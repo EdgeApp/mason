@@ -28,7 +28,10 @@ describe('Mason service', () => {
       const health = await fetch(origin + '/health')
       assert.equal(health.status, 200)
       assert.equal(health.headers.get('cache-control'), 'no-store')
-      assert.equal((await fetch(origin + '/')).status, 404)
+      assert.equal(
+        (await fetch(origin + '/', { redirect: 'manual' })).status,
+        303,
+      )
       store.close()
       assert.equal((await fetch(origin + '/health')).status, 503)
     } finally {

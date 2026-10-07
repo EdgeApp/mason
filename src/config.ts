@@ -1,9 +1,12 @@
+import { asProviders } from './auth/providerConfig.js'
 import { asOptional } from 'cleaners'
 import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { asOrigin, integer, object, text } from './validation.js'
 
 export const asConfig = object({
+  providers: asOptional(asProviders, []),
+  sessionDays: asOptional(integer(1, 90), 30),
   origin: asOrigin,
   database: text(4096),
   storage: text(4096),
