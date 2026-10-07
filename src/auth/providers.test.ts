@@ -16,6 +16,7 @@ import { randomToken } from './accounts.js'
 
 interface Fixture {
   origin: string
+  certificate: Buffer
   configs: ProviderConfig[]
   transport: typeof fetch
   signToken: (token: string, updates: Record<string, unknown>) => string
@@ -24,7 +25,9 @@ interface Fixture {
   selectSubject: (subject: string) => void
 }
 /** Real HTTPS authorization, token, JWKS and user-info endpoints; no TLS bypass. */
-export async function fixture(): Promise<Fixture> {
+export async function fixture(
+  masonOrigin = 'https://builds.example.test',
+): Promise<Fixture> {
   assert(process.env.MASON_TEST_ROOT)
   const root = mkdtempSync(path.join(process.env.MASON_TEST_ROOT, 'protocol-'))
   execFileSync(
@@ -91,7 +94,7 @@ export async function fixture(): Promise<Fixture> {
         {
           client_id: 'fixture',
           client_secret: 'fixture-secret',
-          redirect_uris: [`https://builds.example.test/auth/callback/${id}`],
+          redirect_uris: [`${masonOrigin}/auth/callback/${id}`],
           response_types: ['code'],
           grant_types: ['authorization_code'],
           token_endpoint_auth_method:
@@ -157,10 +160,7 @@ export async function fixture(): Promise<Fixture> {
   app.get('/plain/authorize', (req, res) => {
     assert.equal(req.query.client_id, 'fixture')
     assert.equal(req.query.code_challenge_method, 'S256')
-    assert.equal(
-      req.query.redirect_uri,
-      'https://builds.example.test/auth/callback/plain',
-    )
+    assert.equal(req.query.redirect_uri, masonOrigin + '/auth/callback/plain')
     const code = randomToken()
     codes.set(code, {
       challenge: String(req.query.code_challenge),
@@ -248,6 +248,7 @@ export async function fixture(): Promise<Fixture> {
       )
     },
     origin,
+    certificate: readFileSync(path.join(root, 'tls.crt')),
     configs,
     transport,
     close: async (): Promise<void> => {
@@ -304,7 +305,7 @@ export async function fixture(): Promise<Fixture> {
         )
         url = new URL(response.headers.get('location')!, url).href
         submission = {}
-        if (url.startsWith('https://builds.example.test/')) return new URL(url)
+        if (url.startsWith(masonOrigin + '/')) return new URL(url)
       }
       throw new Error('Provider did not return to Mason')
     },

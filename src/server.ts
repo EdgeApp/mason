@@ -1,8 +1,11 @@
 import express, { type ErrorRequestHandler } from 'express'
 import { Accounts } from './auth/accounts.js'
 import { Providers } from './auth/providers.js'
-import { authRoutes, navigation, sessionContext } from './auth/routes.js'
-import { page, stylesheet } from './view.js'
+import { authRoutes } from './auth/routes.js'
+import { readFileSync } from 'node:fs'
+import { catalogRoutes } from './catalog/routes.js'
+import { installationRoutes } from './catalog/install.js'
+import { page, stylesheet, catalogStyles } from './view.js'
 import type { Server } from 'node:http'
 import { Store } from './store.js'
 
@@ -19,7 +22,7 @@ export function createApp(
       'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
       'Content-Security-Policy':
-        "default-src 'none'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     })
     next()
   })
@@ -32,38 +35,23 @@ export function createApp(
     }
   })
   app.get('/assets/style.css', (_req, res) => {
-    res.type('css').send(stylesheet)
+    res.type('css').send(stylesheet + catalogStyles)
+  })
+  app.get('/assets/catalog.js', (_req, res) => {
+    res
+      .type('js')
+      .send(
+        readFileSync(
+          new URL('../lib/browser/client.js', import.meta.url),
+          'utf8',
+        ),
+      )
   })
   app.use(express.urlencoded({ extended: false, limit: '16kb' }))
   const accounts = new Accounts(store)
   app.use(authRoutes(store, providers, accounts))
-  app.get('/', (req, res) => {
-    const context = sessionContext(req, accounts)
-    if (context == null) {
-      res.redirect(303, '/auth/login')
-      return
-    }
-    const { account, session } = context
-    if (!account.is_admin && !account.is_tester) {
-      res
-        .status(403)
-        .send(
-          page(
-            'Waiting for tester access',
-            '<section class="card"><p>Your account is signed in. A Mason administrator needs to grant you tester access before you can view or download builds.</p></section>',
-            navigation(session, account),
-          ),
-        )
-      return
-    }
-    res.send(
-      page(
-        'Builds',
-        '<p>Your account can access builds.</p>',
-        navigation(session, account),
-      ),
-    )
-  })
+  app.use(installationRoutes(store, accounts))
+  app.use(catalogRoutes(store, accounts))
   app.use((_req, res) => {
     res.status(404).send('Not found')
   })

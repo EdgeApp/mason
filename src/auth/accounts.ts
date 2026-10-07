@@ -190,9 +190,14 @@ export class Accounts {
     token: string | undefined,
   ): { account: Account; session: Session } | undefined {
     if (token == null || !/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined
+    return this.sessionHash(digest(token))
+  }
+  sessionHash(
+    hash: string,
+  ): { account: Account; session: Session } | undefined {
     const row = this.store.db
       .prepare('SELECT * FROM sessions WHERE hash=? AND expires_at>?')
-      .get(digest(token), this.store.now())
+      .get(hash, this.store.now())
     if (row == null) return undefined
     const session = asSession(row)
     const account = this.account(session.account_id)
@@ -319,6 +324,9 @@ export class Accounts {
     this.store.transaction(() => {
       this.store.db
         .prepare('DELETE FROM sessions WHERE expires_at<=?')
+        .run(this.store.now())
+      this.store.db
+        .prepare('DELETE FROM install_grants WHERE expires_at<=?')
         .run(this.store.now())
       this.store.db
         .prepare('DELETE FROM oauth_transactions WHERE expires_at<=?')

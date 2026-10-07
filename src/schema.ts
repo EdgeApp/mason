@@ -1,3 +1,4 @@
+import { migrateCatalog } from './catalog/schema.js'
 import { migrateAuth } from './auth/schema.js'
 import type { DatabaseSync } from 'node:sqlite'
 import { asObject } from 'cleaners'
@@ -7,7 +8,8 @@ export function migrate(db: DatabaseSync): void {
   const version = asObject({ user_version: integer() })(
     db.prepare('PRAGMA user_version').get(),
   ).user_version
-  if (version > 2) throw new Error('Database belongs to a newer Mason version')
+  if (version > 3)
+    throw new Error('Database belongs to a newer Mason version')
   if (version < 1)
     db.exec(`BEGIN IMMEDIATE;
     CREATE TABLE accounts (
@@ -44,4 +46,5 @@ export function migrate(db: DatabaseSync): void {
     PRAGMA user_version=1;
     COMMIT;`)
   if (version < 2) migrateAuth(db)
+  if (version < 3) migrateCatalog(db)
 }
