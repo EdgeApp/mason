@@ -8,6 +8,7 @@ import { installationRoutes } from './catalog/install.js'
 import { page, stylesheet, catalogStyles } from './view.js'
 import type { Server } from 'node:http'
 import { Store } from './store.js'
+import { uploadRoutes } from './upload/routes.js'
 
 export function createApp(
   store: Store,
@@ -47,6 +48,7 @@ export function createApp(
         ),
       )
   })
+  app.use(uploadRoutes(store))
   app.use(express.urlencoded({ extended: false, limit: '16kb' }))
   const accounts = new Accounts(store)
   app.use(authRoutes(store, providers, accounts))
@@ -75,6 +77,9 @@ export function serve(store: Store, intervalMs = 3600000): Server {
     store.config.port,
     store.config.listenHost,
   )
+  // Node's default five-minute request deadline is too short for large packages.
+  server.requestTimeout = 90 * 60000
+  server.headersTimeout = 60000
   const timer = setInterval(() => {
     try {
       store.prune()

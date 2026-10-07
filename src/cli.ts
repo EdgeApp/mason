@@ -1,3 +1,4 @@
+import { keyCommand } from './upload/keyCli.js'
 import { realpathSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { loadConfig } from './config.js'
@@ -10,6 +11,10 @@ export function run(
   argv: string[],
   output: (value: string) => void = console.log,
 ): void {
+  if (argv[0] === 'keys') {
+    keyCommand(argv.slice(1), output)
+    return
+  }
   const [command, flag, file] = argv
   if (
     ![

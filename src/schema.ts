@@ -1,3 +1,4 @@
+import { migrateUploads } from './upload/schema.js'
 import { migrateCatalog } from './catalog/schema.js'
 import { migrateAuth } from './auth/schema.js'
 import type { DatabaseSync } from 'node:sqlite'
@@ -8,7 +9,7 @@ export function migrate(db: DatabaseSync): void {
   const version = asObject({ user_version: integer() })(
     db.prepare('PRAGMA user_version').get(),
   ).user_version
-  if (version > 3)
+  if (version > 4)
     throw new Error('Database belongs to a newer Mason version')
   if (version < 1)
     db.exec(`BEGIN IMMEDIATE;
@@ -47,4 +48,5 @@ export function migrate(db: DatabaseSync): void {
     COMMIT;`)
   if (version < 2) migrateAuth(db)
   if (version < 3) migrateCatalog(db)
+  if (version < 4) migrateUploads(db)
 }
