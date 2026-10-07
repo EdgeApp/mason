@@ -1,0 +1,34 @@
+{
+  "name": "mason-distribution",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.14.0 <25"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src",
+    "test": "tsc && mocha --require=./lib/test/fixtureRoots.test.js --import=tsx --timeout 10000 'src/**/*.test.ts'",
+    "coverage": "tsc && c8 --all --include 'src/**/*.ts' --include 'lib/**/*.js' --exclude 'src/**/*.test.ts' --exclude 'lib/**/*.test.js' --exclude-after-remap --reporter text --reporter json --reporter lcov --check-coverage --per-file --lines 90 mocha --require=./lib/test/fixtureRoots.test.js --timeout 10000 'lib/**/*.test.js'",
+    "start": "node lib/cli.js serve",
+    "mason": "node lib/cli.js"
+  },
+  "dependencies": {
+    "cleaners": "0.3.17",
+    "express": "5.2.1"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@types/mocha": "10.0.10",
+    "@types/node": "24.10.1",
+    "c8": "12.0.0",
+    "eslint": "9.39.1",
+    "mocha": "12.0.3",
+    "prettier": "3.6.2",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.48.1"
+  }
+}
