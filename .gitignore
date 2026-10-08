@@ -1,0 +1,10 @@
+node_modules/
+lib/
+coverage/
+masonConfig.json
+*.local.json
+*.sqlite*
+*.pem
+*.key
+.env
+.DS_Store
