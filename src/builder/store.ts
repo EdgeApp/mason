@@ -47,6 +47,8 @@ const asRow = asObject({
   definition: asString,
   request: asString,
   quarantine: integer(0, 1),
+  cleanup_error: nullable(text(2048)),
+  quarantine_reason: nullable(text(2048)),
 })
 export type Job = Omit<
   ReturnType<typeof asRow>,
@@ -101,6 +103,17 @@ export class BuilderStore {
       ).version !== 1
     )
       throw new Error('Unknown builder schema')
+    this.transaction(() => {
+      const columns = new Set(
+        this.db
+          .prepare('PRAGMA table_info(jobs)')
+          .all()
+          .map((row) => row.name),
+      )
+      for (const column of ['cleanup_error', 'quarantine_reason'])
+        if (!columns.has(column))
+          this.db.exec(`ALTER TABLE jobs ADD COLUMN ${column} TEXT`)
+    })
     for (const suffix of ['-wal', '-shm'])
       if (existsSync(file + suffix)) chmodSync(file + suffix, 0o600)
   }
@@ -277,13 +290,17 @@ export class BuilderStore {
     code?: number,
     result?: unknown,
     quarantine = false,
+    details: {
+      cleanupError?: string
+      quarantineReason?: string
+    } = {},
   ): void {
     const serialized = result == null ? null : JSON.stringify(result)
     if (serialized != null && serialized.length > 65536)
       throw new Error('Result too large')
     this.db
       .prepare(
-        'UPDATE jobs SET status=?,finished=?,exit_code=?,result=?,quarantine=? WHERE id=?',
+        'UPDATE jobs SET status=?,finished=?,exit_code=?,result=?,quarantine=?,cleanup_error=?,quarantine_reason=? WHERE id=?',
       )
       .run(
         oneOf(statuses)(status),
@@ -291,8 +308,21 @@ export class BuilderStore {
         code ?? null,
         serialized,
         Number(quarantine),
+        details.cleanupError == null
+          ? null
+          : text(2048)(details.cleanupError),
+        !quarantine || details.quarantineReason == null
+          ? null
+          : text(2048)(details.quarantineReason),
         id,
       )
+  }
+  releaseQuarantine(id: string): void {
+    this.db
+      .prepare(
+        'UPDATE jobs SET quarantine=0,quarantine_reason=NULL WHERE id=?',
+      )
+      .run(id)
   }
   commit(id: string, sha: string): void {
     if (!/^[a-f0-9]{40,64}$/.test(sha)) throw new Error('Invalid commit')

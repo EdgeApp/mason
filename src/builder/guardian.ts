@@ -111,11 +111,22 @@ export async function executeJob(
     clearInterval(poll)
     disconnected.removeEventListener('abort', disconnect)
     const safe = await (stopping ?? execution.stop())
-    let cleaned = safe
+    let cleanupError: string | undefined
     try {
       if (safe) workspace.cleanup()
     } catch {
-      cleaned = false
+      log.write(
+        'Injected-file cleanup failed; discarding the owned checkout.\n',
+      )
+      try {
+        Workspace.discardCheckout(store, job)
+        workspace.cleanup()
+        log.write('Owned checkout discarded; cleanup completed.\n')
+      } catch {
+        cleanupError =
+          'Owned checkout cleanup failed; it must be recreated before another build uses it.'
+        log.write(cleanupError + '\n')
+      }
     }
     try {
       if (existsSync(resultFile)) {
@@ -159,10 +170,11 @@ export async function executeJob(
     log.write('', true)
     store.finish(
       id,
-      cleaned ? status : 'interrupted',
+      status,
       status === 'succeeded' ? 0 : exitCode,
       result,
-      !cleaned,
+      !safe,
+      { cleanupError, quarantineReason: execution.quarantineReason },
     )
     lock.close()
   }

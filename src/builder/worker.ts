@@ -49,7 +49,17 @@ export class Worker {
               job.id + '.sqlite',
             ),
           )
-          store.finish(job.id, 'interrupted', undefined, undefined, true)
+          store.finish(
+            job.id,
+            'interrupted',
+            undefined,
+            undefined,
+            true,
+            {
+              quarantineReason:
+                'Guardian was lost before process cleanup could be verified.',
+            },
+          )
           lock.close()
         } catch {
           /* A live guardian still owns this job. */
@@ -105,12 +115,34 @@ export class Worker {
     )
     this.child = child
     child.once('error', () => {
-      this.store.finish(job.id, 'interrupted', undefined, undefined, true)
+      this.store.finish(
+        job.id,
+        child.pid == null ? 'failed' : 'interrupted',
+        undefined,
+        { error: 'Build guardian could not be started.' },
+        child.pid != null,
+        {
+          quarantineReason:
+            child.pid == null
+              ? undefined
+              : 'Guardian launch failed after a process was created.',
+        },
+      )
       if (child.pid == null) this.child = undefined
     })
     child.once('exit', () => {
       if (this.store.job(job.id)?.status === 'running')
-        this.store.finish(job.id, 'interrupted', undefined, undefined, true)
+        this.store.finish(
+          job.id,
+          'interrupted',
+          undefined,
+          undefined,
+          true,
+          {
+            quarantineReason:
+              'Guardian exited before process cleanup could be verified.',
+          },
+        )
       this.child = undefined
     })
   }
@@ -171,7 +203,8 @@ export function recover(
         rmSync(manifest)
       }
       Workspace.discardCheckout(store, job)
-      store.finish(id, 'interrupted')
+      if (job.status === 'running') store.finish(id, 'interrupted')
+      else store.releaseQuarantine(id)
     } finally {
       executionLock.close()
     }

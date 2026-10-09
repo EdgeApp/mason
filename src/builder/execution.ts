@@ -52,53 +52,91 @@ export class MaskedLog {
     this.bytes += data.length
   }
 }
-interface ProcessIdentity {
+export interface ProcessIdentity {
   pid: number
   parent: number
   group: number
   start: string
+  state?: string
 }
-function census(): ProcessIdentity[] {
-  return execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,lstart='], {
-    encoding: 'utf8',
-    timeout: 3000,
-    maxBuffer: 4 * 1024 * 1024,
-  })
+export function processSnapshot(): ProcessIdentity[] {
+  const rows = execFileSync(
+    'ps',
+    ['-axo', 'pid=,ppid=,pgid=,stat=,lstart='],
+    {
+      encoding: 'utf8',
+      timeout: 3000,
+      maxBuffer: 4 * 1024 * 1024,
+    },
+  )
     .trim()
     .split('\n')
-    .flatMap((line) => {
-      const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/.exec(line)
-      return match == null
-        ? []
-        : [
-            {
-              pid: Number(match[1]),
-              parent: Number(match[2]),
-              group: Number(match[3]),
-              start: match[4]!,
-            },
-          ]
+    .map((line) => {
+      const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/.exec(
+        line,
+      )
+      if (match == null) throw new Error('Invalid process inventory')
+      return {
+        pid: Number(match[1]),
+        parent: Number(match[2]),
+        group: Number(match[3]),
+        state: match[4]!,
+        start: match[5]!,
+      }
     })
+  if (!rows.some((row) => row.pid === process.pid))
+    throw new Error('Process inventory omitted the guardian')
+  return rows
 }
 /** Tracks detached descendants too. This is containment for cooperative builds, not a sandbox. */
 export class Execution {
   private readonly children = new Map<number, ProcessIdentity>()
   private readonly roots = new Set<number>()
+  private readonly groups = new Set<number>()
   private readonly timer: NodeJS.Timeout
-  private uncertain = false
+  private inspectionFailed = false
+  quarantineReason?: string
   stopped = false
-  constructor(private readonly log: MaskedLog) {
+  constructor(
+    private readonly log: MaskedLog,
+    private readonly inspect: () => ProcessIdentity[] = processSnapshot,
+    private readonly graceMs = 10000,
+    private readonly stopMs = 14000,
+  ) {
     this.timer = setInterval(() => {
       try {
         this.scan()
       } catch {
-        this.uncertain = true
+        this.inspectionError()
       }
     }, 50)
   }
+  private inspectionError(): void {
+    if (!this.inspectionFailed)
+      this.log.write(
+        'Process inspection temporarily unavailable; retrying.\n',
+      )
+    this.inspectionFailed = true
+  }
   private scan(): ProcessIdentity[] {
-    const all = census()
-    const owned = new Set<number>([process.pid, ...this.roots])
+    // Zombies cannot execute or retain build files and need no signal.
+    const all = this.inspect().filter(
+      (item) => !item.state?.startsWith('Z'),
+    )
+    if (this.inspectionFailed)
+      this.log.write('Process inspection recovered.\n')
+    this.inspectionFailed = false
+    const owned = new Set<number>([process.pid])
+    for (const pid of this.roots) {
+      const previous = this.children.get(pid)
+      if (
+        previous == null ||
+        all.some(
+          (item) => item.pid === pid && item.start === previous.start,
+        )
+      )
+        owned.add(pid)
+    }
     for (const item of all)
       if (this.children.get(item.pid)?.start === item.start)
         owned.add(item.pid)
@@ -123,10 +161,19 @@ export class Execution {
         (this.roots.has(item.pid) ||
           item.parent !== process.pid ||
           this.children.has(item.pid))
-      )
+      ) {
         this.children.set(item.pid, item)
+        this.groups.add(item.group)
+      }
+    for (const group of this.groups)
+      if (!all.some((item) => item.group === group))
+        this.groups.delete(group)
     return all.filter(
-      (item) => this.children.get(item.pid)?.start === item.start,
+      // Keep unobserved members of owned groups visible after a monitoring gap.
+      // Only positively identified processes are ever signalled below.
+      (item) =>
+        this.children.get(item.pid)?.start === item.start ||
+        this.groups.has(item.group),
     )
   }
   async run(
@@ -147,7 +194,7 @@ export class Execution {
       let output = ''
       if (child.pid != null) {
         this.roots.add(child.pid)
-        this.scan()
+        this.groups.add(child.pid)
       }
       child.stdout?.setEncoding('utf8')
       child.stderr?.setEncoding('utf8')
@@ -163,43 +210,61 @@ export class Execution {
         if (code === 0 && !this.stopped) resolve(output.trim())
         else reject(new CommandFailure(code))
       })
+      try {
+        this.scan()
+      } catch {
+        this.inspectionError()
+      }
     })
   }
   async stop(): Promise<boolean> {
     this.stopped = true
+    this.quarantineReason = undefined
     clearInterval(this.timer)
-    try {
-      // Give entrypoints one TERM and time to restore signing state. Do not
-      // signal cleanup children created during the cooperative grace period.
-      const initial = this.scan()
-      const roots = initial.filter((item) => this.roots.has(item.pid))
-      for (const item of roots) {
+    const forceAt = Date.now() + this.graceMs
+    const deadline = Date.now() + this.stopMs
+    const signalled = new Set<number>()
+    let empty = 0
+    while (Date.now() < deadline) {
+      let remaining: ProcessIdentity[]
+      try {
+        remaining = this.scan()
+      } catch {
+        this.inspectionError()
+        empty = 0
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        continue
+      }
+      // Fresh terminal verification supersedes a transient monitoring failure.
+      if (remaining.length === 0 && this.roots.size === 0) {
+        if (++empty >= 2) return true
+      } else empty = 0
+      for (const item of remaining) {
+        if (this.children.get(item.pid)?.start !== item.start)
+          continue
+        const force = Date.now() >= forceAt
+        // Give only entrypoints TERM; allow their cleanup subprocesses to finish.
+        if (
+          !force &&
+          (!this.roots.has(item.pid) || signalled.has(item.pid))
+        )
+          continue
         try {
-          process.kill(item.pid, 'SIGTERM')
+          process.kill(item.pid, force ? 'SIGKILL' : 'SIGTERM')
+          signalled.add(item.pid)
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ESRCH')
-            this.uncertain = true
+            this.log.write(
+              'Could not signal an owned build process; verifying termination.\n',
+            )
         }
       }
-      const forceAt = Date.now() + 10000
-      const deadline = forceAt + 4000
-      while (Date.now() < deadline) {
-        const remaining = this.scan()
-        if (remaining.length === 0) return !this.uncertain
-        if (Date.now() >= forceAt)
-          for (const item of remaining) {
-            try {
-              process.kill(item.pid, 'SIGKILL')
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== 'ESRCH')
-                this.uncertain = true
-            }
-          }
-        await new Promise((resolve) => setTimeout(resolve, 100))
-      }
-    } catch {
-      this.uncertain = true
+      await new Promise((resolve) => setTimeout(resolve, 100))
     }
+    this.quarantineReason = this.inspectionFailed
+      ? 'Process inspection remained unavailable at the cleanup deadline.'
+      : 'Build processes or owned process groups remain after the cleanup deadline.'
+    this.log.write(this.quarantineReason + '\n')
     return false
   }
 }

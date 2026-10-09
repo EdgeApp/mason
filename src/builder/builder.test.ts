@@ -28,7 +28,7 @@ import {
 } from './config.js'
 import { BuilderStore, exclusiveLock, publicJob } from './store.js'
 import { executeJob, writeBootstrap } from './guardian.js'
-import { MaskedLog, Execution } from './execution.js'
+import { MaskedLog, Execution, processSnapshot } from './execution.js'
 import { Worker, recover } from './worker.js'
 import { builderApp, serveBuilder } from './server.js'
 import { buildClient } from './client.js'
@@ -885,10 +885,279 @@ describe('Mason builder', function () {
     const job = store.enqueue(request, 'test')
     await completed(worker, job.id)
     await worker.close()
-    assert.equal(store.job(job.id)!.status, 'interrupted')
-    assert.equal(store.job(job.id)!.quarantine, 1)
+    assert.equal(store.job(job.id)!.status, 'failed')
+    assert.equal(store.job(job.id)!.quarantine, 0)
     const next = new Worker(store)
     await next.close()
+  })
+  it('releases the queue after a compiler failure and a transient process inspection error', async () => {
+    const marker = path.join(root, 'inspection-failure')
+    const repo = fixture(`import fs from 'node:fs';
+      if (process.env.FAIL_BUILD) {
+        fs.writeFileSync(${JSON.stringify(marker)}, 'fixture');
+        setTimeout(() => { console.error('synthetic compiler failure'); process.exitCode = 7; }, 300);
+      } else console.log('next build completed');`)
+    const bin = path.join(root, 'bin')
+    mkdirSync(bin)
+    const quotedMarker = "'" + marker.replaceAll("'", "'\\''") + "'"
+    writeFileSync(
+      path.join(bin, 'ps'),
+      `#!/bin/sh\nif [ -f ${quotedMarker} ]; then\n  if [ -s ${quotedMarker} ]; then : > ${quotedMarker}; printf 'malformed process inventory\\n'; exit 0; fi\n  /bin/rm -f ${quotedMarker}; exit 1\nfi\nexec /bin/ps "$@"\n`,
+      { mode: 0o700 },
+    )
+    const resolver = path.join(root, 'resolver.json')
+    writeBootstrap(resolver, { [definition.repository]: repo })
+    const first = store.enqueue(
+      { ...request, envVars: [{ FAIL_BUILD: 'enabled' }] },
+      'test',
+    )
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    const next = store.enqueue(request, 'test')
+    const oldPath = process.env.PATH
+    process.env.PATH = bin + ':' + oldPath
+    const worker = new Worker(store, resolver)
+    try {
+      assert.equal(
+        (await completed(worker, next.id))!.status,
+        'succeeded',
+      )
+      const failed = store.job(first.id)!
+      assert.equal(failed.status, 'failed')
+      assert.equal(failed.exit_code, 7)
+      assert.equal(failed.quarantine, 0)
+      const log = readFileSync(
+        path.join(
+          store.config.workspace,
+          'logs',
+          first.id + '.full.log',
+        ),
+        'utf8',
+      )
+      assert(
+        log.includes('Process inspection temporarily unavailable'),
+      )
+      assert(log.includes('Process inspection recovered'))
+    } finally {
+      await worker.close()
+      process.env.PATH = oldPath
+    }
+  })
+  it('isolates injected-file cleanup failures without changing the build outcome or holding later jobs', async function () {
+    if (process.getuid?.() === 0) this.skip()
+    const repo = fixture(`import fs from 'node:fs';
+      if (process.env.FAIL_BUILD) {
+        fs.unlinkSync(process.env.CONFIG_FILE);
+        fs.mkdirSync(process.env.CONFIG_FILE);
+        fs.chmodSync(process.cwd(), 0o500);
+        process.exitCode = 3;
+      } else console.log('next build completed');`)
+    git(['branch', 'next'], repo)
+    store.importApp({
+      ...definition,
+      files: [
+        {
+          destination: 'private.json',
+          contents: Buffer.from('synthetic-value').toString('base64'),
+          env: 'CONFIG_FILE',
+        },
+      ],
+    })
+    const resolver = path.join(root, 'resolver.json')
+    writeBootstrap(resolver, { [definition.repository]: repo })
+    const first = store.enqueue(
+      { ...request, envVars: [{ FAIL_BUILD: 'enabled' }] },
+      'test',
+    )
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    const next = store.enqueue({ ...request, branch: 'next' }, 'test')
+    const worker = new Worker(store, resolver)
+    try {
+      assert.equal(
+        (await completed(worker, next.id))!.status,
+        'succeeded',
+      )
+      const failed = store.job(first.id)!
+      assert.equal(failed.status, 'failed')
+      assert.equal(failed.exit_code, 3)
+      assert.equal(failed.quarantine, 0)
+      assert.match(
+        failed.cleanup_error!,
+        /Owned checkout cleanup failed/,
+      )
+      assert.equal(failed.quarantine_reason, undefined)
+    } finally {
+      await worker.close()
+      for (const row of store.db
+        .prepare(
+          "SELECT directory FROM workspaces WHERE identity LIKE 'worktree:%'",
+        )
+        .all())
+        if (existsSync(String(row.directory)))
+          chmodSync(String(row.directory), 0o700)
+    }
+  })
+  it('discards a replaced injection and continues building the same branch', async () => {
+    const repo = fixture(`import fs from 'node:fs';
+      if (process.env.FAIL_BUILD) {
+        fs.unlinkSync(process.env.CONFIG_FILE);
+        fs.mkdirSync(process.env.CONFIG_FILE);
+        process.exitCode = 3;
+      } else console.log('next build completed');`)
+    store.importApp({
+      ...definition,
+      files: [
+        {
+          destination: 'private.json',
+          contents: '',
+          env: 'CONFIG_FILE',
+        },
+      ],
+    })
+    const resolver = path.join(root, 'resolver.json')
+    writeBootstrap(resolver, { [definition.repository]: repo })
+    const first = store.enqueue(
+      { ...request, envVars: [{ FAIL_BUILD: 'enabled' }] },
+      'test',
+    )
+    await new Promise((resolve) => setTimeout(resolve, 2))
+    const next = store.enqueue(request, 'test')
+    const worker = new Worker(store, resolver)
+    try {
+      assert.equal(
+        (await completed(worker, next.id))!.status,
+        'succeeded',
+      )
+      assert.equal(store.job(first.id)!.status, 'failed')
+      assert.equal(store.job(first.id)!.quarantine, 0)
+      assert.equal(store.job(first.id)!.cleanup_error, undefined)
+      const log = readFileSync(
+        path.join(
+          store.config.workspace,
+          'logs',
+          first.id + '.full.log',
+        ),
+        'utf8',
+      )
+      assert(
+        log.includes('Owned checkout discarded; cleanup completed.'),
+      )
+    } finally {
+      await worker.close()
+    }
+  })
+  it('retries terminal process inspection and reports persistent uncertainty', async () => {
+    let unavailable = true
+    const log = new MaskedLog(path.join(root, 'inspection.log'), [])
+    const execution = new Execution(
+      log,
+      () => {
+        if (unavailable)
+          throw new Error('synthetic inspection failure')
+        return processSnapshot()
+      },
+      100,
+      1000,
+    )
+    setTimeout(() => {
+      unavailable = false
+    }, 150)
+    assert.equal(await execution.stop(), true)
+    const blocked = new Execution(
+      log,
+      () => {
+        throw new Error('synthetic inspection failure')
+      },
+      0,
+      200,
+    )
+    assert.equal(await blocked.stop(), false)
+    assert.match(
+      blocked.quarantineReason!,
+      /Process inspection remained unavailable/,
+    )
+  })
+  it('preserves terminal results and exit codes when releasing a quarantined job', () => {
+    for (const status of ['succeeded', 'failed'] as const) {
+      const job = store.enqueue(request, 'test')
+      store.claim()
+      store.finish(
+        job.id,
+        status,
+        status === 'succeeded' ? 0 : 7,
+        { status },
+        true,
+        {
+          quarantineReason: 'Synthetic process ownership uncertainty',
+        },
+      )
+      const before = store.job(job.id)!
+      recover(store, job.id, true)
+      const after = store.job(job.id)!
+      assert.equal(after.status, before.status)
+      assert.equal(after.exit_code, before.exit_code)
+      assert.equal(after.finished, before.finished)
+      assert.deepEqual(after.result, before.result)
+      assert.equal(after.quarantine, 0)
+      assert.equal(after.quarantine_reason, undefined)
+    }
+  })
+  it('holds an unverified live process group and releases it after termination', async () => {
+    const pidFile = path.join(root, 'untracked-child.pid')
+    const log = new MaskedLog(path.join(root, 'process-groups.log'), [])
+    const execution = new Execution(log, () => {
+      const rows = processSnapshot()
+      const parent = rows.find(row => row.parent === process.pid && row.group === row.pid)
+      // Model a monitoring gap that misses the child before its parent exits.
+      return parent == null ? rows : rows.filter(row => row.group !== parent.group || row.pid === parent.pid)
+    }, 0, 500)
+    let child: number | undefined
+    try {
+      await execution.run(process.execPath, ['-e', `
+        const {spawn}=require('node:child_process'); const fs=require('node:fs');
+        const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
+        child.unref(); fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid));
+      `], root)
+      child = Number(readFileSync(pidFile, 'utf8'))
+      assert.equal(await execution.stop(), false)
+      assert.match(execution.quarantineReason!, /process groups remain/)
+      process.kill(child, 'SIGKILL')
+      await new Promise(resolve => setTimeout(resolve, 100))
+      assert.equal(await execution.stop(), true)
+      assert.equal(execution.quarantineReason, undefined)
+    } finally {
+      if (child != null) {
+        try { process.kill(child, 'SIGKILL') } catch { /* Already stopped. */ }
+      }
+      await execution.stop()
+    }
+  })
+  it('upgrades legacy job storage without losing completed build evidence', () => {
+    const job = store.enqueue(request, 'test')
+    store.finish(
+      job.id,
+      'failed',
+      7,
+      { compiler: 'synthetic failure' },
+      true,
+    )
+    const before = store.job(job.id)!
+    store.db.exec(
+      'ALTER TABLE jobs DROP COLUMN cleanup_error; ALTER TABLE jobs DROP COLUMN quarantine_reason',
+    )
+    const config = store.config
+    store.close()
+    store = new BuilderStore(config)
+    const after = store.job(job.id)!
+    assert.equal(after.status, before.status)
+    assert.equal(after.exit_code, before.exit_code)
+    assert.deepEqual(after.result, before.result)
+    store.finish(job.id, 'failed', 7, after.result, true, {
+      quarantineReason: 'Synthetic process verification failure',
+    })
+    assert.equal(
+      publicJob(store.job(job.id)!).quarantine_reason,
+      'Synthetic process verification failure',
+    )
   })
   it('allows cooperative cleanup subprocesses to finish after cancellation', async () => {
     const log = new MaskedLog(path.join(root, 'log'), [])
@@ -1403,6 +1672,10 @@ describe('Mason builder', function () {
     while (store.job(orphanJob.id)!.status === 'running')
       await new Promise((resolve) => setTimeout(resolve, 50))
     assert.equal(store.job(orphanJob.id)!.quarantine, 1)
+    assert.match(
+      store.job(orphanJob.id)!.quarantine_reason!,
+      /Guardian.*before process cleanup/,
+    )
     assert.equal(store.claim(), undefined)
     console.log(
       'Killed guardian observation:',

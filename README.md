@@ -74,12 +74,25 @@ values or credentials loaded from files. Restrict the listener to a trusted
 network and use TLS when that network is not trusted.
 
 A guardian stops descendants on cancellation, timeout or server disconnect.
+Ordinary nonzero compiler exits stay `failed`, with their exit code and result,
+and release the worker after fresh process checks. Transient process-inspection
+failures are retried, and defunct processes are not treated as running builds.
+If injected-file cleanup fails after processes stop, Mason discards its owned
+checkout. A persistent filesystem cleanup problem is reported as `cleanup_error`
+and does not hold other jobs; the affected checkout must be recreated before use.
+
 Masonfiles must forward signals and must not daemonize or deliberately escape
 job ownership. An uncertain guardian crash quarantines the queue instead of
 starting another build over a potentially live process. Stop the service,
 inspect and stop remaining job processes, then explicitly run `builder recover
 --config <bootstrap> --job <id> --confirm-stopped yes`. Never use recovery without
 checking. Recovery removes recorded injections; the next checkout is cleaned.
+Completed jobs retain their original status, timestamps, exit code and result
+when recovery releases a hold. `quarantine_reason` explains holds caused by
+remaining process groups, unavailable terminal process inspection or a lost
+guardian. An active job's `quarantine: 1` is normal ownership; it is a queue hold
+when attached to a terminal job. Cleanup failures do not relabel a completed
+compiler result as `interrupted`; that status describes an interrupted execution.
 Distribution remains independently operated and accepts equal build numbers on
 different branches, while preserving uniqueness within each channel and branch.
 
