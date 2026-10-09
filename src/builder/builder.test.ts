@@ -1179,6 +1179,32 @@ describe('Mason builder', function () {
       await execution.stop()
     }
   })
+  it('does not adopt a process checker that reuses a completed build PID', async () => {
+    const log = new MaskedLog(path.join(root, 'reused-checker.log'), [])
+    let leader: ReturnType<typeof processSnapshot>[number] | undefined
+    let checking = false
+    const execution = new Execution(log, () => {
+      if (checking) {
+        assert(leader)
+        return [
+          { ...leader, pid: process.pid, parent: 1, group: process.pid, start: 'guardian' },
+          { ...leader, parent: process.pid, group: process.pid, start: 'process checker' },
+        ]
+      }
+      const rows = processSnapshot()
+      leader ??= rows.find(row => row.parent === process.pid && row.group === row.pid)
+      return rows
+    }, 0, 500)
+    try {
+      await execution.run(process.execPath, ['-e', 'setTimeout(() => {}, 150)'], root)
+      assert(leader)
+      checking = true
+      assert.equal(await execution.stop(), true)
+      assert.equal(execution.quarantineReason, undefined)
+    } finally {
+      await execution.stop()
+    }
+  })
   it('upgrades legacy job storage without losing completed build evidence', () => {
     const job = store.enqueue(request, 'test')
     store.finish(
