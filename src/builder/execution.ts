@@ -81,7 +81,7 @@ export function processSnapshot(): ProcessIdentity[] {
         parent: Number(match[2]),
         group: Number(match[3]),
         state: match[4]!,
-        start: match[5]!,
+        start: match[5]!.trim(),
       }
     })
   if (!rows.some((row) => row.pid === process.pid))
@@ -92,7 +92,7 @@ export function processSnapshot(): ProcessIdentity[] {
 export class Execution {
   private readonly children = new Map<number, ProcessIdentity>()
   private readonly roots = new Set<number>()
-  private readonly groups = new Set<number>()
+  private readonly groups = new Map<number, string | undefined>()
   private readonly timer: NodeJS.Timeout
   private inspectionFailed = false
   quarantineReason?: string
@@ -163,11 +163,25 @@ export class Execution {
           this.children.has(item.pid))
       ) {
         this.children.set(item.pid, item)
-        this.groups.add(item.group)
+        const leader = all.find(
+          (candidate) => candidate.pid === item.group,
+        )
+        if (
+          !this.groups.has(item.group) ||
+          (leader != null && owned.has(leader.pid))
+        )
+          this.groups.set(item.group, leader?.start)
       }
-    for (const group of this.groups)
-      if (!all.some((item) => item.group === group))
+    for (const [group, start] of this.groups) {
+      const leader = all.find((item) => item.pid === group)
+      // A group cannot outlive a new process with its leader's PID. The OS
+      // has recycled that ID; its new members are not part of this build.
+      if (
+        !all.some((item) => item.group === group) ||
+        (start != null && leader != null && leader.start !== start)
+      )
         this.groups.delete(group)
+    }
     return all.filter(
       // Keep unobserved members of owned groups visible after a monitoring gap.
       // Only positively identified processes are ever signalled below.
@@ -194,7 +208,7 @@ export class Execution {
       let output = ''
       if (child.pid != null) {
         this.roots.add(child.pid)
-        this.groups.add(child.pid)
+        this.groups.set(child.pid, undefined)
       }
       child.stdout?.setEncoding('utf8')
       child.stderr?.setEncoding('utf8')
@@ -225,8 +239,8 @@ export class Execution {
     const deadline = Date.now() + this.stopMs
     const signalled = new Set<number>()
     let empty = 0
+    let remaining: ProcessIdentity[] = []
     while (Date.now() < deadline) {
-      let remaining: ProcessIdentity[]
       try {
         remaining = this.scan()
       } catch {
@@ -265,6 +279,13 @@ export class Execution {
       ? 'Process inspection remained unavailable at the cleanup deadline.'
       : 'Build processes or owned process groups remain after the cleanup deadline.'
     this.log.write(this.quarantineReason + '\n')
+    if (!this.inspectionFailed && remaining.length > 0)
+      this.log.write(
+        'Unverified build processes: ' +
+          remaining.map((item) =>
+            `pid=${item.pid} parent=${item.parent} group=${item.group} state=${item.state ?? 'unknown'} ownership=${this.children.get(item.pid)?.start === item.start ? 'tracked' : 'group-only'}`,
+          ).join('; ') + '\n',
+      )
     return false
   }
 }

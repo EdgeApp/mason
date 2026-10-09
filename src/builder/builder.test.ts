@@ -1106,7 +1106,7 @@ describe('Mason builder', function () {
     const log = new MaskedLog(path.join(root, 'process-groups.log'), [])
     const execution = new Execution(log, () => {
       const rows = processSnapshot()
-      const parent = rows.find(row => row.parent === process.pid && row.group === row.pid)
+      const parent = rows.find(row => row.parent === process.pid && row.group === row.pid && !row.state?.startsWith('Z'))
       // Model a monitoring gap that misses the child before its parent exits.
       return parent == null ? rows : rows.filter(row => row.group !== parent.group || row.pid === parent.pid)
     }, 0, 500)
@@ -1128,6 +1128,36 @@ describe('Mason builder', function () {
       if (child != null) {
         try { process.kill(child, 'SIGKILL') } catch { /* Already stopped. */ }
       }
+      await execution.stop()
+    }
+  })
+  it('removes process inventory padding from start-time identities', () => {
+    for (const row of processSnapshot())
+      assert.match(row.start, /\S$/)
+  })
+  it('releases an unrelated process group after its leader PID is reused', async () => {
+    const log = new MaskedLog(path.join(root, 'reused-process-group.log'), [])
+    let leader: ReturnType<typeof processSnapshot>[number] | undefined
+    let reused = false
+    const execution = new Execution(log, () => {
+      if (reused) {
+        assert(leader)
+        return [
+          { ...leader, parent: 1, start: 'unrelated replacement' },
+          { ...leader, pid: leader.pid + 1, parent: leader.pid, start: 'unrelated child' },
+        ]
+      }
+      const rows = processSnapshot()
+      leader ??= rows.find(row => row.parent === process.pid && row.group === row.pid)
+      return rows
+    }, 0, 500)
+    try {
+      await execution.run(process.execPath, ['-e', 'setTimeout(() => {}, 150)'], root)
+      assert(leader)
+      reused = true
+      assert.equal(await execution.stop(), true)
+      assert.equal(execution.quarantineReason, undefined)
+    } finally {
       await execution.stop()
     }
   })
