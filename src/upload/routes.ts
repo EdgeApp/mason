@@ -154,7 +154,10 @@ async function receive(
           format = asFormat(info.filename.split('.').pop()?.toLowerCase())
           const allowed: unknown = JSON.parse(channel.formats)
           if (!Array.isArray(allowed) || !allowed.includes(format))
-            throw new UploadError(400, 'File format does not match channel')
+            throw new UploadError(
+              400,
+              'File format does not match channel',
+            )
           const key = keys.authenticate(fields.token, channel.app_id)
           try {
             reservation = store.reserve(key.id, store.config.packageBytes)
@@ -321,8 +324,8 @@ export function uploadRoutes(store: Store): Router {
           'Provide bundle_id and git_commit or release_version and build_version',
         )
       const found = store
-        .builds(channel.app_id)
-        .find(
+        .builds(channel.app_id, fields.branch)
+        .filter(
           (build) =>
             build.channel_id === channel.id &&
             build.bundle_id === fields.bundle_id &&
@@ -333,8 +336,13 @@ export function uploadRoutes(store: Store): Router {
             (fields.build_version == null ||
               build.build_number === fields.build_version),
         )
-      if (found == null) throw new UploadError(404, 'Build not found')
-      res.json(uploadResponse(store, found))
+      if (found.length === 0) throw new UploadError(404, 'Build not found')
+      if (new Set(found.map((build) => build.branch)).size > 1)
+        throw new UploadError(
+          409,
+          'Specify branch for ambiguous build number',
+        )
+      res.json(uploadResponse(store, found[0]!))
     } catch (error) {
       errorResponse(res, error)
     }

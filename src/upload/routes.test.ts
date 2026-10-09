@@ -76,6 +76,29 @@ function clean(): void {
   assert.equal(readdirSync(store.incoming).length, 0)
 }
 describe('Zealot-compatible upload HTTP API', () => {
+  it('accepts branch-scoped numbers and requires a branch for ambiguous version lookup', async () => {
+    const first = await post(body('ipa', [['branch', 'master']]))
+    assert.equal(first.status, 201)
+    const build = await first.json()
+    const second = await post(body('ipa', [['branch', 'feature/example']]))
+    assert.equal(second.status, 201)
+    const query = new URLSearchParams({
+      token: credential.token,
+      channel_key: 'ipa',
+      bundle_id: build.bundle_id,
+      release_version: build.release_version,
+      build_version: build.build_version,
+    })
+    assert.equal(
+      (await fetch(origin + '/api/apps/version_exist?' + query)).status,
+      409,
+    )
+    query.set('branch', 'feature/example')
+    assert.equal(
+      (await fetch(origin + '/api/apps/version_exist?' + query)).status,
+      200,
+    )
+  })
   it('rejects an oversized canonical URL before publishing and preserves valid Unicode URLs', async () => {
     const expanded = 'https://ci.example.test/' + '\u00e9'.repeat(401)
     assert(expanded.length < 2048 && new URL(expanded).href.length > 2048)
@@ -99,7 +122,10 @@ describe('Zealot-compatible upload HTTP API', () => {
         ['custom_fields', JSON.stringify(value)],
       ]
       if (kind === 'size')
-        extra.push(['ci_url', 'https://ci.example.test/' + 'x'.repeat(1900)])
+        extra.push([
+          'ci_url',
+          'https://ci.example.test/' + 'x'.repeat(1900),
+        ])
       const reply = await post(body('ipa', extra))
       assert.equal(reply.status, 201, await reply.clone().text())
       const first = await reply.json()
@@ -112,7 +138,9 @@ describe('Zealot-compatible upload HTTP API', () => {
         bundle_id: first.bundle_id,
         git_commit: first.git_commit,
       })
-      const found = await fetch(origin + '/api/apps/version_exist?' + query)
+      const found = await fetch(
+        origin + '/api/apps/version_exist?' + query,
+      )
       assert.equal(found.status, 200)
       assert.deepEqual(await found.json(), first)
       assert.equal(store.builds(app).length, 1)

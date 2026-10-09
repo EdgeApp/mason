@@ -283,9 +283,9 @@ export class Store {
         throw new Error('Package does not match app')
       const prior = this.db
         .prepare(
-          'SELECT * FROM builds WHERE channel_id=? AND (digest=? AND branch=? OR build_number=?)',
+          'SELECT * FROM builds WHERE channel_id=? AND branch=? AND (digest=? OR build_number=?)',
         )
-        .all(channel.id, input.digest, input.branch, input.buildNumber)
+        .all(channel.id, input.branch, input.digest, input.buildNumber)
         .map((row) => this.cleanBuild(row))
       if (prior.length !== 0) {
         const match = prior.find(

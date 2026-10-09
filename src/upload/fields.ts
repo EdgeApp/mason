@@ -38,6 +38,7 @@ export const uploadFieldNames = new Set([
   'custom_fields',
 ])
 export const asVersionFields = object({
+  branch: asOptional(text(256)),
   token: asApiToken,
   channel_key: text(256),
   bundle_id: text(256),

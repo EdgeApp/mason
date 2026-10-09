@@ -24,6 +24,7 @@ import {
   readPrivateJson,
   type Config,
 } from './config.js'
+import { migrateBranchNumbers } from './branchNumbers.js'
 import { Store, digest } from './store.js'
 import {
   asFileKey,
@@ -105,6 +106,36 @@ describe('Mason durable store', () => {
       /* A restart test may already close it. */
     }
     rmSync(root, { recursive: true, force: true })
+  })
+  it('preserves grants in a populated migration and scopes build numbers by branch', () => {
+    const first = publish('77')
+    store.db
+      .exec(`INSERT INTO accounts(id,name,created_at) VALUES(1,'Fixture',0);
+      INSERT INTO sessions VALUES('session',1,0,'csrf',0,9999999999999);
+      INSERT INTO install_grants VALUES('grant',${first.id},'session',0,9999999999999);`)
+    migrateBranchNumbers(store.db)
+    assert.equal(
+      store.db.prepare('SELECT build_id FROM install_grants').get()!
+        .build_id,
+      first.id,
+    )
+    assert.deepEqual(
+      store.db.prepare('PRAGMA foreign_key_check').all(),
+      [],
+    )
+    const next = stage('77', 'different')
+    const other = store.publish(next.id, {
+      ...next.input,
+      branch: 'feature/example',
+    })
+    assert.equal(other.build_number, first.build_number)
+    assert.notEqual(other.branch, first.branch)
+    const conflict = stage('77', 'conflict')
+    assert.throws(
+      () => store.publish(conflict.id, conflict.input),
+      /conflict/,
+    )
+    store.cancel(conflict.id)
   })
   it('rejects unsafe existing state directories and replaceable ancestors', () => {
     const published = publish()
