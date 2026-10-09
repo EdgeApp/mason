@@ -10,7 +10,6 @@ export class CommandFailure extends Error {
 export class MaskedLog {
   private pending = ''
   private bytes = 0
-  private readonly width: number
   constructor(
     readonly file: string,
     private readonly secrets: string[],
@@ -23,24 +22,37 @@ export class MaskedLog {
     this.secrets = secrets
       .filter((s) => s.length > 0)
       .sort((a, b) => b.length - a.length)
-    this.width = Math.max(1, ...this.secrets.map((s) => s.length))
   }
   write(value: string, final = false): void {
     this.pending += value
-    let end = final
-      ? this.pending.length
-      : Math.max(0, this.pending.length - this.width)
     let out = '',
       i = 0
-    while (i < end) {
-      const secret = this.secrets.find((s) => this.pending.startsWith(s, i))
+    while (i < this.pending.length) {
+      let secret: string | undefined
+      let partial = false
+      for (const candidate of this.secrets) {
+        if (candidate[0] !== this.pending[i]) continue
+        if (this.pending.startsWith(candidate, i)) {
+          secret = candidate
+          break
+        }
+        if (
+          !final && this.pending.length - i < candidate.length &&
+          candidate.startsWith(this.pending.slice(i))
+        ) {
+          partial = true
+          break
+        }
+      }
+      // Retain only a suffix that can still become a secret across chunks.
+      // An injected config file must not delay unrelated build diagnostics.
+      if (partial) break
       if (secret != null) {
         out += '[redacted]'
         i += secret.length
       } else out += this.pending[i++]
     }
-    end = i
-    this.pending = this.pending.slice(end)
+    this.pending = this.pending.slice(i)
     const redacted = Buffer.from(out)
     if (this.fullFile != null && redacted.length > 0)
       appendFileSync(this.fullFile, redacted)

@@ -409,6 +409,24 @@ describe('Mason builder', function () {
     )
     assert.equal(statSync(full).mode & 0o777, 0o600)
   })
+  it('streams ordinary logs while retaining only possible secret prefixes', () => {
+    const file = path.join(root, 'streaming.log')
+    const full = path.join(root, 'streaming.full.log')
+    const log = new MaskedLog(file, [
+      JSON.stringify({ privateConfig: 'x'.repeat(20000) }),
+      'fixture-token-long',
+      'fixture-token',
+    ], undefined, full)
+    log.write('Dependency installation completed\n')
+    assert.equal(readFileSync(file, 'utf8'), 'Dependency installation completed\n')
+    log.write('fixture-token')
+    assert.equal(readFileSync(full, 'utf8'), 'Dependency installation completed\n')
+    log.write('-long\nNext compiler started\n')
+    assert.equal(readFileSync(full, 'utf8'), 'Dependency installation completed\n[redacted]\nNext compiler started\n')
+    log.write('fixture-')
+    log.write('', true)
+    assert(readFileSync(full, 'utf8').endsWith('fixture-'))
+  })
   it('downloads complete redacted failed-build logs beyond the preview cap', async () => {
     const repo = fixture(`
       process.stdout.write('x'.repeat(5 * 1024 * 1024), () => {
