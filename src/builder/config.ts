@@ -170,11 +170,37 @@ export function loadBuilderConfig(file: string): BuilderConfig {
     workspace: path.resolve(path.dirname(file), config.workspace),
   }
 }
+function asEnvVars(value: unknown): Array<Record<string, string>> {
+  const entries = asArray((map: unknown) => {
+    if (map == null || typeof map !== 'object' || Array.isArray(map))
+      throw new Error('Expected an environment variable object')
+    const entries = Object.entries(map)
+    if (entries.length !== 1)
+      throw new Error('Expected one environment variable per object')
+    const [name, raw] = entries[0]!
+    const value = envValue(raw)
+    if (value.length > 4096)
+      throw new Error('Environment override too long')
+    return [envName(name), value] as const
+  })(value)
+  if (entries.length > 100)
+    throw new Error('Too many environment overrides')
+  if (new Set(entries.map(([name]) => name)).size !== entries.length)
+    throw new Error('Duplicate environment override')
+  const out = entries
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([name, value]) => ({ [name]: value }))
+  if (Buffer.byteLength(JSON.stringify(out)) > 8192)
+    throw new Error('Environment overrides too large')
+  return out
+}
 export const asRequest = object({
   app: text(160),
   branch: branchName,
   platforms: asOptional(asArray(asPlatform)),
   idempotencyKey: asOptional(text(100)),
+  envVars: (value: unknown) =>
+    value === undefined ? [] : asEnvVars(value),
 })
 export type JobRequest = ReturnType<typeof asRequest>
 export function baseEnvironment(): NodeJS.ProcessEnv {

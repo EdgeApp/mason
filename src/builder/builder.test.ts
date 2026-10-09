@@ -168,6 +168,187 @@ describe('Mason builder', function () {
       store.config.workspace,
     )
   })
+  it('validates and persists canonical per-job environment overrides', () => {
+    for (const envVars of [
+      null,
+      {},
+      ['x'],
+      [{}],
+      [[]],
+      [null],
+      JSON.parse(
+        '[{"APP_SERVER_URL":"preview.example.test","__proto__":{"x":true}}]',
+      ),
+      JSON.parse('[{"__proto__":"invalid"}]'),
+      [{ A: 'a', B: 'b' }],
+      [{ A: 1 }],
+      [{ A: 'a' }, { A: 'b' }],
+      [{ MASON_APP: 'other' }],
+      [{ NODE_OPTIONS: '--inspect' }],
+      [{ 'a b': 'x' }],
+      [{ A: '\0' }],
+      [{ A: 'x'.repeat(4097) }],
+      [{ A: '界'.repeat(3000) }],
+      Array.from({ length: 101 }, (_, i) => ({ ['V' + i]: '' })),
+    ])
+      assert.throws(() => asRequest({ ...request, envVars }))
+    const envVars = [{ Z: 'last' }, { A: '' }]
+    const first = store.enqueue(
+      { ...request, envVars, idempotencyKey: 'env' },
+      'test',
+    )
+    assert.deepEqual(first.request.envVars, [{ A: '' }, { Z: 'last' }])
+    assert.equal(
+      store.enqueue(
+        {
+          ...request,
+          envVars: [...envVars].reverse(),
+          idempotencyKey: 'env',
+        },
+        'test',
+      ).id,
+      first.id,
+    )
+    assert.throws(() =>
+      store.enqueue(
+        { ...request, envVars: [{ A: 'changed' }], idempotencyKey: 'env' },
+        'test',
+      ),
+    )
+    const config = store.config
+    store.close()
+    store = new BuilderStore(config)
+    assert.deepEqual(store.job(first.id)!.request.envVars, [
+      { A: '' },
+      { Z: 'last' },
+    ])
+    const legacy = store.enqueue(
+      { ...request, idempotencyKey: 'legacy' },
+      'test',
+    )
+    store.db
+      .prepare('UPDATE jobs SET request=? WHERE id=?')
+      .run(
+        JSON.stringify({ ...request, idempotencyKey: 'legacy' }),
+        legacy.id,
+      )
+    assert.equal(
+      store.enqueue(
+        { ...request, envVars: [], idempotencyKey: 'legacy' },
+        'test',
+      ).id,
+      legacy.id,
+    )
+    assert.deepEqual(store.job(legacy.id)!.request.envVars, [])
+    store.importApp({
+      ...definition,
+      files: [
+        { destination: 'private.json', contents: '', env: 'CONFIG_FILE' },
+      ],
+    })
+    assert.throws(() =>
+      store.enqueue(
+        { ...request, envVars: [{ CONFIG_FILE: '/other' }] },
+        'test',
+      ),
+    )
+  })
+  it('applies REST environment overrides privately to one build only', async () => {
+    const repo = fixture(`import fs from 'node:fs';
+      const value=process.env.APP_SERVER_URL;
+      console.log(value);
+      fs.writeFileSync(process.env.MASON_RESULT_FILE!,JSON.stringify({
+        overridden:value==='https://preview.example.test',
+        defaulted:value==='https://default.example.test',
+        supplied:value,
+        label:process.env.BUILD_LABEL
+      }));`)
+    store.importApp({
+      ...definition,
+      env: [
+        { name: 'APP_SERVER_URL', value: 'https://default.example.test' },
+      ],
+    })
+    const resolver = path.join(root, 'resolver.json')
+    writeBootstrap(resolver, { [definition.repository]: repo })
+    const worker = new Worker(store, resolver)
+    const server = builderApp(store).listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    assert(address && typeof address !== 'string')
+    const url = `http://127.0.0.1:${address.port}`
+    const keyFile = path.join(root, 'key')
+    store.key(keyFile)
+    const headers = {
+      Authorization: `Bearer ${readFileSync(keyFile, 'utf8').trim()}`,
+      'Content-Type': 'application/json',
+    }
+    const post = async (body: unknown): Promise<Response> =>
+      await fetch(url + '/api/jobs', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      })
+    try {
+      for (const envVars of [
+        [{ MASON_BRANCH: 'other' }],
+        [{ A: 'x'.repeat(10000) }],
+      ]) {
+        const bad = await post({ ...request, envVars })
+        assert.equal(bad.status, 400)
+        assert(!JSON.stringify(await bad.json()).includes('other'))
+      }
+      for (const override of [true, false]) {
+        const body = {
+          ...request,
+          ...(override
+            ? {
+                envVars: [
+                  { APP_SERVER_URL: 'https://preview.example.test' },
+                  { BUILD_LABEL: 'quoted "fixture"' },
+                ],
+              }
+            : {}),
+        }
+        const submitted = await post(body)
+        assert.equal(submitted.status, 202)
+        const visible = (await submitted.json()) as { id: string }
+        assert(!JSON.stringify(visible).includes('envVars'))
+        const job = await completed(worker, visible.id)
+        assert.equal(job!.status, 'succeeded')
+        const result = job!.result as Record<string, unknown>
+        assert.equal(result.overridden, override)
+        assert.equal(result.defaulted, !override)
+        assert.equal(result.supplied, '[redacted]')
+        if (override) assert.equal(result.label, '[redacted]')
+        const publicResponse = await (
+          await fetch(url + '/api/jobs/' + visible.id, { headers })
+        ).text()
+        const log = await (
+          await fetch(url + '/api/jobs/' + visible.id + '/log', { headers })
+        ).text()
+        assert(!publicResponse.includes('example.test'))
+        assert(!publicResponse.includes('envVars'))
+        assert(!log.includes('example.test'))
+        assert(log.includes('[redacted]'))
+        console.log(
+          'POST /api/jobs with envVars:',
+          override,
+          '-> 202; completed:',
+          JSON.stringify(result),
+          '; logs redacted',
+        )
+      }
+      assert.equal(
+        store.apps()[0]!.env[0]!.value,
+        'https://default.example.test',
+      )
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await worker.close()
+    }
+  })
   it('snapshots app configuration, scopes keys and preserves queued jobs', () => {
     const keyFile = path.join(root, 'key'),
       keyId = store.key(keyFile),

@@ -29,6 +29,7 @@ export async function executeJob(
     throw new Error('Job is not running')
   }
   const secrets = [
+    ...job.request.envVars.flatMap((map) => Object.values(map)),
     ...job.definition.env.filter((e) => e.secret).map((e) => e.value),
     ...job.definition.files.map((f) =>
       Buffer.from(f.contents, 'base64').toString('utf8'),
@@ -75,6 +76,9 @@ export async function executeJob(
       ...baseEnvironment(),
       ...Object.fromEntries(
         job.definition.env.map((e) => [e.name, e.value]),
+      ),
+      ...Object.fromEntries(
+        job.request.envVars.flatMap((map) => Object.entries(map)),
       ),
       ...workspace.inject(),
       MASON_APP: job.app,

@@ -41,7 +41,7 @@ key once and prints its revocation ID. `builder key-revoke --config <bootstrap>
 --id <id>` revokes it. Start the worker with `builder serve --config <bootstrap>`.
 All REST operations require `Authorization: Bearer <key>`:
 
-- `POST /api/jobs`: `{"app":"app.example.client","branch":"master","platforms":["ios"],"idempotencyKey":"unique-request"}`.
+- `POST /api/jobs`: `{"app":"app.example.client","branch":"master","platforms":["ios"],"idempotencyKey":"unique-request","envVars":[{"APP_SERVER_URL":"https://preview.example.test"}]}`.
 - `GET /api/jobs/:id`: status, pinned commit, timestamps, exit code and optional result.
 - `GET /api/jobs/:id/log`: bounded, redacted plain text.
 - `POST /api/jobs/:id/cancel`: cancel a queued or running job.
@@ -79,3 +79,19 @@ inspect and stop remaining job processes, then explicitly run `builder recover
 checking. Recovery removes recorded injections; the next checkout is cleaned.
 Distribution remains independently operated and accepts equal build numbers on
 different branches, while preserving uniqueness within each channel and branch.
+
+Per-job `envVars` is optional: an array of single-entry string maps. Values
+replace stored app environment values for this job only. Omit it or pass `[]`
+to use defaults; stored definitions and subsequent jobs remain unchanged.
+Names must follow the configured environment-name rules. Reserved `MASON_*`
+and runtime injection names, duplicate names, and injected-file environment
+bindings cannot be overridden. Each object must contain exactly one variable.
+There can be at most 100 variables, 4,096 characters per value (no NUL), and
+8 KiB of serialized overrides; the entire HTTP request still has an 8 KiB limit.
+
+Overrides are included in the private queued snapshot and idempotency check.
+Reordering variables does not change a request, but changing a value with the
+same idempotency key is rejected. All override values are masked in job logs
+and results, and are never returned as request configuration in the API.
+They reach the Masonfile child after checkout, not the builder or Git process.
+Build scripts remain trusted code and can deliberately disclose their inputs.

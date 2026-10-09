@@ -181,6 +181,15 @@ export class BuilderStore {
         (app) => app.slug === request.app && app.enabled,
       )
       if (!app) throw new Error('Unknown or disabled app')
+      const injected = new Set(app.files.map((file) => file.env))
+      if (
+        request.envVars.some((map) =>
+          Object.keys(map).some((name) => injected.has(name)),
+        )
+      )
+        throw new Error(
+          'Cannot override an injected file environment variable',
+        )
       if (
         request.platforms != null &&
         (request.platforms.length === 0 ||
