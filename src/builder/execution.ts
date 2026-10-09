@@ -172,7 +172,7 @@ export class Execution {
         item.pid !== process.pid &&
         (this.roots.has(item.pid) ||
           item.parent !== process.pid ||
-          this.children.has(item.pid))
+          this.children.get(item.pid)?.start === item.start)
       ) {
         this.children.set(item.pid, item)
         const leader = all.find(
