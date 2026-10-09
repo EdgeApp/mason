@@ -73,6 +73,33 @@ export function builderApp(store: BuilderStore): Express {
     }
     res.json({ cancelled: true })
   })
+  app.get('/api/jobs/:id/logs', (req, res) => {
+    if (!/^[a-f0-9-]{36}$/.test(req.params.id)) {
+      res.status(404).json({ error: 'Build log not found' })
+      return
+    }
+    const full = readLogPath(store, req.params.id, true)
+    const file = full ?? readLogPath(store, req.params.id)
+    if (file == null) {
+      res.status(404).json({ error: 'Build log not found' })
+      return
+    }
+    noSymlinks(file)
+    res.set('X-Mason-Log-Capture', full == null ? 'legacy' : 'full')
+    res.type('text/plain')
+    res.download(
+      file,
+      `mason-build-${req.params.id}.log`,
+      { cacheControl: false, lastModified: false },
+      (error) => {
+        if (error == null || res.headersSent) return
+        if ((error as Error & { status?: number }).status === 416) {
+          res.status(416).end()
+        } else
+          res.status(500).json({ error: 'Build log unavailable' })
+      },
+    )
+  })
   app.use(
     (
       _error: unknown,

@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -392,12 +393,186 @@ describe('Mason builder', function () {
   })
   it('masks chunk boundaries and caps logs', () => {
     const file = path.join(root, 'log')
-    const log = new MaskedLog(file, ['secret-value'], 35)
+    const full = path.join(root, 'full-log')
+    const log = new MaskedLog(file, ['secret-value'], 35, full)
     log.write('prefix sec')
     log.write('ret-value suffix')
     log.write('x'.repeat(100), true)
     assert.equal(readFileSync(file).length, 35)
-    assert.match(readFileSync(file, 'utf8'), /prefix \[redacted\] suffix/)
+    assert.match(
+      readFileSync(file, 'utf8'),
+      /prefix \[redacted\] suffix/,
+    )
+    assert.equal(
+      readFileSync(full, 'utf8'),
+      'prefix [redacted] suffix' + 'x'.repeat(100),
+    )
+    assert.equal(statSync(full).mode & 0o777, 0o600)
+  })
+  it('downloads complete redacted failed-build logs beyond the preview cap', async () => {
+    const repo = fixture(`
+      process.stdout.write('x'.repeat(5 * 1024 * 1024), () => {
+        process.stdout.write(process.env.TOKEN + '\\n');
+        process.stderr.write('late compiler failure\\n');
+        process.exitCode = 7;
+      });
+    `)
+    store.importApp({
+      ...definition,
+      env: [{ name: 'TOKEN', value: 'fixture-secret-value' }],
+    })
+    const job = store.enqueue(request, 'test')
+    store.claim()
+    await executeJob(
+      store,
+      job.id,
+      new AbortController().signal,
+      () => repo,
+    )
+    assert.equal(store.job(job.id)!.status, 'failed')
+    assert.equal(store.job(job.id)!.exit_code, 7)
+    const keyFile = path.join(root, 'key')
+    store.key(keyFile)
+    const headers = {
+      Authorization: `Bearer ${readFileSync(keyFile, 'utf8').trim()}`,
+    }
+    const server = builderApp(store).listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    assert(address && typeof address !== 'string')
+    const url = `http://127.0.0.1:${address.port}/api/jobs/${job.id}`
+    try {
+      assert.equal((await fetch(url + '/logs')).status, 401)
+      const preview = await (
+        await fetch(url + '/log', { headers })
+      ).text()
+      assert.equal(Buffer.byteLength(preview), 4 * 1024 * 1024)
+      assert(!preview.includes('late compiler failure'))
+      const response = await fetch(url + '/logs', { headers })
+      assert.equal(response.status, 200)
+      assert.equal(
+        response.headers.get('X-Mason-Log-Capture'),
+        'full',
+      )
+      assert.equal(response.headers.get('Cache-Control'), 'no-store')
+      assert.match(
+        response.headers.get('Content-Type')!,
+        /text\/plain/,
+      )
+      assert.match(
+        response.headers.get('Content-Disposition')!,
+        /attachment/,
+      )
+      const full = await response.text()
+      assert(Buffer.byteLength(full) > 5 * 1024 * 1024)
+      assert(full.includes('late compiler failure'))
+      assert(full.includes('[redacted]'))
+      assert(
+        full.endsWith(
+          'Build execution did not complete successfully.\n',
+        ),
+      )
+      assert(!full.includes('fixture-secret-value'))
+      const range = await fetch(url + '/logs', {
+        headers: { ...headers, Range: 'bytes=0-15' },
+      })
+      assert.equal(range.status, 206)
+      assert.equal(await range.text(), full.slice(0, 16))
+      const beyond = await fetch(url + '/logs', {
+        headers: { ...headers, Range: 'bytes=999999999-' },
+      })
+      assert.equal(beyond.status, 416)
+      assert.equal(
+        beyond.headers.get('Content-Range'),
+        `bytes */${Buffer.byteLength(full)}`,
+      )
+      const queued = store.enqueue(request, 'test')
+      const queuedUrl = url.replace(job.id, queued.id) + '/logs'
+      assert.equal((await fetch(queuedUrl, { headers })).status, 404)
+      const legacyFile = path.join(
+        store.config.workspace,
+        'logs',
+        queued.id + '.log',
+      )
+      writeFileSync(legacyFile, 'legacy diagnostic\n', {
+        mode: 0o600,
+      })
+      const legacy = await fetch(queuedUrl, { headers })
+      assert.equal(
+        legacy.headers.get('X-Mason-Log-Capture'),
+        'legacy',
+      )
+      assert.equal(await legacy.text(), 'legacy diagnostic\n')
+      const fullFile = path.join(
+        store.config.workspace,
+        'logs',
+        queued.id + '.full.log',
+      )
+      writeFileSync(fullFile, '', { mode: 0o600 })
+      const empty = await fetch(queuedUrl, { headers })
+      assert.equal(empty.status, 200)
+      assert.equal(await empty.text(), '')
+      rmSync(fullFile)
+      symlinkSync(path.join(root, 'key'), fullFile)
+      assert.equal((await fetch(queuedUrl, { headers })).status, 400)
+      assert.equal(
+        (
+          await fetch(url.replace(job.id, 'invalid') + '/logs', {
+            headers,
+          })
+        ).status,
+        404,
+      )
+      assert.equal(
+        (
+          await fetch(
+            url.replace(
+              job.id,
+              '00000000-0000-4000-8000-000000000001',
+            ) + '/logs',
+            { headers },
+          )
+        ).status,
+        404,
+      )
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve) =>
+        server.close(() => resolve()),
+      )
+    }
+  })
+  it('prunes complete and bounded logs with expired jobs', async () => {
+    const job = store.enqueue(request, 'test')
+    store.finish(job.id, 'failed', 1)
+    store.db
+      .prepare('UPDATE jobs SET finished=? WHERE id=?')
+      .run(Date.now() - 15 * 86400000, job.id)
+    const preview = path.join(
+      store.config.workspace,
+      'logs',
+      job.id + '.log',
+    )
+    const full = path.join(
+      store.config.workspace,
+      'logs',
+      job.id + '.full.log',
+    )
+    const keep = path.join(
+      store.config.workspace,
+      'logs',
+      'operator.log',
+    )
+    for (const file of [preview, full, keep])
+      writeFileSync(file, 'diagnostic')
+    const worker = new Worker(store)
+    try {
+      assert(!existsSync(preview))
+      assert(!existsSync(full))
+      assert(existsSync(keep))
+    } finally {
+      await worker.close()
+    }
   })
   it('owns and refreshes worktrees, injects files and records pinned results', async () => {
     const repo = fixture(

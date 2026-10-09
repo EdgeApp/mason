@@ -65,8 +65,8 @@ export class Worker {
       path.join(this.store.config.workspace, 'logs'),
     )) {
       if (
-        /^[a-f0-9-]{36}\.log$/.test(name) &&
-        this.store.job(name.slice(0, -4)) == null
+        /^[a-f0-9-]{36}(?:\.full)?\.log$/.test(name) &&
+        this.store.job(name.slice(0, 36)) == null
       )
         rmSync(path.join(this.store.config.workspace, 'logs', name))
     }
@@ -182,8 +182,15 @@ export function recover(
 export function readLogPath(
   store: BuilderStore,
   id: string,
+  full = false,
 ): string | undefined {
   if (!store.job(id)) return undefined
-  const file = path.join(store.config.workspace, 'logs', id + '.log')
-  return existsSync(file) && statSync(file).isFile() ? file : undefined
+  const file = path.join(
+    store.config.workspace,
+    'logs',
+    id + (full ? '.full.log' : '.log'),
+  )
+  return existsSync(file) && statSync(file).isFile()
+    ? file
+    : undefined
 }

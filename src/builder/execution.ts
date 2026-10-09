@@ -15,8 +15,11 @@ export class MaskedLog {
     readonly file: string,
     private readonly secrets: string[],
     private readonly limit = 4 * 1024 * 1024,
+    readonly fullFile?: string,
   ) {
     writeFileSync(file, '', { flag: 'wx', mode: 0o600 })
+    if (fullFile != null)
+      writeFileSync(fullFile, '', { flag: 'wx', mode: 0o600 })
     this.secrets = secrets
       .filter((s) => s.length > 0)
       .sort((a, b) => b.length - a.length)
@@ -38,7 +41,10 @@ export class MaskedLog {
     }
     end = i
     this.pending = this.pending.slice(end)
-    const data = Buffer.from(out).subarray(
+    const redacted = Buffer.from(out)
+    if (this.fullFile != null && redacted.length > 0)
+      appendFileSync(this.fullFile, redacted)
+    const data = redacted.subarray(
       0,
       Math.max(0, this.limit - this.bytes),
     )
@@ -147,11 +153,12 @@ export class Execution {
       child.stderr?.setEncoding('utf8')
       child.stdout?.on('data', (data: string) => {
         if (capture) output = (output + data).slice(-65536)
-        else this.log.write(data)
+        this.log.write(data)
       })
       child.stderr?.on('data', (data: string) => this.log.write(data))
       child.once('error', reject)
-      child.once('exit', (code) => {
+      // Drain both output pipes before finalizing the job's log.
+      child.once('close', (code) => {
         if (child.pid != null) this.roots.delete(child.pid)
         if (code === 0 && !this.stopped) resolve(output.trim())
         else reject(new CommandFailure(code))

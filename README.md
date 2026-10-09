@@ -44,6 +44,7 @@ All REST operations require `Authorization: Bearer <key>`:
 - `POST /api/jobs`: `{"app":"app.example.client","branch":"master","platforms":["ios"],"idempotencyKey":"unique-request","envVars":[{"APP_SERVER_URL":"https://preview.example.test"}]}`.
 - `GET /api/jobs/:id`: status, pinned commit, timestamps, exit code and optional result.
 - `GET /api/jobs/:id/log`: bounded, redacted plain text.
+- `GET /api/jobs/:id/logs`: download the full redacted build log as plain text.
 - `POST /api/jobs/:id/cancel`: cancel a queued or running job.
 
 A private client JSON file contains `url` and `keyFile`. Run `builder build
@@ -62,8 +63,10 @@ deploy commands or upload packages itself.
 One worker executes one job at a time. Each request snapshots its definition.
 Mason fetches from GitHub, pins the branch commit, resets its owned worktree and
 removes all old worktree contents before injection. Git credentials come from
-the worker account's credential helper or SSH environment. Logs are capped at
-4 MiB per job; completed records expire after fourteen days. The queue is capped
+the worker account's credential helper or SSH environment. The existing `/log`
+view is capped at 4 MiB; `/logs` streams the complete retained stdout and stderr,
+including checkout commands and failure messages. Completed records and both
+log files expire after fourteen days. The queue is capped
 at 100 active jobs. Keys authorize arbitrary configured branches: callers and
 repository code must be trusted. This is not a sandbox. Literal configured secret
 values are masked in logs and results, but scripts can disclose transformed
@@ -95,3 +98,15 @@ same idempotency key is rejected. All override values are masked in job logs
 and results, and are never returned as request configuration in the API.
 They reach the Masonfile child after checkout, not the builder or Git process.
 Build scripts remain trusted code and can deliberately disclose their inputs.
+
+The full-log API uses the same builder key as other job operations. It returns
+`Content-Disposition: attachment` with a job-specific filename and supports
+HTTP byte ranges for large downloads. Running jobs return a snapshot of output
+available so far; download again after the job reaches a terminal status.
+`X-Mason-Log-Capture: full` identifies complete capture for jobs started by this
+version. Older jobs fall back to their retained bounded log with
+`X-Mason-Log-Capture: legacy`; previously discarded output cannot be recovered.
+Queued jobs without a log and unknown IDs return 404; unauthenticated requests
+return 401. Output deliberately suppressed by repository build scripts never
+reaches Mason. Full logs consume disk according to actual output, rather than
+stopping at 4 MiB.

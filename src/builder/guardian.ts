@@ -38,6 +38,8 @@ export async function executeJob(
   const log = new MaskedLog(
     path.join(store.config.workspace, 'logs', id + '.log'),
     secrets,
+    undefined,
+    path.join(store.config.workspace, 'logs', id + '.full.log'),
   )
   const execution = new Execution(log)
   const workspace = new Workspace(store, job, execution, resolver)
@@ -101,6 +103,8 @@ export async function executeJob(
   } catch (error) {
     if (error instanceof CommandFailure && error.code != null)
       exitCode = error.code
+    if (error instanceof Error)
+      log.write(`${error.name}: ${error.message}\n`)
     log.write('\nBuild execution did not complete successfully.\n')
   } finally {
     clearTimeout(timer)
