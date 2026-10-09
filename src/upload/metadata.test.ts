@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { once } from 'node:events'
+import { Worker } from 'node:worker_threads'
 import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'mocha'
@@ -10,7 +12,11 @@ import {
   plist,
   zip,
 } from './fixtures.test.js'
-import { customFields, packageIdentity, parseInWorker } from './metadata.js'
+import {
+  customFields,
+  packageIdentity,
+  parseInWorker,
+} from './metadata.js'
 import { plistIdentity } from './plist.js'
 let root: string
 function file(bytes: Buffer): string {
@@ -24,6 +30,25 @@ describe('Bounded package identity parsing', () => {
     root = mkdtempSync(path.join(process.env.MASON_TEST_ROOT, 'metadata-'))
   })
   afterEach(() => rmSync(root, { recursive: true, force: true }))
+  it('completes metadata worker protocols before collecting their exit coverage', async () => {
+    for (const [buffer, format, ok] of [
+      [plist(), 'ipa', true],
+      [manifest(), 'apk', true],
+      [Buffer.alloc(0), 'unknown', false],
+      [Buffer.alloc(1024 * 1024 + 1), 'ipa', false],
+    ] as const) {
+      const worker = new Worker(
+        new URL('../../lib/upload/metadataWorker.js', import.meta.url),
+        { workerData: { buffer, format } },
+      )
+      const [message, exit] = await Promise.all([
+        once(worker, 'message'),
+        once(worker, 'exit'),
+      ])
+      assert.equal(message[0].ok, ok)
+      assert.equal(exit[0], 0)
+    }
+  })
   it('reads XML and binary IPA plists in isolated workers and compares publisher claims', async () => {
     for (const binary of [false, true]) {
       assert.deepEqual(plistIdentity(plist(binary)), packageFields)

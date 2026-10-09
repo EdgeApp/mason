@@ -1,3 +1,4 @@
+import { builderCommand } from './builder/cli.js'
 import { keyCommand } from './upload/keyCli.js'
 import { realpathSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
@@ -37,7 +38,9 @@ export function run(
         ? argv.length !== 5 || argv[3] !== '--account'
         : argv.length !== 3)
   )
-    throw new Error('Usage: mason migrate|prune|status|serve --config <file>')
+    throw new Error(
+      'Usage: mason migrate|prune|status|serve --config <file>',
+    )
   const store = new Store(loadConfig(file))
   if (command === 'serve') {
     const server = serve(store)
@@ -95,7 +98,14 @@ if (
   import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
 ) {
   try {
-    run(process.argv.slice(2))
+    if (process.argv[2] === 'builder') {
+      void builderCommand(process.argv.slice(3)).catch(() => {
+        console.error(
+          'Builder command failed. Check private configuration and job status.',
+        )
+        process.exitCode = 1
+      })
+    } else run(process.argv.slice(2))
   } catch {
     console.error(
       'Mason command failed. Check the command and private configuration.',
