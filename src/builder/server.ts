@@ -4,6 +4,7 @@ import { BuilderStore, publicJob } from './store.js'
 import { readLogPath, Worker } from './worker.js'
 import { noSymlinks } from '../config.js'
 import type { Server } from 'node:http'
+import { AutomaticPoller, AUTOMATIC_POLL_MS } from './automatic.js'
 
 export function builderApp(store: BuilderStore): Express {
   const app = express()
@@ -23,7 +24,10 @@ export function builderApp(store: BuilderStore): Express {
     const key = store.authenticate(
       (req.headers.authorization ?? '').replace(/^Bearer /, ''),
     )
-    if (!req.headers.authorization?.startsWith('Bearer ') || key == null) {
+    if (
+      !req.headers.authorization?.startsWith('Bearer ') ||
+      key == null
+    ) {
       res.status(401).json({ error: 'Builder API key required' })
       return
     }
@@ -31,6 +35,39 @@ export function builderApp(store: BuilderStore): Express {
     next()
   })
   app.use(express.json({ limit: '8kb', strict: true }))
+  app.get('/api/apps', (_req, res) => {
+    res.json(
+      store.apps().map(({ slug, name, enabled, platforms }) => ({
+        slug,
+        name,
+        enabled,
+        platforms,
+        ...store.buildSettings(slug),
+        pollIntervalMs: AUTOMATIC_POLL_MS,
+      })),
+    )
+  })
+  app.get('/api/apps/:slug/build-settings', (req, res) => {
+    try {
+      res.json({
+        ...store.buildSettings(req.params.slug),
+        pollIntervalMs: AUTOMATIC_POLL_MS,
+      })
+    } catch {
+      res.status(404).json({ error: 'App not found' })
+    }
+  })
+  app.put('/api/apps/:slug/build-settings', (req, res) => {
+    try {
+      store.configureBuilds(req.params.slug, req.body)
+      res.json({
+        ...store.buildSettings(req.params.slug),
+        pollIntervalMs: AUTOMATIC_POLL_MS,
+      })
+    } catch {
+      res.status(400).json({ error: 'Invalid app build settings' })
+    }
+  })
   app.post('/api/jobs', (req, res) => {
     try {
       res
@@ -115,17 +152,20 @@ export function builderApp(store: BuilderStore): Express {
 export function serveBuilder(store: BuilderStore): {
   server: Server
   worker: Worker
+  automatic: AutomaticPoller
   close: () => Promise<void>
 } {
   const worker = new Worker(store)
+  const automatic = new AutomaticPoller(store)
   const server = builderApp(store).listen(
     store.config.port,
     store.config.listenHost,
   )
   const close = async (): Promise<void> => {
     server.close()
+    await automatic.close()
     await worker.close()
     store.close()
   }
-  return { server, worker, close }
+  return { server, worker, automatic, close }
 }

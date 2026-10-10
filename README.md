@@ -48,7 +48,7 @@ All REST operations require `Authorization: Bearer <key>`:
 - `POST /api/jobs/:id/cancel`: cancel a queued or running job.
 
 A private client JSON file contains `url` and `keyFile`. Run `builder build
---client-config <file> --app <slug> --branch <branch> [--platform ios,android]` to
+--client-config <file> --app <slug> [--branch <branch>] [--platform ios,android]` to
 submit once and wait for completion. Failure, cancellation and partial builds
 return nonzero. A disconnected client can inspect its printed job ID; it does
 not resubmit automatically.
@@ -95,6 +95,57 @@ when attached to a terminal job. Cleanup failures do not relabel a completed
 compiler result as `interrupted`; that status describes an interrupted execution.
 Distribution remains independently operated and accepts equal build numbers on
 different branches, while preserving uniqueness within each channel and branch.
+
+### Automatic branch builds
+
+The authenticated builder API exposes `GET /api/apps` and
+`GET /api/apps/:slug/build-settings`, including each app's default branch,
+automatic branches and persisted progress. Update an app with
+`PUT /api/apps/:slug/build-settings` and this complete configuration:
+
+```json
+{
+  "defaultBranch": "master",
+  "automaticBranches": ["master", "feature/example"]
+}
+```
+
+The same builder API key authorizes these endpoints. Settings are separate from
+private app definitions; the API never returns injected files or secrets, and
+reimporting a definition preserves its build settings. Existing and newly
+imported apps default to `master` with automation disabled until configured.
+Omitting `branch` from a manual job or the build client uses the app's default.
+
+Mason checks configured remote Git refs at startup and every five minutes.
+Apps sharing a repository and branch share one lookup per poll. Enabling a
+branch schedules its current head on the next check. Subsequent checks schedule
+new commits, or retry an unsuccessful automatic build at most twice: three
+automatic attempts total for each app/branch/commit. Each attempt is reserved
+atomically when queued; cancellation, timeout and interruption consume that
+reservation. Remote lookup failures and a full or quarantined queue consume no
+attempt. Manual builds have their own behavior and do not consume this budget.
+
+Automatic jobs snapshot the app definition and pin the polled commit, even if
+the branch moves while waiting. They use the stored environment and all the
+app's supported platforms, and execute through the ordinary serial worker.
+One pending build per app/branch prevents duplicate scheduling; the next poll
+uses the latest head after that job ends. A successful commit is not rebuilt,
+and an exhausted commit is not retried merely because the service restarts or
+the branch is disabled, re-enabled or moved away and back.
+
+Branch state includes `lastSuccessfulCommit`, `lastAttemptedCommit`,
+`lastJobId`, `attempts`, `observedCommit`, `lastChecked` and `pollError`.
+These fields describe automatic builds. Success requires a successful job at
+the requested commit; a failed newer commit leaves the previous success
+visible. State and per-commit retry budgets survive the fourteen-day job/log
+retention window. API job responses mark automatic jobs with `automatic: 1`
+and include their `requested_commit` as well as the executed `commit_sha`.
+
+Set `automaticBranches` to `[]` to stop future scheduling. Disabling an app
+also pauses its rules. Already queued or running jobs retain their snapshots;
+use the ordinary job cancellation endpoint if they should be stopped.
+Automatic builds still require a valid Masonfile and working app-specific
+build, signing and upload settings. Partial results remain failures.
 
 Per-job `envVars` is optional: an array of single-entry string maps. Values
 replace stored app environment values for this job only. Omit it or pass `[]`

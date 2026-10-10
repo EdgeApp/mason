@@ -30,7 +30,8 @@ export function branchName(value: unknown): string {
     out
       .split('/')
       .some(
-        (p) => p.startsWith('.') || p.endsWith('.') || p.endsWith('.lock'),
+        (p) =>
+          p.startsWith('.') || p.endsWith('.') || p.endsWith('.lock'),
       )
   )
     throw new Error('Invalid branch')
@@ -49,7 +50,9 @@ export function repository(value: unknown): string {
     match[2] === '.' ||
     match[2] === '..'
   )
-    throw new Error('Expected a GitHub repository without credentials')
+    throw new Error(
+      'Expected a GitHub repository without credentials',
+    )
   const prefix = out.startsWith('git@')
     ? 'git@github.com:'
     : 'https://github.com/'
@@ -140,7 +143,8 @@ export function asDefinition(
   ]
   if (
     new Set(names).size !== names.length ||
-    new Set(out.files.map((f) => f.destination)).size !== out.files.length
+    new Set(out.files.map((f) => f.destination)).size !==
+      out.files.length
   )
     throw new Error('Duplicate configuration')
   if (
@@ -196,13 +200,35 @@ function asEnvVars(value: unknown): Array<Record<string, string>> {
 }
 export const asRequest = object({
   app: text(160),
-  branch: branchName,
+  branch: asOptional(branchName),
   platforms: asOptional(asArray(asPlatform)),
   idempotencyKey: asOptional(text(100)),
   envVars: (value: unknown) =>
     value === undefined ? [] : asEnvVars(value),
 })
 export type JobRequest = ReturnType<typeof asRequest>
+export function commitHash(value: unknown): string {
+  const out = asString(value)
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(out))
+    throw new Error('Invalid commit')
+  return out
+}
+const buildSettings = object({
+  defaultBranch: branchName,
+  automaticBranches: asArray(branchName),
+})
+export function asBuildSettings(
+  value: unknown,
+): ReturnType<typeof buildSettings> {
+  const out = buildSettings(value)
+  if (
+    out.automaticBranches.length > 20 ||
+    new Set(out.automaticBranches).size !==
+      out.automaticBranches.length
+  )
+    throw new Error('Invalid automatic branches')
+  return out
+}
 export function baseEnvironment(): NodeJS.ProcessEnv {
   return Object.fromEntries(
     [

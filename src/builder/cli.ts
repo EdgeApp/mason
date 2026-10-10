@@ -44,7 +44,7 @@ export async function builderCommand(
         required('--client-config'),
         {
           app: required('--app'),
-          branch: required('--branch'),
+          branch: options['--branch'],
           platforms: options['--platform']?.split(','),
         },
         output,

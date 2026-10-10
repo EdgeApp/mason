@@ -13,6 +13,8 @@ import { integer, oneOf, text } from '../validation.js'
 import {
   asDefinition,
   asRequest,
+  asBuildSettings,
+  commitHash,
   type BuilderConfig,
   type Definition,
   type JobRequest,
@@ -41,6 +43,8 @@ const asRow = asObject({
   started: nullable(integer()),
   finished: nullable(integer()),
   commit_sha: nullable(text(64)),
+  requested_commit: nullable(commitHash),
+  automatic: integer(0, 1),
   exit_code: nullable(integer(-2147483648, 2147483647)),
   result: nullable(asString),
   cancel: integer(0, 1),
@@ -54,7 +58,9 @@ export type Job = Omit<
   ReturnType<typeof asRow>,
   'definition' | 'request' | 'result'
 > & { definition: Definition; request: JobRequest; result?: unknown }
-export function publicJob(job: Job): Omit<Job, 'definition' | 'request'> {
+export function publicJob(
+  job: Job,
+): Omit<Job, 'definition' | 'request'> {
   const { definition: _definition, request: _request, ...out } = job
   void _definition
   void _request
@@ -62,6 +68,23 @@ export function publicJob(job: Job): Omit<Job, 'definition' | 'request'> {
 }
 export function hash(value: string): string {
   return createHash('sha256').update(value).digest('hex')
+}
+export interface AutomaticBranch {
+  app: string
+  branch: string
+  enabled: boolean
+  lastSuccessfulCommit?: string
+  lastAttemptedCommit?: string
+  lastJobId?: string
+  lastChecked?: number
+  observedCommit?: string
+  pollError?: string
+  attempts: number
+}
+export interface AppBuildSettings {
+  defaultBranch: string
+  automaticBranches: string[]
+  branches: AutomaticBranch[]
 }
 export class BuilderStore {
   readonly db: DatabaseSync
@@ -113,6 +136,27 @@ export class BuilderStore {
       for (const column of ['cleanup_error', 'quarantine_reason'])
         if (!columns.has(column))
           this.db.exec(`ALTER TABLE jobs ADD COLUMN ${column} TEXT`)
+      if (!columns.has('requested_commit'))
+        this.db.exec(
+          'ALTER TABLE jobs ADD COLUMN requested_commit TEXT',
+        )
+      if (!columns.has('automatic'))
+        this.db.exec(
+          'ALTER TABLE jobs ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0',
+        )
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS builder_app_settings(
+          app TEXT PRIMARY KEY, default_branch TEXT NOT NULL) STRICT;
+        INSERT OR IGNORE INTO builder_app_settings SELECT slug,'master' FROM builder_apps;
+        CREATE TABLE IF NOT EXISTS automatic_branches(
+          app TEXT NOT NULL, branch TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+          last_successful_commit TEXT, last_attempted_commit TEXT, last_job_id TEXT,
+          last_checked INTEGER, observed_commit TEXT, poll_error TEXT,
+          PRIMARY KEY(app,branch)) STRICT;
+        CREATE TABLE IF NOT EXISTS automatic_attempts(
+          app TEXT NOT NULL, branch TEXT NOT NULL, commit_sha TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0, succeeded INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(app,branch,commit_sha)) STRICT;`)
     })
     for (const suffix of ['-wal', '-shm'])
       if (existsSync(file + suffix)) chmodSync(file + suffix, 0o600)
@@ -138,6 +182,11 @@ export class BuilderStore {
         'INSERT INTO builder_apps VALUES(?,?) ON CONFLICT(slug) DO UPDATE SET definition=excluded.definition',
       )
       .run(app.slug, JSON.stringify(app))
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO builder_app_settings VALUES(?,'master')",
+      )
+      .run(app.slug)
   }
   apps(): Definition[] {
     return this.db
@@ -145,7 +194,9 @@ export class BuilderStore {
       .all()
       .map((row) =>
         asDefinition(
-          JSON.parse(asObject({ definition: asString })(row).definition),
+          JSON.parse(
+            asObject({ definition: asString })(row).definition,
+          ),
         ),
       )
   }
@@ -164,7 +215,9 @@ export class BuilderStore {
     const row = this.db
       .prepare('SELECT id FROM builder_keys WHERE digest=?')
       .get(hash(token))
-    return row == null ? undefined : asObject({ id: text(36) })(row).id
+    return row == null
+      ? undefined
+      : asObject({ id: text(36) })(row).id
   }
   revoke(id: string): void {
     this.db
@@ -172,67 +225,227 @@ export class BuilderStore {
       .run(text(36)(id))
   }
   enqueue(input: unknown, key: string): Job {
-    const request = asRequest(input)
-    return this.transaction(() => {
-      const token =
-        request.idempotencyKey == null
-          ? null
-          : hash(key + ':' + request.idempotencyKey)
-      const serialized = JSON.stringify(request)
-      if (token != null) {
-        const old = this.db
-          .prepare('SELECT * FROM jobs WHERE token=?')
-          .get(token)
-        if (old != null) {
-          const job = this.clean(old)
-          if (JSON.stringify(job.request) !== serialized)
-            throw new Error('Idempotency conflict')
-          return job
-        }
+    return this.transaction(() => this.insertJob(input, key))
+  }
+  private insertJob(
+    input: unknown,
+    key: string,
+    requestedCommit?: string,
+  ): Job {
+    let request = asRequest(input)
+    const token =
+      request.idempotencyKey == null
+        ? null
+        : hash(key + ':' + request.idempotencyKey)
+    if (token != null) {
+      const old = this.db
+        .prepare('SELECT * FROM jobs WHERE token=?')
+        .get(token)
+      if (old != null) {
+        const job = this.clean(old)
+        request = asRequest({
+          ...request,
+          branch: request.branch ?? job.branch,
+        })
+        if (JSON.stringify(job.request) !== JSON.stringify(request))
+          throw new Error('Idempotency conflict')
+        return job
       }
-      const app = this.apps().find(
-        (app) => app.slug === request.app && app.enabled,
+    }
+    const app = this.apps().find(
+      (app) => app.slug === request.app && app.enabled,
+    )
+    if (!app) throw new Error('Unknown or disabled app')
+    const branch =
+      request.branch ?? this.buildSettings(app.slug).defaultBranch
+    request = asRequest({
+      ...request,
+      branch,
+    })
+    const serialized = JSON.stringify(request)
+    const injected = new Set(app.files.map((file) => file.env))
+    if (
+      request.envVars.some((map) =>
+        Object.keys(map).some((name) => injected.has(name)),
       )
-      if (!app) throw new Error('Unknown or disabled app')
-      const injected = new Set(app.files.map((file) => file.env))
-      if (
-        request.envVars.some((map) =>
-          Object.keys(map).some((name) => injected.has(name)),
-        )
+    )
+      throw new Error(
+        'Cannot override an injected file environment variable',
       )
-        throw new Error(
-          'Cannot override an injected file environment variable',
-        )
-      if (
-        request.platforms != null &&
-        (request.platforms.length === 0 ||
-          new Set(request.platforms).size !== request.platforms.length ||
-          request.platforms.some((p) => !app.platforms.includes(p)))
-      )
-        throw new Error('Unsupported platforms')
-      const count = asObject({ n: integer() })(
-        this.db
-          .prepare(
-            "SELECT count(*) n FROM jobs WHERE status IN ('queued','running')",
-          )
-          .get(),
-      ).n
-      if (count >= 100) throw new Error('Queue is full')
-      const id = randomUUID()
+    if (
+      request.platforms != null &&
+      (request.platforms.length === 0 ||
+        new Set(request.platforms).size !==
+          request.platforms.length ||
+        request.platforms.some((p) => !app.platforms.includes(p)))
+    )
+      throw new Error('Unsupported platforms')
+    const count = asObject({ n: integer() })(
       this.db
         .prepare(
-          "INSERT INTO jobs(id,app,branch,status,created,definition,request,token) VALUES(?,?,?,'queued',?,?,?,?)",
+          "SELECT count(*) n FROM jobs WHERE status IN ('queued','running')",
         )
-        .run(
-          id,
-          request.app,
-          request.branch,
-          Date.now(),
-          JSON.stringify(app),
-          serialized,
-          token,
+        .get(),
+    ).n
+    if (count >= 100) throw new Error('Queue is full')
+    const id = randomUUID()
+    this.db
+      .prepare(
+        "INSERT INTO jobs(id,app,branch,status,created,definition,request,token,requested_commit,automatic) VALUES(?,?,?,'queued',?,?,?,?,?,?)",
+      )
+      .run(
+        id,
+        request.app,
+        branch,
+        Date.now(),
+        JSON.stringify(app),
+        serialized,
+        token,
+        requestedCommit ?? null,
+        Number(requestedCommit != null),
+      )
+    return this.job(id)!
+  }
+  buildSettings(app: string): AppBuildSettings {
+    const row = this.db
+      .prepare(
+        'SELECT default_branch FROM builder_app_settings WHERE app=?',
+      )
+      .get(app)
+    if (row == null) throw new Error('Unknown app')
+    const branches = this.automaticBranches(app)
+    return {
+      defaultBranch: asObject({ default_branch: asString })(row)
+        .default_branch,
+      automaticBranches: branches
+        .filter((b) => b.enabled)
+        .map((b) => b.branch),
+      branches,
+    }
+  }
+  configureBuilds(app: string, input: unknown): void {
+    const settings = asBuildSettings(input)
+    this.transaction(() => {
+      this.buildSettings(app)
+      this.db
+        .prepare(
+          'UPDATE builder_app_settings SET default_branch=? WHERE app=?',
         )
-      return this.job(id)!
+        .run(settings.defaultBranch, app)
+      this.db
+        .prepare(
+          'UPDATE automatic_branches SET enabled=0 WHERE app=?',
+        )
+        .run(app)
+      for (const branch of settings.automaticBranches)
+        this.db
+          .prepare(
+            `INSERT INTO automatic_branches(app,branch) VALUES(?,?)
+          ON CONFLICT(app,branch) DO UPDATE SET enabled=1`,
+          )
+          .run(app, branch)
+    })
+  }
+  automaticBranches(app?: string): AutomaticBranch[] {
+    return this.db
+      .prepare(
+        `SELECT b.*,coalesce(a.attempts,0) attempts
+      FROM automatic_branches b LEFT JOIN automatic_attempts a
+      ON a.app=b.app AND a.branch=b.branch AND a.commit_sha=b.last_attempted_commit
+      WHERE (? IS NULL OR b.app=?) ORDER BY b.app,b.branch`,
+      )
+      .all(app ?? null, app ?? null)
+      .map((value) => {
+        const row = asObject({
+          app: asString,
+          branch: asString,
+          enabled: integer(0, 1),
+          last_successful_commit: nullable(commitHash),
+          last_attempted_commit: nullable(commitHash),
+          last_job_id: nullable(text(36)),
+          last_checked: nullable(integer()),
+          observed_commit: nullable(commitHash),
+          poll_error: nullable(asString),
+          attempts: integer(0, 3),
+        })(value)
+        return {
+          app: row.app,
+          branch: row.branch,
+          enabled: row.enabled === 1,
+          lastSuccessfulCommit: row.last_successful_commit,
+          lastAttemptedCommit: row.last_attempted_commit,
+          lastJobId: row.last_job_id,
+          lastChecked: row.last_checked,
+          observedCommit: row.observed_commit,
+          pollError: row.poll_error,
+          attempts: row.attempts,
+        }
+      })
+  }
+  recordPoll(app: string, branch: string, commit?: string): void {
+    this.db
+      .prepare(
+        `UPDATE automatic_branches SET last_checked=?,observed_commit=?,poll_error=?
+      WHERE app=? AND branch=? AND enabled=1`,
+      )
+      .run(
+        Date.now(),
+        commit == null ? null : commitHash(commit),
+        commit == null ? 'Could not read branch head' : null,
+        app,
+        branch,
+      )
+  }
+  enqueueAutomatic(
+    app: string,
+    branch: string,
+    commit: string,
+  ): Job | undefined {
+    commitHash(commit)
+    return this.transaction(() => {
+      const rule = this.automaticBranches(app).find(
+        (r) => r.branch === branch && r.enabled,
+      )
+      if (
+        rule == null ||
+        !this.apps().some((a) => a.slug === app && a.enabled)
+      )
+        return undefined
+      const pending = this.pending()
+      if (pending.length >= 100) return undefined
+      if (
+        pending.some(
+          (j) =>
+            (j.app === app && j.branch === branch) ||
+            (j.quarantine && j.status !== 'running'),
+        )
+      )
+        return undefined
+      const attempt = this.db
+        .prepare(
+          `SELECT attempts,succeeded FROM automatic_attempts
+        WHERE app=? AND branch=? AND commit_sha=?`,
+        )
+        .get(app, branch, commit)
+      if (
+        attempt != null &&
+        (attempt.succeeded === 1 || Number(attempt.attempts) >= 3)
+      )
+        return undefined
+      const job = this.insertJob({ app, branch }, 'automatic', commit)
+      this.db
+        .prepare(
+          `INSERT INTO automatic_attempts(app,branch,commit_sha,attempts) VALUES(?,?,?,1)
+        ON CONFLICT(app,branch,commit_sha) DO UPDATE SET attempts=attempts+1`,
+        )
+        .run(app, branch, commit)
+      this.db
+        .prepare(
+          `UPDATE automatic_branches SET last_attempted_commit=?,last_job_id=?
+        WHERE app=? AND branch=?`,
+        )
+        .run(commit, job.id, app, branch)
+      return job
     })
   }
   private clean(value: unknown): Job {
@@ -262,7 +475,9 @@ export class BuilderStore {
     return this.transaction(() => {
       const pending = this.pending()
       if (
-        pending.some((job) => job.status === 'running' || job.quarantine)
+        pending.some(
+          (job) => job.status === 'running' || job.quarantine,
+        )
       )
         return undefined
       const job = pending.find((job) => job.status === 'queued')
@@ -298,24 +513,44 @@ export class BuilderStore {
     const serialized = result == null ? null : JSON.stringify(result)
     if (serialized != null && serialized.length > 65536)
       throw new Error('Result too large')
-    this.db
-      .prepare(
-        'UPDATE jobs SET status=?,finished=?,exit_code=?,result=?,quarantine=?,cleanup_error=?,quarantine_reason=? WHERE id=?',
-      )
-      .run(
-        oneOf(statuses)(status),
-        Date.now(),
-        code ?? null,
-        serialized,
-        Number(quarantine),
-        details.cleanupError == null
-          ? null
-          : text(2048)(details.cleanupError),
-        !quarantine || details.quarantineReason == null
-          ? null
-          : text(2048)(details.quarantineReason),
-        id,
-      )
+    this.transaction(() => {
+      this.db
+        .prepare(
+          'UPDATE jobs SET status=?,finished=?,exit_code=?,result=?,quarantine=?,cleanup_error=?,quarantine_reason=? WHERE id=?',
+        )
+        .run(
+          oneOf(statuses)(status),
+          Date.now(),
+          code ?? null,
+          serialized,
+          Number(quarantine),
+          details.cleanupError == null
+            ? null
+            : text(2048)(details.cleanupError),
+          !quarantine || details.quarantineReason == null
+            ? null
+            : text(2048)(details.quarantineReason),
+          id,
+        )
+      const job = this.job(id)
+      if (
+        status === 'succeeded' &&
+        job?.automatic &&
+        job.requested_commit != null &&
+        job.commit_sha === job.requested_commit
+      ) {
+        this.db
+          .prepare(
+            `UPDATE automatic_branches SET last_successful_commit=? WHERE app=? AND branch=?`,
+          )
+          .run(job.commit_sha!, job.app, job.branch)
+        this.db
+          .prepare(
+            `UPDATE automatic_attempts SET succeeded=1 WHERE app=? AND branch=? AND commit_sha=?`,
+          )
+          .run(job.app, job.branch, job.commit_sha!)
+      }
+    })
   }
   releaseQuarantine(id: string): void {
     this.db
@@ -325,21 +560,29 @@ export class BuilderStore {
       .run(id)
   }
   commit(id: string, sha: string): void {
-    if (!/^[a-f0-9]{40,64}$/.test(sha)) throw new Error('Invalid commit')
-    this.db.prepare('UPDATE jobs SET commit_sha=? WHERE id=?').run(sha, id)
+    commitHash(sha)
+    const job = this.job(id)
+    if (job?.requested_commit != null && job.requested_commit !== sha)
+      throw new Error('Requested commit changed')
+    this.db
+      .prepare('UPDATE jobs SET commit_sha=? WHERE id=?')
+      .run(sha, id)
   }
   own(identity: string, directory: string): boolean {
     const row = this.db
       .prepare('SELECT directory FROM workspaces WHERE identity=?')
       .get(identity)
     if (row == null) {
-      if (existsSync(directory)) throw new Error('Foreign workspace path')
+      if (existsSync(directory))
+        throw new Error('Foreign workspace path')
       this.db
         .prepare('INSERT INTO workspaces VALUES(?,?)')
         .run(identity, directory)
       return false
     }
-    if (asObject({ directory: asString })(row).directory !== directory)
+    if (
+      asObject({ directory: asString })(row).directory !== directory
+    )
       throw new Error('Workspace identity mismatch')
     return true
   }

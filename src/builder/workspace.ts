@@ -107,7 +107,7 @@ export class Workspace {
         '--no-tags',
         '--',
         this.resolveRepository(this.job.definition.repository),
-        `+refs/heads/${this.job.branch}:${ref}`,
+        `+${this.job.requested_commit ?? `refs/heads/${this.job.branch}`}:${ref}`,
       ],
       this.clone,
     )
