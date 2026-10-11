@@ -174,3 +174,77 @@ Queued jobs without a log and unknown IDs return 404; unauthenticated requests
 return 401. Output deliberately suppressed by repository build scripts never
 reaches Mason. Full logs consume disk according to actual output, rather than
 stopping at 4 MiB.
+
+### Registering iOS test devices
+
+The green **Register Device** button beside **Sign out** opens a temporary
+Profile Service download. In Safari on an iPhone or iPad, download the profile,
+then open Settings → Profile Downloaded → Install. The device sends a signed
+UDID/model/OS response to Mason. The registration is saved to the signed-in
+tester's account. Model names default to `iPhone13 of mark@example` and can be
+edited. Desktop visitors can scan a QR code to open the flow on their phone.
+
+Registration does not install an app signing certificate, root CA, or MDM
+payload. The profile is unsigned; Apple's profile-installation warning is
+expected. Only UDID, PRODUCT and VERSION are requested. Device callbacks verify
+CMS signatures against Apple's roots and an expiring one-use account/session
+challenge. Apple's built-in device identity certificate dates are ignored as
+specified by its Profile Service documentation; the signature, chain and device
+issuer are verified. Registration and installation require existing tester or
+administrator access. New registrations never implicitly grant tester access.
+
+Enable registration in the private distribution configuration:
+
+```json
+"devices": {
+  "workerTokenFile": "/private/mason/device-worker-key.json",
+  "trustStoreFile": "/srv/mason/src/devices/apple-roots.pem",
+  "openssl": "openssl"
+}
+```
+
+The owner-only worker key file contains `{"token":"<64 random hex digits>"}`.
+Use a separate random key for this worker, not an upload or builder API key.
+`GET` and `POST /api/device-provisioning` require that Bearer key. They are for
+one trusted provisioning worker, not browser access. The provided Apple root
+certificates are public certificates from Apple's PKI website.
+
+On the signing Mac, run `node lib/cli.js devices-worker --config <private file>`.
+Its owner-only configuration contains `origin`, `tokenFile`,
+`builderConfigFile`, `stateDirectory`, `bundle`, `gemfile`, `bundlePath`, optional
+`ruby`, and `apple: {teamId, certificateId, loginFile}`. `apple.apiKeyFile` can
+replace the saved Apple login/session file. These credentials must be permitted
+to register devices and create provisioning profiles. A saved Apple login can
+expire and require renewed authentication; API keys are preferable for long-term
+unattended operation.
+
+The worker polls over HTTPS every 30 seconds. It registers the device, creates
+new ad hoc profiles using the existing distribution certificate and enabled
+Apple devices, and keeps the fresh profiles in a private local cache. It does
+not revoke certificates or commit to application/signing repositories. An
+immutable Mason-owned bundle shim supplies the profiles to the existing build
+adapter after read-only Match imports its certificate. Mason's stored app
+settings are updated; branch origins, secrets and other app settings remain
+intact. Apple processing delays and credential/quota failures remain visible.
+
+A registration queues iOS-only builds of configured default branches even if
+Git has not changed. Preparation jobs pin their commit, persist their batch and
+idempotency keys, and allow at most two retries after the initial attempt. They
+do not consume or reset the source-change automatic-build budget. Multiple
+pending devices are handled together. Existing queued jobs retain their original
+configuration snapshot. Historical packages remain immutable: **Prepare for
+this device** queues a new build of that package's exact branch and commit.
+
+Mason verifies and records device membership and expiry from each uploaded
+IPA's embedded Apple-signed ad hoc profile, including the app identifier.
+Installation grants are bound to the selected account-owned device and checked
+again at manifest/artifact download. Unregistered, incompatible and expired
+profiles are never presented as ready. Android and desktop downloads keep their
+existing behavior. `devices-inspect --config <distribution config>` backfills
+retained IPAs. `devices-bootstrap --config <worker config>` verifies Apple
+credentials and prepares the existing device set before starting the daemon.
+
+Apple's annual device allowance still applies. Removing an account association
+does not disable the device at Apple, recover a device slot, or revoke downloaded
+apps. Use the Apple developer account to manage that separate device lifecycle.
+See `src/devices/NOTICE.md` for Zealot and DeviceKit attribution.

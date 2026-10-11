@@ -1,11 +1,5 @@
 import { asBoolean, asObject, asOptional } from 'cleaners'
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  openSync,
-  readSync,
-} from 'node:fs'
+import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs'
 import { Worker } from 'node:worker_threads'
 import { open as openZip, type Entry, type ZipFile } from 'yauzl'
 import { noSymlinks } from '../config.js'
@@ -57,17 +51,15 @@ const asPublisher = object({
   buildNumber: text(80),
   buildTime: asOptional((value: unknown): string => {
     const stamp = text(40)(value)
-    if (
-      !/^\d{4}-\d\d-\d\dT/.test(stamp) ||
-      !Number.isFinite(Date.parse(stamp))
-    )
+    if (!/^\d{4}-\d\d-\d\dT/.test(stamp) || !Number.isFinite(Date.parse(stamp)))
       throw new Error('Invalid build time')
     return new Date(stamp).toISOString()
   }),
 })
-async function zippedMetadata(
+export async function zippedMetadata(
   file: string,
   format: 'ipa' | 'apk',
+  provisioning = false,
 ): Promise<Buffer> {
   const zip = await new Promise<ZipFile>((resolve, reject) =>
     openZip(
@@ -95,7 +87,10 @@ async function zippedMetadata(
           const matches =
             format === 'apk'
               ? entry.fileName === 'AndroidManifest.xml'
-              : /^Payload\/[^/]+\.app\/Info\.plist$/.test(entry.fileName)
+              : (provisioning
+                  ? /^Payload\/[^/]+\.app\/embedded\.mobileprovision$/
+                  : /^Payload\/[^/]+\.app\/Info\.plist$/
+                ).test(entry.fileName)
           if (matches) {
             if (
               selected != null ||
@@ -113,11 +108,10 @@ async function zippedMetadata(
       zip.readEntry()
     })
     if (selected == null) throw new Error('Package metadata missing')
-    const stream = await new Promise<NodeJS.ReadableStream>(
-      (resolve, reject) =>
-        zip.openReadStream(selected!, (error, stream) =>
-          error != null ? reject(error) : resolve(stream!),
-        ),
+    const stream = await new Promise<NodeJS.ReadableStream>((resolve, reject) =>
+      zip.openReadStream(selected!, (error, stream) =>
+        error != null ? reject(error) : resolve(stream!),
+      ),
     )
     const parts: Buffer[] = []
     let size = 0
@@ -186,7 +180,9 @@ export async function packageIdentity(
 ): Promise<PackageIdentity> {
   noSymlinks(file)
   const publisher =
-    Array.isArray(custom) || custom.mason == null ? undefined : asPublisher(custom.mason)
+    Array.isArray(custom) || custom.mason == null
+      ? undefined
+      : asPublisher(custom.mason)
   if (format === 'ipa' || format === 'apk') {
     const actual = await parseInWorker(
       await zippedMetadata(file, format),
@@ -207,10 +203,7 @@ export async function packageIdentity(
   try {
     const stat = fstatSync(fd),
       head = Buffer.alloc(64)
-    if (
-      !stat.isFile() ||
-      readSync(fd, head, 0, head.length, 0) !== head.length
-    )
+    if (!stat.isFile() || readSync(fd, head, 0, head.length, 0) !== head.length)
       throw new Error('Invalid desktop package')
     if (format === 'dmg') {
       const footer = Buffer.alloc(4)
@@ -221,9 +214,7 @@ export async function packageIdentity(
       )
         throw new Error('Expected UDIF disk image')
     } else if (format === 'msi') {
-      if (
-        !head.subarray(0, 8).equals(Buffer.from('d0cf11e0a1b11ae1', 'hex'))
-      )
+      if (!head.subarray(0, 8).equals(Buffer.from('d0cf11e0a1b11ae1', 'hex')))
         throw new Error('Expected Windows installer')
     } else {
       const position = head.readUInt32LE(60),

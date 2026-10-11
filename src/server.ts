@@ -1,3 +1,8 @@
+import {
+  deviceCallbackRoutes,
+  deviceRoutes,
+  deviceWorkerRoutes,
+} from './devices/routes.js'
 import express, { type ErrorRequestHandler } from 'express'
 import { Accounts } from './auth/accounts.js'
 import { Providers } from './auth/providers.js'
@@ -23,7 +28,7 @@ export function createApp(
       'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
       'Content-Security-Policy':
-        "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+        "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
     })
     next()
   })
@@ -48,10 +53,13 @@ export function createApp(
         ),
       )
   })
+  app.use(deviceCallbackRoutes(store))
+  app.use(deviceWorkerRoutes(store))
   app.use(uploadRoutes(store))
   app.use(express.urlencoded({ extended: false, limit: '16kb' }))
   const accounts = new Accounts(store)
   app.use(authRoutes(store, providers, accounts))
+  app.use(deviceRoutes(store, accounts))
   app.use(installationRoutes(store, accounts))
   app.use(catalogRoutes(store, accounts))
   app.use((_req, res) => {

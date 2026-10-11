@@ -112,7 +112,7 @@ describe('Mason durable store', () => {
     store.db
       .exec(`INSERT INTO accounts(id,name,created_at) VALUES(1,'Fixture',0);
       INSERT INTO sessions VALUES('session',1,0,'csrf',0,9999999999999);
-      INSERT INTO install_grants VALUES('grant',${first.id},'session',0,9999999999999);`)
+      INSERT INTO install_grants(hash,build_id,session_hash,created_at,expires_at) VALUES('grant',${first.id},'session',0,9999999999999);`)
     migrateBranchNumbers(store.db)
     assert.equal(
       store.db.prepare('SELECT build_id FROM install_grants').get()!

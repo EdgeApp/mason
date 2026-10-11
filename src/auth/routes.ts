@@ -69,7 +69,7 @@ export function sessionContext(
 const hidden = (session: Session): string =>
   `<input type="hidden" name="csrf" value="${escape(session.csrf)}">`
 export function navigation(session: Session, account: Account): string {
-  return `${account.is_admin ? '<a href="/people">People</a>' : ''}<form method="post" action="/auth/logout">${hidden(session)}<button class="secondary">Sign out</button></form>`
+  return `${account.is_admin ? '<a href="/people">People</a>' : ''}<a class="button register-device" href="/devices">Register Device</a><form method="post" action="/auth/logout">${hidden(session)}<button class="secondary">Sign out</button></form>`
 }
 export function authLimiter(now: () => number): RequestHandler {
   const clients = new Map<string, { count: number; until: number }>()
@@ -293,24 +293,22 @@ export function authRoutes(
     }
     const rows = accounts
       .list()
-      .map(
-        (account) => {
-          const identities = accounts
-            .identities(account.id)
-            .map((identity) => {
-              const provider = store.config.providers.find(
-                (item) => item.id === identity.provider,
-              )
-              const email =
-                identity.email == null
-                  ? 'No email provided'
-                  : `${escape(identity.email)} · ${identity.email_verified ? 'Verified email' : 'Unverified email — confirm this person before granting access'}`
-              return `<p>${email}</p><small>Sign-in provider: ${escape(provider?.name ?? identity.provider)} (${escape(identity.provider)})</small><details><summary>Identity details</summary><small>Issuer: ${escape(identity.issuer)}</small><small>Account reference: ${escape(identity.subject)}</small></details>`
-            })
-            .join('')
-          return `<div class="row"><div><strong>${escape(account.name)}</strong>${identities || '<p>No sign-in identity available</p>'}<small>${account.disabled ? 'Disabled' : account.is_admin ? 'Administrator' : account.is_tester ? 'Tester' : 'Waiting for access'}</small></div>${account.is_admin ? '' : `<form method="post" action="/people/${account.id}/tester">${hidden(context.session)}<input type="hidden" name="enabled" value="${account.is_tester ? 'false' : 'true'}"><button class="${account.is_tester ? 'danger' : 'secondary'}">${account.is_tester ? 'Revoke tester' : 'Grant tester'}</button></form>`}</div>`
-        },
-      )
+      .map((account) => {
+        const identities = accounts
+          .identities(account.id)
+          .map((identity) => {
+            const provider = store.config.providers.find(
+              (item) => item.id === identity.provider,
+            )
+            const email =
+              identity.email == null
+                ? 'No email provided'
+                : `${escape(identity.email)} · ${identity.email_verified ? 'Verified email' : 'Unverified email — confirm this person before granting access'}`
+            return `<p>${email}</p><small>Sign-in provider: ${escape(provider?.name ?? identity.provider)} (${escape(identity.provider)})</small><details><summary>Identity details</summary><small>Issuer: ${escape(identity.issuer)}</small><small>Account reference: ${escape(identity.subject)}</small></details>`
+          })
+          .join('')
+        return `<div class="row"><div><strong>${escape(account.name)}</strong>${identities || '<p>No sign-in identity available</p>'}<small>${account.disabled ? 'Disabled' : account.is_admin ? 'Administrator' : account.is_tester ? 'Tester' : 'Waiting for access'}</small></div>${account.is_admin ? '' : `<form method="post" action="/people/${account.id}/tester">${hidden(context.session)}<input type="hidden" name="enabled" value="${account.is_tester ? 'false' : 'true'}"><button class="${account.is_tester ? 'danger' : 'secondary'}">${account.is_tester ? 'Revoke tester' : 'Grant tester'}</button></form>`}</div>`
+      })
       .join('')
     const invites = accounts
       .invitations()
