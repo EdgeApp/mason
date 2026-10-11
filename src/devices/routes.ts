@@ -69,6 +69,7 @@ export function deviceCallbackRoutes(store: Store): Router {
     express.raw({ type: () => true, limit: '1mb' }),
     async (req, res) => {
       active++
+      let stage = 'signature'
       try {
         const cfg = store.config.devices!
         const bytes = await verifyCms(
@@ -77,9 +78,19 @@ export function deviceCallbackRoutes(store: Store): Router {
           true,
           cfg.openssl,
         )
-        devices.receive(String(req.params.token), decodePlist(bytes))
-        res.redirect(303, '/devices/complete/' + String(req.params.token))
+        stage = 'attributes'
+        const attributes = decodePlist(bytes)
+        stage = 'registration'
+        devices.receive(String(req.params.token), attributes)
+        // Profile Service recognizes 301 as the handoff back to Safari.
+        // A normal 303 makes Settings follow the HTML page as another profile.
+        res.redirect(
+          301,
+          store.config.origin + '/devices/complete/' + String(req.params.token),
+        )
       } catch {
+        // Never log the token, signed payload, UDID or certificate contents.
+        console.error('Mason device callback failed at ' + stage)
         res
           .status(400)
           .send(

@@ -189,12 +189,19 @@ describe('Device registration, account ownership and iOS compatibility', () => {
       },
       false,
     )
-    assert.equal(callback.status, 303)
+    assert.equal(callback.status, 301)
+    assert.equal(
+      callback.headers.get('location'),
+      store.config.origin + '/devices/complete/' + token,
+    )
+    assert.equal(callback.headers.get('cache-control'), 'no-store')
     const found = devices.list(user.account.id)
     assert.equal(found.length, 1)
     assert.equal(found[0]!.name, 'iPhone13 of mark@example')
     assert.equal(found[0]!.status, 'pending')
-    const complete = await request(callback.headers.get('location')!)
+    const complete = await request(
+      new URL(callback.headers.get('location')!).pathname,
+    )
     assert.equal(complete.status, 303)
     assert.match(complete.headers.get('set-cookie')!, /__Host-mason-device=/)
     assert.equal(
