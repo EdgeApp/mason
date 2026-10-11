@@ -1,11 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import {
-  chmodSync,
-  existsSync,
-  readFileSync,
-  writeFileSync,
-} from 'node:fs'
+import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { asObject, asString, asOptional } from 'cleaners'
 import { noSymlinks, privateDirectory } from '../config.js'
@@ -58,9 +53,7 @@ export type Job = Omit<
   ReturnType<typeof asRow>,
   'definition' | 'request' | 'result'
 > & { definition: Definition; request: JobRequest; result?: unknown }
-export function publicJob(
-  job: Job,
-): Omit<Job, 'definition' | 'request'> {
+export function publicJob(job: Job): Omit<Job, 'definition' | 'request'> {
   const { definition: _definition, request: _request, ...out } = job
   void _definition
   void _request
@@ -137,9 +130,7 @@ export class BuilderStore {
         if (!columns.has(column))
           this.db.exec(`ALTER TABLE jobs ADD COLUMN ${column} TEXT`)
       if (!columns.has('requested_commit'))
-        this.db.exec(
-          'ALTER TABLE jobs ADD COLUMN requested_commit TEXT',
-        )
+        this.db.exec('ALTER TABLE jobs ADD COLUMN requested_commit TEXT')
       if (!columns.has('automatic'))
         this.db.exec(
           'ALTER TABLE jobs ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0',
@@ -183,9 +174,7 @@ export class BuilderStore {
       )
       .run(app.slug, JSON.stringify(app))
     this.db
-      .prepare(
-        "INSERT OR IGNORE INTO builder_app_settings VALUES(?,'master')",
-      )
+      .prepare("INSERT OR IGNORE INTO builder_app_settings VALUES(?,'master')")
       .run(app.slug)
   }
   apps(): Definition[] {
@@ -194,9 +183,7 @@ export class BuilderStore {
       .all()
       .map((row) =>
         asDefinition(
-          JSON.parse(
-            asObject({ definition: asString })(row).definition,
-          ),
+          JSON.parse(asObject({ definition: asString })(row).definition),
         ),
       )
   }
@@ -205,9 +192,7 @@ export class BuilderStore {
       token = randomBytes(32).toString('hex')
     noSymlinks(file)
     writeFileSync(file, token + '\n', { flag: 'wx', mode: 0o600 })
-    this.db
-      .prepare('INSERT INTO builder_keys VALUES(?,?)')
-      .run(id, hash(token))
+    this.db.prepare('INSERT INTO builder_keys VALUES(?,?)').run(id, hash(token))
     return id
   }
   authenticate(token: string): string | undefined {
@@ -215,22 +200,24 @@ export class BuilderStore {
     const row = this.db
       .prepare('SELECT id FROM builder_keys WHERE digest=?')
       .get(hash(token))
-    return row == null
-      ? undefined
-      : asObject({ id: text(36) })(row).id
+    return row == null ? undefined : asObject({ id: text(36) })(row).id
   }
   revoke(id: string): void {
-    this.db
-      .prepare('DELETE FROM builder_keys WHERE id=?')
-      .run(text(36)(id))
+    this.db.prepare('DELETE FROM builder_keys WHERE id=?').run(text(36)(id))
   }
   enqueue(input: unknown, key: string): Job {
     return this.transaction(() => this.insertJob(input, key))
+  }
+  enqueuePinned(input: unknown, key: string, commit: string): Job {
+    return this.transaction(() =>
+      this.insertJob(input, key, commitHash(commit)),
+    )
   }
   private insertJob(
     input: unknown,
     key: string,
     requestedCommit?: string,
+    automatic = false,
   ): Job {
     let request = asRequest(input)
     const token =
@@ -238,9 +225,7 @@ export class BuilderStore {
         ? null
         : hash(key + ':' + request.idempotencyKey)
     if (token != null) {
-      const old = this.db
-        .prepare('SELECT * FROM jobs WHERE token=?')
-        .get(token)
+      const old = this.db.prepare('SELECT * FROM jobs WHERE token=?').get(token)
       if (old != null) {
         const job = this.clean(old)
         request = asRequest({
@@ -256,8 +241,7 @@ export class BuilderStore {
       (app) => app.slug === request.app && app.enabled,
     )
     if (!app) throw new Error('Unknown or disabled app')
-    const branch =
-      request.branch ?? this.buildSettings(app.slug).defaultBranch
+    const branch = request.branch ?? this.buildSettings(app.slug).defaultBranch
     request = asRequest({
       ...request,
       branch,
@@ -269,14 +253,11 @@ export class BuilderStore {
         Object.keys(map).some((name) => injected.has(name)),
       )
     )
-      throw new Error(
-        'Cannot override an injected file environment variable',
-      )
+      throw new Error('Cannot override an injected file environment variable')
     if (
       request.platforms != null &&
       (request.platforms.length === 0 ||
-        new Set(request.platforms).size !==
-          request.platforms.length ||
+        new Set(request.platforms).size !== request.platforms.length ||
         request.platforms.some((p) => !app.platforms.includes(p)))
     )
       throw new Error('Unsupported platforms')
@@ -302,24 +283,19 @@ export class BuilderStore {
         serialized,
         token,
         requestedCommit ?? null,
-        Number(requestedCommit != null),
+        Number(automatic),
       )
     return this.job(id)!
   }
   buildSettings(app: string): AppBuildSettings {
     const row = this.db
-      .prepare(
-        'SELECT default_branch FROM builder_app_settings WHERE app=?',
-      )
+      .prepare('SELECT default_branch FROM builder_app_settings WHERE app=?')
       .get(app)
     if (row == null) throw new Error('Unknown app')
     const branches = this.automaticBranches(app)
     return {
-      defaultBranch: asObject({ default_branch: asString })(row)
-        .default_branch,
-      automaticBranches: branches
-        .filter((b) => b.enabled)
-        .map((b) => b.branch),
+      defaultBranch: asObject({ default_branch: asString })(row).default_branch,
+      automaticBranches: branches.filter((b) => b.enabled).map((b) => b.branch),
       branches,
     }
   }
@@ -328,14 +304,10 @@ export class BuilderStore {
     this.transaction(() => {
       this.buildSettings(app)
       this.db
-        .prepare(
-          'UPDATE builder_app_settings SET default_branch=? WHERE app=?',
-        )
+        .prepare('UPDATE builder_app_settings SET default_branch=? WHERE app=?')
         .run(settings.defaultBranch, app)
       this.db
-        .prepare(
-          'UPDATE automatic_branches SET enabled=0 WHERE app=?',
-        )
+        .prepare('UPDATE automatic_branches SET enabled=0 WHERE app=?')
         .run(app)
       for (const branch of settings.automaticBranches)
         this.db
@@ -406,10 +378,7 @@ export class BuilderStore {
       const rule = this.automaticBranches(app).find(
         (r) => r.branch === branch && r.enabled,
       )
-      if (
-        rule == null ||
-        !this.apps().some((a) => a.slug === app && a.enabled)
-      )
+      if (rule == null || !this.apps().some((a) => a.slug === app && a.enabled))
         return undefined
       const pending = this.pending()
       if (pending.length >= 100) return undefined
@@ -432,7 +401,7 @@ export class BuilderStore {
         (attempt.succeeded === 1 || Number(attempt.attempts) >= 3)
       )
         return undefined
-      const job = this.insertJob({ app, branch }, 'automatic', commit)
+      const job = this.insertJob({ app, branch }, 'automatic', commit, true)
       this.db
         .prepare(
           `INSERT INTO automatic_attempts(app,branch,commit_sha,attempts) VALUES(?,?,?,1)
@@ -474,11 +443,7 @@ export class BuilderStore {
   claim(): Job | undefined {
     return this.transaction(() => {
       const pending = this.pending()
-      if (
-        pending.some(
-          (job) => job.status === 'running' || job.quarantine,
-        )
-      )
+      if (pending.some((job) => job.status === 'running' || job.quarantine))
         return undefined
       const job = pending.find((job) => job.status === 'queued')
       if (job == null) return undefined
@@ -554,9 +519,7 @@ export class BuilderStore {
   }
   releaseQuarantine(id: string): void {
     this.db
-      .prepare(
-        'UPDATE jobs SET quarantine=0,quarantine_reason=NULL WHERE id=?',
-      )
+      .prepare('UPDATE jobs SET quarantine=0,quarantine_reason=NULL WHERE id=?')
       .run(id)
   }
   commit(id: string, sha: string): void {
@@ -564,25 +527,20 @@ export class BuilderStore {
     const job = this.job(id)
     if (job?.requested_commit != null && job.requested_commit !== sha)
       throw new Error('Requested commit changed')
-    this.db
-      .prepare('UPDATE jobs SET commit_sha=? WHERE id=?')
-      .run(sha, id)
+    this.db.prepare('UPDATE jobs SET commit_sha=? WHERE id=?').run(sha, id)
   }
   own(identity: string, directory: string): boolean {
     const row = this.db
       .prepare('SELECT directory FROM workspaces WHERE identity=?')
       .get(identity)
     if (row == null) {
-      if (existsSync(directory))
-        throw new Error('Foreign workspace path')
+      if (existsSync(directory)) throw new Error('Foreign workspace path')
       this.db
         .prepare('INSERT INTO workspaces VALUES(?,?)')
         .run(identity, directory)
       return false
     }
-    if (
-      asObject({ directory: asString })(row).directory !== directory
-    )
+    if (asObject({ directory: asString })(row).directory !== directory)
       throw new Error('Workspace identity mismatch')
     return true
   }
@@ -599,9 +557,7 @@ export function exclusiveLock(file: string): DatabaseSync {
   const db = new DatabaseSync(file)
   chmodSync(file, 0o600)
   try {
-    db.exec(
-      'CREATE TABLE IF NOT EXISTS mutex(value INTEGER); BEGIN EXCLUSIVE',
-    )
+    db.exec('CREATE TABLE IF NOT EXISTS mutex(value INTEGER); BEGIN EXCLUSIVE')
     return db
   } catch (error) {
     db.close()

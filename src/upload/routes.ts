@@ -1,3 +1,7 @@
+import {
+  inspectProvisioning,
+  saveProvisioning,
+} from '../devices/provisioning.js'
 import Busboy from 'busboy'
 import { asObject } from 'cleaners'
 import { Router, type Request, type Response } from 'express'
@@ -7,11 +11,7 @@ import { Transform, type Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { Store } from '../store.js'
 import { asChannel, asFormat, asId, type Format } from '../validation.js'
-import {
-  asUploadFields,
-  asVersionFields,
-  uploadFieldNames,
-} from './fields.js'
+import { asUploadFields, asVersionFields, uploadFieldNames } from './fields.js'
 import { ApiKeys } from './keys.js'
 import { packageIdentity } from './metadata.js'
 import { uploadResponse } from './response.js'
@@ -33,9 +33,7 @@ function authorize(
     const row = asObject({ id: asId })(
       store.db
         .prepare('SELECT id FROM channels WHERE channel_key=?')
-        .get(
-          typeof fields.channel_key === 'string' ? fields.channel_key : '',
-        ),
+        .get(typeof fields.channel_key === 'string' ? fields.channel_key : ''),
     )
     const channel = store.channel(row.id)
     keys.authenticate(fields.token, channel.app_id)
@@ -99,8 +97,7 @@ async function receive(
     seen = false
   const hash = createHash('sha256')
   let fail: (error: unknown) => void = () => {}
-  const onAborted = (): void =>
-    fail(new UploadError(400, 'Upload interrupted'))
+  const onAborted = (): void => fail(new UploadError(400, 'Upload interrupted'))
   const onIdle = (): void => fail(new UploadError(408, 'Upload timed out'))
   const timer = setTimeout(onIdle, 90 * 60000)
   req.setTimeout(60000, onIdle)
@@ -154,10 +151,7 @@ async function receive(
           format = asFormat(info.filename.split('.').pop()?.toLowerCase())
           const allowed: unknown = JSON.parse(channel.formats)
           if (!Array.isArray(allowed) || !allowed.includes(format))
-            throw new UploadError(
-              400,
-              'File format does not match channel',
-            )
+            throw new UploadError(400, 'File format does not match channel')
           const key = keys.authenticate(fields.token, channel.app_id)
           try {
             reservation = store.reserve(key.id, store.config.packageBytes)
@@ -197,12 +191,7 @@ async function receive(
     })
     await fileTask
     if (failed != null) throw failed
-    if (
-      reservation == null ||
-      format == null ||
-      channel == null ||
-      size === 0
-    )
+    if (reservation == null || format == null || channel == null || size === 0)
       throw new UploadError(400, 'A nonempty package file is required')
     const cleaned = asUploadFields(fields)
     authorize(store, keys, fields)
@@ -236,10 +225,7 @@ export function uploadRoutes(store: Store): Router {
     for (const [key, value] of attempts)
       if (value.until <= now) attempts.delete(key)
     const prior = attempts.get(id) ?? { count: 0, until: now + 60000 }
-    if (
-      ++prior.count > 120 ||
-      (!attempts.has(id) && attempts.size >= 10000)
-    ) {
+    if (++prior.count > 120 || (!attempts.has(id) && attempts.size >= 10000)) {
       errorResponse(res, new UploadError(429, 'Too many API requests'))
       return
     }
@@ -259,6 +245,17 @@ export function uploadRoutes(store: Store): Router {
         format,
         fields.custom_fields,
       )
+      const deviceConfig = store.config.devices
+      const provisioning =
+        format === 'ipa' && deviceConfig != null
+          ? await inspectProvisioning(
+              store.incomingPath(reservation),
+              deviceConfig.trustStoreFile,
+              deviceConfig.openssl,
+            )
+          : undefined
+      if (provisioning != null && provisioning.appId !== identity.bundleId)
+        throw new Error('Provisioning profile does not match uploaded app')
       let build
       try {
         build = store.publish(
@@ -296,6 +293,7 @@ export function uploadRoutes(store: Store): Router {
           )
         throw error
       }
+      if (provisioning != null) saveProvisioning(store, build.id, provisioning)
       reservation = undefined
       try {
         store.prune()
@@ -338,10 +336,7 @@ export function uploadRoutes(store: Store): Router {
         )
       if (found.length === 0) throw new UploadError(404, 'Build not found')
       if (new Set(found.map((build) => build.branch)).size > 1)
-        throw new UploadError(
-          409,
-          'Specify branch for ambiguous build number',
-        )
+        throw new UploadError(409, 'Specify branch for ambiguous build number')
       res.json(uploadResponse(store, found[0]!))
     } catch (error) {
       errorResponse(res, error)

@@ -1,3 +1,4 @@
+import { Devices } from '../devices/store.js'
 import { Router, type Request } from 'express'
 import { Accounts } from '../auth/accounts.js'
 import { navigation, sessionContext } from '../auth/routes.js'
@@ -108,9 +109,7 @@ export function catalogRoutes(
       if (app == null) {
         res
           .status(404)
-          .send(
-            page('App unavailable', '<p>This app is unavailable.</p>', nav),
-          )
+          .send(page('App unavailable', '<p>This app is unavailable.</p>', nav))
         return
       }
       const home = `<a href="/${query}">Apps</a>`,
@@ -136,10 +135,12 @@ export function catalogRoutes(
       const builds = store
         .builds(app.id, branch)
         .filter((build) => build.platform === chosen)
+      const deviceStore = new Devices(store),
+        selectedDevice = deviceStore.selected(account.id, req.headers.cookie)
       const rows = builds
         .map(
           (build) =>
-            `<form id="build-${build.id}" method="post" action="/builds/${build.id}/install"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><button class="list-row build-row" aria-label="Install ${escape(build.version)} build ${escape(build.build_number)}"><div><strong>${escape(build.version)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${time(build.published_at)} · ${(build.size / 1024 ** 2).toFixed(1)} MB</small><code title="${escape(build.commit_hash)}">${escape(build.commit_hash.slice(0, 12))}</code></div><span class="download-label">Install <span aria-hidden="true">↓</span></span></button></form>`,
+            `<form id="build-${build.id}" method="post" action="/builds/${build.id}/install"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><button class="list-row build-row" aria-label="${deviceStore.eligible(build, selectedDevice) ? 'Install' : selectedDevice == null ? 'Register Device for' : 'Prepare for this device'} ${escape(build.version)} build ${escape(build.build_number)}"><div><strong>${escape(build.version)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${time(build.published_at)} · ${(build.size / 1024 ** 2).toFixed(1)} MB</small><code title="${escape(build.commit_hash)}">${escape(build.commit_hash.slice(0, 12))}</code></div><span class="download-label">${deviceStore.eligible(build, selectedDevice) ? 'Install' : selectedDevice == null ? 'Register Device' : 'Prepare for device'} <span aria-hidden="true">↓</span></span></button></form>`,
         )
         .join('')
       res.send(

@@ -1,3 +1,4 @@
+import { Devices, type Device } from '../devices/store.js'
 import { asObject, asString } from 'cleaners'
 import { Router } from 'express'
 import {
@@ -20,6 +21,8 @@ const asGrant = asObject({
   session_hash: asString,
   created_at: integer(),
   expires_at: integer(),
+  device_id: (v: unknown): number | undefined =>
+    v == null ? undefined : asId(v),
 })
 export class Installations {
   readonly accounts: Accounts
@@ -29,6 +32,7 @@ export class Installations {
   create(
     buildId: number,
     session: Session,
+    device?: Device,
   ): { token: string; build: Build; expiresAt: number } {
     return this.store.transaction(() => {
       const context = this.accounts.sessionHash(session.hash)
@@ -39,6 +43,12 @@ export class Installations {
         throw new Error('Tester access required')
       const build = this.store.build(buildId)
       if (build == null) throw new Error('Build unavailable')
+      const registry = new Devices(this.store)
+      const owned = registry
+        .list(context.account.id)
+        .find((d) => d.id === device?.id)
+      if (!registry.eligible(build, owned))
+        throw new Error('Compatible registered device required')
       this.store.db
         .prepare('DELETE FROM install_grants WHERE expires_at<=?')
         .run(this.store.now())
@@ -49,13 +59,16 @@ export class Installations {
           context.session.expires_at,
         )
       this.store.db
-        .prepare('INSERT INTO install_grants VALUES(?,?,?,?,?)')
+        .prepare(
+          'INSERT INTO install_grants(hash,build_id,session_hash,created_at,expires_at,device_id) VALUES(?,?,?,?,?,?)',
+        )
         .run(
           digest(token),
           build.id,
           session.hash,
           this.store.now(),
           expiresAt,
+          device?.id ?? null,
         )
       return { token, build, expiresAt }
     })
@@ -74,7 +87,12 @@ export class Installations {
       !(context.account.is_admin || context.account.is_tester)
     )
       return undefined
-    return this.store.build(grant.build_id)
+    const build = this.store.build(grant.build_id)
+    const devices = new Devices(this.store),
+      device = devices
+        .list(context.account.id)
+        .find((d) => d.id === grant.device_id)
+    return build != null && devices.eligible(build, device) ? build : undefined
   }
   manifest(build: Build, token: string): string {
     if (build.format !== 'ipa') throw new Error('Not an iOS application')
@@ -127,9 +145,27 @@ export function installationRoutes(
       return
     }
     csrf(req, store, context.session)
+    const build = store.build(asId(Number(req.params.id)))
+    const devices = new Devices(store)
+    const selected = devices.selected(context.account.id, req.headers.cookie)
+    if (build != null && !devices.eligible(build, selected)) {
+      res
+        .status(409)
+        .send(
+          page(
+            'Prepare your device',
+            selected == null
+              ? '<section class="card"><p>Register or select your iPhone or iPad before installing this build.</p><a class="button register-device" href="/devices">Register Device</a></section>'
+              : `<section class="card"><p>This build does not yet include your device. Mason can prepare a new build of this branch and commit.</p><form method="post" action="/builds/${build.id}/prepare"><input type="hidden" name="csrf" value="${escape(context.session.csrf)}"><button>Prepare for this device</button></form></section>`,
+            navigation(context.session, context.account),
+          ),
+        )
+      return
+    }
     const result = installs.create(
       asId(Number(req.params.id)),
       context.session,
+      selected,
     )
     if (result.build.format !== 'ipa') {
       res.redirect(303, installs.url(result.token, 'artifact'))
@@ -201,10 +237,7 @@ export function installationRoutes(
     if (range != null)
       res
         .status(206)
-        .set(
-          'Content-Range',
-          `bytes ${range.start}-${range.end}/${build.size}`,
-        )
+        .set('Content-Range', `bytes ${range.start}-${range.end}/${build.size}`)
     res.set(
       'Content-Length',
       String(range == null ? build.size : range.end - range.start + 1),

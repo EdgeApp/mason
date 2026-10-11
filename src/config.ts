@@ -1,10 +1,22 @@
 import { asProviders } from './auth/providerConfig.js'
 import { asOptional } from 'cleaners'
-import { lstatSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from 'node:fs'
 import path from 'node:path'
 import { asOrigin, integer, object, text } from './validation.js'
 
+export const asDeviceConfig = object({
+  workerTokenFile: text(4096),
+  trustStoreFile: text(4096),
+  openssl: asOptional(text(4096), 'openssl'),
+})
 export const asConfig = object({
+  devices: asOptional(asDeviceConfig),
   providers: asOptional(asProviders, []),
   sessionDays: asOptional(integer(1, 90), 30),
   origin: asOrigin,
@@ -44,6 +56,14 @@ export function loadConfig(file: string): Config {
   }
   return {
     ...config,
+    devices:
+      config.devices == null
+        ? undefined
+        : {
+            ...config.devices,
+            workerTokenFile: path.resolve(base, config.devices.workerTokenFile),
+            trustStoreFile: path.resolve(base, config.devices.trustStoreFile),
+          },
     database: path.resolve(base, config.database),
     storage: path.resolve(base, config.storage),
   }
@@ -73,8 +93,7 @@ export function privateDirectory(directory: string): void {
     while (true) {
       try {
         const stat = lstatSync(current)
-        const trustedOwner =
-          uid == null || stat.uid === uid || stat.uid === 0
+        const trustedOwner = uid == null || stat.uid === uid || stat.uid === 0
         const stickyRoot = stat.uid === 0 && (stat.mode & 0o1000) !== 0
         if (
           !stat.isDirectory() ||
