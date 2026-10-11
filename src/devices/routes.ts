@@ -141,9 +141,23 @@ export function deviceRoutes(
             'SELECT device_id FROM device_challenges WHERE hash=? AND account_id=? AND expires_at>?',
           )
           .get(digest(String(req.params.token)), account.id, store.now())
-        if (row?.device_id) {
-          res.cookie(DEVICE_COOKIE, String(row.device_id), cookieOptions)
-          res.redirect(303, '/devices')
+        const device = row?.device_id
+          ? devices.list(account.id).find((d) => d.id === row.device_id)
+          : undefined
+        if (device) {
+          const model = device.model.replace(
+            /^(iPhone|iPad|iPod)(.+)$/,
+            (_match, family: string, variant: string) =>
+              family + ' ' + variant.replace(/(\d|[a-z])([A-Z])/g, '$1 $2'),
+          )
+          res.cookie(DEVICE_COOKIE, String(device.id), cookieOptions)
+          res.send(
+            page(
+              'Device registered',
+              `<section class="card"><p>You've registered the following device: <strong>${escape(model)}</strong>.</p><p>A new build of the applications is required before you can install them on your device. Mason will prepare these builds automatically.</p><p>Builds take approximately <strong>30 to 60 minutes</strong> to become available. Please check back in that time.</p><div class="actions"><a class="button" href="/">Browse apps</a><a href="/devices">View your devices</a></div></section>`,
+              navigation(session, account),
+            ),
+          )
           return
         }
         res

@@ -202,8 +202,13 @@ describe('Device registration, account ownership and iOS compatibility', () => {
     const complete = await request(
       new URL(callback.headers.get('location')!).pathname,
     )
-    assert.equal(complete.status, 303)
+    assert.equal(complete.status, 200)
     assert.match(complete.headers.get('set-cookie')!, /__Host-mason-device=/)
+    const confirmation = await complete.text()
+    assert.match(confirmation, /You've registered the following device:/)
+    assert.match(confirmation, /<strong>iPhone 13<\/strong>/)
+    assert.match(confirmation, /Mason will prepare these builds automatically/)
+    assert.match(confirmation, /30 to 60 minutes/)
     assert.equal(
       (
         await request(
@@ -215,8 +220,15 @@ describe('Device registration, account ownership and iOS compatibility', () => {
       410,
     )
     const next = devices.challenge(user.session)
-    devices.receive(next, decodePlist(Buffer.from(payload(next))))
+    devices.receive(next, {
+      ...decodePlist(Buffer.from(payload(next))),
+      PRODUCT: 'iPhone18,1',
+    })
     assert.equal(devices.list(user.account.id).length, 1)
+    assert.match(
+      await (await request('/devices/complete/' + next)).text(),
+      /<strong>iPhone 17 Pro<\/strong>/,
+    )
     const otherInitial = accounts.login({
       ...identity,
       subject: 'another',
