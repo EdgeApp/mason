@@ -1523,9 +1523,28 @@ describe('Mason builder', function () {
       assert.ok(emptyHtml.includes(`<script nonce="${nonce}">`))
       assert.ok(emptyHtml.includes('Nothing is building.'))
       assert.ok(emptyHtml.includes('The queue is empty.'))
+      assert.ok(emptyHtml.includes('No recent builds yet.'))
       assert.equal((await fetch(url + '/api/queue')).status, 401)
       assert.equal((await fetch(url + '/other')).status, 401)
 
+      const history = Array.from({ length: 7 }, (_, i) => {
+        const job = store.enqueue(
+          { ...request, branch: 'finished-' + i },
+          'test',
+        )
+        store.finish(job.id, i % 2 === 0 ? 'succeeded' : 'failed', i % 2)
+        store.db
+          .prepare('UPDATE jobs SET created=?,started=?,finished=? WHERE id=?')
+          .run(10000 - i * 1000, 20000, 30000 + i * 1000, job.id)
+        return job
+      })
+      assert.deepEqual(
+        store.recent().map((job) => job.id),
+        history
+          .slice(2)
+          .reverse()
+          .map((job) => job.id),
+      )
       const running = store.enqueue(
         { ...request, branch: 'active' },
         'test',
@@ -1547,7 +1566,26 @@ describe('Mason builder', function () {
       )
       const html = await (await fetch(url + '/')).text()
       const building = html.slice(html.indexOf('<h1>Building'), html.indexOf('<h1>Queued'))
-      const queued = html.slice(html.indexOf('<h1>Queued'))
+      const queued = html.slice(
+        html.indexOf('<h1>Queued'),
+        html.indexOf('<h1>Recent Builds'),
+      )
+      const recent = html.slice(html.indexOf('<h1>Recent Builds'))
+      assert.equal(recent.match(/<article /g)?.length, 5)
+      const recentOrder = [6, 5, 4, 3, 2].map((i) =>
+        recent.indexOf(`<span class="branch">finished-${i}</span>`),
+      )
+      assert.ok(
+        recentOrder.every(
+          (at, i) => at > 0 && (i === 0 || at > recentOrder[i - 1]!),
+        ),
+      )
+      assert.equal(recent.includes('finished-0'), false)
+      assert.equal(recent.includes('finished-1'), false)
+      assert.equal(recent.includes('Holding the worker'), false)
+      assert.ok(recent.includes('<dt>Finished</dt>'))
+      assert.ok(recent.includes('<dd>succeeded</dd>'))
+      assert.ok(recent.includes('<dd>failed</dd>'))
       assert.ok(building.includes('<span class="branch">active</span>'))
       assert.ok(building.includes(`<code>${'c'.repeat(40)}</code>`))
       assert.ok(building.includes('<dt>Started</dt>'))

@@ -137,6 +137,10 @@ export function builderApp(
   app.get('/', async (_req, res) => {
     const nonce = randomBytes(16).toString('base64')
     const names = new Map(store.apps().map((a) => [a.slug, a.name]))
+    const [jobs, recent] = await Promise.all([
+      queueEntries(store, lookup),
+      queueEntries(store, lookup, store.recent()),
+    ])
     res.set(
       'Content-Security-Policy',
       `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
@@ -144,7 +148,7 @@ export function builderApp(
     res
       .type('html')
       .send(
-        statusPage(await queueEntries(store, lookup), names, Date.now(), nonce),
+        statusPage(jobs, names, Date.now(), nonce, recent),
       )
   })
   app.use((req, res, next) => {

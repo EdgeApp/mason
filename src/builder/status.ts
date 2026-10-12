@@ -64,6 +64,7 @@ export function statusPage(
   appNames: Map<string, string>,
   now: number,
   nonce: string,
+  recent: QueueEntry[] = [],
 ): string {
   const render = (job: QueueEntry): string =>
     card(job, appNames.get(job.app) ?? job.app, now)
@@ -77,5 +78,9 @@ export function statusPage(
     queued.length === 0
       ? '<p class="empty">The queue is empty.</p>'
       : queued.map(render).join('')
+  }</section><section><h1>Recent Builds</h1>${
+    recent.length === 0
+      ? '<p class="empty">No recent builds yet.</p>'
+      : recent.map(render).join('')
   }</section></main><script nonce="${nonce}">${script}</script></body></html>`
 }

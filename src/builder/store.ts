@@ -452,6 +452,14 @@ export class BuilderStore {
       .all()
       .map((row) => this.clean(row))
   }
+  recent(): Job[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM jobs WHERE status NOT IN ('queued','running') ORDER BY COALESCE(finished,created) DESC,created DESC,id DESC LIMIT 5",
+      )
+      .all()
+      .map((row) => this.clean(row))
+  }
   claim(): Job | undefined {
     return this.transaction(() => {
       const pending = this.pending()
