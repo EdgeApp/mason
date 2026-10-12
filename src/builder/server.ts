@@ -1,17 +1,126 @@
 import express, { type Express } from 'express'
 import { readFileSync } from 'node:fs'
-import { BuilderStore, publicJob } from './store.js'
+import { reverse } from 'node:dns/promises'
+import { isIP } from 'node:net'
+import { BuilderStore, publicJob, type Job } from './store.js'
 import { readLogPath, Worker } from './worker.js'
 import { noSymlinks } from '../config.js'
 import type { Server } from 'node:http'
 import { AutomaticPoller, AUTOMATIC_POLL_MS } from './automatic.js'
+import { randomBytes } from 'node:crypto'
+import { statusPage } from './status.js'
 
-export function builderApp(store: BuilderStore): Express {
+export function clientAddress(
+  remote: string | undefined,
+): string | undefined {
+  if (remote == null) return undefined
+  const address = remote.startsWith('::ffff:')
+    ? remote.slice('::ffff:'.length)
+    : remote
+  return isIP(address) === 0 ? undefined : address
+}
+export async function clientName(
+  address: string,
+  lookup: (ip: string) => Promise<string[]> = reverse,
+  timeoutMs = 300,
+): Promise<string | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const names = await Promise.race([
+      lookup(address),
+      new Promise<string[]>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('timeout')), timeoutMs)
+      }),
+    ])
+    return names.find(
+      (name) =>
+        name.length > 0 &&
+        name.length <= 253 &&
+        !/[\u0000-\u001f\u007f\s]/.test(name) &&
+        isIP(name) === 0,
+    )
+  } catch {
+    return undefined
+  } finally {
+    if (timer != null) clearTimeout(timer)
+  }
+}
+export type QueueEntry = Omit<
+  ReturnType<typeof publicJob>,
+  | 'started'
+  | 'finished'
+  | 'commit_sha'
+  | 'requested_commit'
+  | 'exit_code'
+  | 'cleanup_error'
+  | 'quarantine_reason'
+  | 'client_ip'
+> & {
+  started: number | null
+  finished: number | null
+  commit_sha: string | null
+  requested_commit: string | null
+  exit_code: number | null
+  cleanup_error: string | null
+  quarantine_reason: string | null
+  client_ip: string | null
+  client_name: string | null
+  trigger: 'poll' | 'api'
+}
+async function queueEntries(
+  store: BuilderStore,
+  lookup: (ip: string) => Promise<string[]>,
+  jobs: Job[] = store.pending(),
+): Promise<QueueEntry[]> {
+  const addresses = [
+    ...new Set(
+      jobs.flatMap((job) => (job.client_ip == null ? [] : [job.client_ip])),
+    ),
+  ]
+  const names = new Map(
+    await Promise.all(
+      addresses.map(
+        async (ip): Promise<[string, string | undefined]> => [
+          ip,
+          await clientName(ip, lookup),
+        ],
+      ),
+    ),
+  )
+  return jobs.map((job) =>
+    queueEntry(
+      job,
+      job.client_ip == null ? undefined : names.get(job.client_ip),
+    ),
+  )
+}
+function queueEntry(job: Job, name: string | undefined): QueueEntry {
+  const pub = publicJob(job)
+  return {
+    ...pub,
+    started: pub.started ?? null,
+    finished: pub.finished ?? null,
+    commit_sha: pub.commit_sha ?? null,
+    requested_commit: pub.requested_commit ?? null,
+    exit_code: pub.exit_code ?? null,
+    cleanup_error: pub.cleanup_error ?? null,
+    quarantine_reason: pub.quarantine_reason ?? null,
+    client_ip: pub.client_ip ?? null,
+    client_name: name ?? null,
+    trigger: pub.automatic === 1 ? 'poll' : 'api',
+  }
+}
+
+export function builderApp(
+  store: BuilderStore,
+  options?: { lookup?: (ip: string) => Promise<string[]> },
+): Express {
   const app = express()
   app.disable('x-powered-by')
   let window = Date.now(),
     count = 0
-  app.use((req, res, next) => {
+  const lookup = options?.lookup ?? reverse
+  app.use((_req, res, next) => {
     res.set('Cache-Control', 'no-store')
     if (Date.now() - window > 60000) {
       window = Date.now()
@@ -21,6 +130,28 @@ export function builderApp(store: BuilderStore): Express {
       res.status(429).json({ error: 'Request limit exceeded' })
       return
     }
+    next()
+  })
+  // The status page is the one read without a key: it is opened in a
+  // browser on the builder's trusted network.
+  app.get('/', async (_req, res) => {
+    const nonce = randomBytes(16).toString('base64')
+    const names = new Map(store.apps().map((a) => [a.slug, a.name]))
+    const [jobs, recent] = await Promise.all([
+      queueEntries(store, lookup),
+      queueEntries(store, lookup, store.recent()),
+    ])
+    res.set(
+      'Content-Security-Policy',
+      `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`,
+    )
+    res
+      .type('html')
+      .send(
+        statusPage(jobs, names, Date.now(), nonce, recent),
+      )
+  })
+  app.use((req, res, next) => {
     const key = store.authenticate(
       (req.headers.authorization ?? '').replace(/^Bearer /, ''),
     )
@@ -68,11 +199,20 @@ export function builderApp(store: BuilderStore): Express {
       res.status(400).json({ error: 'Invalid app build settings' })
     }
   })
+  app.get('/api/queue', async (_req, res) => {
+    res.json(await queueEntries(store, lookup))
+  })
   app.post('/api/jobs', (req, res) => {
     try {
-      res
-        .status(202)
-        .json(publicJob(store.enqueue(req.body, res.locals.key)))
+      res.status(202).json(
+        publicJob(
+          store.enqueue(
+            req.body,
+            res.locals.key,
+            clientAddress(req.socket.remoteAddress),
+          ),
+        ),
+      )
     } catch {
       res.status(400).json({
         error: 'Invalid job, idempotency conflict, or queue full',

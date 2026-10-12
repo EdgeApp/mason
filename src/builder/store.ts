@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
+import { isIP } from 'node:net'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -48,6 +49,7 @@ const asRow = asObject({
   quarantine: integer(0, 1),
   cleanup_error: nullable(text(2048)),
   quarantine_reason: nullable(text(2048)),
+  client_ip: nullable(text(45)),
 })
 export type Job = Omit<
   ReturnType<typeof asRow>,
@@ -135,6 +137,8 @@ export class BuilderStore {
         this.db.exec(
           'ALTER TABLE jobs ADD COLUMN automatic INTEGER NOT NULL DEFAULT 0',
         )
+      if (!columns.has('client_ip'))
+        this.db.exec('ALTER TABLE jobs ADD COLUMN client_ip TEXT')
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS builder_app_settings(
           app TEXT PRIMARY KEY, default_branch TEXT NOT NULL) STRICT;
@@ -205,8 +209,10 @@ export class BuilderStore {
   revoke(id: string): void {
     this.db.prepare('DELETE FROM builder_keys WHERE id=?').run(text(36)(id))
   }
-  enqueue(input: unknown, key: string): Job {
-    return this.transaction(() => this.insertJob(input, key))
+  enqueue(input: unknown, key: string, clientIp?: string): Job {
+    return this.transaction(() =>
+      this.insertJob(input, key, undefined, false, clientIp),
+    )
   }
   enqueuePinned(input: unknown, key: string, commit: string): Job {
     return this.transaction(() =>
@@ -218,6 +224,7 @@ export class BuilderStore {
     key: string,
     requestedCommit?: string,
     automatic = false,
+    clientIp?: string,
   ): Job {
     let request = asRequest(input)
     const token =
@@ -270,9 +277,13 @@ export class BuilderStore {
     ).n
     if (count >= 100) throw new Error('Queue is full')
     const id = randomUUID()
+    const address =
+      !automatic && clientIp != null && isIP(clientIp) !== 0
+        ? clientIp
+        : null
     this.db
       .prepare(
-        "INSERT INTO jobs(id,app,branch,status,created,definition,request,token,requested_commit,automatic) VALUES(?,?,?,'queued',?,?,?,?,?,?)",
+        "INSERT INTO jobs(id,app,branch,status,created,definition,request,token,requested_commit,automatic,client_ip) VALUES(?,?,?,'queued',?,?,?,?,?,?,?)",
       )
       .run(
         id,
@@ -284,6 +295,7 @@ export class BuilderStore {
         token,
         requestedCommit ?? null,
         Number(automatic),
+        address,
       )
     return this.job(id)!
   }
@@ -436,6 +448,14 @@ export class BuilderStore {
     return this.db
       .prepare(
         "SELECT * FROM jobs WHERE status IN ('queued','running') OR quarantine=1 ORDER BY created,id",
+      )
+      .all()
+      .map((row) => this.clean(row))
+  }
+  recent(): Job[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM jobs WHERE status NOT IN ('queued','running') ORDER BY COALESCE(finished,created) DESC,created DESC,id DESC LIMIT 5",
       )
       .all()
       .map((row) => this.clean(row))
