@@ -30,7 +30,8 @@ import { BuilderStore, exclusiveLock, publicJob } from './store.js'
 import { executeJob, writeBootstrap } from './guardian.js'
 import { MaskedLog, Execution, processSnapshot } from './execution.js'
 import { Worker, recover } from './worker.js'
-import { builderApp, serveBuilder } from './server.js'
+import { builderApp, clientAddress, clientName, serveBuilder } from './server.js'
+import { duration } from './status.js'
 import { buildClient } from './client.js'
 import { builderCommand } from './cli.js'
 
@@ -1232,6 +1233,357 @@ describe('Mason builder', function () {
       publicJob(store.job(job.id)!).quarantine_reason,
       'Synthetic process verification failure',
     )
+  })
+  it('reports the queue with branch, times, trigger, and caller', async () => {
+    assert.equal(clientAddress('::ffff:192.0.2.15'), '192.0.2.15')
+    assert.equal(clientAddress('2001:db8::1'), '2001:db8::1')
+    assert.equal(clientAddress('not-an-address'), undefined)
+    assert.equal(clientAddress(undefined), undefined)
+    assert.equal(await clientName('192.0.2.15', async () => []), undefined)
+    assert.equal(
+      await clientName('192.0.2.15', async () => ['192.0.2.15', 'bench.example.test']),
+      'bench.example.test',
+    )
+    assert.equal(
+      await clientName('192.0.2.15', () => new Promise(() => undefined), 20),
+      undefined,
+    )
+    const named = await clientName('127.0.0.1', undefined, 500)
+    assert.ok(named == null || typeof named === 'string')
+    store.configureBuilds(definition.slug, {
+      defaultBranch: 'master',
+      automaticBranches: ['release'],
+    })
+    const server = builderApp(store, {
+      lookup: async (ip) => {
+        if (ip === '127.0.0.1') return ['laptop.example.test']
+        if (ip === '192.0.2.15') return ['bench.example.test']
+        throw new Error('no name')
+      },
+    }).listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    assert(address && typeof address !== 'string')
+    const url = `http://127.0.0.1:${address.port}`
+    const keyFile = path.join(root, 'key')
+    store.key(keyFile)
+    const headers = {
+      Authorization: `Bearer ${readFileSync(keyFile, 'utf8').trim()}`,
+      'Content-Type': 'application/json',
+    }
+    try {
+      assert.equal((await fetch(url + '/api/queue')).status, 401)
+      const submitted = await fetch(url + '/api/jobs', {
+        method: 'POST',
+        headers: { ...headers, 'X-Forwarded-For': '203.0.113.30' },
+        body: JSON.stringify({
+          ...request,
+          idempotencyKey: 'queue-api',
+        }),
+      })
+      assert.equal(submitted.status, 202)
+      const posted = (await submitted.json()) as { id: string; client_ip: string }
+      assert.equal(posted.client_ip, '127.0.0.1')
+      const replay = await fetch(url + '/api/jobs', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          ...request,
+          idempotencyKey: 'queue-api',
+        }),
+      })
+      assert.equal(((await replay.json()) as { id: string }).id, posted.id)
+      const running = store.claim()
+      assert.equal(running?.id, posted.id)
+      assert.equal(typeof running?.started, 'number')
+      const direct = store.enqueue(
+        { ...request, branch: 'feature' },
+        'test',
+        '192.0.2.15',
+      )
+      const unnamed = store.enqueue(
+        { ...request, branch: 'other' },
+        'test',
+        '198.51.100.8',
+      )
+      const ignored = store.enqueue(
+        { ...request, branch: 'ignored' },
+        'test',
+        'not-an-address',
+      )
+      assert.equal(ignored.client_ip, undefined)
+      const repeated = store.enqueue(
+        { ...request, branch: 'feature', idempotencyKey: 'same' },
+        'test',
+        '192.0.2.15',
+      )
+      assert.equal(
+        store.enqueue(
+          { ...request, branch: 'feature', idempotencyKey: 'same' },
+          'test',
+          '198.51.100.9',
+        ).client_ip,
+        '192.0.2.15',
+      )
+      const polled = store.enqueueAutomatic(
+        definition.slug,
+        'release',
+        'a'.repeat(40),
+      )
+      assert(polled)
+      assert.equal(polled.client_ip, undefined)
+      const pinned = store.enqueuePinned(
+        { ...request, branch: 'provisioning' },
+        'test',
+        'b'.repeat(40),
+      )
+      const done = store.enqueue(
+        { ...request, branch: 'done' },
+        'test',
+      )
+      store.finish(done.id, 'succeeded', 0, { ok: true })
+      const held = store.enqueue(
+        { ...request, branch: 'held' },
+        'test',
+      )
+      store.finish(held.id, 'failed', 1, { ok: false }, true, {
+        quarantineReason: 'Synthetic hold',
+      })
+      const body = (await (
+        await fetch(url + '/api/queue', { headers })
+      ).json()) as Array<Record<string, unknown>>
+      const encoded = JSON.stringify(body)
+      assert.equal(encoded.includes('"definition"'), false)
+      assert.equal(encoded.includes('"request"'), false)
+      assert.deepEqual(
+        body.map((job) => job.id).sort(),
+        [
+          posted.id,
+          direct.id,
+          unnamed.id,
+          ignored.id,
+          repeated.id,
+          polled.id,
+          pinned.id,
+          held.id,
+        ].sort(),
+      )
+      for (let i = 1; i < body.length; i++) {
+        const previous = body[i - 1]!
+        const current = body[i]!
+        assert.equal(
+          (previous.created as number) < (current.created as number) ||
+            ((previous.created as number) === (current.created as number) &&
+              (previous.id as string) < (current.id as string)),
+          true,
+        )
+      }
+      const byBranch = new Map(body.map((job) => [job.branch, job]))
+      const active = byBranch.get('master')!
+      assert.equal(active.status, 'running')
+      assert.equal(active.trigger, 'api')
+      assert.equal(typeof active.created, 'number')
+      assert.equal(typeof active.started, 'number')
+      assert.equal(active.client_ip, '127.0.0.1')
+      assert.equal(active.client_name, 'laptop.example.test')
+      assert.equal(byBranch.get('feature')!.client_name, 'bench.example.test')
+      assert.equal(byBranch.get('feature')!.started, null)
+      assert.equal(byBranch.get('other')!.client_ip, '198.51.100.8')
+      assert.equal(byBranch.get('other')!.client_name, null)
+      assert.equal(byBranch.get('other')!.trigger, 'api')
+      assert.equal(byBranch.get('release')!.trigger, 'poll')
+      assert.equal(byBranch.get('release')!.client_ip, null)
+      assert.equal(byBranch.get('release')!.client_name, null)
+      assert.equal(byBranch.get('release')!.requested_commit, 'a'.repeat(40))
+      assert.equal(byBranch.get('release')!.commit_sha, null)
+      assert.equal(byBranch.get('provisioning')!.trigger, 'api')
+      assert.equal(byBranch.get('provisioning')!.requested_commit, 'b'.repeat(40))
+      assert.equal(byBranch.get('held')!.status, 'failed')
+      assert.equal(byBranch.get('held')!.quarantine_reason, 'Synthetic hold')
+      assert.equal(byBranch.get('done'), undefined)
+      const beforeUpgrade = store.pending().map((job) => ({
+        ...job,
+        client_ip: undefined,
+      }))
+      const config = store.config
+      store.db.exec('ALTER TABLE jobs DROP COLUMN client_ip')
+      store.close()
+      store = new BuilderStore(config)
+      assert.deepEqual(store.pending(), beforeUpgrade)
+      assert.equal(store.job(posted.id)!.status, 'running')
+      assert.equal(store.job(posted.id)!.client_ip, undefined)
+      assert.equal(
+        store.enqueue(
+          { ...request, branch: 'after-upgrade' },
+          'test',
+          '192.0.2.20',
+        ).client_ip,
+        '192.0.2.20',
+      )
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+  it('keeps queue reads available with slow DNS and enforces key revocation', async () => {
+    const lookups: string[] = []
+    const server = builderApp(store, {
+      lookup: (ip) => {
+        lookups.push(ip)
+        return new Promise(() => undefined)
+      },
+    }).listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    assert(address && typeof address !== 'string')
+    const url = `http://127.0.0.1:${address.port}/api/queue`
+    const keyFile = path.join(root, 'key')
+    const keyId = store.key(keyFile)
+    const headers = {
+      Authorization: `Bearer ${readFileSync(keyFile, 'utf8').trim()}`,
+    }
+    try {
+      const empty = await fetch(url, { headers })
+      assert.equal(empty.status, 200)
+      assert.equal(empty.headers.get('cache-control'), 'no-store')
+      assert.deepEqual(await empty.json(), [])
+      assert.deepEqual(lookups, [])
+      for (const branch of ['first', 'second'])
+        store.enqueue({ ...request, branch }, 'test', '192.0.2.15')
+      store.enqueue(
+        { ...request, branch: 'ipv6' },
+        'test',
+        '2001:db8::1',
+      )
+      const response = await fetch(url, {
+        headers,
+        signal: AbortSignal.timeout(2000),
+      })
+      assert.equal(response.status, 200)
+      const jobs = (await response.json()) as Array<
+        Record<string, unknown>
+      >
+      assert.equal(jobs.length, 3)
+      assert.ok(jobs.every((job) => job.client_name === null))
+      assert.deepEqual(lookups.sort(), ['192.0.2.15', '2001:db8::1'])
+      assert.equal(
+        jobs.find((job) => job.branch === 'ipv6')!.client_ip,
+        '2001:db8::1',
+      )
+      store.revoke(keyId)
+      assert.equal((await fetch(url, { headers })).status, 401)
+      assert.equal(
+        (
+          await fetch(url, {
+            headers: { Authorization: 'Bearer invalid' },
+          })
+        ).status,
+        401,
+      )
+      assert.equal(lookups.length, 2)
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve) =>
+        server.close(() => resolve()),
+      )
+    }
+  })
+  it('serves the status page at the root without a key', async () => {
+    assert.equal(duration(-5), '0 s')
+    assert.equal(duration(59_999), '59 s')
+    assert.equal(duration(61_000), '1 min 01 s')
+    assert.equal(duration(3_725_000), '1 h 02 min')
+    store.importApp({
+      ...definition,
+      slug: 'app.example.markup',
+      name: '<b>Markup & Co</b>',
+    })
+    store.configureBuilds(definition.slug, {
+      defaultBranch: 'master',
+      automaticBranches: ['release'],
+    })
+    const server = builderApp(store, {
+      lookup: async (ip) => {
+        if (ip === '192.0.2.15') return ['bench.example.test']
+        throw new Error('no name')
+      },
+    }).listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    const address = server.address()
+    assert(address && typeof address !== 'string')
+    const url = `http://127.0.0.1:${address.port}`
+    try {
+      const empty = await fetch(url + '/')
+      assert.equal(empty.status, 200)
+      assert.match(empty.headers.get('content-type')!, /^text\/html/)
+      assert.equal(empty.headers.get('cache-control'), 'no-store')
+      const policy = empty.headers.get('content-security-policy')!
+      const nonce = /script-src 'nonce-([^']+)'/.exec(policy)![1]!
+      const emptyHtml = await empty.text()
+      assert.ok(emptyHtml.includes(`<script nonce="${nonce}">`))
+      assert.ok(emptyHtml.includes('Nothing is building.'))
+      assert.ok(emptyHtml.includes('The queue is empty.'))
+      assert.equal((await fetch(url + '/api/queue')).status, 401)
+      assert.equal((await fetch(url + '/other')).status, 401)
+
+      const running = store.enqueue(
+        { ...request, branch: 'active' },
+        'test',
+        '192.0.2.15',
+      )
+      store.claim()
+      store.db
+        .prepare('UPDATE jobs SET commit_sha=?,started=? WHERE id=?')
+        .run('c'.repeat(40), Date.now() - 3_725_000, running.id)
+      const later = [
+        store.enqueue({ ...request, branch: 'first' }, 'test', '198.51.100.8'),
+        store.enqueueAutomatic(definition.slug, 'release', 'a'.repeat(40))!,
+        store.enqueue({ app: 'app.example.markup', branch: 'last' }, 'test'),
+      ]
+      later.forEach((job, i) =>
+        store.db
+          .prepare('UPDATE jobs SET created=? WHERE id=?')
+          .run(Date.now() - 3000 + i * 1000, job.id),
+      )
+      const html = await (await fetch(url + '/')).text()
+      const building = html.slice(html.indexOf('<h1>Building'), html.indexOf('<h1>Queued'))
+      const queued = html.slice(html.indexOf('<h1>Queued'))
+      assert.ok(building.includes('<span class="branch">active</span>'))
+      assert.ok(building.includes(`<code>${'c'.repeat(40)}</code>`))
+      assert.ok(building.includes('<dt>Started</dt>'))
+      assert.ok(building.includes('<dt>Running for</dt>'))
+      assert.ok(building.includes('1 h 02 min'))
+      assert.ok(building.includes('192.0.2.15 <small>bench.example.test</small>'))
+      assert.ok(building.includes('Fixture <small>app.example.fixture</small>'))
+      assert.ok(queued.includes('<span class="branch">3</span>'))
+      assert.equal(queued.includes('<dt>Started</dt>'), false)
+      assert.equal(queued.match(/<dt>In queue for<\/dt>/g)?.length, 3)
+      const order = ['first', 'release', 'last'].map((branch) =>
+        queued.indexOf(`<span class="branch">${branch}</span>`),
+      )
+      assert.ok(order[0]! > 0 && order[0]! < order[1]! && order[1]! < order[2]!)
+      assert.ok(queued.includes('<dd>198.51.100.8</dd>'))
+      assert.ok(queued.includes(`<code>${'a'.repeat(40)}</code>`))
+      assert.ok(queued.includes('<dd>Branch poll</dd>'))
+      assert.ok(queued.includes('Resolved at checkout'))
+      assert.ok(queued.includes('Not recorded'))
+      assert.ok(queued.includes('&lt;b&gt;Markup &amp; Co&lt;/b&gt;'))
+      assert.equal(html.includes('<b>Markup'), false)
+
+      store.finish(running.id, 'failed', 1, { ok: false }, true, {
+        quarantineReason: 'Synthetic <hold>',
+      })
+      const heldHtml = await (await fetch(url + '/')).text()
+      assert.ok(
+        heldHtml.includes(
+          'Holding the worker after failed: Synthetic &lt;hold&gt;',
+        ),
+      )
+      assert.ok(heldHtml.includes('<dt>Ran for</dt>'))
+    } finally {
+      server.closeAllConnections()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
   })
   it('allows cooperative cleanup subprocesses to finish after cancellation', async () => {
     const log = new MaskedLog(path.join(root, 'log'), [])

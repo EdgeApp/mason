@@ -39,9 +39,19 @@ values instead of injecting them.
 `builder key-create --config <bootstrap> --output <new-key-file>` writes a new
 key once and prints its revocation ID. `builder key-revoke --config <bootstrap>
 --id <id>` revokes it. Start the worker with `builder serve --config <bootstrap>`.
-All REST operations require `Authorization: Bearer <key>`:
+Opening the listener's root (`http://<host>:<port>/`) in a browser shows a
+status page: the running build (or a finished one still holding the worker,
+with its reason) and then the queued builds, next to run first. Each shows the
+app, commit, branch, when it was queued, how it was queued (branch poll or
+API) and an API caller's IP address. The running build also shows when it
+started and how long it has run; a queued build shows how long it has waited.
+The page refreshes every ten seconds. It is the only route that needs no key,
+so anyone who can reach the listener can read the queue.
 
-- `POST /api/jobs`: `{"app":"app.example.client","branch":"master","platforms":["ios"],"idempotencyKey":"unique-request","envVars":[{"APP_SERVER_URL":"https://preview.example.test"}]}`.
+Everything under `/api` requires `Authorization: Bearer <key>`:
+
+- `POST /api/jobs`: `{"app":"app.example.client","branch":"master","platforms":["ios"],"idempotencyKey":"unique-request","envVars":[{"APP_SERVER_URL":"https://preview.example.test"}]}`. The job records the caller's TCP address.
+- `GET /api/queue`: jobs that are queued, running, or holding the worker, oldest first. `created` is when the job was queued and `started` is when it began running (`null` until then). `branch` is the requested branch. `commit_sha` is the pinned commit after checkout, and `requested_commit` is the commit a poll scheduled. `trigger` is `poll` when the branch check queued the job and `api` when `POST /api/jobs` did. An API job includes `client_ip`. `client_name` is that address's reverse-DNS name when the lookup answers quickly, otherwise `null`. Poll jobs leave both null.
 - `GET /api/jobs/:id`: status, pinned commit, timestamps, exit code and optional result.
 - `GET /api/jobs/:id/log`: bounded, redacted plain text.
 - `GET /api/jobs/:id/logs`: download the full redacted build log as plain text.
