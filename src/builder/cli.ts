@@ -23,7 +23,7 @@ export async function builderCommand(
     build: ['--client-config', '--app', '--branch', '--platform'],
     serve: ['--config'],
     'app-import': ['--config', '--file'],
-    'key-create': ['--config', '--output'],
+    'key-create': ['--config', '--output', '--role'],
     'key-revoke': ['--config', '--id'],
     recover: ['--config', '--job', '--confirm-stopped'],
     apps: ['--config'],
@@ -77,9 +77,16 @@ export async function builderCommand(
     if (command === 'app-import') {
       store.importApp(readPrivateJson(required('--file')))
       output('App configured')
-    } else if (command === 'key-create')
-      output(JSON.stringify({ id: store.key(required('--output')) }))
-    else if (command === 'key-revoke') {
+    } else if (command === 'key-create') {
+      const role = options['--role'] ?? 'build'
+      if (!['build', 'admin'].includes(role)) throw new Error('Invalid role')
+      output(
+        JSON.stringify({
+          id: store.key(required('--output'), role === 'admin'),
+          role,
+        }),
+      )
+    } else if (command === 'key-revoke') {
       store.revoke(required('--id'))
       output('Key revoked')
     } else if (command === 'recover') {

@@ -139,6 +139,15 @@ export class BuilderStore {
         )
       if (!columns.has('client_ip'))
         this.db.exec('ALTER TABLE jobs ADD COLUMN client_ip TEXT')
+      if (
+        !this.db
+          .prepare('PRAGMA table_info(builder_keys)')
+          .all()
+          .some((row) => row.name === 'admin')
+      )
+        this.db.exec(
+          'ALTER TABLE builder_keys ADD COLUMN admin INTEGER NOT NULL DEFAULT 0',
+        )
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS builder_app_settings(
           app TEXT PRIMARY KEY, default_branch TEXT NOT NULL) STRICT;
@@ -181,6 +190,49 @@ export class BuilderStore {
       .prepare("INSERT OR IGNORE INTO builder_app_settings VALUES(?,'master')")
       .run(app.slug)
   }
+  /**
+   * Adds or replaces an app definition from the admin API. Stored secret
+   * values are never returned, so an env entry `{name, keep: true}` or a file
+   * entry `{destination, keep: true}` reuses the stored value instead.
+   */
+  saveApp(slug: string, input: unknown): { created: boolean; app: Definition } {
+    return this.transaction(() => {
+      const stored = this.apps().find((app) => app.slug === slug)
+      if (input == null || typeof input !== 'object' || Array.isArray(input))
+        throw new Error('Expected an app definition')
+      const body = input as Record<string, unknown>
+      if (body.slug !== undefined && body.slug !== slug)
+        throw new Error('Slug does not match')
+      const kept = <T extends Record<string, unknown>>(
+        entries: unknown,
+        key: string,
+        previous: T[],
+      ): unknown =>
+        Array.isArray(entries)
+          ? entries.map((entry: unknown) => {
+              if (
+                entry == null ||
+                typeof entry !== 'object' ||
+                (entry as Record<string, unknown>).keep === undefined
+              )
+                return entry
+              const { keep, ...rest } = entry as Record<string, unknown>
+              const old = previous.find((item) => item[key] === rest[key])
+              if (keep !== true || old == null)
+                throw new Error('No stored value to keep')
+              return { ...old, ...rest }
+            })
+          : entries
+      const app = asDefinition({
+        ...body,
+        slug,
+        env: kept(body.env, 'name', stored?.env ?? []),
+        files: kept(body.files, 'destination', stored?.files ?? []),
+      })
+      this.importApp(app)
+      return { created: stored == null, app }
+    })
+  }
   apps(): Definition[] {
     return this.db
       .prepare('SELECT definition FROM builder_apps')
@@ -191,13 +243,23 @@ export class BuilderStore {
         ),
       )
   }
-  key(file: string): string {
+  /** Admin keys also manage app definitions through /api/admin. */
+  key(file: string, admin = false): string {
     const id = randomUUID(),
       token = randomBytes(32).toString('hex')
     noSymlinks(file)
     writeFileSync(file, token + '\n', { flag: 'wx', mode: 0o600 })
-    this.db.prepare('INSERT INTO builder_keys VALUES(?,?)').run(id, hash(token))
+    this.db
+      .prepare('INSERT INTO builder_keys(id,digest,admin) VALUES(?,?,?)')
+      .run(id, hash(token), Number(admin))
     return id
+  }
+  isAdmin(id: string): boolean {
+    return (
+      this.db
+        .prepare('SELECT id FROM builder_keys WHERE id=? AND admin=1')
+        .get(id) != null
+    )
   }
   authenticate(token: string): string | undefined {
     if (!/^[a-f0-9]{64}$/.test(token)) return undefined

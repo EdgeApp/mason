@@ -106,6 +106,26 @@ compiler result as `interrupted`; that status describes an interrupted execution
 Distribution remains independently operated and accepts equal build numbers on
 different branches, while preserving uniqueness within each channel and branch.
 
+### Builder admin API
+
+`builder key-create --config <bootstrap> --output <new-key-file> --role admin`
+creates a key that can also manage app definitions over HTTP, so a new app
+needs no file on the builder. Admin keys build like any other key; ordinary
+keys get 403 from these routes, which accept JSON bodies up to 1 MiB:
+
+- `GET /api/admin/apps` and `GET /api/admin/apps/:slug`: definitions without
+  secrets. Secret environment entries show only `name` and `secret: true`;
+  injected files show `destination`, `env` and their size in `bytes`.
+- `PUT /api/admin/apps/:slug`: add (201) or replace (200) the definition, in
+  the same format as `app-import`. A `slug` in the body must match the path.
+  Because secrets are never returned, an environment entry
+  `{"name":"UPLOAD_TOKEN","keep":true}` or a file entry
+  `{"destination":"deployConfig.json","keep":true}` reuses the stored value;
+  a kept file may set a new `env`. Entries left out are removed.
+
+A new app starts with the default build settings, like an imported one.
+Queued and running jobs keep the definition they snapshotted.
+
 ### Automatic branch builds
 
 The authenticated builder API exposes `GET /api/apps` and
