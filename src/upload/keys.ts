@@ -8,11 +8,14 @@ import {
   asOrigin,
   integer,
   object,
+  oneOf,
   text,
   type Cleaner,
 } from '../validation.js'
 
-const asKeyId: Cleaner<string> = (value) => {
+export const roles = ['upload', 'admin'] as const
+export type Role = (typeof roles)[number]
+export const asKeyId: Cleaner<string> = (value) => {
   const id = asString(value)
   if (!/^[a-f0-9]{32}$/.test(id)) throw new Error('Invalid API key ID')
   return id
@@ -43,6 +46,7 @@ const asKey = asObject({
   expires_at: (value: unknown): number | undefined =>
     value === null ? undefined : integer()(value),
   revoked: asFlag,
+  role: oneOf(roles),
 })
 const asCredentialFields = object({
   schemaVersion: (value: unknown): number => {
@@ -72,12 +76,31 @@ export interface Key {
   createdAt: number
   expiresAt?: number
   revoked: boolean
+  role: Role
+}
+function publicKey(key: ReturnType<typeof asKey>): Key {
+  return {
+    id: key.id,
+    name: key.name,
+    apps: asScopes(JSON.parse(key.apps)),
+    createdAt: key.created_at,
+    expiresAt: key.expires_at,
+    revoked: key.revoked === 1,
+    role: key.role,
+  }
 }
 export class ApiKeys {
   constructor(readonly store: Store) {}
-  create(name: string, scopes: unknown, expiresAt?: number): Credentials {
+  /** Admin keys manage apps, channels and upload keys; they cannot upload. */
+  create(
+    name: string,
+    scopes: unknown,
+    expiresAt?: number,
+    role: Role = 'upload',
+  ): Credentials {
     name = text(120)(name)
-    const apps = asScopes(scopes)
+    role = oneOf(roles)(role)
+    const apps = role === 'admin' ? 'all' : asScopes(scopes)
     if (expiresAt != null) integer(this.store.now() + 1)(expiresAt)
     const known = new Set(this.store.apps().map((app) => app.id))
     if (apps !== 'all' && apps.some((app) => !known.has(app)))
@@ -87,7 +110,7 @@ export class ApiKeys {
     this.store.transaction(() => {
       this.store.db
         .prepare(
-          'INSERT INTO api_keys(id,hash,name,apps,created_at,expires_at) VALUES(?,?,?,?,?,?)',
+          'INSERT INTO api_keys(id,hash,name,apps,created_at,expires_at,role) VALUES(?,?,?,?,?,?,?)',
         )
         .run(
           id,
@@ -96,10 +119,15 @@ export class ApiKeys {
           JSON.stringify(apps),
           this.store.now(),
           expiresAt ?? null,
+          role,
         )
       this.store.db
         .prepare('INSERT INTO audit(action,target,at) VALUES(?,?,?)')
-        .run('key.create', id, this.store.now())
+        .run(
+          role === 'admin' ? 'key.create.admin' : 'key.create',
+          id,
+          this.store.now(),
+        )
     })
     return {
       schemaVersion: 1,
@@ -116,20 +144,19 @@ export class ApiKeys {
         'SELECT * FROM api_keys ORDER BY created_at DESC,id LIMIT 1000',
       )
       .all()
-      .map((row) => {
-        const key = asKey(row)
-        return {
-          id: key.id,
-          name: key.name,
-          apps: asScopes(JSON.parse(key.apps)),
-          createdAt: key.created_at,
-          expiresAt: key.expires_at,
-          revoked: key.revoked === 1,
-        }
-      })
+      .map((row) => publicKey(asKey(row)))
   }
   authenticate(value: unknown, appId: number): Key {
     appId = asId(appId)
+    const key = this.verify(value, 'upload')
+    if (key.apps !== 'all' && !key.apps.includes(appId))
+      throw new Error('API key does not permit this app')
+    return key
+  }
+  authenticateAdmin(value: unknown): Key {
+    return this.verify(value, 'admin')
+  }
+  private verify(value: unknown, role: Role): Key {
     const token = asApiToken(value),
       id = token.slice(9, 41)
     const row = this.store.db
@@ -142,20 +169,11 @@ export class ApiKeys {
       key == null ||
       !matches ||
       key.revoked ||
+      key.role !== role ||
       (key.expires_at != null && key.expires_at <= this.store.now())
     )
       throw new Error('Invalid API key')
-    const apps = asScopes(JSON.parse(key.apps))
-    if (apps !== 'all' && !apps.includes(asId(appId)))
-      throw new Error('API key does not permit this app')
-    return {
-      id: key.id,
-      name: key.name,
-      apps,
-      createdAt: key.created_at,
-      expiresAt: key.expires_at,
-      revoked: false,
-    }
+    return publicKey(key)
   }
   revoke(id: string): void {
     id = asKeyId(id)

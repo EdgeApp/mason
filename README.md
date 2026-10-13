@@ -258,3 +258,43 @@ Apple's annual device allowance still applies. Removing an account association
 does not disable the device at Apple, recover a device slot, or revoke downloaded
 apps. Use the Apple developer account to manage that separate device lifecycle.
 See `src/devices/NOTICE.md` for Zealot and DeviceKit attribution.
+
+## Distribution admin API
+
+Apps, their upload channels and upload keys are managed over HTTP, so adding
+an app needs no database access. An admin key authorizes it. Mint the first
+one on the distribution server; the credential is printed once:
+
+```sh
+node lib/cli.js keys create --config <config> --name <name> --role admin --json
+```
+
+Save it with `keys import --file <private file>` like an upload credential.
+Admin keys cannot upload packages, and upload keys cannot reach the admin API.
+Admin keys are not scoped to apps and are only created with the CLI. `keys
+list` shows each key's `role`; `keys revoke` revokes either kind.
+
+Every route below takes `Authorization: Bearer <admin token>` and JSON bodies
+up to 16 KiB, and is limited to 120 requests a minute:
+
+- `GET /api/admin/apps`: every app, including disabled ones, with its channels.
+  A channel's `key` is the `channel_key` its uploads send.
+- `POST /api/admin/apps`: `{"slug":"app.example.desktop","name":"Desktop"}`.
+  The slug is the package's bundle identifier. `position` defaults to after
+  the last app and `enabled` to true. An existing slug returns 409.
+- `GET` or `PATCH /api/admin/apps/:slug`: read, or change `name`, `position`
+  and `enabled`. Omitted fields are kept.
+- `POST /api/admin/apps/:slug/channels`: `{"platform":"macos"}` creates the
+  platform's channel with a random key. `formats` defaults to every format the
+  platform allows (`dmg` for macOS, `exe` and `msi` for Windows). One channel
+  per platform; a second returns 409.
+- `PATCH /api/admin/apps/:slug/channels/:platform`: change `formats` or
+  `enabled`, or pass `"rotateKey":true` for a new channel key.
+- `GET /api/admin/keys`: keys with their role, with app scopes as slugs.
+- `POST /api/admin/keys`: `{"name":"Desktop builds","apps":["app.example.desktop"]}`
+  creates an upload key and returns its one-time credential. `apps` may be
+  `"all"`; `expiresAt` is optional epoch milliseconds.
+- `POST /api/admin/keys/:id/revoke`: revoke an upload or admin key.
+
+Unknown apps, channels and keys return 404; invalid input returns 400.
+Changes are recorded in the audit table.
