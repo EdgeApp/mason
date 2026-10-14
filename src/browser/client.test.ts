@@ -209,8 +209,7 @@ describe('Browser platform navigation', () => {
     await settle()
     assert.equal(requests, 0)
     assert.equal(installer.location.pathname, '/builds/1/install')
-    assert.equal(installer.visits.length, 1)
-    assert(installer.visits[0]?.startsWith('itms-services:'))
+    assert.equal(installer.visits.length, 0)
     const catalog = browser({
       url: 'https://builds.example.test/apps/1',
       chosen: 'ios',
@@ -294,7 +293,7 @@ describe('Browser platform navigation', () => {
     await settle()
     assert.equal(explicit.location.search, '?platform=macos')
     const installer = browser({ install: true })
-    assert(installer.visits[0]?.startsWith('itms-services:'))
+    assert.equal(installer.visits.length, 0)
   })
   it('ignores stale responses and returns safely to document navigation after failures', async () => {
     const url = 'https://builds.example.test/apps/1?platform=android'

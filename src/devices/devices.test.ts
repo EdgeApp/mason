@@ -16,6 +16,7 @@ import { Devices, friendlyName, DEVICE_COOKIE } from './store.js'
 import { decodePlist } from './plist.js'
 import { verifyCms } from './cms.js'
 import { inspectProvisioning, saveProvisioning } from './provisioning.js'
+import { branchKey } from '../catalog/platform.js'
 import { zip, plist } from '../upload/fixtures.test.js'
 
 const fakeUdid = '0'.repeat(39) + '1'
@@ -359,11 +360,16 @@ describe('Device registration, account ownership and iOS compatibility', () => {
       digest: createHash('sha256').update(bytes).digest('hex'),
     })
     const cookie = `; ${DEVICE_COOKIE}=${device.id}`
+    const catalog = `/apps/${app}/branches/${branchKey('master')}?platform=ios`
+    const selectedCookie = { headers: {cookie: `${SESSION_COOKIE}=${user.token}${cookie}`} }
+    assert.equal((await (await request(catalog, selectedCookie)).text()).includes('data-install'), false)
     assert.equal(
       (await post(`/builds/${build.id}/install`, {}, cookie)).status,
       409,
     )
     saveProvisioning(store, build.id, profile)
+    assert.match(await (await request(catalog, selectedCookie)).text(), /data-install[^>]*href="itms-services:/)
+    assert.equal((await (await request(catalog)).text()).includes('data-install'), false)
     assert.equal(
       devices.eligible(build, { ...device, status: 'registered' }),
       true,

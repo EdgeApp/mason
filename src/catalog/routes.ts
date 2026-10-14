@@ -6,6 +6,7 @@ import { Store } from '../store.js'
 import { asId, type Build, type Platform } from '../validation.js'
 import { escape, page } from '../view.js'
 import { branchKey, branchName, labels, platform } from './platform.js'
+import { Installations } from './install.js'
 
 function selected(req: Request): Platform {
   const preferences = (req.headers.cookie ?? '')
@@ -57,7 +58,8 @@ export function catalogRoutes(
   store: Store,
   accounts = new Accounts(store),
 ): Router {
-  const router = Router()
+  const router = Router(),
+    installations = new Installations(store)
   router.get(
     ['/', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
     (req, res) => {
@@ -138,15 +140,23 @@ export function catalogRoutes(
       const deviceStore = new Devices(store),
         selectedDevice = deviceStore.selected(account.id, req.headers.cookie)
       const rows = builds
-        .map(
-          (build) =>
-            `<form id="build-${build.id}" method="post" action="/builds/${build.id}/install"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><button class="list-row build-row" aria-label="${deviceStore.eligible(build, selectedDevice) ? 'Install' : selectedDevice == null ? 'Register Device for' : 'Prepare for this device'} ${escape(build.version)} build ${escape(build.build_number)}"><div><strong>${escape(build.version)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${time(build.published_at)} · ${(build.size / 1024 ** 2).toFixed(1)} MB</small><code title="${escape(build.commit_hash)}">${escape(build.commit_hash.slice(0, 12))}</code></div><span class="download-label">${deviceStore.eligible(build, selectedDevice) ? 'Install' : selectedDevice == null ? 'Register Device' : 'Prepare for device'} <span aria-hidden="true">↓</span></span></button></form>`,
-        )
+        .map((build) => {
+          const eligible = deviceStore.eligible(build, selectedDevice)
+          const label = `${eligible ? 'Install' : selectedDevice == null ? 'Register Device for' : 'Prepare for this device'} ${build.version} build ${build.build_number}`
+          const content = `<div><strong>${escape(build.version)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${time(build.published_at)} · ${(build.size / 1024 ** 2).toFixed(1)} MB</small><code title="${escape(build.commit_hash)}">${escape(build.commit_hash.slice(0, 12))}</code></div><span class="download-label">${eligible ? 'Install' : selectedDevice == null ? 'Register Device' : 'Prepare for device'} <span aria-hidden="true">↓</span></span>`
+          if (eligible && build.format === 'ipa') {
+            // The tap itself must open the native installer. A page-load
+            // redirect loses Safari's user gesture and adds an app-open prompt.
+            const grant = installations.create(build.id, session, selectedDevice)
+            return `<a id="build-${build.id}" class="list-row build-row" data-install aria-label="${escape(label)}" href="${escape(installations.iosUrl(grant.token))}">${content}</a>`
+          }
+          return `<form id="build-${build.id}" method="post" action="/builds/${build.id}/install"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><button class="list-row build-row" aria-label="${escape(label)}">${content}</button></form>`
+        })
         .join('')
       res.send(
         page(
           branch,
-          `<p class="breadcrumbs">${home}<span>/</span><a href="${appPath}${query}">${escape(app.name)}</a></p><p class="intro">${labels[chosen]} builds · newest first</p><div class="build-list">${rows || `<section class="card"><h2>No ${labels[chosen]} builds</h2><p>This branch has no retained builds for the selected platform. Choose another platform or publish a new build.</p></section>`}</div>`,
+          `<p class="breadcrumbs">${home}<span>/</span><a href="${appPath}${query}">${escape(app.name)}</a></p><p class="intro">${labels[chosen]} builds · newest first${chosen === 'ios' && builds.length > 0 ? '<br>Installation links last up to one hour. Refresh this page if a link expires.' : ''}</p><div class="build-list">${rows || `<section class="card"><h2>No ${labels[chosen]} builds</h2><p>This branch has no retained builds for the selected platform. Choose another platform or publish a new build.</p></section>`}</div>`,
           nav,
           true,
         ),
