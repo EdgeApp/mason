@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import {
   chmodSync,
   mkdirSync,
@@ -42,6 +44,99 @@ const base = {
     },
   },
 }
+describe('Apple provisioning result protocol', () => {
+  it('keeps session-refresh diagnostics out of the JSON provisioning result', function () {
+    const dir = mkdtempSync(
+      path.join(process.env.MASON_TEST_ROOT!, 'apple-protocol-'),
+    )
+    try {
+      writeFileSync(
+        path.join(dir, 'spaceship.rb'),
+        `
+module Spaceship
+  class Client; end
+  module ConnectAPI
+    def self.login(*args, **options)
+      puts 'Available session is not valid anymore. Continuing with normal login.'
+    end
+    class Device
+      def self.all; []; end
+    end
+    class Certificate
+      def self.all
+        [Struct.new(:id) { def valid?; true; end }.new('fixture')]
+      end
+    end
+    class BundleId
+      def self.find(app); Struct.new(:id, :identifier).new('fixture', app); end
+    end
+    class Profile
+      def self.all(**options); []; end
+      def self.create(**options)
+        puts 'Provisioning profile prepared'
+        Struct.new(:profile_content).new(Base64.strict_encode64('fixture-profile'))
+      end
+    end
+  end
+end
+`,
+      )
+      const login = path.join(dir, 'login.json')
+      const requestFile = path.join(dir, 'request.json')
+      writeFileSync(
+        login,
+        JSON.stringify({
+          username: 'fixture',
+          password: 'fixture',
+          cookieDirectory: dir,
+        }),
+        { mode: 0o600 },
+      )
+      writeFileSync(
+        requestFile,
+        JSON.stringify({
+          apple: {
+            loginFile: login,
+            teamId: 'fixture',
+            certificateId: 'fixture',
+          },
+          devices: [],
+          apps: [app],
+          directory: dir,
+        }),
+        { mode: 0o600 },
+      )
+      const result = spawnSync(
+        'ruby',
+        [
+          '-I',
+          dir,
+          fileURLToPath(
+            new URL('../../src/devices/apple-provision.rb', import.meta.url),
+          ),
+          requestFile,
+        ],
+        { encoding: 'utf8', timeout: 10000 },
+      )
+      if (
+        (result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT'
+      )
+        this.skip()
+      assert.equal(result.status, 0, result.stderr)
+      const reply = JSON.parse(result.stdout)
+      assert.equal(reply.profiles.length, 1)
+      assert.equal(reply.profiles[0].app, app)
+      assert.match(result.stderr, /Available session is not valid anymore/)
+      assert.match(result.stderr, /Provisioning profile prepared/)
+      assert.equal(
+        readFileSync(reply.profiles[0].file, 'utf8'),
+        'fixture-profile',
+      )
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
 describe('Device provisioning worker', () => {
   beforeEach(() => {
     root = mkdtempSync(
