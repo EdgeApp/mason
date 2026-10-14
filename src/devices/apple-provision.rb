@@ -5,6 +5,10 @@ require 'fileutils'
 require 'digest'
 require 'base64'
 require 'spaceship'
+# Spaceship can print session-refresh messages. Keep stdout exclusively JSON
+# so the Node worker can parse successful provisioning results reliably.
+protocol_output = $stdout
+$stdout = $stderr
 request = JSON.parse(File.read(ARGV.fetch(0)))
 config = request.fetch('apple')
 Spaceship::Client.class_eval do
@@ -48,4 +52,4 @@ request.fetch('apps').each do |app|
   File.write(file, Base64.decode64(profile.profile_content), mode:'wb', perm:0600)
   profiles << {app:app, name:name, file:file, sha256:Digest::SHA256.file(file).hexdigest}
 end
-puts JSON.generate({revision:revision, devices:states, profiles:profiles, udids:active.map(&:udid)})
+protocol_output.puts JSON.generate({revision:revision, devices:states, profiles:profiles, udids:active.map(&:udid)})
