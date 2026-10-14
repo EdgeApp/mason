@@ -4,6 +4,7 @@ import {
   deviceWorkerRoutes,
 } from './devices/routes.js'
 import express, { type ErrorRequestHandler } from 'express'
+import { adminRoutes } from './admin/routes.js'
 import { Accounts } from './auth/accounts.js'
 import { Providers } from './auth/providers.js'
 import { authRoutes } from './auth/routes.js'
@@ -56,6 +57,7 @@ export function createApp(
   app.use(deviceCallbackRoutes(store))
   app.use(deviceWorkerRoutes(store))
   app.use(uploadRoutes(store))
+  app.use(adminRoutes(store))
   app.use(express.urlencoded({ extended: false, limit: '16kb' }))
   const accounts = new Accounts(store)
   app.use(authRoutes(store, providers, accounts))

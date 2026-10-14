@@ -106,6 +106,26 @@ compiler result as `interrupted`; that status describes an interrupted execution
 Distribution remains independently operated and accepts equal build numbers on
 different branches, while preserving uniqueness within each channel and branch.
 
+### Builder admin API
+
+`builder key-create --config <bootstrap> --output <new-key-file> --role admin`
+creates a key that can also manage app definitions over HTTP, so a new app
+needs no file on the builder. Admin keys build like any other key; ordinary
+keys get 403 from these routes, which accept JSON bodies up to 1 MiB:
+
+- `GET /api/admin/apps` and `GET /api/admin/apps/:slug`: definitions without
+  secrets. Secret environment entries show only `name` and `secret: true`;
+  injected files show `destination`, `env` and their size in `bytes`.
+- `PUT /api/admin/apps/:slug`: add (201) or replace (200) the definition, in
+  the same format as `app-import`. A `slug` in the body must match the path.
+  Because secrets are never returned, an environment entry
+  `{"name":"UPLOAD_TOKEN","keep":true}` or a file entry
+  `{"destination":"deployConfig.json","keep":true}` reuses the stored value;
+  a kept file may set a new `env`. Entries left out are removed.
+
+A new app starts with the default build settings, like an imported one.
+Queued and running jobs keep the definition they snapshotted.
+
 ### Automatic branch builds
 
 The authenticated builder API exposes `GET /api/apps` and
@@ -258,3 +278,43 @@ Apple's annual device allowance still applies. Removing an account association
 does not disable the device at Apple, recover a device slot, or revoke downloaded
 apps. Use the Apple developer account to manage that separate device lifecycle.
 See `src/devices/NOTICE.md` for Zealot and DeviceKit attribution.
+
+## Distribution admin API
+
+Apps, their upload channels and upload keys are managed over HTTP, so adding
+an app needs no database access. An admin key authorizes it. Mint the first
+one on the distribution server; the credential is printed once:
+
+```sh
+node lib/cli.js keys create --config <config> --name <name> --role admin --json
+```
+
+Save it with `keys import --file <private file>` like an upload credential.
+Admin keys cannot upload packages, and upload keys cannot reach the admin API.
+Admin keys are not scoped to apps and are only created with the CLI. `keys
+list` shows each key's `role`; `keys revoke` revokes either kind.
+
+Every route below takes `Authorization: Bearer <admin token>` and JSON bodies
+up to 16 KiB, and is limited to 120 requests a minute:
+
+- `GET /api/admin/apps`: every app, including disabled ones, with its channels.
+  A channel's `key` is the `channel_key` its uploads send.
+- `POST /api/admin/apps`: `{"slug":"app.example.desktop","name":"Desktop"}`.
+  The slug is the package's bundle identifier. `position` defaults to after
+  the last app and `enabled` to true. An existing slug returns 409.
+- `GET` or `PATCH /api/admin/apps/:slug`: read, or change `name`, `position`
+  and `enabled`. Omitted fields are kept.
+- `POST /api/admin/apps/:slug/channels`: `{"platform":"macos"}` creates the
+  platform's channel with a random key. `formats` defaults to every format the
+  platform allows (`dmg` for macOS, `exe` and `msi` for Windows). One channel
+  per platform; a second returns 409.
+- `PATCH /api/admin/apps/:slug/channels/:platform`: change `formats` or
+  `enabled`, or pass `"rotateKey":true` for a new channel key.
+- `GET /api/admin/keys`: keys with their role, with app scopes as slugs.
+- `POST /api/admin/keys`: `{"name":"Desktop builds","apps":["app.example.desktop"]}`
+  creates an upload key and returns its one-time credential. `apps` may be
+  `"all"`; `expiresAt` is optional epoch milliseconds.
+- `POST /api/admin/keys/:id/revoke`: revoke an upload or admin key.
+
+Unknown apps, channels and keys return 404; invalid input returns 400.
+Changes are recorded in the audit table.

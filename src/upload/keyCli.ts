@@ -16,8 +16,8 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { loadConfig, noSymlinks } from '../config.js'
 import { Store } from '../store.js'
-import { asId } from '../validation.js'
-import { ApiKeys, asCredentials } from './keys.js'
+import { asId, oneOf } from '../validation.js'
+import { ApiKeys, asCredentials, roles } from './keys.js'
 
 export function importCredentials(
   file: string,
@@ -93,7 +93,7 @@ export function keyCommand(
   }
   const allowed =
     command === 'create'
-      ? ['--config', '--name', '--apps', '--expires', '--json']
+      ? ['--config', '--name', '--apps', '--expires', '--role', '--json']
       : command === 'list'
         ? ['--config']
         : command === 'revoke'
@@ -126,8 +126,12 @@ export function keyCommand(
     } else {
       if (!flags.has('--json'))
         throw new Error('Use --json to receive the one-time credential')
-      const apps = required('--apps'),
+      const role = oneOf(roles)(flags.get('--role') ?? 'upload'),
         expiry = flags.get('--expires')
+      // Admin keys are not scoped to apps; upload keys must name theirs.
+      if (role === 'admin' && flags.has('--apps'))
+        throw new Error('Admin keys do not take app scopes')
+      const apps = role === 'admin' ? 'all' : required('--apps')
       output(
         JSON.stringify(
           keys.create(
@@ -136,6 +140,7 @@ export function keyCommand(
               ? 'all'
               : apps.split(',').map((value) => asId(Number(value))),
             expiry == null ? undefined : Date.parse(expiry),
+            role,
           ),
         ),
       )

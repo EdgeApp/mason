@@ -9,6 +9,7 @@ import type { Server } from 'node:http'
 import { AutomaticPoller, AUTOMATIC_POLL_MS } from './automatic.js'
 import { randomBytes } from 'node:crypto'
 import { statusPage } from './status.js'
+import { builderAdminRoutes } from './admin.js'
 
 export function clientAddress(
   remote: string | undefined,
@@ -165,6 +166,7 @@ export function builderApp(
     res.locals.key = key
     next()
   })
+  app.use(builderAdminRoutes(store))
   app.use(express.json({ limit: '8kb', strict: true }))
   app.get('/api/apps', (_req, res) => {
     res.json(
