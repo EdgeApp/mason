@@ -195,6 +195,20 @@ describe('Mason protected catalog and installation', () => {
     }
     assert.throws(() => installs.create(1, user.session), /Tester/)
   })
+  it('offers a direct iOS install link tied to the authorized session', async () => {
+    const build = publish('ios')
+    const route = `/apps/${app}/branches/${branchKey('master')}?platform=ios`
+    const html = await (await request(route)).text()
+    assert.match(html, /<a id="build-/)
+    assert.equal(html.includes(`<form id="build-${build.id}"`), false)
+    const link = new URL(/data-install[^>]*href="([^"]+)"/.exec(html)![1]!.replaceAll('&amp;', '&'))
+    assert.equal(link.protocol, 'itms-services:')
+    const manifest = link.searchParams.get('url')!
+    assert.equal(new URL(manifest).origin, store.config.origin)
+    assert.equal((await request(manifest, {}, false)).status, 200)
+    accounts.logout(user.token)
+    assert.equal((await request(manifest, {}, false)).status, 404)
+  })
   it('selects platforms safely and round-trips arbitrary branch names without paths', () => {
     for (const [agent, expected] of [
       ['iPhone', 'ios'],

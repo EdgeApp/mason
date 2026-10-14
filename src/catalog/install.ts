@@ -101,6 +101,12 @@ export class Installations {
   url(token: string, resource: 'manifest.plist' | 'artifact'): string {
     return `${this.store.config.origin}/install/${token}/${resource}`
   }
+  iosUrl(token: string): string {
+    return (
+      'itms-services://?action=download-manifest&url=' +
+      encodeURIComponent(this.url(token, 'manifest.plist'))
+    )
+  }
 }
 export function byteRange(
   value: string | undefined,
@@ -171,13 +177,11 @@ export function installationRoutes(
       res.redirect(303, installs.url(result.token, 'artifact'))
       return
     }
-    const url =
-      'itms-services://?action=download-manifest&url=' +
-      encodeURIComponent(installs.url(result.token, 'manifest.plist'))
+    const url = installs.iosUrl(result.token)
     res.send(
       page(
         'Install app',
-        `<section class="card"><p>Your iOS installation is ready. Confirm the installation on your device.</p><a class="button" data-install href="${escape(url)}">Install on iOS</a><p>This installation link expires within one hour.</p></section>`,
+        `<section class="card"><p>Tap Install on iOS, then confirm the installation on your device.</p><a class="button" data-install href="${escape(url)}">Install on iOS</a><p>This installation link expires within one hour.</p></section>`,
         navigation(context.session, context.account),
         true,
       ),

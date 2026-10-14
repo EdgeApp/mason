@@ -132,7 +132,4 @@ if (catalogPage) {
     }
   }
 }
-const install = document.querySelector<HTMLAnchorElement>('a[data-install]')
-if (install != null && install.href.startsWith('itms-services:'))
-  location.assign(install.href)
 export {}
