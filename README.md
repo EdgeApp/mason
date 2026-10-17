@@ -8,8 +8,7 @@ with `node lib/cli.js builder ...`.
 
 Create an owner-only JSON bootstrap file (`chmod 600`) containing `workspace`
 (an absolute dedicated directory), `listenHost` (defaults to `127.0.0.1`) and
-`port` (defaults to `9300`). The workspace stores `builder.sqlite`, owned bare
-clones in `git/`, reusable branch worktrees in `git-worktrees/`, logs, execution
+`port` (defaults to `9300`). The workspace stores `builder.sqlite`, one owned clone in `checkout/`, logs, execution
 locks and user-maintained files in `files/`. Do not point it at an existing clone.
 
 Import each app using `builder app-import --config <bootstrap> --file <app.json>`.
@@ -27,8 +26,8 @@ The app file is also owner-only JSON:
 }
 ```
 
-`position` defaults to zero and `enabled` to true. `workspace` optionally selects
-a worktree subdirectory; `entrypoint` selects a relative `.ts` or `.js` file.
+`position` defaults to zero and `enabled` to true. The legacy app `workspace` field is accepted for compatibility but no longer
+changes the checkout location. `entrypoint` selects a relative `.ts` or `.js` file.
 Otherwise Mason uses `Masonfile.ts`, then `Masonfile.js`. TypeScript must use
 syntax supported by Node's native type stripping. Configured environment values
 are secret by default. Injected file contents are base64, copied with mode 0600,
@@ -71,8 +70,12 @@ private app config, separate from builder API keys. Mason does not interpret
 deploy commands or upload packages itself.
 
 One worker executes one job at a time. Each request snapshots its definition.
-Mason fetches from GitHub, pins the branch commit, resets its owned worktree and
-removes all old worktree contents before injection. Git credentials come from
+Mason fetches from GitHub, pins the branch commit, switches its single clone to that commit and
+removes all old generated and untracked contents before injection. Masonfiles
+install dependencies in that checkout. Switching repositories replaces the
+clone at the same path, so branches and repositories cannot accumulate build
+directories. Old `git-worktrees/` and `git/` directories from previous versions
+can be removed during maintenance after all guardians have stopped. Git credentials come from
 the worker account's credential helper or SSH environment. The existing `/log`
 view is capped at 4 MiB; `/logs` streams the complete retained stdout and stderr,
 including checkout commands and failure messages. Completed records and both

@@ -625,7 +625,7 @@ describe('Mason builder', function () {
     assert(!log.includes('file-secret'))
     const row = store.db
       .prepare(
-        "SELECT directory FROM workspaces WHERE identity LIKE 'worktree:%'",
+        "SELECT directory FROM workspaces WHERE identity = 'checkout:shared'",
       )
       .get()!
     const checkout = String(row.directory)
@@ -703,86 +703,99 @@ describe('Mason builder', function () {
     const next = store.enqueue(request, 'test')
     assert.equal(store.claim()!.id, next.id)
   })
-  it('supports relocated worktrees and retries database-owned interrupted clones', async () => {
+  it('uses one checkout across branches, app workspace settings and repositories', async () => {
     const repo = fixture()
-    for (const workspace of ['git-worktrees', 'alternate']) {
-      const transport =
-        workspace === 'alternate'
-          ? 'git@github.com:example/fixture.git'
-          : definition.repository
-      store.importApp({ ...definition, workspace, repository: transport })
-      const job = store.enqueue(request, 'test')
+    git(['checkout', '-b', 'next'], repo)
+    writeFileSync(path.join(repo, 'branch-file'), 'next branch')
+    git(['add', '.'], repo)
+    git(['commit', '-m', 'Next branch'], repo)
+    const nextCommit = git(['rev-parse', 'HEAD'], repo)
+    const other = path.join(root, 'other-repo')
+    git(['clone', repo, other], root)
+    writeFileSync(path.join(other, 'other-file'), 'other repository')
+    git(['add', '.'], other)
+    git(['commit', '-m', 'Other repository'], other)
+    const checkout = path.join(store.config.workspace, 'checkout')
+    for (const [repository, branch, source, workspace] of [
+      [definition.repository, 'master', repo, 'git-worktrees'],
+      [definition.repository, 'next', repo, 'alternate'],
+      ['https://github.com/example/other.git', 'next', other, 'another'],
+    ]) {
+      store.importApp({ ...definition, repository, workspace })
+      const job = store.enqueue({ ...request, branch }, 'test')
       store.claim()
       await executeJob(
         store,
         job.id,
         new AbortController().signal,
-        (url) => {
-          assert.equal(url, transport)
-          return repo
-        },
+        () => source!,
       )
       assert.equal(store.job(job.id)!.status, 'succeeded')
-    }
-    assert.equal(
-      store.db
-        .prepare(
-          "SELECT count(*) AS n FROM workspaces WHERE identity LIKE 'worktree:%'",
-        )
-        .get()!.n,
-      2,
-    )
-    const row = store.db
-      .prepare(
-        "SELECT directory FROM workspaces WHERE directory LIKE '%alternate%'",
+      assert.equal(
+        git(['rev-parse', '--absolute-git-dir'], checkout),
+        path.join(checkout, '.git'),
       )
-      .get()!
-    rmSync(String(row.directory), { recursive: true })
-    const recreated = store.enqueue(request, 'test')
-    store.claim()
-    await executeJob(
-      store,
-      recreated.id,
-      new AbortController().signal,
-      () => repo,
-    )
-    assert.equal(store.job(recreated.id)!.status, 'succeeded')
+      assert(!existsSync(path.join(checkout, 'stale-build-output')))
+      assert(!existsSync(path.join(checkout, 'node_modules', 'stale')))
+      if (branch === 'master')
+        assert(!existsSync(path.join(checkout, 'branch-file')))
+      else assert(existsSync(path.join(checkout, 'branch-file')))
+      if (source === repo && branch === 'next')
+        assert.equal(store.job(job.id)!.commit_sha, nextCommit)
+      writeFileSync(
+        path.join(checkout, 'stale-build-output'),
+        'old build',
+      )
+      mkdirSync(path.join(checkout, 'node_modules'), { recursive: true })
+      writeFileSync(
+        path.join(checkout, 'node_modules', 'stale'),
+        'old dependency',
+      )
+    }
+    assert(existsSync(path.join(checkout, 'other-file')))
     assert.equal(
-      store.db
-        .prepare(
-          "SELECT count(*) AS n FROM workspaces WHERE identity LIKE 'clone:%'",
-        )
-        .get()!.n,
+      store.db.prepare('SELECT count(*) AS n FROM workspaces').get()!.n,
       1,
     )
-    // Model a killed initial clone before its completion marker was written.
-    const clone = String(
-      store.db
-        .prepare(
-          "SELECT directory FROM workspaces WHERE identity LIKE 'clone:%'",
-        )
-        .get()!.directory,
+    assert(!existsSync(path.join(store.config.workspace, 'git')))
+    assert(
+      !existsSync(path.join(store.config.workspace, 'git-worktrees')),
     )
-    rmSync(clone, { recursive: true })
-    mkdirSync(clone)
-    writeFileSync(path.join(clone, 'partial'), 'incomplete')
-    // Remove old worktrees because this fixture models an initial clone.
-    for (const row of store.db
-      .prepare(
-        "SELECT directory FROM workspaces WHERE identity LIKE 'worktree:%'",
-      )
-      .all())
-      rmSync(String(row.directory), { recursive: true })
-    const retry = store.enqueue(request, 'test')
+    // An interrupted initial clone keeps its database reservation but no marker.
+    rmSync(checkout, { recursive: true })
+    mkdirSync(checkout)
+    writeFileSync(path.join(checkout, 'partial'), 'incomplete')
+    const retry = store.enqueue({ ...request, branch: 'next' }, 'test')
     store.claim()
     await executeJob(
       store,
       retry.id,
       new AbortController().signal,
-      () => repo,
+      () => other,
     )
     assert.equal(store.job(retry.id)!.status, 'succeeded')
-    assert(!existsSync(path.join(clone, 'partial')))
+    assert(!existsSync(path.join(checkout, 'partial')))
+  })
+  it('preserves foreign paths and rejects a replaced shared-checkout marker', async () => {
+    const repo = fixture()
+    const checkout = path.join(store.config.workspace, 'checkout')
+    mkdirSync(checkout)
+    const keep = path.join(checkout, 'keep')
+    writeFileSync(keep, 'operator data')
+    const run = async (): Promise<string> => {
+      const job = store.enqueue(request, 'test')
+      store.claim()
+      await executeJob(store, job.id, new AbortController().signal, () => repo)
+      return store.job(job.id)!.status
+    }
+    assert.equal(await run(), 'failed')
+    assert.equal(readFileSync(keep, 'utf8'), 'operator data')
+    rmSync(checkout, { recursive: true })
+    assert.equal(await run(), 'succeeded')
+    writeFileSync(path.join(checkout, '.git', 'mason-owner'), 'foreign')
+    writeFileSync(keep, 'keep after failed validation')
+    assert.equal(await run(), 'failed')
+    assert.equal(readFileSync(keep, 'utf8'), 'keep after failed validation')
   })
   it('pins and cleans initialized submodules between repeated builds', async () => {
     const dependency = path.join(root, 'dependency')
@@ -816,7 +829,7 @@ describe('Mason builder', function () {
     const checkout = String(
       store.db
         .prepare(
-          "SELECT directory FROM workspaces WHERE identity LIKE 'worktree:%'",
+          "SELECT directory FROM workspaces WHERE identity = 'checkout:shared'",
         )
         .get()!.directory,
     )
@@ -860,7 +873,7 @@ describe('Mason builder', function () {
     const checkout = String(
       store.db
         .prepare(
-          "SELECT directory FROM workspaces WHERE identity LIKE 'worktree:%'",
+          "SELECT directory FROM workspaces WHERE identity = 'checkout:shared'",
         )
         .get()!.directory,
     )
@@ -961,7 +974,7 @@ describe('Mason builder', function () {
       process.env.PATH = oldPath
     }
   })
-  it('isolates injected-file cleanup failures without changing the build outcome or holding later jobs', async function () {
+  it('repairs owned checkout permissions after a failed build without holding later jobs', async function () {
     if (process.getuid?.() === 0) this.skip()
     const repo = fixture(`import fs from 'node:fs';
       if (process.env.FAIL_BUILD) {
@@ -999,16 +1012,13 @@ describe('Mason builder', function () {
       assert.equal(failed.status, 'failed')
       assert.equal(failed.exit_code, 3)
       assert.equal(failed.quarantine, 0)
-      assert.match(
-        failed.cleanup_error!,
-        /Owned checkout cleanup failed/,
-      )
+      assert.equal(failed.cleanup_error, undefined)
       assert.equal(failed.quarantine_reason, undefined)
     } finally {
       await worker.close()
       for (const row of store.db
         .prepare(
-          "SELECT directory FROM workspaces WHERE identity LIKE 'worktree:%'",
+          "SELECT directory FROM workspaces WHERE identity = 'checkout:shared'",
         )
         .all())
         if (existsSync(String(row.directory)))
@@ -1671,7 +1681,7 @@ describe('Mason builder', function () {
     assert.equal(store.job(job.id)!.status, 'failed')
     const row = store.db
       .prepare(
-        "SELECT directory FROM workspaces WHERE identity LIKE 'worktree:%'",
+        "SELECT directory FROM workspaces WHERE identity = 'checkout:shared'",
       )
       .get()!
     assert.equal(

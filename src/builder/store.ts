@@ -87,8 +87,6 @@ export class BuilderStore {
     privateDirectory(config.workspace)
     for (const directory of [
       'logs',
-      'git',
-      'git-worktrees',
       'files',
       'executions',
     ])

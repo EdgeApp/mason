@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   readFileSync,
@@ -14,54 +15,64 @@ export type RepositoryResolver = (repository: string) => string
 export class Workspace {
   private readonly injected: string[] = []
   readonly checkout: string
-  private readonly clone: string
-  private readonly identity: string
+  private static readonly owner = 'mason-shared-checkout-v1\n'
   constructor(
     private readonly store: BuilderStore,
     readonly job: Job,
     private readonly execution: Execution,
-    private readonly resolveRepository: RepositoryResolver = (value) =>
-      value,
+    private readonly resolveRepository: RepositoryResolver = (
+      repository,
+    ) => repository,
   ) {
-    this.identity = hash(
-      job.definition.repository.replace(
-        /^git@github\.com:/,
-        'https://github.com/',
-      ),
-    )
-    this.clone = path.join(store.config.workspace, 'git', this.identity)
-    this.checkout = path.join(
-      store.config.workspace,
-      job.definition.workspace,
-      hash(this.identity + ':' + job.branch),
-    )
+    this.checkout = path.join(store.config.workspace, 'checkout')
   }
   static discardCheckout(store: BuilderStore, job: Job): void {
+    const directory = path.join(store.config.workspace, 'checkout')
+    noSymlinks(directory)
+    if (store.own('checkout:shared', directory))
+      Workspace.removeCheckout(directory)
+    // Recovery must also handle a guardian started before the shared-checkout upgrade.
     const repository = hash(
       job.definition.repository.replace(
         /^git@github\.com:/,
         'https://github.com/',
       ),
     )
-    const directory = path.join(
+    const legacy = path.join(
       store.config.workspace,
       job.definition.workspace,
       hash(repository + ':' + job.branch),
     )
-    noSymlinks(directory)
-    if (
-      store.own(
+    const owned = store.db
+      .prepare('SELECT directory FROM workspaces WHERE identity=?')
+      .get(
         'worktree:' +
           hash(
-            repository + ':' + job.branch + ':' + job.definition.workspace,
+            repository +
+              ':' +
+              job.branch +
+              ':' +
+              job.definition.workspace,
           ),
-        directory,
       )
-    )
-      rmSync(directory, { recursive: true, force: true })
+    if (owned?.directory === legacy) {
+      noSymlinks(legacy)
+      rmSync(legacy, { recursive: true, force: true })
+    }
+  }
+  private static removeCheckout(directory: string): void {
+    noSymlinks(directory)
+    if (!existsSync(directory)) return
+    // A build can make its root read-only. Restore the owned root before removing
+    // it so a failed injection cleanup does not poison the shared checkout.
+    chmodSync(directory, 0o700)
+    rmSync(directory, { recursive: true, force: true })
   }
   async prepare(): Promise<string> {
-    const git = async (args: string[], cwd: string): Promise<string> =>
+    const git = async (
+      args: string[],
+      cwd = this.checkout,
+    ): Promise<string> =>
       await this.execution.run(
         'git',
         ['-c', 'core.hooksPath=/dev/null', ...args],
@@ -69,81 +80,58 @@ export class Workspace {
         undefined,
         true,
       )
-    privateDirectory(path.dirname(this.checkout))
-    for (const target of [this.clone, this.checkout]) noSymlinks(target)
-    this.store.own('clone:' + this.identity, this.clone)
-    const owner = path.join(this.clone, 'mason-owner')
+    noSymlinks(this.checkout)
+    this.store.own('checkout:shared', this.checkout)
+    const gitDir = path.join(this.checkout, '.git')
+    const owner = path.join(gitDir, 'mason-owner')
     noSymlinks(owner)
-    // The database reserved this exact path before clone started. A stopped
-    // clone may not have reached marker creation; retry only this owned path.
-    if (existsSync(this.clone) && !existsSync(owner))
-      rmSync(this.clone, { recursive: true })
-    if (!existsSync(this.clone)) {
+    // An interrupted initial clone has no completion marker. Only database-owned
+    // paths reach this point, so an incomplete clone can be recreated safely.
+    if (existsSync(this.checkout) && !existsSync(owner))
+      Workspace.removeCheckout(this.checkout)
+    const repository = this.resolveRepository(
+      this.job.definition.repository,
+    )
+    if (existsSync(this.checkout)) {
+      if (
+        !lstatSync(gitDir).isDirectory() ||
+        readFileSync(owner, 'utf8') !== Workspace.owner
+      )
+        throw new Error('Foreign checkout repository')
+      if (
+        path.resolve(await git(['rev-parse', '--absolute-git-dir'])) !==
+        gitDir
+      )
+        throw new Error('Foreign checkout repository')
+      const normalize = (url: string): string =>
+        url.replace(/^git@github\.com:/, 'https://github.com/')
+      if (
+        normalize(await git(['remote', 'get-url', 'origin'])) !==
+        normalize(repository)
+      )
+        Workspace.removeCheckout(this.checkout)
+    }
+    if (!existsSync(this.checkout)) {
       await git(
-        [
-          'clone',
-          '--bare',
-          '--',
-          this.resolveRepository(this.job.definition.repository),
-          this.clone,
-        ],
+        ['clone', '--no-checkout', '--', repository, this.checkout],
         this.store.config.workspace,
       )
-      writeFileSync(path.join(this.clone, 'mason-owner'), this.identity, {
-        mode: 0o600,
-        flag: 'wx',
-      })
+      writeFileSync(owner, Workspace.owner, { mode: 0o600, flag: 'wx' })
     }
-    noSymlinks(path.join(this.clone, 'mason-owner'))
-    if (
-      readFileSync(path.join(this.clone, 'mason-owner'), 'utf8') !==
-      this.identity
-    )
-      throw new Error('Foreign clone')
-    const ref = 'refs/mason/' + this.job.id
-    await git(
-      [
-        'fetch',
-        '--no-tags',
-        '--',
-        this.resolveRepository(this.job.definition.repository),
-        `+${this.job.requested_commit ?? `refs/heads/${this.job.branch}`}:${ref}`,
-      ],
-      this.clone,
-    )
-    const commit = await git(
-      ['rev-parse', '--verify', `${ref}^{commit}`],
-      this.clone,
-    )
+    // One fixed fetch ref prevents a ref from accumulating for every completed job.
+    const ref = 'refs/mason/current'
+    await git([
+      'fetch',
+      '--no-tags',
+      '--',
+      repository,
+      `+${this.job.requested_commit ?? `refs/heads/${this.job.branch}`}:${ref}`,
+    ])
+    const commit = await git(['rev-parse', '--verify', `${ref}^{commit}`])
     this.store.commit(this.job.id, commit)
-    this.store.own(
-      'worktree:' +
-        hash(
-          this.identity +
-            ':' +
-            this.job.branch +
-            ':' +
-            this.job.definition.workspace,
-        ),
-      this.checkout,
-    )
-    if (!existsSync(this.checkout)) {
-      await git(['worktree', 'prune', '--expire', 'now'], this.clone)
-      await git(
-        ['worktree', 'add', '--detach', '--', this.checkout, commit],
-        this.clone,
-      )
-    }
-    const gitFile = path.join(this.checkout, '.git')
-    noSymlinks(gitFile)
-    const common = await git(
-      ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-      this.checkout,
-    )
-    if (path.resolve(common) !== this.clone)
-      throw new Error('Foreign worktree repository')
-    await git(['reset', '--hard', commit], this.checkout)
-    await git(['clean', '-ffdx'], this.checkout)
+    await git(['checkout', '--detach', '--force', commit])
+    await git(['reset', '--hard', commit])
+    await git(['clean', '-ffdx'])
     if (existsSync(path.join(this.checkout, '.gitmodules'))) {
       await git(['submodule', 'sync', '--recursive'], this.checkout)
       const cleanSubmodules = [
@@ -161,7 +149,7 @@ export class Workspace {
       )
       await git(cleanSubmodules, this.checkout)
     }
-    await git(['update-ref', '-d', ref], this.clone)
+    await git(['update-ref', '-d', ref])
     return commit
   }
   inject(): Record<string, string> {
