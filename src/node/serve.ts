@@ -39,7 +39,8 @@ import type { Server as HttpsServer } from 'node:https'
 import { Link, type MethodTable } from '../link/link.js'
 import { Pairing, serveNodeLinks, type NodeLinks } from '../link/nodeSide.js'
 import { memoryPair } from '../link/wire.js'
-import { NodeRegistry } from '../master/nodes.js'
+import type { NodeRegistry } from '../master/nodes.js'
+import { Master } from '../master/runtime.js'
 
 export type Role = 'master' | 'worker' | 'host'
 export const defaultPorts = { master: 9300, host: 9200, link: 9310 }
@@ -93,6 +94,7 @@ export interface RunningNode {
   databases: Map<string, DatabaseSync>
   /** On a master: its paired nodes. */
   registry?: NodeRegistry
+  master?: Master
   /** On a worker or host: its pairing and the master's link. */
   pairing?: Pairing
   links?: NodeLinks
@@ -105,7 +107,7 @@ export interface RunningNode {
 const asNodeFile = asObject({ role: asString, coWorker: asOptional(asString) })
 
 /** Records the data directory's role, refusing to reuse it for another one. */
-function claimRole(dir: string, role: Role): void {
+export function claimRole(dir: string, role: Role): void {
   const file = path.join(dir, 'node.json')
   if (existsSync(file)) {
     const recorded = asNodeFile(JSON.parse(readPrivate(file))).role
@@ -136,15 +138,17 @@ export function databaseFiles(role: Role, coWorker = false): string[] {
   return role === 'worker' ? ['worker.sqlite'] : ['host.sqlite']
 }
 
-/** Whether a master database has its first account. */
+/** Whether a master database has its first local admin. */
 export function masterConfigured(db: DatabaseSync): boolean {
-  const table = db
-    .prepare(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='accounts'",
-    )
-    .get()
-  if (table == null) return false
-  return db.prepare('SELECT 1 FROM accounts LIMIT 1').get() != null
+  const columns = db.prepare('PRAGMA table_info(accounts)').all()
+  if (!columns.some((column) => column.name === 'password')) return false
+  return (
+    db
+      .prepare(
+        "SELECT 1 FROM accounts WHERE role='admin' AND password IS NOT NULL AND disabled=0 LIMIT 1",
+      )
+      .get() != null
+  )
 }
 
 /**
@@ -236,13 +240,28 @@ export async function startNode(
     let web: RunningNode['web']
     let link: RunningNode['link']
     let setupCode: string | undefined
-    const master = databases.get('master.sqlite')
-    const configured = (): boolean => master != null && masterConfigured(master)
+    const masterDb = databases.get('master.sqlite')
+    const master =
+      masterDb == null
+        ? undefined
+        : new Master(masterDb, identity, {
+            ...(options.masterMethods == null
+              ? {}
+              : { methods: options.masterMethods }),
+            ...(options.heartbeatMs == null
+              ? {}
+              : { heartbeatMs: options.heartbeatMs }),
+            ...(options.redialBaseMs == null
+              ? {}
+              : { redialBaseMs: options.redialBaseMs }),
+            onConfigured: (): void => clearSetupCode(dir),
+          })
+    const configured = (): boolean => master?.configured() ?? false
     if (options.role === 'master' || options.role === 'host') {
       const certificate = webCertificate(identity, webOptions)
       const app =
-        options.role === 'master'
-          ? masterApp({ role: 'master', testEndpoints, configured })
+        master != null
+          ? masterApp({ role: 'master', testEndpoints, configured, master })
           : hostApp({ role: 'host', testEndpoints })
       const server = await listenWeb(app, certificate, webOptions)
       cleanup.push(
@@ -297,15 +316,7 @@ export async function startNode(
     let registry: NodeRegistry | undefined
     let localWorker: Link | undefined
     if (master != null) {
-      const nodes = new NodeRegistry(master, identity, {
-        methods: options.masterMethods ?? ((): MethodTable => ({})),
-        ...(options.heartbeatMs == null
-          ? {}
-          : { heartbeatMs: options.heartbeatMs }),
-        ...(options.redialBaseMs == null
-          ? {}
-          : { redialBaseMs: options.redialBaseMs }),
-      })
+      const nodes = master.registry
       registry = nodes
       cleanup.push(() => nodes.stop())
       if (options.coWorker) {
@@ -350,20 +361,9 @@ export async function startNode(
       testEndpoints,
     })
     const nodeHandlers: Record<string, ControlHandler> =
-      registry == null
+      master == null
         ? { pairing: () => pairing?.key() ?? null }
-        : {
-            'nodes.add': async (args) =>
-              await registry!.add(
-                String(args.address ?? ''),
-                String(args.key ?? ''),
-              ),
-            'nodes.list': () => registry!.list(),
-            'nodes.remove': (args): null => {
-              registry!.remove(String(args.fingerprint ?? ''))
-              return null
-            },
-          }
+        : master.controlHandlers()
     const control = await serveControl(dir, {
       status,
       ...nodeHandlers,
@@ -405,6 +405,7 @@ export async function startNode(
       control,
       databases,
       ...(registry == null ? {} : { registry }),
+      ...(master == null ? {} : { master }),
       ...(pairing == null ? {} : { pairing }),
       ...(links == null ? {} : { links }),
       ...(localWorker == null ? {} : { localWorker }),

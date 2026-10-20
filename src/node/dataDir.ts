@@ -75,7 +75,7 @@ export function lockDataDir(dir: string): DataDirLock {
   const db = new DatabaseSync(file, { timeout: 0 })
   chmodSync(file, 0o600)
   try {
-    db.exec('PRAGMA locking_mode=EXCLUSIVE')
+    db.exec('PRAGMA journal_mode=OFF; PRAGMA locking_mode=EXCLUSIVE')
     db.exec('CREATE TABLE IF NOT EXISTS mutex(value INTEGER)')
     db.exec('BEGIN EXCLUSIVE')
   } catch {

@@ -18,11 +18,13 @@
     "mason": "node lib/cli.js"
   },
   "dependencies": {
+    "argon2": "0.45.1",
     "bplist-parser": "0.5.0",
     "busboy": "1.6.0",
     "cleaners": "0.3.17",
     "express": "5.2.1",
     "fast-xml-parser": "5.11.2",
+    "hash-wasm": "4.12.0",
     "openid-client": "6.8.8",
     "qrcode": "1.5.4",
     "undici": "7.29.1",

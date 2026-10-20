@@ -1,10 +1,11 @@
 import type { DatabaseSync } from 'node:sqlite'
+import { migrate } from '../schema.js'
 
 /**
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 1
+export const MASTER_SCHEMA = 2
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -25,9 +26,85 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       last_seen INTEGER,
       removed INTEGER NOT NULL DEFAULT 0 CHECK(removed IN (0,1))
     ) STRICT;`),
+  (db): void => {
+    db.exec(`
+    ALTER TABLE accounts ADD COLUMN username TEXT;
+    ALTER TABLE accounts ADD COLUMN password TEXT;
+    ALTER TABLE accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'tester'
+      CHECK(role IN ('admin','manager','developer','tester'));
+    CREATE UNIQUE INDEX account_username ON accounts(username COLLATE NOCASE) WHERE username IS NOT NULL;
+    CREATE TABLE account_addresses (
+      account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      method TEXT NOT NULL, email TEXT NOT NULL,
+      PRIMARY KEY(account_id, method), UNIQUE(method, email)
+    ) STRICT;
+    ALTER TABLE audit ADD COLUMN via TEXT NOT NULL DEFAULT '';
+    CREATE TABLE groups (
+      id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE group_apps (
+      group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+      PRIMARY KEY(group_id, app_id)
+    ) STRICT;
+    CREATE TABLE group_members (
+      group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+      account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      PRIMARY KEY(group_id, account_id)
+    ) STRICT;
+    CREATE TABLE api_keys_next (
+      id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, name TEXT NOT NULL, apps TEXT NOT NULL,
+      created_at INTEGER NOT NULL, expires_at INTEGER,
+      revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0,1)),
+      role TEXT NOT NULL CHECK(role IN ('admin','manager','developer','tester','upload')),
+      projects TEXT NOT NULL DEFAULT '[]', branches TEXT NOT NULL DEFAULT '[]',
+      format TEXT NOT NULL DEFAULT 'v1' CHECK(format IN ('v1','builder')),
+      creator INTEGER REFERENCES accounts(id)
+    ) STRICT;
+    INSERT INTO api_keys_next(id,hash,name,apps,created_at,expires_at,revoked,role)
+      SELECT id,hash,name,apps,created_at,expires_at,revoked,role FROM api_keys;
+    DROP TABLE api_keys;
+    ALTER TABLE api_keys_next RENAME TO api_keys;
+    CREATE TABLE projects (
+      id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, repository TEXT NOT NULL,
+      format TEXT NOT NULL CHECK(format IN ('pipeline','script')), entrypoint TEXT,
+      timeout_seconds INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+      position INTEGER NOT NULL DEFAULT 0, default_branch TEXT NOT NULL DEFAULT 'master',
+      webhook_secret TEXT, script TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE project_apps (
+      app_id INTEGER PRIMARY KEY REFERENCES apps(id),
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+    ) STRICT;
+    CREATE TABLE project_env (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, value TEXT NOT NULL, secret INTEGER NOT NULL DEFAULT 1 CHECK(secret IN (0,1)),
+      PRIMARY KEY(project_id, name)
+    ) STRICT;
+    CREATE TABLE project_files (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      destination TEXT NOT NULL, contents TEXT NOT NULL, env TEXT,
+      PRIMARY KEY(project_id, destination)
+    ) STRICT;
+    CREATE TABLE branch_rules (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      position INTEGER NOT NULL, pattern TEXT NOT NULL,
+      mode TEXT NOT NULL CHECK(mode IN ('automatic','request')),
+      PRIMARY KEY(project_id, position)
+    ) STRICT;
+    CREATE TABLE settings (
+      area TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE change_log (
+      revision INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, key TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('put','delete')), at INTEGER NOT NULL
+    ) STRICT;`)
+  },
 ]
 
 export function migrateMaster(db: DatabaseSync): void {
+  // The distribution tables (accounts, apps, builds, devices, keys) come first.
+  migrate(db)
   db.exec(
     'CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT',
   )

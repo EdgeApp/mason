@@ -263,7 +263,7 @@ describe('Configuration-free nodes', function () {
     const db = node.databases.get('master.sqlite')!
     assert.equal(masterConfigured(db), false)
     db.exec(
-      'CREATE TABLE accounts(id INTEGER PRIMARY KEY); INSERT INTO accounts DEFAULT VALUES',
+      "INSERT INTO accounts(name,username,password,role,created_at) VALUES('x','x','{}','admin',1)",
     )
     assert.equal(masterConfigured(db), true)
     assert.match(

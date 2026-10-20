@@ -11,6 +11,11 @@ import {
   type RunningNode,
 } from './serve.js'
 import type { NodeRecord } from '../master/nodes.js'
+import type { MasterKey } from '../master/keys.js'
+import { importDeployment } from '../master/import.js'
+import type { ClientPasswordCosts } from '../auth/passwordProtocol.js'
+import { readStdin, setupCommand, withStoppedMaster } from '../setup/cli.js'
+import { writePrivate } from './dataDir.js'
 import {
   hostSystem,
   installService,
@@ -20,6 +25,10 @@ import {
 
 export interface MainIO {
   out(line: string): void
+  /** Standard input, read whole (for --password-stdin). */
+  stdin?(): Promise<string>
+  /** Client password costs for `mason setup`; calibrated when absent. */
+  passwordCosts?: ClientPasswordCosts
   err(line: string): void
   /** The operating system for `--install` and `--uninstall`. */
   system(): ServiceSystem
@@ -58,6 +67,11 @@ const usage = `Usage:
   mason nodes add --address <address> --key <pairing key> [--data <dir>]
   mason nodes list [--json] [--data <dir>]
   mason nodes remove <fingerprint> [--data <dir>]
+  mason setup --username <name> --password-stdin [--api-key-out <file>]
+  mason import --distribution <db> --builder <db> [--data <dir>]
+  mason keys create --role <role> [--name <n>] [--project <slug>]… [--branch <glob>]… [--app <id>]… --out <file>
+  mason keys list | mason keys revoke <id>
+  mason settings get <area> | mason settings set <area> --file <json>
 Options: --data <dir> --port <n> --link-port <n> --listen <address>
   --web-cert <file> --web-key <file> --web-plain --new-key --test-endpoints
   --install [--user <name>] --uninstall`
@@ -150,6 +164,103 @@ async function roleCommand(
   return 0
 }
 
+/** `mason import`: a stopped master's database from the current deployment. */
+async function importCommand(argv: string[], io: MainIO): Promise<number> {
+  const args = parseArgs(argv, ['--data', '--distribution', '--builder'], [])
+  const distribution = single(args, '--distribution')
+  const builder = single(args, '--builder')
+  if (distribution == null || builder == null || args.positional.length !== 0)
+    throw new Error(
+      'Usage: mason import --distribution <db> --builder <db> [--data <dir>]',
+    )
+  for (const file of [distribution, builder])
+    if (!existsSync(file)) throw new Error(`No database at ${file}`)
+  const summary = await withStoppedMaster(
+    resolveDataDir(single(args, '--data')),
+    (master) => importDeployment(master, { distribution, builder }),
+  )
+  io.out(JSON.stringify(summary, null, 2))
+  return 0
+}
+
+/** `mason keys …`: API keys, through the master's control socket. */
+async function keysCommand(argv: string[], io: MainIO): Promise<number> {
+  const [action, ...rest] = argv
+  const args = parseArgs(
+    rest,
+    ['--data', '--role', '--name', '--project', '--branch', '--app', '--out'],
+    ['--json'],
+  )
+  const data = resolveDataDir(single(args, '--data'))
+  if (action === 'create') {
+    const out = single(args, '--out')
+    const role = single(args, '--role')
+    if (out == null || role == null || args.positional.length !== 0)
+      throw new Error('Usage: mason keys create --role <role> --out <file>')
+    if (existsSync(out)) throw new Error(`${out} already exists`)
+    const name = single(args, '--name')
+    const key = (await controlRequest(data, 'keys.create', {
+      role,
+      ...(name == null ? {} : { name }),
+      projects: args.values.get('--project') ?? [],
+      branches: args.values.get('--branch') ?? [],
+      apps: (args.values.get('--app') ?? []).map(Number),
+    })) as MasterKey & { token: string }
+    writePrivate(out, key.token + '\n')
+    io.out(
+      `Created ${key.role} key ${key.id} (${key.name}); the token is in ${out}`,
+    )
+    return 0
+  }
+  if (action === 'list') {
+    const keys = (await controlRequest(data, 'keys.list')) as MasterKey[]
+    if (args.flags.has('--json')) io.out(JSON.stringify(keys))
+    else
+      for (const key of keys)
+        io.out(
+          `${key.id}  ${key.role}  ${key.name}${key.revoked ? '  revoked' : ''}`,
+        )
+    return 0
+  }
+  if (action === 'revoke' && args.positional.length === 1) {
+    await controlRequest(data, 'keys.revoke', { id: args.positional[0] })
+    io.out(`Revoked ${args.positional[0]}`)
+    return 0
+  }
+  throw new Error(usage)
+}
+
+/** `mason settings get|set <area>`, through the master's control socket. */
+async function settingsCommand(argv: string[], io: MainIO): Promise<number> {
+  const [action, area, ...rest] = argv
+  const args = parseArgs(rest, ['--data', '--file'], [])
+  const data = resolveDataDir(single(args, '--data'))
+  if (area == null || args.positional.length !== 0) throw new Error(usage)
+  if (action === 'get') {
+    io.out(
+      JSON.stringify(
+        await controlRequest(data, 'settings.get', { area }),
+        null,
+        2,
+      ),
+    )
+    return 0
+  }
+  const file = single(args, '--file')
+  if (action === 'set' && file != null) {
+    const value = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    io.out(
+      JSON.stringify(
+        await controlRequest(data, 'settings.set', { area, value }),
+        null,
+        2,
+      ),
+    )
+    return 0
+  }
+  throw new Error(usage)
+}
+
 /** `mason nodes …`: the master's nodes, through its control socket. */
 async function nodesCommand(argv: string[], io: MainIO): Promise<number> {
   const [action, ...rest] = argv
@@ -208,6 +319,15 @@ export async function nodeMain(
     if ((roles as readonly string[]).includes(first))
       return await roleCommand(first as Role, rest, io)
     if (first === 'nodes') return await nodesCommand(rest, io)
+    if (first === 'setup')
+      return await setupCommand(rest, {
+        out: io.out,
+        stdin: io.stdin ?? readStdin,
+        ...(io.passwordCosts == null ? {} : { costs: io.passwordCosts }),
+      })
+    if (first === 'import') return await importCommand(rest, io)
+    if (first === 'keys') return await keysCommand(rest, io)
+    if (first === 'settings') return await settingsCommand(rest, io)
     if (first === 'status') {
       const args = parseArgs(rest, ['--data'], ['--json'])
       if (args.positional.length !== 0) throw new Error(usage)
