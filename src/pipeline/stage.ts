@@ -48,6 +48,8 @@ export function maskValue(value: Json, secrets: string[]): Json {
 }
 
 export interface StepRecord {
+  /** Numbers the steps of one attempt; a step's start and end share it. */
+  id: number
   kind: string
   title: string
   status: 'running' | 'succeeded' | 'failed'
@@ -92,17 +94,22 @@ export async function runStage(options: StageOptions): Promise<StageResult> {
   mkdirSync(snapshot.privateDir, { recursive: true, mode: 0o700 })
   const secrets = [
     ...Object.values(snapshot.secrets),
-    ...Object.values(snapshot.files),
+    ...Object.values(snapshot.files).map((contents) =>
+      Buffer.from(contents, 'base64').toString(),
+    ),
   ]
   let activity: NodeJS.Timeout | undefined
   let stopped: 'cancelled' | 'timed_out' | undefined
+  let stopReason: string | undefined
   let stopping: Promise<boolean> | undefined
   const stop =
     (why: 'cancelled' | 'timed_out', message: string) => (): void => {
       if (stopped != null) return
       stopped = why
+      stopReason = message
       log.write(`\n${message}\n`)
-      channel?.notify('cancel')
+      // The stage's signal carries why, so its own error says so too.
+      channel?.notify('cancel', { reason: message })
       stopping = execution.stop()
     }
   const touch = (): void => {
@@ -171,7 +178,16 @@ export async function runStage(options: StageOptions): Promise<StageResult> {
     ),
     options.timeout * 1000,
   )
-  const cancel = stop('cancelled', 'The stage was cancelled.')
+  // The worker aborts with why: it is stopping, the master asked, the machine retires.
+  const cancel = (): void => {
+    const why: unknown = options.signal?.reason
+    stop(
+      'cancelled',
+      why instanceof Error && why.name !== 'AbortError'
+        ? `The stage was cancelled: ${why.message.replace(/\.$/, '')}.`
+        : 'The stage was cancelled.',
+    )()
+  }
   if (options.signal?.aborted === true) cancel()
   options.signal?.addEventListener('abort', cancel, { once: true })
   touch()
@@ -211,6 +227,7 @@ export async function runStage(options: StageOptions): Promise<StageResult> {
   if (stopped == null && result?.value !== undefined && status !== 'failed')
     out.value = maskValue(result.value, secrets)
   const reason =
+    stopReason ??
     result?.reason ??
     result?.error ??
     (stopped == null && result == null

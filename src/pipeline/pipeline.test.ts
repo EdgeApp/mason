@@ -336,7 +336,16 @@ describe('pipeline graph', () => {
         run: fn,
         needs: [{ name: 'later', kind: 'stage' }],
       })
-    }, /not declared before it/)
+    }, /needs later, which is not declared in workflow build/)
+    fails((m) => {
+      m.apiVersion(1)
+      m.stage('a', {
+        on: 'linux',
+        run: fn,
+        needs: [{ name: 'b', kind: 'stage' }],
+      })
+      m.stage('b', { on: 'linux', run: fn })
+    }, /has a cycle: a → b → a/)
     fails((m) => {
       m.apiVersion(1)
       m.stage('x', { on: 'linux', run: fn, timeout: 'soon' as '1h' })
@@ -1172,7 +1181,7 @@ export async function main(ctx: Stage) {
 `,
       {
         secrets: { API_TOKEN: 's3cr3t-value' },
-        files: { SIGNING_KEY: 'key material' },
+        files: { SIGNING_KEY: Buffer.from('key material').toString('base64') },
       },
     )
     assert.equal(out.result.status, 'succeeded', out.log)
@@ -1486,12 +1495,32 @@ export async function main(ctx: Stage) {
     const cancelled = await stage(source, {}, { signal: controller.signal })
     assert.equal(cancelled.result.status, 'cancelled')
     assert.match(cancelled.log, /The stage was cancelled\./)
+    // The worker's reason for the abort is the stage's reason.
+    const stopping = new AbortController()
+    setTimeout(() => {
+      stopping.abort(new Error('The worker is stopping'))
+    }, 1500)
+    const stopped = await stage(source, {}, { signal: stopping.signal })
+    assert.equal(stopped.result.status, 'cancelled')
+    assert.equal(
+      stopped.result.reason,
+      'The stage was cancelled: The worker is stopping.',
+    )
     const timed = await stage(source, {}, { timeout: 1 })
     assert.equal(timed.result.status, 'timed_out')
     assert.match(timed.log, /passed its 1 s timeout/)
+    assert.equal(
+      timed.result.reason,
+      'The stage passed its 1 s timeout; stopping it.',
+    )
+    assert(
+      !timed.log.includes('    at '),
+      'a stop is reported without a stack trace',
+    )
     const silent = await stage(source, {}, { activityTimeout: 1 })
     assert.equal(silent.result.status, 'timed_out')
     assert.match(silent.log, /No output for 1 s/)
+    assert.equal(silent.result.reason, 'No output for 1 s; stopping the stage.')
     const early = new AbortController()
     early.abort()
     const before = await stage(

@@ -7,7 +7,6 @@ import {
   json,
   NotFound,
 } from './api.js'
-import { BranchRefused, IdempotencyConflict, QueueFull } from './jobs.js'
 import { ProjectConflict, ProjectNotFound } from './projects.js'
 import { requireRole } from './roles.js'
 import type { Master } from './runtime.js'
@@ -21,7 +20,7 @@ const errors: express.ErrorRequestHandler = (error, req, res, next) => {
   apiErrors(error, req, res, next)
 }
 
-/** `/api/v2/projects`, the v1 job API and build-number seeding. */
+/** `/api/v2/projects` and build-number seeding. */
 export function projectsApi(master: Master): Router {
   const router = Router()
   const auth = authenticate(master.keys)
@@ -120,48 +119,5 @@ export function projectsApi(master: Master): Router {
   )
   router.use('/api/v2/build-numbers', errors)
 
-  // The v1 job API keeps its paths and fields for existing clients.
-  router.use(
-    ['/api/jobs', '/api/queue'],
-    express.json({ limit: '16kb', strict: true }),
-    auth,
-  )
-  router.post(
-    '/api/jobs',
-    json((req, res) => {
-      const job = master.jobs.request(
-        actorOf(res),
-        req.body,
-        req.socket.remoteAddress?.replace(/^::ffff:/, ''),
-      )
-      res.status(202)
-      return job
-    }),
-  )
-  router.get(
-    '/api/jobs/:id',
-    json((req, res) => {
-      requireRole(actorOf(res), 'developer')
-      const job = master.jobs.job(String(req.params.id))
-      if (job == null) throw new NotFound('Job not found')
-      return job
-    }),
-  )
-  router.get(
-    '/api/queue',
-    json((_req, res) => {
-      requireRole(actorOf(res), 'developer')
-      return master.jobs.pending()
-    }),
-  )
-  router.use(['/api/jobs', '/api/queue'], ((error, req, res, next) => {
-    if (
-      error instanceof BranchRefused ||
-      error instanceof QueueFull ||
-      error instanceof IdempotencyConflict
-    )
-      return void res.status(400).json({ error: error.message })
-    errors(error, req, res, next)
-  }) as express.ErrorRequestHandler)
   return router
 }

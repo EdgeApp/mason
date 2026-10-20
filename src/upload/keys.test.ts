@@ -92,10 +92,7 @@ describe('Mason operator API keys', () => {
     assert.equal(keys.authenticate(all.token, other).apps, 'all')
     keys.revoke(all.id)
     assert.throws(() => keys.authenticate(all.token, app))
-    assert.equal(
-      keys.list().find((row) => row.id === all.id)?.revoked,
-      true,
-    )
+    assert.equal(keys.list().find((row) => row.id === all.id)?.revoked, true)
     assert.throws(() => keys.revoke('0'.repeat(32)))
     assert.throws(() => keys.revoke('invalid'))
     for (const input of [[], [app, app], [0], {}, 'other'])
@@ -148,10 +145,7 @@ describe('Mason operator API keys', () => {
     assert.equal(keys.authenticate(credentials.token, app).name, 'Fixture')
     const file = path.join(root, 'saved.json')
     assert.match(cli(['import', '--file', file], created), /Saved/)
-    assert.match(
-      cli(['import', '--file', file, '--replace'], created),
-      /Saved/,
-    )
+    assert.match(cli(['import', '--file', file, '--replace'], created), /Saved/)
     const listed = cli(['list', '--config', configFile])
     assert(listed.includes('Fixture'))
     assert(!listed.includes(credentials.token))

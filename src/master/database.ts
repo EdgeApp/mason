@@ -29,6 +29,10 @@ export class MasterDatabase {
       )
       .run(actor.accountId ?? null, action, target, this.now(), actor.label)
   }
+  /** Called after each recorded change, in the master's process. */
+  readonly listeners = new Set<
+    (entity: string, key: string, operation: 'put' | 'delete') => void
+  >()
   /** Records a replicated write for the host's cache. */
   change(
     entity: string,
@@ -40,6 +44,8 @@ export class MasterDatabase {
         'INSERT INTO change_log(entity,key,operation,at) VALUES(?,?,?,?)',
       )
       .run(entity, String(key), operation, this.now())
+    for (const listener of this.listeners)
+      listener(entity, String(key), operation)
   }
   /** Whether a local admin exists, which locks the master's setup. */
   configured(): boolean {

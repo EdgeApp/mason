@@ -62,9 +62,19 @@ export interface Project {
   /** Secret names only; values are write-only. */
   env: Array<{ name: string; secret: boolean }>
   files: Array<{ destination: string; env?: string }>
+  /** Other repositories its stages may fetch: submodules and `ctx.checkout`. */
+  repositories: string[]
+  /** Whether `ctx.git.tag` with `push` may push tags to GitHub. */
+  tagPushes: boolean
 }
 
 const asProjectInput = asObject({
+  repositories: asOptional((value: unknown): string[] => {
+    const list = asArray(repository)(value)
+    if (list.length > 20) throw new Error('At most 20 extra repositories')
+    return [...new Set(list)]
+  }),
+  tagPushes: asOptional(asBoolean),
   name: asOptional(text(120)),
   repository: asOptional(repository),
   format: asOptional((value: unknown): 'pipeline' | 'script' => {
@@ -175,6 +185,8 @@ export class Projects {
       position: Number(row.position),
       defaultBranch: String(row.default_branch),
       script,
+      repositories: JSON.parse(String(row.repositories ?? '[]')) as string[],
+      tagPushes: row.tag_pushes === 1,
       webhookSecret: { set: row.webhook_secret != null },
       apps,
       rules: this.rules(id),
@@ -337,6 +349,14 @@ export class Projects {
             slug,
           )
       }
+      if (input.repositories != null)
+        this.db
+          .prepare('UPDATE projects SET repositories=? WHERE slug=?')
+          .run(JSON.stringify(input.repositories), slug)
+      if (input.tagPushes != null)
+        this.db
+          .prepare('UPDATE projects SET tag_pushes=? WHERE slug=?')
+          .run(Number(input.tagPushes), slug)
       this.master.audit(
         actor,
         existing == null ? 'project.create' : 'project.update',

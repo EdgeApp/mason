@@ -205,8 +205,15 @@ export class Jobs {
             "SELECT 1 FROM jobs WHERE project_id=? AND branch=? AND status IN ('queued','running')",
           )
           .get(project.id, branch) != null
-      )
+      ) {
+        // The branch is busy: remember the commit for when its run ends.
+        this.db
+          .prepare(
+            'INSERT INTO automatic_branches(project_id,branch,observed_commit) VALUES(?,?,?) ON CONFLICT(project_id,branch) DO UPDATE SET observed_commit=excluded.observed_commit',
+          )
+          .run(project.id, branch, commit)
         return undefined
+      }
       const attempt = this.db
         .prepare(
           'SELECT attempts,succeeded FROM automatic_attempts WHERE project_id=? AND branch=? AND commit_sha=?',
@@ -240,6 +247,25 @@ export class Jobs {
     })
   }
 
+  /**
+   * When a branch's run ends: the newest commit a push or poll saw while it
+   * was busy, if the branch is still automatic and has not tried that commit.
+   */
+  pushedSince(project: Project, branch: string): JobView | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT observed_commit,last_attempted_commit FROM automatic_branches WHERE project_id=? AND branch=?',
+      )
+      .get(project.id, branch)
+    if (
+      row?.observed_commit == null ||
+      row.observed_commit === row.last_attempted_commit ||
+      ruleFor(project.rules, branch)?.mode !== 'automatic'
+    )
+      return undefined
+    return this.automatic(project, branch, String(row.observed_commit))
+  }
+
   /** Records a successful automatic build so its commit is not built again. */
   succeeded(id: string): void {
     const row = this.db.prepare('SELECT * FROM jobs WHERE id=?').get(id)
@@ -265,6 +291,50 @@ export class Jobs {
       )
   }
 
+  /** A job of any workflow and trigger; the scheduler resolves its commit and graph. */
+  create(
+    project: Project,
+    branch: string,
+    trigger:
+      | 'push'
+      | 'request'
+      | 'schedule'
+      | 'after'
+      | 'deviceRegistered'
+      | 'restart',
+    options: {
+      workflow?: string
+      commit?: string
+      params?: Record<string, unknown>
+      actor?: Actor
+      restartOf?: string
+      restartFrom?: string
+      graphKey?: string
+    } = {},
+  ): JobView {
+    return this.master.transaction(() =>
+      this.insert(
+        project,
+        branch,
+        trigger,
+        JSON.stringify(asRequest({ app: project.slug, branch })),
+        {
+          ...(options.commit == null ? {} : { commit: options.commit }),
+          ...(options.actor == null ? {} : { actor: options.actor }),
+          workflow: options.workflow ?? 'build',
+          params: options.params ?? {},
+          ...(options.restartOf == null
+            ? {}
+            : { restartOf: options.restartOf }),
+          ...(options.restartFrom == null
+            ? {}
+            : { restartFrom: options.restartFrom }),
+          ...(options.graphKey == null ? {} : { graphKey: options.graphKey }),
+        },
+      ),
+    )
+  }
+
   private insert(
     project: Project,
     branch: string,
@@ -275,6 +345,11 @@ export class Jobs {
       clientIp?: string | undefined
       actor?: Actor
       commit?: string
+      workflow?: string
+      params?: Record<string, unknown>
+      restartOf?: string
+      restartFrom?: string
+      graphKey?: string
     },
   ): JobView {
     const count = Number(
@@ -287,14 +362,15 @@ export class Jobs {
       ).n,
     )
     if (count >= 100) throw new QueueFull()
+    const workflow = options.workflow ?? 'build'
     const number =
       Number(
         (
           this.db
             .prepare(
-              "SELECT COALESCE(MAX(number),0) n FROM jobs WHERE project_id=? AND workflow='build'",
+              'SELECT COALESCE(MAX(number),0) n FROM jobs WHERE project_id=? AND workflow=?',
             )
-            .get(project.id) as {
+            .get(project.id, workflow) as {
             n: number
           }
         ).n,
@@ -302,11 +378,12 @@ export class Jobs {
     const id = randomUUID()
     this.db
       .prepare(
-        "INSERT INTO jobs(id,project_id,workflow,number,branch,requested_commit,trigger,status,created,request,token,client_ip,key_id,actor) VALUES(?,?,'build',?,?,?,?,'queued',?,?,?,?,?,?)",
+        "INSERT INTO jobs(id,project_id,workflow,number,branch,requested_commit,trigger,status,created,request,token,client_ip,key_id,actor,params,restart_of,restart_from,graph_key) VALUES(?,?,?,?,?,?,?,'queued',?,?,?,?,?,?,?,?,?,?)",
       )
       .run(
         id,
         project.id,
+        workflow,
         number,
         branch,
         options.commit ?? null,
@@ -316,7 +393,11 @@ export class Jobs {
         options.token ?? null,
         options.clientIp ?? null,
         options.actor?.keyId ?? null,
-        options.actor?.label ?? 'poller',
+        options.actor?.label ?? (trigger === 'push' ? 'poller' : trigger),
+        JSON.stringify(options.params ?? {}),
+        options.restartOf ?? null,
+        options.restartFrom ?? null,
+        options.graphKey ?? null,
       )
     this.master.change('job', id)
     return this.job(id)!

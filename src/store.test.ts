@@ -115,14 +115,10 @@ describe('Mason durable store', () => {
       INSERT INTO install_grants(hash,build_id,session_hash,created_at,expires_at) VALUES('grant',${first.id},'session',0,9999999999999);`)
     migrateBranchNumbers(store.db)
     assert.equal(
-      store.db.prepare('SELECT build_id FROM install_grants').get()!
-        .build_id,
+      store.db.prepare('SELECT build_id FROM install_grants').get()!.build_id,
       first.id,
     )
-    assert.deepEqual(
-      store.db.prepare('PRAGMA foreign_key_check').all(),
-      [],
-    )
+    assert.deepEqual(store.db.prepare('PRAGMA foreign_key_check').all(), [])
     const next = stage('77', 'different')
     const other = store.publish(next.id, {
       ...next.input,
@@ -131,10 +127,7 @@ describe('Mason durable store', () => {
     assert.equal(other.build_number, first.build_number)
     assert.notEqual(other.branch, first.branch)
     const conflict = stage('77', 'conflict')
-    assert.throws(
-      () => store.publish(conflict.id, conflict.input),
-      /conflict/,
-    )
+    assert.throws(() => store.publish(conflict.id, conflict.input), /conflict/)
     store.cancel(conflict.id)
   })
   it('rejects unsafe existing state directories and replaceable ancestors', () => {
@@ -168,16 +161,10 @@ describe('Mason durable store', () => {
     const reopened = new Store(config)
     reopened.close()
     chmodSync(store.files, 0o777)
-    assert.throws(
-      () => store.filePath(published.file_key),
-      /State directories/,
-    )
+    assert.throws(() => store.filePath(published.file_key), /State directories/)
     chmodSync(store.files, 0o700)
     chmodSync(store.incoming, 0o777)
-    assert.throws(
-      () => store.incomingPath('a'.repeat(32)),
-      /State directories/,
-    )
+    assert.throws(() => store.incomingPath('a'.repeat(32)), /State directories/)
     chmodSync(store.incoming, 0o700)
     const file = path.join(root, 'regular')
     writeFileSync(file, 'fixture')

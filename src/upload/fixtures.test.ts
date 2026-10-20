@@ -14,9 +14,7 @@ export function plist(binary = false): Buffer {
     return Buffer.from(
       '<?xml version="1.0"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>' +
         Object.entries(fields)
-          .map(
-            ([key, value]) => `<key>${key}</key><string>${value}</string>`,
-          )
+          .map(([key, value]) => `<key>${key}</key><string>${value}</string>`)
           .join('') +
         '</dict></plist>',
     )
@@ -159,8 +157,7 @@ export function zip(entries: Array<[string, Buffer]>, flags = 0): Buffer {
 export function desktop(format: 'dmg' | 'msi' | 'exe'): Buffer {
   const file = Buffer.alloc(1024)
   if (format === 'dmg') file.write('koly', 512)
-  else if (format === 'msi')
-    Buffer.from('d0cf11e0a1b11ae1', 'hex').copy(file)
+  else if (format === 'msi') Buffer.from('d0cf11e0a1b11ae1', 'hex').copy(file)
   else {
     file.write('MZ')
     file.writeUInt32LE(64, 60)

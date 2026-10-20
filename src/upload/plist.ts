@@ -1,9 +1,5 @@
 import { asArray, asObject, asString, asUnknown } from 'cleaners'
-import {
-  parseBuffer,
-  setMaxObjectCount,
-  setMaxObjectSize,
-} from 'bplist-parser'
+import { parseBuffer, setMaxObjectCount, setMaxObjectSize } from 'bplist-parser'
 import { XMLParser, XMLValidator } from 'fast-xml-parser'
 import { text } from '../validation.js'
 

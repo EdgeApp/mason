@@ -35,7 +35,7 @@ export interface StageSnapshot {
   env: Record<string, string>
   /** Only the secrets the stage declared. */
   secrets: Record<string, string>
-  /** Only the secret files the stage declared, by name. */
+  /** Only the secret files the stage declared, by name, base64-encoded as the master stores them. */
   files: Record<string, string>
   buildNumbers: Record<string, string>
   /** Outputs of stages that finished before this one was assigned. */
@@ -114,16 +114,19 @@ export function createContext(
   const write = (text: string): void => {
     process.stdout.write(text.endsWith('\n') ? text : text + '\n')
   }
+  let steps = 0
   const step = async <T>(
     kind: string,
     title: string,
     body: () => Promise<T>,
   ): Promise<T> => {
     const started = Date.now()
-    channel.notify('step', { kind, title, status: 'running' })
+    const id = ++steps
+    channel.notify('step', { id, kind, title, status: 'running' })
     try {
       const value = await body()
       channel.notify('step', {
+        id,
         kind,
         title,
         status: 'succeeded',
@@ -132,6 +135,7 @@ export function createContext(
       return value
     } catch (error) {
       channel.notify('step', {
+        id,
         kind,
         title,
         status: 'failed',
@@ -289,7 +293,10 @@ export function createContext(
       if (file == null) {
         file = path.join(snapshot.privateDir, `secret-${secretFiles.size + 1}`)
         // Owner-only, and never replacing a file that is already there.
-        writeFileSync(file, contents, { mode: 0o600, flag: 'wx' })
+        writeFileSync(file, Buffer.from(contents, 'base64'), {
+          mode: 0o600,
+          flag: 'wx',
+        })
         secretFiles.set(name, file)
       }
       return file

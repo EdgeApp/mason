@@ -344,6 +344,7 @@ export class Recorder {
   private version: number | undefined
   private count = 0
   private buildOptions = false
+  private readonly refs = new Map<string, Map<string, string[]>>()
 
   constructor(
     readonly context: SetupContext,
@@ -480,6 +481,23 @@ export class Recorder {
           )
       }
     }
+    for (const workflow of workflows) {
+      const refs = this.refs.get(workflow.name) ?? new Map<string, string[]>()
+      for (const stage of [...workflow.stages, ...workflow.post])
+        stage.needs = [
+          ...new Set(
+            stage.needs.flatMap((need) => {
+              if (!need.startsWith('\u0000')) return [need]
+              const exits = refs.get(need.slice(1))
+              if (exits == null)
+                throw new GraphError(
+                  `Stage ${stage.name} needs ${need.slice(1)}, which is not declared in workflow ${workflow.name}`,
+                )
+              return exits
+            }),
+          ),
+        ]
+    }
     const graph: Graph = {
       apiVersion: this.version,
       format: 'pipeline',
@@ -564,7 +582,8 @@ export class Recorder {
   private builder(workflow: GraphWorkflow): WorkflowBuilder {
     // The exits of the item declared last: what a stage with no `needs` waits for.
     let previous: string[] = []
-    const refs = new Map<string, string[]>()
+    const refs = this.refs.get(workflow.name) ?? new Map<string, string[]>()
+    this.refs.set(workflow.name, refs)
     const ref = (
       name: string,
       kind: StageRef['kind'],
@@ -581,12 +600,10 @@ export class Recorder {
       return [
         ...new Set(
           needs.flatMap((need) => {
-            const exits = refs.get(need?.name)
-            if (exits == null)
-              throw new GraphError(
-                `${what} needs ${String(need?.name)}, which is not declared before it in workflow ${workflow.name}`,
-              )
-            return exits
+            if (typeof need?.name !== 'string')
+              throw new GraphError(`${what}: needs lists stage references`)
+            // A reference to a stage declared later resolves when setup ends.
+            return refs.get(need.name) ?? [`\u0000${need.name}`]
           }),
         ),
       ]

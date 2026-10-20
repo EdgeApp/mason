@@ -140,9 +140,7 @@ export class ApiKeys {
   }
   list(): Key[] {
     return this.store.db
-      .prepare(
-        'SELECT * FROM api_keys ORDER BY created_at DESC,id LIMIT 1000',
-      )
+      .prepare('SELECT * FROM api_keys ORDER BY created_at DESC,id LIMIT 1000')
       .all()
       .map((row) => publicKey(asKey(row)))
   }
@@ -178,12 +176,8 @@ export class ApiKeys {
   revoke(id: string): void {
     id = asKeyId(id)
     this.store.transaction(() => {
-      asKey(
-        this.store.db.prepare('SELECT * FROM api_keys WHERE id=?').get(id),
-      )
-      this.store.db
-        .prepare('UPDATE api_keys SET revoked=1 WHERE id=?')
-        .run(id)
+      asKey(this.store.db.prepare('SELECT * FROM api_keys WHERE id=?').get(id))
+      this.store.db.prepare('UPDATE api_keys SET revoked=1 WHERE id=?').run(id)
       this.store.db
         .prepare('INSERT INTO audit(action,target,at) VALUES(?,?,?)')
         .run('key.revoke', id, this.store.now())

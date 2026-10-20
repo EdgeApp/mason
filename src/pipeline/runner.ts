@@ -59,8 +59,13 @@ export async function stageMain(port: Port): Promise<number> {
     controller.abort(new Error(why))
   }
   process.on('SIGTERM', stop('Stage stopped'))
-  channel.onNotice((type) => {
-    if (type === 'cancel') stop('Stage cancelled')()
+  channel.onNotice((type, data) => {
+    if (type === 'cancel')
+      stop(
+        typeof (data as { reason?: unknown } | null)?.reason === 'string'
+          ? (data as { reason: string }).reason
+          : 'Stage cancelled',
+      )()
   })
   const snapshot = await new Promise<StageSnapshot>((resolve) => {
     channel.onNotice((type, data) => {
@@ -94,7 +99,8 @@ export async function stageMain(port: Port): Promise<number> {
       ...(out.unstable == null ? {} : { reason: out.unstable }),
     }
   } catch (error) {
-    report(error)
+    // A stop already explained itself in the log.
+    if (error !== controller.signal.reason) report(error)
     result = {
       status: 'failed',
       error: error instanceof Error ? error.message : String(error),

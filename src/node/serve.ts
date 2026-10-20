@@ -42,6 +42,7 @@ import { memoryPair } from '../link/wire.js'
 import type { NodeRegistry } from '../master/nodes.js'
 import { Master, type MasterOptions } from '../master/runtime.js'
 import { privateDirectory } from '../config.js'
+import { WorkerRuntime, type WorkerOptions } from '../worker/stage.js'
 
 export type Role = 'master' | 'worker' | 'host'
 export const defaultPorts = { master: 9300, host: 9200, link: 9310 }
@@ -65,9 +66,23 @@ export interface NodeOptions {
   nodeMethods?: MethodTable
   heartbeatMs?: number
   redialBaseMs?: number
-  /** Master internals for tests: GitHub API origin, branch heads, poll interval. */
-  masterOptions?: Pick<MasterOptions, 'github' | 'headLister'>
+  /** Master internals for tests: GitHub API origin, branch heads, repository remotes, pass interval. */
+  masterOptions?: Pick<
+    MasterOptions,
+    | 'github'
+    | 'headLister'
+    | 'remote'
+    | 'tickMs'
+    | 'timeZone'
+    | 'graceMs'
+    | 'stashLimit'
+    | 'now'
+  >
   pollMs?: number
+  /** Stages a worker runs at once (the master's node setting can lower it). */
+  slots?: number
+  /** Worker internals for tests. */
+  workerOptions?: Pick<WorkerOptions, 'inspect' | 'flushMs'>
 }
 
 export interface NodeStatus {
@@ -104,6 +119,8 @@ export interface RunningNode {
   links?: NodeLinks
   /** On `master --worker`: the worker's end of the in-process link. */
   localWorker?: Link
+  /** On a worker, or a master with a worker: the worker role. */
+  worker?: WorkerRuntime
   status(): NodeStatus
   close(): Promise<void>
 }
@@ -268,6 +285,7 @@ export async function startNode(
             onConfigured: (): void => clearSetupCode(dir),
             ...options.masterOptions,
             scratch: privateScratch(dir),
+            dir,
           })
     const configured = (): boolean => master?.configured() ?? false
     if (options.role === 'master' || options.role === 'host') {
@@ -309,13 +327,49 @@ export async function startNode(
     }
     let pairing: Pairing | undefined
     let links: NodeLinks | undefined
+    let worker: WorkerRuntime | undefined
+    let workerLink: () => Link | undefined = () => undefined
+    const workerDb = databases.get('worker.sqlite')
+    if (workerDb != null) {
+      // A worker beside a master keeps its files apart from the master's stashes and logs.
+      const workerDir = options.coWorker ? path.join(dir, 'worker') : dir
+      privateDirectory(workerDir)
+      worker = new WorkerRuntime({
+        dir: workerDir,
+        db: workerDb,
+        version,
+        link: (): Link | undefined => workerLink(),
+        assignment: (): typeof localAssignment =>
+          pairing?.assignment() ?? localAssignment,
+        ...(options.slots == null ? {} : { slots: options.slots }),
+        ...options.workerOptions,
+      })
+      await worker.start()
+      const running = worker
+      cleanup.push(async () => await running.stop())
+    }
+    let localAssignment:
+      | { name: string; type: string; labels: string[] }
+      | undefined
+    const workerMethods = (): MethodTable => ({
+      requests: {
+        ...worker?.methods().requests,
+        ...options.nodeMethods?.requests,
+      },
+      events: { ...options.nodeMethods?.events },
+      streams: { ...options.nodeMethods?.streams },
+    })
     if (link != null) {
       pairing = new Pairing(dir, identity)
       if (options.newKey) pairing.reset()
       links = serveNodeLinks(link.server as HttpsServer, {
         pairing,
         role: options.role as 'worker' | 'host',
-        methods: options.nodeMethods ?? {},
+        methods:
+          options.role === 'worker'
+            ? workerMethods()
+            : (options.nodeMethods ?? {}),
+        onLink: () => worker?.flushSoon(),
         ...(options.heartbeatMs == null
           ? {}
           : { heartbeatMs: options.heartbeatMs }),
@@ -325,6 +379,7 @@ export async function startNode(
       })
       const nodeLinks = links
       cleanup.push(() => nodeLinks.close())
+      workerLink = (): Link | undefined => nodeLinks.current()
     }
     let registry: NodeRegistry | undefined
     let localWorker: Link | undefined
@@ -335,19 +390,25 @@ export async function startNode(
       cleanup.push(async () => await running.stop())
       if (options.coWorker) {
         const [masterWire, workerWire] = memoryPair()
+        const methods = workerMethods()
         localWorker = new Link(workerWire, {
           localRole: 'worker',
           peerRole: 'master',
           dialer: false,
           methods: {
-            ...options.nodeMethods,
+            ...methods,
             requests: {
-              ...options.nodeMethods?.requests,
-              'node.configure': (params): unknown => params,
+              ...methods.requests,
+              'node.configure': (params): unknown => {
+                localAssignment = params as typeof localAssignment
+                return params
+              },
             },
           },
           peer: { fingerprint: identity.fingerprint, version },
         })
+        const local = localWorker
+        workerLink = (): Link | undefined => (local.closed ? undefined : local)
         await nodes.attachLocal(masterWire, identity.fingerprint, hostname())
       }
       master.start(options.pollMs)
@@ -374,10 +435,19 @@ export async function startNode(
         : {}),
       testEndpoints,
     })
-    const nodeHandlers: Record<string, ControlHandler> =
-      master == null
+    const nodeHandlers: Record<string, ControlHandler> = {
+      ...(master == null
         ? { pairing: () => pairing?.key() ?? null }
-        : master.controlHandlers()
+        : master.controlHandlers()),
+      ...(worker == null
+        ? {}
+        : {
+            recover: (): null => {
+              worker!.recover()
+              return null
+            },
+          }),
+    }
     const control = await serveControl(dir, {
       status,
       ...nodeHandlers,
@@ -423,6 +493,7 @@ export async function startNode(
       ...(pairing == null ? {} : { pairing }),
       ...(links == null ? {} : { links }),
       ...(localWorker == null ? {} : { localWorker }),
+      ...(worker == null ? {} : { worker }),
       status,
       close,
     }

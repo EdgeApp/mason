@@ -15,6 +15,8 @@ export class MaskedLog {
     private readonly secrets: string[],
     private readonly limit = 4 * 1024 * 1024,
     readonly fullFile?: string,
+    /** Receives every redacted chunk, for streaming the log elsewhere. */
+    private readonly onOutput?: (redacted: string) => void,
   ) {
     writeFileSync(file, '', { flag: 'wx', mode: 0o600 })
     if (fullFile != null)
@@ -54,6 +56,7 @@ export class MaskedLog {
     }
     this.pending = this.pending.slice(i)
     const redacted = Buffer.from(out)
+    if (out.length > 0) this.onOutput?.(out)
     if (this.fullFile != null && redacted.length > 0)
       appendFileSync(this.fullFile, redacted)
     const data = redacted.subarray(
@@ -138,7 +141,9 @@ export class Execution {
     if (this.inspectionFailed)
       this.log.write('Process inspection recovered.\n')
     this.inspectionFailed = false
-    const owned = new Set<number>([process.pid])
+    // Ownership starts from the processes this execution spawned, so several
+    // executions in one process (a worker's slots) never claim each other's.
+    const owned = new Set<number>()
     for (const pid of this.roots) {
       const previous = this.children.get(pid)
       if (

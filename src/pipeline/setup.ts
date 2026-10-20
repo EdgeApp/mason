@@ -17,6 +17,8 @@ export const runnerPath = fileURLToPath(new URL('./runner.js', import.meta.url))
 /** The environment every runner starts from: no secret, file or token, ever. */
 export function runnerEnvironment(): Record<string, string> {
   const env = baseEnvironment() as Record<string, string>
+  // Masonfile code never reaches the operator's SSH agent.
+  delete env.SSH_AUTH_SOCK
   // Lets a coverage run measure the runner; it is a directory path, not a secret.
   if (process.env.NODE_V8_COVERAGE != null)
     env.NODE_V8_COVERAGE = process.env.NODE_V8_COVERAGE

@@ -426,6 +426,43 @@ describe('Projects, branch rules and build numbers', function () {
       assert.throws(() => asRules(bad))
   })
 
+  it('builds a push that arrives while the branch is busy as soon as its run ends', () => {
+    const master = database()
+    const projects = new Projects(master)
+    const jobs = new Jobs(master, projects)
+    projects.save(localOperator, 'q', { repository: 'https://github.com/a/q' })
+    projects.setRules(localOperator, 'q', [
+      { pattern: 'release', mode: 'automatic' },
+    ])
+    const project = projects.get('q')
+    const first = jobs.automatic(project, 'release', commit(50))!
+    assert.equal(jobs.automatic(project, 'release', commit(51)), undefined)
+    assert.equal(jobs.automatic(project, 'release', commit(52)), undefined)
+    // Still busy: nothing yet.
+    assert.equal(jobs.pushedSince(project, 'release'), undefined)
+    master.db
+      .prepare("UPDATE jobs SET status='failed' WHERE id=?")
+      .run(first.id)
+    const next = jobs.pushedSince(project, 'release')!
+    assert.equal(next.requested_commit, commit(52))
+    master.db
+      .prepare("UPDATE jobs SET status='succeeded' WHERE id=?")
+      .run(next.id)
+    // That commit was tried; a branch no longer automatic waits for a request.
+    assert.equal(jobs.pushedSince(project, 'release'), undefined)
+    assert.equal(
+      jobs.automatic(project, 'release', commit(53))!.branch,
+      'release',
+    )
+    assert.equal(jobs.automatic(project, 'release', commit(54)), undefined)
+    master.db
+      .prepare("UPDATE jobs SET status='failed' WHERE branch='release'")
+      .run()
+    projects.setRules(localOperator, 'q', [{ pattern: '*', mode: 'request' }])
+    assert.equal(jobs.pushedSince(projects.get('q'), 'release'), undefined)
+    assert.equal(jobs.pushedSince(project, 'unknown'), undefined)
+  })
+
   it('polls automatic branches by rule, capped, with three attempts per commit and one pending job', async () => {
     const master = database()
     const projects = new Projects(master)
@@ -621,10 +658,10 @@ describe('Projects, branch rules and build numbers', function () {
           job.json.project,
           job.json.branch,
           job.json.status,
-          job.json.trigger,
+          job.json.automatic,
           job.json.number,
         ],
-        ['fixtures', 'feature/x', 'queued', 'request', 1],
+        ['fixtures', 'feature/x', 'queued', 0, 1],
       )
       const byApp = await api(node, 'POST', '/api/jobs', admin, {
         app: 'app.teamstation.masonfixture',

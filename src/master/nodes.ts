@@ -19,6 +19,10 @@ export interface NodeRecord {
   name: string
   type: string
   labels: string[]
+  /** Stages it runs at once. */
+  slots: number
+  /** Absolute directories custom workspace paths may name on this node. */
+  workspaceRoots: string[]
   version: string
   addedAt: number
   lastSeen?: number
@@ -36,6 +40,8 @@ const asRow = asObject({
   name: asString,
   type: asString,
   labels: asString,
+  slots: asOptional(asNumber, 1),
+  workspace_roots: asOptional(asString, '[]'),
   version: asString,
   added_at: asNumber,
   last_seen: (value: unknown): number | undefined =>
@@ -100,6 +106,8 @@ export class NodeRegistry extends EventEmitter {
       name: row.name,
       type: row.type,
       labels: asArray(asString)(JSON.parse(row.labels)),
+      slots: row.slots,
+      workspaceRoots: asArray(asString)(JSON.parse(row.workspace_roots)),
       version: row.version,
       addedAt: row.added_at,
       ...(row.last_seen == null ? {} : { lastSeen: row.last_seen }),
@@ -211,13 +219,42 @@ export class NodeRegistry extends EventEmitter {
     await this.attach(fingerprint, wire, 'worker', masonVersion)
   }
 
-  /** Changes a node's name, type and labels and sends them to it. */
+  /** Changes a node's name, type and labels and sends them to it; slots and workspace roots stay on the master. */
   async assign(
     fingerprint: string,
-    value: { name?: string; type?: string; labels?: string[] },
+    value: {
+      name?: string
+      type?: string
+      labels?: string[]
+      slots?: number
+      workspaceRoots?: string[]
+    },
   ): Promise<NodeRecord> {
     const row = this.row(fingerprint)
     if (row == null || row.removed) throw new Error('No such node')
+    if (value.slots != null) {
+      if (
+        !Number.isSafeInteger(value.slots) ||
+        value.slots < 1 ||
+        value.slots > 64
+      )
+        throw new Error('slots is 1–64')
+      this.db
+        .prepare('UPDATE nodes SET slots=? WHERE fingerprint=?')
+        .run(value.slots, fingerprint)
+    }
+    if (value.workspaceRoots != null) {
+      const roots = asArray(asString)(value.workspaceRoots)
+      if (
+        roots.some(
+          (root) => !root.startsWith('/') || root.split('/').includes('..'),
+        )
+      )
+        throw new Error('Workspace roots are absolute paths')
+      this.db
+        .prepare('UPDATE nodes SET workspace_roots=? WHERE fingerprint=?')
+        .run(JSON.stringify(roots), fingerprint)
+    }
     const assigned = asObject({
       name: asOptional(asString, row.name),
       type: asOptional(asString, row.type),

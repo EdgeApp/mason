@@ -65,6 +65,8 @@ type Message =
       method?: string
       params?: unknown
       bytes?: number
+      /** Why a stream was aborted, for the other end's error. */
+      reason?: string
     }
 
 /**
@@ -115,7 +117,12 @@ export class Stream extends EventEmitter {
   abort(reason = 'Stream aborted'): void {
     if (this.aborted != null) return
     this.receiveAbort(reason)
-    this.link.sendMessage({ kind: 'stream', op: 'abort', stream: this.id })
+    this.link.sendMessage({
+      kind: 'stream',
+      op: 'abort',
+      stream: this.id,
+      reason: reason.slice(0, 500),
+    })
   }
   /** Reads every chunk until the end; rejects if the stream is aborted. */
   async collect(limit = Number.MAX_SAFE_INTEGER): Promise<Buffer> {
@@ -479,7 +486,12 @@ export class Link extends EventEmitter {
         return this.violation()
       stream.receiveCredit(message.bytes!)
     } else if (op === 'end') stream.receiveEnd()
-    else if (op === 'abort') stream.receiveAbort('Stream aborted by peer')
+    else if (op === 'abort')
+      stream.receiveAbort(
+        typeof message.reason === 'string' && message.reason !== ''
+          ? message.reason.slice(0, 500)
+          : 'Stream aborted by peer',
+      )
     else this.violation()
   }
 

@@ -67,6 +67,10 @@ const usage = `Usage:
   mason nodes add --address <address> --key <pairing key> [--data <dir>]
   mason nodes list [--json] [--data <dir>]
   mason nodes remove <fingerprint> [--data <dir>]
+  mason nodes set <name|fingerprint> [--name <n>] [--type <t>] [--label <l>]… [--slots <n>] [--workspace-root <dir>]…
+  mason runs list [--project <slug>] [--workflow <w>] [--branch <b>] [--status <s>] [--json]
+  mason runs cleanup                       apply retention now (the master does it hourly)
+  mason recover                            clear a worker's guardian quarantine after checking it
   mason setup --username <name> --password-stdin [--api-key-out <file>]
   mason import --distribution <db> --builder <db> [--data <dir>]
   mason keys create --role <role> [--name <n>] [--project <slug>]… [--branch <glob>]… [--app <id>]… --out <file>
@@ -75,7 +79,7 @@ const usage = `Usage:
   mason projects list | get <slug> | set <slug> --file <json> | remove <slug>
   mason build-numbers seed --project <slug> --key <key> --from <buildNum.json>
 Options: --data <dir> --port <n> --link-port <n> --listen <address>
-  --web-cert <file> --web-key <file> --web-plain --new-key --test-endpoints
+  --web-cert <file> --web-key <file> --web-plain --new-key --test-endpoints --slots <n>
   --install [--user <name>] --uninstall`
 
 /** Waits for a node service to come up and answer on its control socket. */
@@ -339,9 +343,66 @@ async function buildNumbersCommand(
 }
 
 /** `mason nodes …`: the master's nodes, through its control socket. */
+async function runsCommand(argv: string[], io: MainIO): Promise<number> {
+  const [action, ...rest] = argv
+  const args = parseArgs(
+    rest,
+    ['--data', '--project', '--workflow', '--branch', '--status', '--limit'],
+    ['--json'],
+  )
+  const data = resolveDataDir(single(args, '--data'))
+  if (action === 'cleanup') {
+    const out = (await controlRequest(data, 'runs.cleanup')) as {
+      runs: number
+      stashes: number
+      graphs: number
+    }
+    io.out(
+      `Removed ${out.runs} run(s), the stashes of ${out.stashes} run(s) and ${out.graphs} unused graph(s).`,
+    )
+    return 0
+  }
+  if (action === 'list') {
+    const filter: Record<string, string> = {}
+    for (const name of ['project', 'workflow', 'branch', 'status', 'limit']) {
+      const value = single(args, `--${name}`)
+      if (value != null) filter[name] = value
+    }
+    const runs = (await controlRequest(data, 'runs.list', filter)) as Array<{
+      id: string
+      project: string
+      workflow: string
+      number: number
+      branch: string
+      status: string
+    }>
+    if (args.flags.has('--json')) io.out(JSON.stringify(runs))
+    else
+      for (const run of runs)
+        io.out(
+          `${run.id}  ${run.project} ${run.workflow} #${run.number}  ${run.branch}  ${run.status}`,
+        )
+    return 0
+  }
+  throw new Error(usage)
+}
+
 async function nodesCommand(argv: string[], io: MainIO): Promise<number> {
   const [action, ...rest] = argv
-  const args = parseArgs(rest, ['--data', '--address', '--key'], ['--json'])
+  const args = parseArgs(
+    rest,
+    [
+      '--data',
+      '--address',
+      '--key',
+      '--name',
+      '--type',
+      '--label',
+      '--slots',
+      '--workspace-root',
+    ],
+    ['--json'],
+  )
   const data = resolveDataDir(single(args, '--data'))
   if (action === 'add') {
     const address = single(args, '--address')
@@ -368,6 +429,28 @@ async function nodesCommand(argv: string[], io: MainIO): Promise<number> {
         io.out(
           `${node.fingerprint}  ${node.role}  ${node.name}  ${node.host}:${node.port}  ${node.connected ? 'linked' : 'not linked'}`,
         )
+    return 0
+  }
+  if (action === 'set' && args.positional.length === 1) {
+    const value: Record<string, unknown> = {}
+    const name = single(args, '--name')
+    if (name != null) value.name = name
+    const type = single(args, '--type')
+    if (type != null) value.type = type
+    if (args.values.has('--label')) value.labels = args.values.get('--label')
+    const slots = single(args, '--slots')
+    if (slots != null) value.slots = Number(slots)
+    if (args.values.has('--workspace-root'))
+      value.workspaceRoots = args.values.get('--workspace-root')
+    const node = (await controlRequest(data, 'nodes.set', {
+      node: args.positional[0],
+      value,
+    })) as NodeRecord
+    io.out(
+      args.flags.has('--json')
+        ? JSON.stringify(node)
+        : `${node.name}: type ${node.type || '(none)'}, labels ${node.labels.join(',') || '(none)'}, ${node.slots} slot(s)`,
+    )
     return 0
   }
   if (action === 'remove' && args.positional.length === 1) {
@@ -407,6 +490,13 @@ export async function nodeMain(
     if (first === 'settings') return await settingsCommand(rest, io)
     if (first === 'projects') return await projectsCommand(rest, io)
     if (first === 'build-numbers') return await buildNumbersCommand(rest, io)
+    if (first === 'runs') return await runsCommand(rest, io)
+    if (first === 'recover') {
+      const args = parseArgs(rest, ['--data'], [])
+      await controlRequest(resolveDataDir(single(args, '--data')), 'recover')
+      io.out('Quarantine cleared; the worker takes stages again.')
+      return 0
+    }
     if (first === 'status') {
       const args = parseArgs(rest, ['--data'], ['--json'])
       if (args.positional.length !== 0) throw new Error(usage)

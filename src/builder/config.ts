@@ -29,10 +29,7 @@ export function branchName(value: unknown): string {
     out.endsWith('/') ||
     out
       .split('/')
-      .some(
-        (p) =>
-          p.startsWith('.') || p.endsWith('.') || p.endsWith('.lock'),
-      )
+      .some((p) => p.startsWith('.') || p.endsWith('.') || p.endsWith('.lock'))
   )
     throw new Error('Invalid branch')
   return out
@@ -50,9 +47,7 @@ export function repository(value: unknown): string {
     match[2] === '.' ||
     match[2] === '..'
   )
-    throw new Error(
-      'Expected a GitHub repository without credentials',
-    )
+    throw new Error('Expected a GitHub repository without credentials')
   const prefix = out.startsWith('git@')
     ? 'git@github.com:'
     : 'https://github.com/'
@@ -119,9 +114,7 @@ const definition = object({
     [],
   ),
 })
-export function asDefinition(
-  value: unknown,
-): ReturnType<typeof definition> {
+export function asDefinition(value: unknown): ReturnType<typeof definition> {
   const out = definition(value)
   if (
     ['git', 'files', 'logs', 'executions'].includes(
@@ -143,15 +136,12 @@ export function asDefinition(
   ]
   if (
     new Set(names).size !== names.length ||
-    new Set(out.files.map((f) => f.destination)).size !==
-      out.files.length
+    new Set(out.files.map((f) => f.destination)).size !== out.files.length
   )
     throw new Error('Duplicate configuration')
   if (
     out.files.some((f) =>
-      ['Masonfile.ts', 'Masonfile.js', out.entrypoint].includes(
-        f.destination,
-      ),
+      ['Masonfile.ts', 'Masonfile.js', out.entrypoint].includes(f.destination),
     )
   )
     throw new Error('Cannot inject the entrypoint')
@@ -183,12 +173,10 @@ function asEnvVars(value: unknown): Array<Record<string, string>> {
       throw new Error('Expected one environment variable per object')
     const [name, raw] = entries[0]!
     const value = envValue(raw)
-    if (value.length > 4096)
-      throw new Error('Environment override too long')
+    if (value.length > 4096) throw new Error('Environment override too long')
     return [envName(name), value] as const
   })(value)
-  if (entries.length > 100)
-    throw new Error('Too many environment overrides')
+  if (entries.length > 100) throw new Error('Too many environment overrides')
   if (new Set(entries.map(([name]) => name)).size !== entries.length)
     throw new Error('Duplicate environment override')
   const out = entries
@@ -203,8 +191,7 @@ export const asRequest = object({
   branch: asOptional(branchName),
   platforms: asOptional(asArray(asPlatform)),
   idempotencyKey: asOptional(text(100)),
-  envVars: (value: unknown) =>
-    value === undefined ? [] : asEnvVars(value),
+  envVars: (value: unknown) => (value === undefined ? [] : asEnvVars(value)),
 })
 export type JobRequest = ReturnType<typeof asRequest>
 export function commitHash(value: unknown): string {
@@ -223,25 +210,31 @@ export function asBuildSettings(
   const out = buildSettings(value)
   if (
     out.automaticBranches.length > 20 ||
-    new Set(out.automaticBranches).size !==
-      out.automaticBranches.length
+    new Set(out.automaticBranches).size !== out.automaticBranches.length
   )
     throw new Error('Invalid automatic branches')
   return out
 }
-export function baseEnvironment(): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    [
-      'PATH',
-      'HOME',
-      'USER',
-      'LOGNAME',
-      'TMPDIR',
-      'LANG',
-      'SSH_AUTH_SOCK',
-      'DEVELOPER_DIR',
-    ].flatMap((name) =>
-      process.env[name] == null ? [] : [[name, process.env[name]!]],
+export function baseEnvironment(
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  return {
+    // A launchd or systemd service starts with no locale, and tools such as
+    // CocoaPods then refuse non-ASCII text.
+    LANG: platform === 'darwin' ? 'en_US.UTF-8' : 'C.UTF-8',
+    ...Object.fromEntries(
+      [
+        'PATH',
+        'HOME',
+        'USER',
+        'LOGNAME',
+        'TMPDIR',
+        'LANG',
+        'SSH_AUTH_SOCK',
+        'DEVELOPER_DIR',
+      ].flatMap((name) =>
+        process.env[name] == null ? [] : [[name, process.env[name]!]],
+      ),
     ),
-  )
+  }
 }

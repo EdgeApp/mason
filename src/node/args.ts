@@ -69,6 +69,7 @@ const roleValued = [
   '--web-cert',
   '--web-key',
   '--user',
+  '--slots',
 ] as const
 const roleSwitches = [
   '--web-plain',
@@ -118,6 +119,12 @@ export function parseRoleCommand(role: Role, argv: string[]): RoleCommand {
     const value = single(args, flag)
     if (value != null) options[key] = value
   }
+  const slots = single(args, '--slots')
+  if (slots != null) {
+    if (!/^\d+$/.test(slots) || Number(slots) < 1 || Number(slots) > 64)
+      throw new Error('--slots is 1–64')
+    options.slots = Number(slots)
+  }
   if (args.flags.has('--web-plain')) options.webPlain = true
   if (args.flags.has('--new-key')) options.newKey = true
   if (args.flags.has('--test-endpoints')) options.testEndpoints = true
@@ -128,6 +135,7 @@ export function parseRoleCommand(role: Role, argv: string[]): RoleCommand {
     '--listen',
     '--web-cert',
     '--web-key',
+    '--slots',
   ])
     for (const value of args.values.get(name) ?? [])
       serviceArgs.push(name, value)

@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 3
+export const MASTER_SCHEMA = 4
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -144,6 +144,59 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, key TEXT NOT NULL,
       reservation TEXT NOT NULL, value TEXT NOT NULL, created_at INTEGER NOT NULL,
       PRIMARY KEY(project_id, key, reservation)
+    ) STRICT;`)
+  },
+  (db): void => {
+    db.exec(`
+    ALTER TABLE nodes ADD COLUMN slots INTEGER NOT NULL DEFAULT 1 CHECK(slots BETWEEN 1 AND 64);
+    ALTER TABLE nodes ADD COLUMN workspace_roots TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE projects ADD COLUMN repositories TEXT NOT NULL DEFAULT '[]';
+    ALTER TABLE projects ADD COLUMN tag_pushes INTEGER NOT NULL DEFAULT 0 CHECK(tag_pushes IN (0,1));
+    ALTER TABLE jobs ADD COLUMN description TEXT;
+    ALTER TABLE jobs ADD COLUMN graph_key TEXT;
+    ALTER TABLE jobs ADD COLUMN restart_of TEXT;
+    ALTER TABLE jobs ADD COLUMN restart_from TEXT;
+    ALTER TABLE jobs ADD COLUMN concurrency TEXT;
+    ALTER TABLE jobs ADD COLUMN deadline INTEGER;
+    ALTER TABLE jobs ADD COLUMN reason TEXT;
+    CREATE TABLE graphs (
+      key TEXT PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      branch TEXT NOT NULL, commit_sha TEXT NOT NULL, workflow TEXT NOT NULL,
+      graph TEXT NOT NULL, created INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX graphs_branch ON graphs(project_id, branch, created);
+    CREATE TABLE job_stages (
+      job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, name TEXT NOT NULL,
+      position INTEGER NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,
+      attempt INTEGER NOT NULL DEFAULT 0, worker TEXT, assigned INTEGER, started INTEGER, finished INTEGER,
+      deadline INTEGER, disconnected INTEGER NOT NULL DEFAULT 0 CHECK(disconnected IN (0,1)),
+      log_seq INTEGER NOT NULL DEFAULT 0, step_seq INTEGER NOT NULL DEFAULT 0,
+      output TEXT, reason TEXT, reused INTEGER NOT NULL DEFAULT 0 CHECK(reused IN (0,1)),
+      token TEXT, approval TEXT, cancel INTEGER NOT NULL DEFAULT 0 CHECK(cancel IN (0,1)),
+      PRIMARY KEY(job_id, name)
+    ) STRICT;
+    CREATE INDEX job_stages_worker ON job_stages(worker, status);
+    CREATE TABLE job_steps (
+      job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, stage TEXT NOT NULL,
+      attempt INTEGER NOT NULL, id INTEGER NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
+      status TEXT NOT NULL, ms INTEGER, at INTEGER NOT NULL,
+      PRIMARY KEY(job_id, stage, attempt, id)
+    ) STRICT;
+    CREATE TABLE stashes (
+      job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, name TEXT NOT NULL,
+      stage TEXT NOT NULL, size INTEGER NOT NULL, file TEXT NOT NULL, created INTEGER NOT NULL,
+      PRIMARY KEY(job_id, name)
+    ) STRICT;
+    CREATE TABLE worker_inventory (
+      fingerprint TEXT PRIMARY KEY, inventory TEXT NOT NULL, quarantine TEXT, updated INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE resource_locks (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, name TEXT NOT NULL,
+      job_id TEXT NOT NULL, stage TEXT NOT NULL, PRIMARY KEY(project_id, name)
+    ) STRICT;
+    CREATE TABLE schedule_fires (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, workflow TEXT NOT NULL,
+      branch TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(project_id, workflow, branch, at)
     ) STRICT;`)
   },
 ]
