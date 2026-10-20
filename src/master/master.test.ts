@@ -880,7 +880,7 @@ describe('Master database, setup and import', function () {
           }),
         /Invalid area/,
       )
-      assert.deepEqual(node.master!.settings.names(), ['example'])
+      assert(node.master!.settings.names().includes('example'))
       const { token: admin } = await createFirstAdmin(
         node.master!.database,
         node.master!.keys,

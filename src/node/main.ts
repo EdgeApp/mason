@@ -72,6 +72,8 @@ const usage = `Usage:
   mason keys create --role <role> [--name <n>] [--project <slug>]… [--branch <glob>]… [--app <id>]… --out <file>
   mason keys list | mason keys revoke <id>
   mason settings get <area> | mason settings set <area> --file <json>
+  mason projects list | get <slug> | set <slug> --file <json> | remove <slug>
+  mason build-numbers seed --project <slug> --key <key> --from <buildNum.json>
 Options: --data <dir> --port <n> --link-port <n> --listen <address>
   --web-cert <file> --web-key <file> --web-plain --new-key --test-endpoints
   --install [--user <name>] --uninstall`
@@ -261,6 +263,81 @@ async function settingsCommand(argv: string[], io: MainIO): Promise<number> {
   throw new Error(usage)
 }
 
+/** `mason projects …`, through the master's control socket. */
+async function projectsCommand(argv: string[], io: MainIO): Promise<number> {
+  const [action, ...rest] = argv
+  const args = parseArgs(rest, ['--data', '--file'], ['--json'])
+  const data = resolveDataDir(single(args, '--data'))
+  const [slug] = args.positional
+  if (action === 'list' && slug == null) {
+    const projects = (await controlRequest(data, 'projects.list')) as Array<{
+      slug: string
+      format: string
+      repository: string
+      apps: unknown[]
+    }>
+    if (args.flags.has('--json')) io.out(JSON.stringify(projects))
+    else
+      for (const project of projects)
+        io.out(
+          `${project.slug}  ${project.format}  ${project.repository}  ${project.apps.length} apps`,
+        )
+    return 0
+  }
+  if (action === 'get' && slug != null) {
+    io.out(
+      JSON.stringify(
+        await controlRequest(data, 'projects.get', { slug }),
+        null,
+        2,
+      ),
+    )
+    return 0
+  }
+  const file = single(args, '--file')
+  if (action === 'set' && slug != null && file != null) {
+    const value = JSON.parse(readFileSync(file, 'utf8')) as unknown
+    io.out(
+      JSON.stringify(
+        await controlRequest(data, 'projects.set', { slug, value }),
+        null,
+        2,
+      ),
+    )
+    return 0
+  }
+  if (action === 'remove' && slug != null) {
+    await controlRequest(data, 'projects.remove', { slug })
+    io.out(`Removed ${slug}`)
+    return 0
+  }
+  throw new Error(usage)
+}
+
+/** `mason build-numbers seed`: reads a copy of buildNum.json and never writes it. */
+async function buildNumbersCommand(
+  argv: string[],
+  io: MainIO,
+): Promise<number> {
+  const [action, ...rest] = argv
+  const args = parseArgs(rest, ['--data', '--project', '--key', '--from'], [])
+  const project = single(args, '--project')
+  const key = single(args, '--key')
+  const from = single(args, '--from')
+  if (action !== 'seed' || project == null || key == null || from == null)
+    throw new Error(
+      'Usage: mason build-numbers seed --project <slug> --key <key> --from <buildNum.json>',
+    )
+  const entries = JSON.parse(readFileSync(from, 'utf8')) as unknown
+  const result = (await controlRequest(
+    resolveDataDir(single(args, '--data')),
+    'buildNumbers.seed',
+    { project, key, entries },
+  )) as { branches: number }
+  io.out(`Seeded ${result.branches} branches of ${project} ${key}`)
+  return 0
+}
+
 /** `mason nodes …`: the master's nodes, through its control socket. */
 async function nodesCommand(argv: string[], io: MainIO): Promise<number> {
   const [action, ...rest] = argv
@@ -328,6 +405,8 @@ export async function nodeMain(
     if (first === 'import') return await importCommand(rest, io)
     if (first === 'keys') return await keysCommand(rest, io)
     if (first === 'settings') return await settingsCommand(rest, io)
+    if (first === 'projects') return await projectsCommand(rest, io)
+    if (first === 'build-numbers') return await buildNumbersCommand(rest, io)
     if (first === 'status') {
       const args = parseArgs(rest, ['--data'], ['--json'])
       if (args.positional.length !== 0) throw new Error(usage)

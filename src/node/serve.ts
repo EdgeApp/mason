@@ -40,7 +40,8 @@ import { Link, type MethodTable } from '../link/link.js'
 import { Pairing, serveNodeLinks, type NodeLinks } from '../link/nodeSide.js'
 import { memoryPair } from '../link/wire.js'
 import type { NodeRegistry } from '../master/nodes.js'
-import { Master } from '../master/runtime.js'
+import { Master, type MasterOptions } from '../master/runtime.js'
+import { privateDirectory } from '../config.js'
 
 export type Role = 'master' | 'worker' | 'host'
 export const defaultPorts = { master: 9300, host: 9200, link: 9310 }
@@ -64,6 +65,9 @@ export interface NodeOptions {
   nodeMethods?: MethodTable
   heartbeatMs?: number
   redialBaseMs?: number
+  /** Master internals for tests: GitHub API origin, branch heads, poll interval. */
+  masterOptions?: Pick<MasterOptions, 'github' | 'headLister'>
+  pollMs?: number
 }
 
 export interface NodeStatus {
@@ -105,6 +109,13 @@ export interface RunningNode {
 }
 
 const asNodeFile = asObject({ role: asString, coWorker: asOptional(asString) })
+
+/** An owner-only scratch directory inside the data directory. */
+function privateScratch(dir: string): string {
+  const scratch = path.join(dir, 'tmp')
+  privateDirectory(scratch)
+  return scratch
+}
 
 /** Records the data directory's role, refusing to reuse it for another one. */
 export function claimRole(dir: string, role: Role): void {
@@ -255,6 +266,8 @@ export async function startNode(
               ? {}
               : { redialBaseMs: options.redialBaseMs }),
             onConfigured: (): void => clearSetupCode(dir),
+            ...options.masterOptions,
+            scratch: privateScratch(dir),
           })
     const configured = (): boolean => master?.configured() ?? false
     if (options.role === 'master' || options.role === 'host') {
@@ -318,7 +331,8 @@ export async function startNode(
     if (master != null) {
       const nodes = master.registry
       registry = nodes
-      cleanup.push(() => nodes.stop())
+      const running = master
+      cleanup.push(async () => await running.stop())
       if (options.coWorker) {
         const [masterWire, workerWire] = memoryPair()
         localWorker = new Link(workerWire, {
@@ -336,7 +350,7 @@ export async function startNode(
         })
         await nodes.attachLocal(masterWire, identity.fingerprint, hostname())
       }
-      nodes.start()
+      master.start(options.pollMs)
     }
     if (options.role === 'master' && !configured())
       setupCode = newSetupCode(dir)

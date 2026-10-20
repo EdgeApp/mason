@@ -9,9 +9,12 @@ export interface SettingsArea {
    * Validates a new value. `previous` is the stored value, so a write-only
    * field sent as `{ keep: true }` can reuse what is stored.
    */
-  validate(input: unknown, previous: SettingValue | undefined): SettingValue
+  validate(
+    input: unknown,
+    previous: SettingValue | undefined,
+  ): SettingValue | Promise<SettingValue>
   /** Top-level fields that are secrets: never returned, only set or unset. */
-  secrets?: string[]
+  secrets?: string[] | ((value: SettingValue | undefined) => string[])
   /** Called after a change commits, for areas published to the host or nodes. */
   changed?(value: SettingValue): void
 }
@@ -54,16 +57,19 @@ export class Settings {
     const area = this.area(name)
     const value = this.value(name) ?? {}
     const out: SettingValue = { ...value }
-    for (const field of area.secrets ?? [])
-      out[field] = { set: value[field] != null }
+    const secrets =
+      typeof area.secrets === 'function'
+        ? area.secrets(value)
+        : (area.secrets ?? [])
+    for (const field of secrets) out[field] = { set: value[field] != null }
     return out
   }
 
-  set(actor: Actor, name: string, input: unknown): SettingValue {
+  async set(actor: Actor, name: string, input: unknown): Promise<SettingValue> {
     requireRole(actor, 'manager')
     const area = this.area(name)
     const previous = this.value(name)
-    const value = area.validate(input, previous)
+    const value = await area.validate(input, previous)
     this.master.transaction(() => {
       this.master.db
         .prepare(

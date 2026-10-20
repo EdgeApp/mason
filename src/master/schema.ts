@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 2
+export const MASTER_SCHEMA = 3
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -98,6 +98,52 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     CREATE TABLE change_log (
       revision INTEGER PRIMARY KEY AUTOINCREMENT, entity TEXT NOT NULL, key TEXT NOT NULL,
       operation TEXT NOT NULL CHECK(operation IN ('put','delete')), at INTEGER NOT NULL
+    ) STRICT;`)
+  },
+  (db): void => {
+    db.exec(`
+    CREATE TABLE jobs (
+      id TEXT PRIMARY KEY, project_id INTEGER NOT NULL REFERENCES projects(id),
+      workflow TEXT NOT NULL DEFAULT 'build', number INTEGER NOT NULL,
+      branch TEXT NOT NULL, requested_commit TEXT, commit_sha TEXT,
+      trigger TEXT NOT NULL CHECK(trigger IN ('push','request','schedule','after','deviceRegistered','restart')),
+      status TEXT NOT NULL, created INTEGER NOT NULL, started INTEGER, finished INTEGER,
+      params TEXT NOT NULL DEFAULT '{}', request TEXT NOT NULL, token TEXT UNIQUE,
+      client_ip TEXT, key_id TEXT, actor TEXT NOT NULL DEFAULT '',
+      cancel INTEGER NOT NULL DEFAULT 0 CHECK(cancel IN (0,1)),
+      exit_code INTEGER, result TEXT,
+      UNIQUE(project_id, workflow, number)
+    ) STRICT;
+    CREATE INDEX jobs_queue ON jobs(status, created);
+    CREATE TABLE automatic_branches (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, branch TEXT NOT NULL,
+      last_checked INTEGER, observed_commit TEXT, poll_error TEXT,
+      last_attempted_commit TEXT, last_successful_commit TEXT, last_job_id TEXT,
+      PRIMARY KEY(project_id, branch)
+    ) STRICT;
+    CREATE TABLE automatic_attempts (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, branch TEXT NOT NULL,
+      commit_sha TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+      succeeded INTEGER NOT NULL DEFAULT 0 CHECK(succeeded IN (0,1)),
+      PRIMARY KEY(project_id, branch, commit_sha)
+    ) STRICT;
+    CREATE TABLE build_number_schemes (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, key TEXT NOT NULL,
+      scheme TEXT NOT NULL, PRIMARY KEY(project_id, key)
+    ) STRICT;
+    CREATE TABLE build_numbers (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, key TEXT NOT NULL,
+      branch TEXT NOT NULL, date_part TEXT NOT NULL, count INTEGER NOT NULL,
+      PRIMARY KEY(project_id, key, branch, date_part)
+    ) STRICT;
+    CREATE TABLE build_number_last (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, key TEXT NOT NULL,
+      branch TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY(project_id, key, branch)
+    ) STRICT;
+    CREATE TABLE build_number_reservations (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, key TEXT NOT NULL,
+      reservation TEXT NOT NULL, value TEXT NOT NULL, created_at INTEGER NOT NULL,
+      PRIMARY KEY(project_id, key, reservation)
     ) STRICT;`)
   },
 ]

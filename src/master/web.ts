@@ -1,6 +1,7 @@
 import type express from 'express'
 import { nodeWebApp, sendPage, type WebAppContext } from '../node/webApp.js'
 import { masterApi } from './api.js'
+import { projectsApi } from './projectsApi.js'
 import type { Master } from './runtime.js'
 
 export interface MasterWebContext extends WebAppContext {
@@ -11,6 +12,7 @@ export interface MasterWebContext extends WebAppContext {
 /** The master's web listener: its UI and API. */
 export function masterApp(context: MasterWebContext): express.Express {
   const app = nodeWebApp(context)
+  app.use(projectsApi(context.master))
   app.use(
     masterApi({
       keys: context.master.keys,
