@@ -9,6 +9,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:masonfiles": "tsc -p tsconfig.examples.json",
+    "check:doc-examples": "node scripts/check-doc-examples.ts",
     "lint": "eslint src",
     "test": "tsc && mocha --require=./lib/test/fixtureRoots.test.js --import=tsx --timeout 10000 'src/**/*.test.ts'",
     "coverage": "tsc && NODE_DISABLE_COMPILE_CACHE=1 c8 --all --include 'src/**/*.ts' --include 'lib/**/*.js' --exclude 'src/**/*.test.ts' --exclude 'lib/**/*.test.js' --exclude-after-remap --reporter text --reporter json --reporter lcov --check-coverage --per-file --lines 90 mocha --require=./lib/test/fixtureRoots.test.js --timeout 10000 'lib/**/*.test.js'",
