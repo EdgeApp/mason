@@ -1,4 +1,4 @@
-import type { Json, RunInfo } from '../../types/mason/index.js'
+import type { Json, RunInfo, Tools } from '../../types/mason/index.js'
 import type { GraphStage, SetupContext } from './graph.js'
 
 /** What the master sends a worker for a setup run: no secrets, files or tokens beyond the run's own. */
@@ -59,6 +59,10 @@ export interface StageAssignment {
   timeout: number
   activityTimeout?: number
   continueOnError: boolean
+  /** The stage's tools, already installed on this node: their `bin` paths go first on `PATH`. */
+  tools?: Tools
+  /** The Xcode the master chose for the stage's `xcode` range. */
+  developerDir?: string
 }
 
 export type Assignment = SetupAssignment | StageAssignment

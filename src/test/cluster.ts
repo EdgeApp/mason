@@ -87,6 +87,8 @@ export class FakeRepo {
 
 export interface WorkerSpec {
   name: string
+  /** Where the worker finds Xcodes and downloads tools. */
+  workerOptions?: NodeOptions['workerOptions']
   type?: string
   labels?: string[]
   slots?: number
@@ -211,7 +213,7 @@ export async function cluster(
         listen: '127.0.0.1',
         heartbeatMs: 0,
         ...(spec.slots == null ? {} : { slots: spec.slots }),
-        workerOptions: { flushMs: 50 },
+        workerOptions: { flushMs: 50, ...spec.workerOptions },
       },
       quiet,
     )

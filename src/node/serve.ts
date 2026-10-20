@@ -82,7 +82,10 @@ export interface NodeOptions {
   /** Stages a worker runs at once (the master's node setting can lower it). */
   slots?: number
   /** Worker internals for tests. */
-  workerOptions?: Pick<WorkerOptions, 'inspect' | 'flushMs'>
+  workerOptions?: Pick<
+    WorkerOptions,
+    'inspect' | 'flushMs' | 'applications' | 'toolSources'
+  >
 }
 
 export interface NodeStatus {

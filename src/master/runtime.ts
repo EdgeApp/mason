@@ -47,6 +47,43 @@ export interface MasterOptions {
   now?: () => number
 }
 
+/**
+ * Per-node-type settings. `androidLicensesAccepted: true` records who
+ * accepted the Android SDK licences for that type, and when; the worker's
+ * Android installer accepts them only then.
+ */
+export function nodeTypesSetting(
+  input: unknown,
+  previous: Record<string, unknown> | undefined,
+  context: { actor: { label: string }; now: number },
+): Record<string, unknown> {
+  if (input == null || typeof input !== 'object' || Array.isArray(input))
+    throw new Error('nodeTypes maps node type names to their settings')
+  const out: Record<string, unknown> = {}
+  for (const [type, value] of Object.entries(input)) {
+    if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(type))
+      throw new Error(`Invalid node type ${type}`)
+    const fields = (value ?? {}) as { androidLicensesAccepted?: unknown }
+    const before = (
+      previous?.[type] as { androidLicensesAccepted?: unknown } | undefined
+    )?.androidLicensesAccepted
+    if (fields.androidLicensesAccepted === true)
+      out[type] = {
+        androidLicensesAccepted: before ?? {
+          by: context.actor.label,
+          at: context.now,
+        },
+      }
+    else if (
+      fields.androidLicensesAccepted == null ||
+      fields.androidLicensesAccepted === false
+    )
+      out[type] = {}
+    else throw new Error('androidLicensesAccepted is true or false')
+  }
+  return out
+}
+
 /** Merges two method tables; the first wins on a clash. */
 function mergeMethods(a: MethodTable, b: MethodTable): MethodTable {
   return {
@@ -154,8 +191,15 @@ export class Master {
       ...(options.tickMs == null ? {} : { tickMs: options.tickMs }),
       ...(options.timeZone == null ? {} : { timeZone: options.timeZone }),
       ...(options.graceMs == null ? {} : { graceMs: options.graceMs }),
+      androidLicencesAccepted: (type): boolean =>
+        (
+          this.settings.value('nodeTypes')?.[type] as
+            | { androidLicensesAccepted?: unknown }
+            | undefined
+        )?.androidLicensesAccepted != null,
     })
     this.retention = new Retention(this.database, this.scheduler, this.stashes)
+    this.settings.register('nodeTypes', { validate: nodeTypesSetting })
   }
 
   /** Starts dialing nodes and polling repositories. */

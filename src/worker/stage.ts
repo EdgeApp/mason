@@ -35,7 +35,15 @@ import {
 import { inside } from '../pipeline/context.js'
 import { runSetup, SetupFailed } from '../pipeline/setup.js'
 import { runStage, secretForms, type StepRecord } from '../pipeline/stage.js'
-import { baseInventory, type Inventory } from './baseInventory.js'
+import { baseInventory } from './baseInventory.js'
+import { fullInventory, type FullInventory } from './inventory.js'
+import {
+  install,
+  installable,
+  toolEnvironment,
+  type InstallRequest,
+} from './tools/index.js'
+import { defaultSources, type ToolSources } from './tools/common.js'
 import { checkout } from './checkout.js'
 import { GitBridge } from './gitProxy.js'
 import { Journal } from './journal.js'
@@ -55,6 +63,10 @@ export interface WorkerOptions {
   flushMs?: number
   /** Slots this worker offers; the master's setting for the node wins when lower. */
   slots?: number
+  /** Where Xcodes are installed; `/Applications`. */
+  applications?: string
+  /** Where installers download from. */
+  toolSources?: ToolSources
 }
 
 const safe = (key: string): string =>
@@ -130,6 +142,7 @@ export class WorkerRuntime {
   readonly bridge: GitBridge
   private readonly controllers = new Map<string, AbortController>()
   private readonly executions = new Set<Promise<void>>()
+  private installing: Promise<void> = Promise.resolve()
   private readonly busy = new Set<number>()
   private readonly workspaceLocks = new Map<string, Promise<void>>()
   private timer: NodeJS.Timeout | undefined
@@ -172,16 +185,69 @@ export class WorkerRuntime {
     this.bridge.close()
   }
 
-  inventory(): Inventory {
+  inventory(): FullInventory {
     const assigned = this.options.assignment()
     const quarantine = this.journal.quarantine()
-    return baseInventory({
-      dir: this.options.dir,
-      ...(assigned == null ? {} : assigned),
-      version: this.options.version,
-      ...(this.options.slots == null ? {} : { slots: this.options.slots }),
-      ...(quarantine == null ? {} : { quarantine }),
+    return fullInventory(
+      baseInventory({
+        dir: this.options.dir,
+        ...(assigned == null ? {} : assigned),
+        version: this.options.version,
+        ...(this.options.slots == null ? {} : { slots: this.options.slots }),
+        ...(quarantine == null ? {} : { quarantine }),
+      }),
+      {
+        toolsDir: this.path('tools'),
+        ...(this.options.applications == null
+          ? {}
+          : { applications: this.options.applications }),
+      },
+    )
+  }
+
+  /**
+   * Runs one installer from the closed set, one at a time. The installer's
+   * log comes back with the result, and the inventory after it.
+   */
+  private async installTool(params: unknown): Promise<{
+    ok: boolean
+    version?: string
+    error?: string
+    log: string
+    inventory: FullInventory
+  }> {
+    const request = params as InstallRequest
+    let log = ''
+    const previous = this.installing
+    let done!: () => void
+    this.installing = new Promise<void>((resolve) => {
+      done = resolve
     })
+    await previous
+    try {
+      if (!(installable as readonly string[]).includes(request?.tool))
+        throw new Error(`${String(request?.tool)} is not a tool Mason installs`)
+      const base = this.inventory()
+      const version = await install(request, {
+        toolsDir: this.path('tools'),
+        sources: this.options.toolSources ?? defaultSources,
+        os: base.os,
+        arch: base.arch,
+        log: (text) => {
+          log += text
+        },
+      })
+      return { ok: true, version, log, inventory: this.inventory() }
+    } catch (error) {
+      return {
+        ok: false,
+        error: (error as Error).message,
+        log,
+        inventory: this.inventory(),
+      }
+    } finally {
+      done()
+    }
   }
 
   /** Clears the quarantine after an operator checked the node (`mason recover`). */
@@ -201,6 +267,7 @@ export class WorkerRuntime {
         }),
         'setup.run': (params) => this.accept(params as SetupAssignment),
         'stage.run': (params) => this.accept(params as StageAssignment),
+        'tools.install': async (params) => await this.installTool(params),
         'job.forget': (params): null => {
           this.forgetJob(String((params as { job?: unknown }).job))
           return null
@@ -468,6 +535,23 @@ export class WorkerRuntime {
     }
   }
 
+  /** A stage's non-secret environment, with its tools first on `PATH` and its Xcode. */
+  private stageEnvironment(
+    assignment: StageAssignment,
+  ): Record<string, string> {
+    return {
+      ...assignment.env,
+      ...toolEnvironment(
+        assignment.tools,
+        this.path('tools'),
+        process.env.PATH ?? '',
+      ),
+      ...(assignment.developerDir == null
+        ? {}
+        : { DEVELOPER_DIR: assignment.developerDir }),
+    }
+  }
+
   private node(): NodeInfo {
     const inventory = this.inventory()
     return {
@@ -505,7 +589,7 @@ export class WorkerRuntime {
           matrix: assignment.matrix,
         },
         node: this.node(),
-        env: assignment.env,
+        env: this.stageEnvironment(assignment),
         secrets: assignment.secrets,
         files: assignment.files,
         buildNumbers: assignment.buildNumbers,
@@ -584,7 +668,7 @@ export class WorkerRuntime {
     try {
       await execution.run(process.execPath, [masonfile], dir, {
         ...baseEnvironment(),
-        ...assignment.env,
+        ...this.stageEnvironment(assignment),
         ...assignment.secrets,
         ...fileEnv,
         MASON_APP: assignment.project,

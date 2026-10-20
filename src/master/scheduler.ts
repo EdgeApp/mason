@@ -36,7 +36,9 @@ import {
   type GraphWorkflow,
   type StageState,
 } from '../pipeline/graph.js'
-import type { Inventory } from '../worker/baseInventory.js'
+import type { FullInventory } from '../worker/inventory.js'
+import { missingTools, type InstallRequest } from '../worker/tools/index.js'
+import { selectXcode } from '../worker/tools/versions.js'
 import type { BuildNumbers } from './buildNumbers.js'
 import type { MasterDatabase } from './database.js'
 import { atLeast, Forbidden, requireRole, type Actor } from './roles.js'
@@ -109,6 +111,8 @@ export interface SchedulerOptions {
   tickMs?: number
   /** How long past a stage's timeout the master waits for a silent worker. */
   graceMs?: number
+  /** Whether a node type records an administrator's Android SDK licence acceptance. */
+  androidLicencesAccepted?: (nodeType: string) => boolean
 }
 
 const hash = (value: string): string =>
@@ -123,9 +127,15 @@ const sortedParams = (params: Record<string, unknown>): string =>
 /** A worker's inventory row with the master's node record. */
 interface WorkerSlot {
   node: NodeRecord
-  inventory: Inventory
+  inventory: FullInventory
   link: Link
+  /** Tools the stage needs that this worker must install first. */
+  missing: InstallRequest[]
+  /** The Xcode chosen for the stage's `xcode` range. */
+  developerDir?: string
 }
+
+const noTools = { node: [], rust: [], java: [], android: [] }
 
 /**
  * The master's scheduler: resolves each job's commit, gets its validated
@@ -868,13 +878,13 @@ export class Scheduler {
 
   // ── Workers ───────────────────────────────────────────────────────────
 
-  private inventory(fingerprint: string): Inventory | undefined {
+  private inventory(fingerprint: string): FullInventory | undefined {
     const row = this.db
       .prepare('SELECT inventory FROM worker_inventory WHERE fingerprint=?')
       .get(fingerprint)
     return row == null
       ? undefined
-      : (JSON.parse(String(row.inventory)) as Inventory)
+      : (JSON.parse(String(row.inventory)) as FullInventory)
   }
 
   /** Connected, unquarantined workers matching a selector, least busy first. */
@@ -890,24 +900,181 @@ export class Scheduler {
         (
           this.db
             .prepare(
-              "SELECT COUNT(*) n FROM job_stages WHERE worker=? AND status='running'",
+              "SELECT COUNT(*) n FROM job_stages WHERE worker=? AND status IN ('running','preparing')",
             )
             .get(node.fingerprint) as { n: number }
         ).n,
       )
       if (load >= Math.min(node.slots, inventory.slots)) continue
       if (stage != null && !this.matches(stage, node, inventory)) continue
-      out.push({ node, inventory, link, load })
+      const fit = stage == null ? { missing: [] } : this.fit(stage, inventory)
+      if (fit == null) continue
+      out.push({ node, inventory, link, load, ...fit })
     }
+    // Workers that already have the stage's tools come before ones that must install them.
     return out.sort(
-      (a, b) => a.load - b.load || a.node.name.localeCompare(b.node.name),
+      (a, b) =>
+        Number(a.missing.length > 0) - Number(b.missing.length > 0) ||
+        a.load - b.load ||
+        a.node.name.localeCompare(b.node.name),
     )
+  }
+
+  /**
+   * Whether a worker can run a stage's `tools`: the Xcode its range needs must
+   * be installed; node, rust, java and Android packages may be installed first.
+   */
+  private fit(
+    stage: GraphStage,
+    inventory: FullInventory,
+  ): { missing: InstallRequest[]; developerDir?: string } | undefined {
+    const tools = stage.tools
+    let developerDir: string | undefined
+    if (tools?.xcode != null) {
+      const xcode = selectXcode(tools.xcode, inventory.xcodes ?? [])
+      if (xcode == null) return undefined
+      developerDir = path.join(xcode.path, 'Contents', 'Developer')
+    }
+    return {
+      missing: missingTools(tools, inventory.tools ?? noTools),
+      ...(developerDir == null ? {} : { developerDir }),
+    }
+  }
+
+  /** Connected workers whose selector and Xcode fit a stage, whatever their load. */
+  private candidatesIgnoringLoad(stage: GraphStage): number {
+    return this.options.registry.list().filter((node) => {
+      const inventory = this.inventory(node.fingerprint)
+      return (
+        node.role === 'worker' &&
+        inventory != null &&
+        this.options.registry.link(node.fingerprint) != null &&
+        this.matches(stage, node, inventory) &&
+        this.fit(stage, inventory) != null
+      )
+    }).length
+  }
+
+  /** Connected workers a stage's selector matches, whatever their tools and load. */
+  private selectable(stage: GraphStage): number {
+    return this.options.registry.list().filter((node) => {
+      const inventory = this.inventory(node.fingerprint)
+      return (
+        node.role === 'worker' &&
+        inventory != null &&
+        this.options.registry.link(node.fingerprint) != null &&
+        this.matches(stage, node, inventory)
+      )
+    }).length
+  }
+
+  /**
+   * Installs the tools a stage is missing on the chosen worker while the stage
+   * waits in `preparing`; the installers' logs go into the stage log.
+   */
+  private prepareTools(
+    job: string,
+    stage: GraphStage,
+    worker: WorkerSlot,
+  ): void {
+    this.db
+      .prepare(
+        "UPDATE job_stages SET status='preparing',worker=?,started=? WHERE job_id=? AND name=?",
+      )
+      .run(worker.node.fingerprint, this.now(), job, stage.name)
+    this.appendLog(
+      job,
+      stage.name,
+      `── Preparing ${stage.name} on ${worker.node.name}: installing ${worker.missing
+        .map((request) =>
+          request.tool === 'android'
+            ? `android ${(request.packages ?? []).join(' ')}`
+            : `${request.tool} ${request.version ?? ''}`,
+        )
+        .join(', ')} ──\n`,
+    )
+    this.options.master.change('job', job)
+    void (async (): Promise<void> => {
+      for (const request of worker.missing) {
+        const answer = (await worker.link.request(
+          'tools.install',
+          request.tool === 'android'
+            ? {
+                ...request,
+                nodeType: worker.node.type,
+                acceptLicences:
+                  this.options.androidLicencesAccepted?.(worker.node.type) ===
+                  true,
+              }
+            : request,
+          60 * 60 * 1000,
+        )) as {
+          ok: boolean
+          error?: string
+          log: string
+          inventory: FullInventory
+        }
+        this.appendLog(job, stage.name, answer.log)
+        this.storeInventory(worker.node.fingerprint, answer.inventory)
+        if (this.stage(job, stage.name)?.status !== 'preparing') return
+        if (!answer.ok) {
+          this.appendLog(
+            job,
+            stage.name,
+            `${answer.error ?? 'Install failed'}\n`,
+          )
+          this.finishStage(
+            job,
+            stage.name,
+            'failed',
+            answer.error ?? 'Install failed',
+          )
+          return
+        }
+      }
+      if (this.stage(job, stage.name)?.status === 'preparing')
+        this.db
+          .prepare(
+            "UPDATE job_stages SET status='queued',worker=NULL WHERE job_id=? AND name=?",
+          )
+          .run(job, stage.name)
+    })()
+      .catch((error: unknown) => {
+        // The worker went away mid-install: the stage waits for a worker again.
+        this.appendLog(
+          job,
+          stage.name,
+          `Preparing failed: ${(error as Error).message}\n`,
+        )
+        if (this.stage(job, stage.name)?.status === 'preparing')
+          this.db
+            .prepare(
+              "UPDATE job_stages SET status='queued',worker=NULL WHERE job_id=? AND name=?",
+            )
+            .run(job, stage.name)
+      })
+      .finally(() => {
+        this.poke()
+      })
+  }
+
+  private storeInventory(fingerprint: string, inventory: FullInventory): void {
+    this.db
+      .prepare(
+        'INSERT INTO worker_inventory(fingerprint,inventory,quarantine,updated) VALUES(?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET inventory=excluded.inventory,quarantine=excluded.quarantine,updated=excluded.updated',
+      )
+      .run(
+        fingerprint,
+        JSON.stringify(inventory),
+        inventory.quarantine ?? null,
+        this.now(),
+      )
   }
 
   private matches(
     stage: GraphStage,
     node: NodeRecord,
-    inventory: Inventory,
+    inventory: FullInventory,
   ): boolean {
     const on = stage.on
     if (on == null) return true
@@ -931,7 +1098,7 @@ export class Scheduler {
     const node = this.options.registry.get(fingerprint)
     if (node?.role !== 'worker') return
     let state: {
-      inventory: Inventory
+      inventory: FullInventory
       runs: Array<{ key: string; status: string }>
     }
     // Anything assigned after this question cannot be in the answer.
@@ -941,16 +1108,7 @@ export class Scheduler {
     } catch {
       return
     }
-    this.db
-      .prepare(
-        'INSERT INTO worker_inventory(fingerprint,inventory,quarantine,updated) VALUES(?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET inventory=excluded.inventory,quarantine=excluded.quarantine,updated=excluded.updated',
-      )
-      .run(
-        fingerprint,
-        JSON.stringify(state.inventory),
-        state.inventory.quarantine ?? null,
-        this.now(),
-      )
+    this.storeInventory(fingerprint, state.inventory)
     const known = new Map(state.runs.map((run) => [run.key, run.status]))
     for (const row of this.db
       .prepare("SELECT * FROM job_stages WHERE worker=? AND status='running'")
@@ -1070,8 +1228,27 @@ export class Scheduler {
   private assign(job: Row, stage: GraphStage, workflow: GraphWorkflow): void {
     const id = String(job.id)
     const worker = this.pick(stage, id)
-    if (worker == null) return
+    if (worker == null) {
+      // Connected workers match the selector but none has an Xcode the range accepts.
+      if (
+        stage.tools?.xcode != null &&
+        this.selectable(stage) > 0 &&
+        this.candidatesIgnoringLoad(stage) === 0
+      )
+        this.finishStage(
+          id,
+          stage.name,
+          'failed',
+          `No connected node for this stage has an Xcode matching ${stage.tools.xcode}`,
+        )
+      return
+    }
     if (!this.locks(job, stage)) return
+    if (worker.missing.length > 0) {
+      this.unlock(id, stage.name)
+      this.prepareTools(id, stage, worker)
+      return
+    }
     const project = this.project(job)
     const row = this.stage(id, stage.name)!
     const attempt = Number(row.attempt) + 1
@@ -1177,6 +1354,10 @@ export class Scheduler {
         ? {}
         : { activityTimeout: stage.activityTimeout }),
       continueOnError: stage.continueOnError,
+      ...(stage.tools == null ? {} : { tools: stage.tools }),
+      ...(worker.developerDir == null
+        ? {}
+        : { developerDir: worker.developerDir }),
     }
     this.startStage(job, stage.name, attempt, token, worker, stage.timeout)
     this.send(worker, 'stage.run', assignment, id, stage.name)
@@ -1202,7 +1383,11 @@ export class Scheduler {
   private cancelStage(job: string, name: string): void {
     const row = this.stage(job, name)
     if (row == null) return
-    if (row.status === 'queued' || row.status === 'awaiting_approval') {
+    if (
+      row.status === 'queued' ||
+      row.status === 'awaiting_approval' ||
+      row.status === 'preparing'
+    ) {
       this.finishStage(job, name, 'cancelled', 'The run was stopped')
       return
     }

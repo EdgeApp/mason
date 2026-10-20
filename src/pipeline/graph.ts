@@ -1183,6 +1183,7 @@ export type StageState =
   | 'queued'
   | 'running'
   | 'awaiting_approval'
+  | 'preparing'
 const terminal = new Set<StageState>([
   'succeeded',
   'unstable',

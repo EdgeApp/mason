@@ -12,6 +12,7 @@ export interface SettingsArea {
   validate(
     input: unknown,
     previous: SettingValue | undefined,
+    context: { actor: Actor; now: number },
   ): SettingValue | Promise<SettingValue>
   /** Top-level fields that are secrets: never returned, only set or unset. */
   secrets?: string[] | ((value: SettingValue | undefined) => string[])
@@ -69,7 +70,10 @@ export class Settings {
     requireRole(actor, 'manager')
     const area = this.area(name)
     const previous = this.value(name)
-    const value = await area.validate(input, previous)
+    const value = await area.validate(input, previous, {
+      actor,
+      now: this.master.now(),
+    })
     this.master.transaction(() => {
       this.master.db
         .prepare(
