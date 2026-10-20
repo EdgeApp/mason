@@ -110,7 +110,7 @@ export class Execution {
   quarantineReason?: string
   stopped = false
   constructor(
-    private readonly log: MaskedLog,
+    private readonly log: Pick<MaskedLog, 'write'>,
     private readonly inspect: () => ProcessIdentity[] = processSnapshot,
     private readonly graceMs = 10000,
     private readonly stopMs = 14000,
@@ -208,6 +208,7 @@ export class Execution {
     cwd: string,
     env = baseEnvironment(),
     capture = false,
+    ipc?: (child: ChildProcess) => void,
   ): Promise<string> {
     if (this.stopped) throw new Error('Execution stopped')
     return await new Promise((resolve, reject) => {
@@ -215,8 +216,9 @@ export class Execution {
         cwd,
         env,
         detached: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ipc == null ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', 'ipc'],
       })
+      ipc?.(child)
       let output = ''
       if (child.pid != null) {
         this.roots.add(child.pid)

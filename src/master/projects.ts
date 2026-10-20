@@ -13,6 +13,8 @@ import {
   text,
   type Platform,
 } from '../validation.js'
+import type { NodeSelector } from '../../types/mason/index.js'
+import { asNodeSelector } from '../pipeline/graph.js'
 import type { MasterDatabase } from './database.js'
 import { asRules, type BranchRule } from './rules.js'
 import { requireRole, type Actor } from './roles.js'
@@ -52,7 +54,8 @@ export interface Project {
   position: number
   defaultBranch: string
   /** Script projects: the builder workspace directory and platforms. */
-  script: { workspace?: string; platforms?: Platform[] }
+  /** For `script` projects: the checkout directory, platforms and where the build stage runs (default `{ os: 'macos' }`). */
+  script: { workspace?: string; platforms?: Platform[]; on?: NodeSelector }
   webhookSecret: { set: boolean }
   apps: ProjectApp[]
   rules: BranchRule[]
@@ -96,6 +99,7 @@ const asProjectInput = asObject({
     asObject({
       workspace: asOptional(relativePath),
       platforms: asOptional(asArray(asPlatform)),
+      on: asOptional(asNodeSelector),
     }),
   ),
 })
