@@ -11,6 +11,7 @@ import { pathToFileURL } from 'node:url'
 import { loadConfig, readPrivateJson } from './config.js'
 import { serve } from './server.js'
 import { Accounts } from './auth/accounts.js'
+import { rewriteTeamStationSubjects } from './auth/rewriteTeamStationSubjects.js'
 import { asId } from './validation.js'
 import { Store } from './store.js'
 
@@ -32,6 +33,7 @@ export function run(
       'accounts',
       'admin-grant',
       'admin-revoke',
+      'rewrite-teamstation-subjects',
     ].includes(command ?? '') ||
     flag !== '--config' ||
     file == null ||
@@ -40,11 +42,17 @@ export function run(
         argv[3] !== '--provider' ||
         argv[5] !== '--subject' ||
         argv[7] !== '--email'
-      : command === 'admin-revoke'
-        ? argv.length !== 5 || argv[3] !== '--account'
-        : argv.length !== 3)
+      : command === 'rewrite-teamstation-subjects'
+        ? argv[3] !== '--provider' ||
+          argv[4] == null ||
+          !(argv.length === 5 || (argv.length === 6 && argv[5] === '--apply'))
+        : command === 'admin-revoke'
+          ? argv.length !== 5 || argv[3] !== '--account'
+          : argv.length !== 3)
   )
-    throw new Error('Usage: mason migrate|prune|status|serve --config <file>')
+    throw new Error(
+      'Usage: mason migrate|prune|status|serve --config <file>; mason rewrite-teamstation-subjects --config <file> --provider <id> [--apply]; mason admin-grant --config <file> --provider <id> --subject <subject (usr_ for TeamStation)> --email <email>',
+    )
   const store = new Store(loadConfig(file))
   if (command === 'serve') {
     const server = serve(store)
@@ -65,7 +73,15 @@ export function run(
   }
   try {
     const accounts = new Accounts(store)
-    if (command === 'admin-grant')
+    if (command === 'rewrite-teamstation-subjects') {
+      const apply = argv[5] === '--apply'
+      const result = rewriteTeamStationSubjects(store, argv[4]!, apply)
+      output(
+        `$ mason rewrite-teamstation-subjects --config <file> --provider ${argv[4]!}${apply ? ' --apply' : ''}`,
+      )
+      output(JSON.stringify({ mode: apply ? 'applied' : 'dry-run', ...result }))
+      if (result.collisions.length > 0) process.exitCode = 1
+    } else if (command === 'admin-grant')
       output(
         JSON.stringify({
           account: accounts.promote(argv[4]!, argv[6]!, argv[8]!),
