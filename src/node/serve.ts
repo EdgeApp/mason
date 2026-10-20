@@ -1,0 +1,384 @@
+import { chmodSync, existsSync, readFileSync } from 'node:fs'
+import type { Server } from 'node:http'
+import { createServer as createHttpsServer } from 'node:https'
+import { hostname, networkInterfaces } from 'node:os'
+import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { asObject, asOptional, asString } from 'cleaners'
+import { hostApp } from '../host/web.js'
+import { masterApp } from '../master/web.js'
+import { version } from '../version.js'
+import {
+  serveControl,
+  type ControlHandler,
+  type ControlServer,
+} from './control.js'
+import {
+  lockDataDir,
+  lockHolder,
+  prepareDataDir,
+  readPrivate,
+  writePrivate,
+} from './dataDir.js'
+import {
+  clearSetupCode,
+  fingerprint,
+  loadIdentity,
+  newSetupCode,
+  pairingKey,
+  type Identity,
+} from './identity.js'
+import { certificateHash, publicKeyPin } from './certificate.js'
+import {
+  listenWeb,
+  webCertificate,
+  type WebCertificate,
+  type WebOptions,
+} from './web.js'
+import { createPublicKey } from 'node:crypto'
+
+export type Role = 'master' | 'worker' | 'host'
+export const defaultPorts = { master: 9300, host: 9200, link: 9310 }
+
+export interface NodeOptions {
+  role: Role
+  /** `mason master --worker`: a worker in the master's process. */
+  coWorker?: boolean
+  data: string
+  port?: number
+  linkPort?: number
+  listen?: string
+  webCert?: string
+  webKey?: string
+  webPlain?: boolean
+  newKey?: boolean
+  testEndpoints?: boolean
+}
+
+export interface NodeStatus {
+  role: Role
+  roles: Role[]
+  version: string
+  data: string
+  state: 'running' | 'stopped'
+  pid?: number
+  fingerprint?: string
+  certificateHash?: string
+  pin?: string
+  web?: string
+  link?: string
+  pairing?: 'waiting' | 'paired'
+  setup?: 'waiting' | 'configured'
+  testEndpoints?: boolean
+}
+
+export interface RunningNode {
+  options: NodeOptions
+  dir: string
+  identity: Identity
+  web?: { server: Server; url: string; certificate?: WebCertificate }
+  link?: { server: Server; port: number }
+  control: ControlServer
+  databases: Map<string, DatabaseSync>
+  status(): NodeStatus
+  close(): Promise<void>
+}
+
+const asNodeFile = asObject({ role: asString, coWorker: asOptional(asString) })
+
+/** Records the data directory's role, refusing to reuse it for another one. */
+function claimRole(dir: string, role: Role): void {
+  const file = path.join(dir, 'node.json')
+  if (existsSync(file)) {
+    const recorded = asNodeFile(JSON.parse(readPrivate(file))).role
+    if (recorded !== role)
+      throw new Error(
+        `This data directory belongs to a ${recorded}; use another --data for a ${role}`,
+      )
+    return
+  }
+  writePrivate(file, JSON.stringify({ role }) + '\n')
+}
+
+function openDatabase(file: string): DatabaseSync {
+  const db = new DatabaseSync(file, {
+    timeout: 5000,
+    enableForeignKeyConstraints: true,
+    enableDoubleQuotedStringLiterals: false,
+  })
+  chmodSync(file, 0o600)
+  db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;')
+  return db
+}
+
+/** The databases each role keeps in its data directory. */
+export function databaseFiles(role: Role, coWorker = false): string[] {
+  if (role === 'master')
+    return coWorker ? ['master.sqlite', 'worker.sqlite'] : ['master.sqlite']
+  return role === 'worker' ? ['worker.sqlite'] : ['host.sqlite']
+}
+
+/** Whether a master database has its first account. */
+export function masterConfigured(db: DatabaseSync): boolean {
+  const table = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='accounts'",
+    )
+    .get()
+  if (table == null) return false
+  return db.prepare('SELECT 1 FROM accounts LIMIT 1').get() != null
+}
+
+/**
+ * Addresses a listener can be reached at, for the operator to copy: the host
+ * name and every non-internal address, leaving out link-local IPv6 ones.
+ */
+export function reachableAddresses(port: number, listen?: string): string[] {
+  const format = (address: string): string =>
+    `${address.includes(':') ? `[${address}]` : address}:${port}`
+  if (listen != null && listen !== '0.0.0.0' && listen !== '::')
+    return [format(listen)]
+  const out = new Set<string>([format(hostname())])
+  for (const list of Object.values(networkInterfaces()))
+    for (const entry of list ?? [])
+      if (!entry.internal && !/^fe80:/i.test(entry.address))
+        out.add(format(entry.address))
+  return [...out]
+}
+
+async function listenLink(
+  identity: Identity,
+  port: number,
+  listen?: string,
+): Promise<Server> {
+  const server = createHttpsServer(
+    {
+      cert: identity.cert,
+      key: identity.key,
+      minVersion: 'TLSv1.3',
+      ecdhCurve: 'X25519MLKEM768',
+    },
+    (_req, res) => {
+      res.writeHead(426, { Connection: 'close' }).end()
+    },
+  )
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(port, listen, () => {
+      server.off('error', reject)
+      resolve()
+    })
+  })
+  return server
+}
+
+function boundPort(server: Server): number {
+  const address = server.address()
+  if (address == null || typeof address === 'string')
+    throw new Error('Listener has no port')
+  return address.port
+}
+
+/** Starts a node: takes the data directory, then serves its roles. */
+export async function startNode(
+  options: NodeOptions,
+  log: (line: string) => void = console.log,
+  handlers: Record<string, ControlHandler> = {},
+): Promise<RunningNode> {
+  if (options.coWorker && options.role !== 'master')
+    throw new Error('--worker is only for a master')
+  const dir = prepareDataDir(options.data)
+  const lock = lockDataDir(dir)
+  const cleanup: Array<() => Promise<void> | void> = [
+    (): void => lock.release(),
+  ]
+  const close = async (): Promise<void> => {
+    for (const step of cleanup.reverse()) await step()
+    cleanup.length = 0
+  }
+  try {
+    claimRole(dir, options.role)
+    const identity = loadIdentity(dir, { renew: options.newKey === true })
+    const databases = new Map<string, DatabaseSync>()
+    for (const name of databaseFiles(options.role, options.coWorker)) {
+      const db = openDatabase(path.join(dir, name))
+      databases.set(name, db)
+      cleanup.push(() => db.close())
+    }
+    const webOptions: WebOptions = {
+      port:
+        options.port ??
+        (options.role === 'host' ? defaultPorts.host : defaultPorts.master),
+      ...(options.listen == null ? {} : { listen: options.listen }),
+      ...(options.webCert == null ? {} : { webCert: options.webCert }),
+      ...(options.webKey == null ? {} : { webKey: options.webKey }),
+      ...(options.webPlain ? { webPlain: true } : {}),
+    }
+    const testEndpoints = options.testEndpoints === true
+    let web: RunningNode['web']
+    let link: RunningNode['link']
+    let setupCode: string | undefined
+    const master = databases.get('master.sqlite')
+    const configured = (): boolean => master != null && masterConfigured(master)
+    if (options.role === 'master' || options.role === 'host') {
+      const certificate = webCertificate(identity, webOptions)
+      const app =
+        options.role === 'master'
+          ? masterApp({ role: 'master', testEndpoints, configured })
+          : hostApp({ role: 'host', testEndpoints })
+      const server = await listenWeb(app, certificate, webOptions)
+      cleanup.push(
+        () =>
+          new Promise<void>((resolve) => {
+            server.closeAllConnections()
+            server.close(() => resolve())
+          }),
+      )
+      const scheme = certificate == null ? 'http' : 'https'
+      const host = options.listen ?? hostname()
+      web = {
+        server,
+        url: `${scheme}://${host.includes(':') ? `[${host}]` : host}:${boundPort(server)}`,
+        ...(certificate == null ? {} : { certificate }),
+      }
+    }
+    if (options.role === 'worker' || options.role === 'host') {
+      const server = await listenLink(
+        identity,
+        options.linkPort ?? defaultPorts.link,
+        options.listen,
+      )
+      cleanup.push(
+        () =>
+          new Promise<void>((resolve) => {
+            server.closeAllConnections()
+            server.close(() => resolve())
+          }),
+      )
+      link = { server, port: boundPort(server) }
+    }
+    if (options.role === 'master' && !configured())
+      setupCode = newSetupCode(dir)
+    else if (options.role === 'master') clearSetupCode(dir)
+
+    const status = (): NodeStatus => ({
+      ...statusFromFiles(dir, options.role),
+      state: 'running',
+      pid: process.pid,
+      roles: options.coWorker ? ['master', 'worker'] : [options.role],
+      ...(web == null ? {} : { web: web.url }),
+      ...(link == null ? {} : { link: `:${link.port}` }),
+      ...(web?.certificate == null
+        ? {}
+        : {
+            certificateHash: web.certificate.certificateHash,
+            pin: web.certificate.pin,
+          }),
+      ...(options.role === 'master'
+        ? { setup: configured() ? 'configured' : 'waiting' }
+        : {}),
+      testEndpoints,
+    })
+    const control = await serveControl(dir, { status, ...handlers })
+    cleanup.push(() => control.close())
+
+    log(
+      `Mason ${version} ${options.coWorker ? 'master with a worker' : options.role}`,
+    )
+    log(`Data: ${dir}`)
+    log(`Fingerprint: ${identity.fingerprint}`)
+    if (testEndpoints) log('Test endpoints are enabled.')
+    if (web != null) {
+      log(`Web: ${web.url}`)
+      if (web.certificate != null)
+        log(
+          `Web certificate SHA-256: ${web.certificate.certificateHash}  pin: ${web.certificate.pin}`,
+        )
+    }
+    if (setupCode != null)
+      log(
+        `Setup code: ${setupCode}  (enter it on the setup page, or run mason setup)`,
+      )
+    if (link != null) {
+      log(`Link: ${reachableAddresses(link.port, options.listen).join(', ')}`)
+      log(`Pairing key: ${pairingKey(identity)}`)
+    }
+    return {
+      options,
+      dir,
+      identity,
+      web,
+      link,
+      control,
+      databases,
+      status,
+      close,
+    }
+  } catch (error) {
+    await close()
+    throw error
+  }
+}
+
+/** Status read from a data directory without a running node. */
+export function statusFromFiles(dir: string, role?: Role): NodeStatus {
+  const nodeFile = path.join(dir, 'node.json')
+  const recorded = existsSync(nodeFile)
+    ? (asNodeFile(JSON.parse(readPrivate(nodeFile))).role as Role)
+    : undefined
+  const actual = recorded ?? role ?? 'master'
+  const out: NodeStatus = {
+    role: actual,
+    roles: [actual],
+    version,
+    data: dir,
+    state: 'stopped',
+  }
+  const pub = path.join(dir, 'identity.pub')
+  if (existsSync(pub))
+    out.fingerprint = fingerprint(createPublicKey(readPrivate(pub)))
+  const crt = path.join(dir, 'tls.crt')
+  if (existsSync(crt)) {
+    const cert = readFileSync(crt, 'utf8')
+    out.certificateHash = certificateHash(cert)
+    out.pin = publicKeyPin(cert)
+  }
+  if (actual === 'worker' || actual === 'host')
+    out.pairing = existsSync(path.join(dir, 'master.json'))
+      ? 'paired'
+      : 'waiting'
+  if (actual === 'master') {
+    const file = path.join(dir, 'master.sqlite')
+    let configured = false
+    if (existsSync(file)) {
+      const db = new DatabaseSync(file, { readOnly: true })
+      try {
+        configured = masterConfigured(db)
+      } finally {
+        db.close()
+      }
+    }
+    out.setup = configured ? 'configured' : 'waiting'
+  }
+  return out
+}
+
+/** Status of a data directory: from the running node, or from its files. */
+export async function nodeStatus(
+  dir: string,
+  request: (command: string) => Promise<unknown>,
+): Promise<NodeStatus> {
+  try {
+    return (await request('status')) as NodeStatus
+  } catch {
+    const holder = lockHolder(dir)
+    const status = statusFromFiles(dir)
+    return holder.held
+      ? {
+          ...status,
+          state: 'running',
+          ...(holder.pid == null ? {} : { pid: holder.pid }),
+        }
+      : status
+  }
+}

@@ -1,0 +1,52 @@
+import express from 'express'
+import { escape, page, stylesheet } from '../view.js'
+
+export const contentSecurityPolicy =
+  "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+
+export interface WebAppContext {
+  role: 'master' | 'host'
+  testEndpoints: boolean
+}
+
+/** The banner every page shows while test endpoints are enabled. */
+export function testBanner(context: WebAppContext): string {
+  return context.testEndpoints
+    ? '<p class="notice" role="status">Test endpoints are enabled on this Mason node.</p>'
+    : ''
+}
+
+/** Common headers, health check and stylesheet for a node's web listener. */
+export function nodeWebApp(context: WebAppContext): express.Express {
+  const app = express()
+  app.disable('x-powered-by')
+  app.set('trust proxy', 'loopback')
+  app.use((_req, res, next) => {
+    res.set({
+      'Cache-Control': 'no-store',
+      'Referrer-Policy': 'no-referrer',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': contentSecurityPolicy,
+    })
+    next()
+  })
+  app.get('/health', (_req, res) => {
+    res.json({ status: 'ready', role: context.role })
+  })
+  app.get('/assets/style.css', (_req, res) => {
+    res.type('css').send(stylesheet)
+  })
+  return app
+}
+
+/** Sends a page with the test-endpoints banner when it applies. */
+export function sendPage(
+  res: express.Response,
+  context: WebAppContext,
+  title: string,
+  content: string,
+  status = 200,
+): void {
+  res.status(status).send(page(title, testBanner(context) + content))
+}
+export { escape }

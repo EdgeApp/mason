@@ -14,6 +14,20 @@ import { Accounts } from './auth/accounts.js'
 import { rewriteTeamStationSubjects } from './auth/rewriteTeamStationSubjects.js'
 import { asId } from './validation.js'
 import { Store } from './store.js'
+import { nodeMain } from './node/main.js'
+
+/**
+ * The legacy commands keep their exact syntax: every `builder` and
+ * `devices-*` command, `keys import`, and any command given `--config <file>`.
+ */
+export function isLegacyCommand(argv: string[]): boolean {
+  return (
+    argv.includes('--config') ||
+    argv[0] === 'builder' ||
+    (argv[0] === 'keys' && argv[1] === 'import') ||
+    (argv[0]?.startsWith('devices-') ?? false)
+  )
+}
 
 export function run(
   argv: string[],
@@ -158,7 +172,12 @@ if (
         )
         process.exitCode = 1
       })
-    } else run(process.argv.slice(2))
+    } else if (isLegacyCommand(process.argv.slice(2)))
+      run(process.argv.slice(2))
+    else
+      void nodeMain(process.argv.slice(2)).then((code) => {
+        process.exitCode = code
+      })
   } catch {
     console.error(
       'Mason command failed. Check the command and private configuration.',

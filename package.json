@@ -25,6 +25,7 @@
     "fast-xml-parser": "5.11.2",
     "openid-client": "6.8.8",
     "qrcode": "1.5.4",
+    "undici": "7.29.1",
     "yauzl": "3.4.0"
   },
   "devDependencies": {
@@ -42,7 +43,6 @@
     "prettier": "3.6.2",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
-    "typescript-eslint": "8.48.1",
-    "undici": "7.29.1"
+    "typescript-eslint": "8.48.1"
   }
 }

@@ -6,6 +6,7 @@ import { readPrivateJson, noSymlinks } from '../config.js'
 import { asClientConfig, statuses } from './store.js'
 import { asRequest } from './config.js'
 import { oneOf, text } from '../validation.js'
+import { pinnedFetch } from '../node/pinnedFetch.js'
 
 export async function buildClient(
   file: string,
@@ -37,19 +38,23 @@ export async function buildClient(
   const key = readFileSync(keyFile, 'utf8').trim()
   if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('Invalid builder key')
   const request = asRequest(input)
-  const response = await fetch(new URL('/api/jobs', url), {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
+  const response = await pinnedFetch(
+    new URL('/api/jobs', url),
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ...request,
+        idempotencyKey: request.idempotencyKey ?? randomUUID(),
+      }),
+      signal: AbortSignal.timeout(10000),
+      redirect: 'error',
     },
-    body: JSON.stringify({
-      ...request,
-      idempotencyKey: request.idempotencyKey ?? randomUUID(),
-    }),
-    signal: AbortSignal.timeout(10000),
-    redirect: 'error',
-  })
+    config.pin,
+  )
   if (!response.ok) throw new Error('Builder rejected job')
   const clean = asObject({
     id: text(36),
@@ -61,11 +66,15 @@ export async function buildClient(
   output(JSON.stringify(job))
   while (['queued', 'running'].includes(job.status)) {
     await new Promise((resolve) => setTimeout(resolve, config.pollMs))
-    const response = await fetch(new URL(`/api/jobs/${job.id}`, url), {
-      headers: { Authorization: `Bearer ${key}` },
-      redirect: 'error',
-      signal: AbortSignal.timeout(10000),
-    })
+    const response = await pinnedFetch(
+      new URL(`/api/jobs/${job.id}`, url),
+      {
+        headers: { Authorization: `Bearer ${key}` },
+        redirect: 'error',
+        signal: AbortSignal.timeout(10000),
+      },
+      config.pin,
+    )
     if (!response.ok) throw new Error('Could not read builder status')
     job = clean(await response.json())
   }
