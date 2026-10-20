@@ -3,7 +3,6 @@ import path from 'node:path'
 import { parseArgs, parseRoleCommand, single } from './args.js'
 import { controlRequest } from './control.js'
 import { resolveDataDir } from './dataDir.js'
-import { pairingKey } from './identity.js'
 import {
   nodeStatus,
   startNode,
@@ -11,6 +10,7 @@ import {
   type Role,
   type RunningNode,
 } from './serve.js'
+import type { NodeRecord } from '../master/nodes.js'
 import {
   hostSystem,
   installService,
@@ -55,6 +55,9 @@ const usage = `Usage:
   mason worker [options]                 run a worker
   mason host [options]                   run the host
   mason status [--data <dir>] [--json]   show a node's state
+  mason nodes add --address <address> --key <pairing key> [--data <dir>]
+  mason nodes list [--json] [--data <dir>]
+  mason nodes remove <fingerprint> [--data <dir>]
 Options: --data <dir> --port <n> --link-port <n> --listen <address>
   --web-cert <file> --web-key <file> --web-plain --new-key --test-endpoints
   --install [--user <name>] --uninstall`
@@ -140,13 +143,53 @@ async function roleCommand(
       )
     return 0
   }
-  const node = await startNode(command.options, io.out, {
-    pairing: () => (role === 'master' ? null : pairingKey(node.identity)),
-  })
+  const node = await startNode(command.options, io.out)
   io.started?.(node)
   await io.stopped()
   await node.close()
   return 0
+}
+
+/** `mason nodes …`: the master's nodes, through its control socket. */
+async function nodesCommand(argv: string[], io: MainIO): Promise<number> {
+  const [action, ...rest] = argv
+  const args = parseArgs(rest, ['--data', '--address', '--key'], ['--json'])
+  const data = resolveDataDir(single(args, '--data'))
+  if (action === 'add') {
+    const address = single(args, '--address')
+    const key = single(args, '--key')
+    if (address == null || key == null || args.positional.length !== 0)
+      throw new Error(
+        'Usage: mason nodes add --address <address> --key <pairing key>',
+      )
+    const node = (await controlRequest(data, 'nodes.add', {
+      address,
+      key,
+    })) as NodeRecord
+    io.out(
+      `Paired ${node.role} ${node.name} (${node.fingerprint}) at ${node.host}:${node.port}`,
+    )
+    return 0
+  }
+  if (action === 'list') {
+    const nodes = (await controlRequest(data, 'nodes.list')) as NodeRecord[]
+    if (args.flags.has('--json')) io.out(JSON.stringify(nodes))
+    else if (nodes.length === 0) io.out('No nodes are paired.')
+    else
+      for (const node of nodes)
+        io.out(
+          `${node.fingerprint}  ${node.role}  ${node.name}  ${node.host}:${node.port}  ${node.connected ? 'linked' : 'not linked'}`,
+        )
+    return 0
+  }
+  if (action === 'remove' && args.positional.length === 1) {
+    await controlRequest(data, 'nodes.remove', {
+      fingerprint: args.positional[0],
+    })
+    io.out(`Removed ${args.positional[0]}`)
+    return 0
+  }
+  throw new Error(usage)
 }
 
 /** Runs a node command: `mason`, `mason worker`, `mason status`, … */
@@ -164,6 +207,7 @@ export async function nodeMain(
       return await roleCommand('master', argv, io)
     if ((roles as readonly string[]).includes(first))
       return await roleCommand(first as Role, rest, io)
+    if (first === 'nodes') return await nodesCommand(rest, io)
     if (first === 'status') {
       const args = parseArgs(rest, ['--data'], ['--json'])
       if (args.positional.length !== 0) throw new Error(usage)

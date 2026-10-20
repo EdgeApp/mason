@@ -25,7 +25,6 @@ import {
   fingerprint,
   loadIdentity,
   newSetupCode,
-  pairingKey,
   type Identity,
 } from './identity.js'
 import { certificateHash, publicKeyPin } from './certificate.js'
@@ -36,6 +35,11 @@ import {
   type WebOptions,
 } from './web.js'
 import { createPublicKey } from 'node:crypto'
+import type { Server as HttpsServer } from 'node:https'
+import { Link, type MethodTable } from '../link/link.js'
+import { Pairing, serveNodeLinks, type NodeLinks } from '../link/nodeSide.js'
+import { memoryPair } from '../link/wire.js'
+import { NodeRegistry } from '../master/nodes.js'
 
 export type Role = 'master' | 'worker' | 'host'
 export const defaultPorts = { master: 9300, host: 9200, link: 9310 }
@@ -53,6 +57,12 @@ export interface NodeOptions {
   webPlain?: boolean
   newKey?: boolean
   testEndpoints?: boolean
+  /** Methods the master accepts from each peer role (later milestones add them). */
+  masterMethods?: (role: 'worker' | 'host') => MethodTable
+  /** Methods a worker or host accepts from its master. */
+  nodeMethods?: MethodTable
+  heartbeatMs?: number
+  redialBaseMs?: number
 }
 
 export interface NodeStatus {
@@ -67,7 +77,8 @@ export interface NodeStatus {
   pin?: string
   web?: string
   link?: string
-  pairing?: 'waiting' | 'paired'
+  pairing?: 'waiting' | 'paired' | 'removed'
+  master?: string
   setup?: 'waiting' | 'configured'
   testEndpoints?: boolean
 }
@@ -80,6 +91,13 @@ export interface RunningNode {
   link?: { server: Server; port: number }
   control: ControlServer
   databases: Map<string, DatabaseSync>
+  /** On a master: its paired nodes. */
+  registry?: NodeRegistry
+  /** On a worker or host: its pairing and the master's link. */
+  pairing?: Pairing
+  links?: NodeLinks
+  /** On `master --worker`: the worker's end of the in-process link. */
+  localWorker?: Link
   status(): NodeStatus
   close(): Promise<void>
 }
@@ -257,6 +275,58 @@ export async function startNode(
       )
       link = { server, port: boundPort(server) }
     }
+    let pairing: Pairing | undefined
+    let links: NodeLinks | undefined
+    if (link != null) {
+      pairing = new Pairing(dir, identity)
+      if (options.newKey) pairing.reset()
+      links = serveNodeLinks(link.server as HttpsServer, {
+        pairing,
+        role: options.role as 'worker' | 'host',
+        methods: options.nodeMethods ?? {},
+        ...(options.heartbeatMs == null
+          ? {}
+          : { heartbeatMs: options.heartbeatMs }),
+        onPaired: (fingerprint) => log(`Paired with master ${fingerprint}`),
+        onRemoved: () =>
+          log('Removed by its master; start with --new-key to pair it again.'),
+      })
+      const nodeLinks = links
+      cleanup.push(() => nodeLinks.close())
+    }
+    let registry: NodeRegistry | undefined
+    let localWorker: Link | undefined
+    if (master != null) {
+      const nodes = new NodeRegistry(master, identity, {
+        methods: options.masterMethods ?? ((): MethodTable => ({})),
+        ...(options.heartbeatMs == null
+          ? {}
+          : { heartbeatMs: options.heartbeatMs }),
+        ...(options.redialBaseMs == null
+          ? {}
+          : { redialBaseMs: options.redialBaseMs }),
+      })
+      registry = nodes
+      cleanup.push(() => nodes.stop())
+      if (options.coWorker) {
+        const [masterWire, workerWire] = memoryPair()
+        localWorker = new Link(workerWire, {
+          localRole: 'worker',
+          peerRole: 'master',
+          dialer: false,
+          methods: {
+            ...options.nodeMethods,
+            requests: {
+              ...options.nodeMethods?.requests,
+              'node.configure': (params): unknown => params,
+            },
+          },
+          peer: { fingerprint: identity.fingerprint, version },
+        })
+        await nodes.attachLocal(masterWire, identity.fingerprint, hostname())
+      }
+      nodes.start()
+    }
     if (options.role === 'master' && !configured())
       setupCode = newSetupCode(dir)
     else if (options.role === 'master') clearSetupCode(dir)
@@ -279,7 +349,26 @@ export async function startNode(
         : {}),
       testEndpoints,
     })
-    const control = await serveControl(dir, { status, ...handlers })
+    const nodeHandlers: Record<string, ControlHandler> =
+      registry == null
+        ? { pairing: () => pairing?.key() ?? null }
+        : {
+            'nodes.add': async (args) =>
+              await registry!.add(
+                String(args.address ?? ''),
+                String(args.key ?? ''),
+              ),
+            'nodes.list': () => registry!.list(),
+            'nodes.remove': (args): null => {
+              registry!.remove(String(args.fingerprint ?? ''))
+              return null
+            },
+          }
+    const control = await serveControl(dir, {
+      status,
+      ...nodeHandlers,
+      ...handlers,
+    })
     cleanup.push(() => control.close())
 
     log(
@@ -299,9 +388,13 @@ export async function startNode(
       log(
         `Setup code: ${setupCode}  (enter it on the setup page, or run mason setup)`,
       )
-    if (link != null) {
+    if (link != null && pairing != null) {
       log(`Link: ${reachableAddresses(link.port, options.listen).join(', ')}`)
-      log(`Pairing key: ${pairingKey(identity)}`)
+      const paired = pairing.master()
+      if (pairing.removed())
+        log('Removed by its master; start with --new-key to pair it again.')
+      else if (paired != null) log(`Paired with master ${paired.fingerprint}`)
+      else log(`Pairing key: ${pairing.key()!}`)
     }
     return {
       options,
@@ -311,6 +404,10 @@ export async function startNode(
       link,
       control,
       databases,
+      ...(registry == null ? {} : { registry }),
+      ...(pairing == null ? {} : { pairing }),
+      ...(links == null ? {} : { links }),
+      ...(localWorker == null ? {} : { localWorker }),
       status,
       close,
     }
@@ -343,10 +440,16 @@ export function statusFromFiles(dir: string, role?: Role): NodeStatus {
     out.certificateHash = certificateHash(cert)
     out.pin = publicKeyPin(cert)
   }
-  if (actual === 'worker' || actual === 'host')
-    out.pairing = existsSync(path.join(dir, 'master.json'))
-      ? 'paired'
-      : 'waiting'
+  if (actual === 'worker' || actual === 'host') {
+    const masterFile = path.join(dir, 'master.json')
+    if (existsSync(path.join(dir, 'removed'))) out.pairing = 'removed'
+    else if (existsSync(masterFile)) {
+      out.pairing = 'paired'
+      out.master = (
+        JSON.parse(readPrivate(masterFile)) as { fingerprint: string }
+      ).fingerprint
+    } else out.pairing = 'waiting'
+  }
   if (actual === 'master') {
     const file = path.join(dir, 'master.sqlite')
     let configured = false
