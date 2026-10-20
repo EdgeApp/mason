@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import type { Server } from 'node:http'
@@ -290,7 +290,10 @@ describe('Device registration, account ownership and iOS compatibility', () => {
         'Content-Type': 'application/x-www-form-urlencoded',
         cookie: `${SESSION_COOKIE}=${other.token}`,
       },
-      body: new URLSearchParams({ csrf: other.session.csrf, name: 'Changed' }),
+      body: new URLSearchParams({
+        csrf: other.session.csrf,
+        name: 'Changed',
+      }),
     })
     assert.equal(attack.status, 403)
     assert.equal(
@@ -361,15 +364,104 @@ describe('Device registration, account ownership and iOS compatibility', () => {
     })
     const cookie = `; ${DEVICE_COOKIE}=${device.id}`
     const catalog = `/apps/${app}/branches/${branchKey('master')}?platform=ios`
-    const selectedCookie = { headers: {cookie: `${SESSION_COOKIE}=${user.token}${cookie}`} }
-    assert.equal((await (await request(catalog, selectedCookie)).text()).includes('data-install'), false)
+    const selectedCookie = {
+      headers: { cookie: `${SESSION_COOKIE}=${user.token}${cookie}` },
+    }
+    assert.equal(
+      (await (await request(catalog, selectedCookie)).text()).includes(
+        'data-install',
+      ),
+      false,
+    )
     assert.equal(
       (await post(`/builds/${build.id}/install`, {}, cookie)).status,
       409,
     )
-    saveProvisioning(store, build.id, profile)
-    assert.match(await (await request(catalog, selectedCookie)).text(), /data-install[^>]*href="itms-services:/)
-    assert.equal((await (await request(catalog)).text()).includes('data-install'), false)
+    const configFile = path.join(root, 'backfill.json')
+    writeFileSync(configFile, JSON.stringify(store.config), {
+      mode: 0o600,
+    })
+    const inspect = spawnSync(
+      process.execPath,
+      ['lib/cli.js', 'devices-inspect', '--config', configFile],
+      { encoding: 'utf8' },
+    )
+    assert.equal(inspect.status, 0, inspect.stderr)
+    assert.deepEqual(JSON.parse(inspect.stdout), {
+      verified: 1,
+      unavailable: 0,
+    })
+    assert.equal((await post(`/builds/${build.id}/prepare`, {})).status, 303)
+    assert.equal(
+      (await post(`/builds/${build.id}/prepare`, {}, cookie)).status,
+      200,
+    )
+    assert.equal(
+      (await post(`/builds/${build.id}/prepare`, {}, cookie)).status,
+      200,
+    )
+    assert.equal(
+      store.db.prepare('SELECT count(*) n FROM device_build_requests').get()?.n,
+      1,
+    )
+    const workerHeaders = { Authorization: 'Bearer ' + 'a'.repeat(64) }
+    const pending = await (
+      await request(
+        '/api/device-provisioning',
+        { headers: workerHeaders },
+        false,
+      )
+    ).json()
+    assert.equal(pending.requests.length, 1)
+    assert.equal(pending.requests[0].commit_hash, 'a'.repeat(40))
+    const reported = await request(
+      '/api/device-provisioning',
+      {
+        method: 'POST',
+        headers: { ...workerHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          devices: [{ id: device.id, status: 'registered', message: 'Ready' }],
+          requests: [
+            {
+              id: pending.requests[0].id,
+              status: 'queued',
+              message: 'Queued',
+            },
+          ],
+        }),
+      },
+      false,
+    )
+    assert.equal(reported.status, 200)
+    assert.equal(devices.list(user.account.id)[0]!.message, 'Ready')
+    assert.equal(
+      store.db.prepare('SELECT status FROM device_build_requests').get()
+        ?.status,
+      'queued',
+    )
+    assert.throws(
+      () => devices.requestBuild(user.account.id, device.id + 1, build.id),
+      /unavailable/,
+    )
+    for (let i = 0; i < 19; i++) {
+      store.db
+        .prepare(
+          "INSERT INTO device_build_requests(account_id,device_id,build_id,created_at,status) VALUES(?,?,?,?,'queued')",
+        )
+        .run(user.account.id, device.id, build.id, store.now())
+    }
+    assert.throws(
+      () => devices.requestBuild(user.account.id, device.id, build.id),
+      /Too many/,
+    )
+    assert.match(
+      await (await request(catalog, selectedCookie)).text(),
+      /data-install[^>]*href="itms-services:/,
+    )
+    assert.equal(
+      (await (await request(catalog)).text()).includes('data-install'),
+      false,
+    )
     assert.equal(
       devices.eligible(build, { ...device, status: 'registered' }),
       true,
@@ -393,11 +485,17 @@ describe('Device registration, account ownership and iOS compatibility', () => {
   })
   it('names known models automatically and rejects unsafe plist structures', () => {
     assert.equal(
-      friendlyName('iPhone14,5', { email: 'mark@gmail.com', name: 'Fixture' }),
+      friendlyName('iPhone14,5', {
+        email: 'mark@gmail.com',
+        name: 'Fixture',
+      }),
       'iPhone13 of mark@gmail',
     )
     assert.equal(
-      friendlyName('iPhone18,3', { email: 'paul@vtex.net', name: 'Fixture' }),
+      friendlyName('iPhone18,3', {
+        email: 'paul@vtex.net',
+        name: 'Fixture',
+      }),
       'iPhone17 of paul@vtex',
     )
     assert.throws(() =>
@@ -413,6 +511,173 @@ describe('Device registration, account ownership and iOS compatibility', () => {
           '<plist><dict><key>a</key><string>1</string><key>a</key><string>2</string></dict></plist>',
         ),
       ),
+    )
+  })
+  it('persists device actions and clears a removed selection without affecting other accounts', async () => {
+    const token = devices.challenge(user.session)
+    const device = devices.receive(
+      token,
+      decodePlist(Buffer.from(payload(token))),
+    )
+    const selected = await post(`/devices/${device.id}/select`, {})
+    assert.match(
+      selected.headers.get('set-cookie')!,
+      new RegExp(`${DEVICE_COOKIE}=${device.id}`),
+    )
+    store.db
+      .prepare(
+        "UPDATE devices SET status='error',message='Retry needed' WHERE id=?",
+      )
+      .run(device.id)
+    assert.equal((await post(`/devices/${device.id}/retry`, {})).status, 303)
+    assert.equal(devices.list(user.account.id)[0]!.status, 'pending')
+    assert.equal(devices.list(user.account.id)[0]!.message, '')
+    assert.equal((await post(`/devices/${device.id}/unknown`, {})).status, 404)
+    assert.equal(
+      (await post(`/devices/${device.id + 1}/select`, {})).status,
+      404,
+    )
+    const removed = await post(
+      `/devices/${device.id}/remove`,
+      {},
+      `; ${DEVICE_COOKIE}=${device.id}`,
+    )
+    assert.equal(removed.status, 303)
+    assert.match(removed.headers.get('set-cookie')!, /Expires=Thu, 01 Jan 1970/)
+    assert.deepEqual(devices.list(user.account.id), [])
+    assert.equal(store.db.prepare('SELECT count(*) n FROM devices').get()?.n, 1)
+  })
+  it('rejects anonymous and non-tester registration and bounds callback attempts', async () => {
+    assert.equal(
+      (await request('/devices/profile', { method: 'POST' }, false)).status,
+      403,
+    )
+    assert.equal(
+      (await request('/builds/1/prepare', { method: 'POST' }, false)).status,
+      403,
+    )
+    const other = accounts.login({ ...identity, subject: 'unprivileged' })
+    assert.equal(
+      (
+        await request('/devices', {
+          headers: { cookie: `${SESSION_COOKIE}=${other.token}` },
+        })
+      ).status,
+      403,
+    )
+    assert.equal(
+      (await request('/devices/callback/invalid', { method: 'POST' }, false))
+        .status,
+      400,
+    )
+    for (let i = 0; i < 30; i++)
+      assert.equal(
+        (
+          await request(
+            '/devices/callback/' + 'A'.repeat(43),
+            { method: 'POST' },
+            false,
+          )
+        ).status,
+        410,
+      )
+    assert.equal(
+      (
+        await request(
+          '/devices/callback/' + 'A'.repeat(43),
+          { method: 'POST' },
+          false,
+        )
+      ).status,
+      429,
+    )
+    const report = await request(
+      '/api/device-provisioning',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ' + 'a'.repeat(64),
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          devices: Array.from({ length: 501 }, () => ({
+            id: 1,
+            status: 'pending',
+            message: '',
+          })),
+          requests: [],
+        }),
+      },
+      false,
+    )
+    assert.equal(report.status, 400)
+  })
+})
+
+describe('Bounded property-list decoding', () => {
+  it('reads binary dictionaries and rejects a binary array root', () => {
+    assert.deepEqual(
+      decodePlist(
+        Buffer.from(
+          'YnBsaXN0MDDTAQIDBAUGVWNvdW50V2VuYWJsZWRVbGFiZWwQBwlXZml4dHVyZQgPFR0jJSYAAAAAAAABAQAAAAAAAAAHAAAAAAAAAAAAAAAAAAAALg==',
+          'base64',
+        ),
+      ),
+      { count: 7, enabled: true, label: 'fixture' },
+    )
+    assert.throws(
+      () =>
+        decodePlist(
+          Buffer.from(
+            'YnBsaXN0MDChAV8QEG5vdC1hLWRpY3Rpb25hcnkICgAAAAAAAAEBAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAd',
+            'base64',
+          ),
+        ),
+      /dictionary/,
+    )
+  })
+  it('reads array values and refuses excessive depth, malformed values and non-dictionary roots', () => {
+    const parsed = decodePlist(
+      Buffer.from(
+        '<plist><dict><key>values</key><array><true/><false/><integer>7</integer><string/></array></dict></plist>',
+      ),
+    )
+    assert.deepEqual(parsed.values, [true, false, 7, ''])
+    assert.throws(
+      () =>
+        decodePlist(
+          Buffer.from(
+            '<plist>' +
+              '<array>'.repeat(14) +
+              '<true/>' +
+              '</array>'.repeat(14) +
+              '</plist>',
+          ),
+        ),
+      /deep/,
+    )
+    for (const body of [
+      '<real>1.2</real>',
+      '<dict><key>orphan</key></dict>',
+      '<string>root</string>',
+    ])
+      assert.throws(() => decodePlist(Buffer.from(`<plist>${body}</plist>`)))
+    assert.throws(() => decodePlist(Buffer.alloc(1024 * 1024 + 1)), /large/)
+    assert.throws(
+      () => decodePlist(Buffer.from('<plist><dict/><dict/></plist>')),
+      /root/,
+    )
+    assert.equal(
+      friendlyName('iPad999,1', { name: 'Hank Aaron', email: undefined }),
+      'iPad of Hank Aaron',
+    )
+    assert.equal(
+      friendlyName('iPod999,1', { name: 'Hank Aaron', email: undefined }),
+      'iPod of Hank Aaron',
+    )
+    assert.equal(
+      friendlyName('Unknown', { name: 'Hank Aaron', email: undefined }),
+      'iPhone of Hank Aaron',
     )
   })
 })

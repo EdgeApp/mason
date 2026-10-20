@@ -266,18 +266,18 @@ export function deviceRoutes(
           )
           .run(store.now(), device.id)
         break
-      case 'remove':
+      case 'remove': {
+        const wasSelected =
+          devices.selected(context.account.id, req.headers.cookie)?.id ===
+          device.id
         store.db
           .prepare(
             'DELETE FROM account_devices WHERE account_id=? AND device_id=?',
           )
           .run(context.account.id, device.id)
-        if (
-          devices.selected(context.account.id, req.headers.cookie)?.id ===
-          device.id
-        )
-          res.clearCookie(DEVICE_COOKIE, cookieOptions)
+        if (wasSelected) res.clearCookie(DEVICE_COOKIE, cookieOptions)
         break
+      }
       default:
         res.status(404).send('Unknown action')
         return
