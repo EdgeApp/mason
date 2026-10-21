@@ -144,7 +144,7 @@ export function dashboardData(
     "SELECT branch,build_number,published_at FROM builds WHERE app_id=? AND state='ready' AND deleted_at IS NULL AND id IN (SELECT MAX(id) FROM builds WHERE app_id=? AND state='ready' AND deleted_at IS NULL GROUP BY branch) ORDER BY published_at DESC LIMIT 3",
   )
   const runsOf = db.prepare(
-    'SELECT id,branch,number,status,workflow,commit_sha,description,created FROM (SELECT *,ROW_NUMBER() OVER (PARTITION BY branch ORDER BY created DESC) AS place FROM jobs WHERE project_id=?) WHERE place=1 ORDER BY created DESC LIMIT 4',
+    "SELECT id,branch,number,status,workflow,commit_sha,description,created FROM (SELECT *,ROW_NUMBER() OVER (PARTITION BY branch ORDER BY created DESC) AS place FROM jobs WHERE project_id=? AND workflow NOT LIKE '@%') WHERE place=1 ORDER BY created DESC LIMIT 4",
   )
   const counts: DashboardData['counts'] = {
     all: 0,
@@ -233,7 +233,7 @@ export function dashboardData(
   }
   const finished = db
     .prepare(
-      "SELECT SUM(status='succeeded') AS ok,COUNT(*) AS total FROM jobs WHERE status IN ('succeeded','unstable','failed','timed_out') AND finished>=?",
+      "SELECT SUM(status='succeeded') AS ok,COUNT(*) AS total FROM jobs WHERE status IN ('succeeded','unstable','failed','timed_out') AND finished>=? AND workflow NOT LIKE '@%'",
     )
     .get(source.now - 30 * DAY) as { ok: number | null; total: number }
   const storage =
@@ -373,11 +373,14 @@ function query(filter: DashboardFilter, change: DashboardFilter): string {
   return text === '' ? '/' : `/?${text}`
 }
 
-/** The run's page; the artifacts view until the run view exists. */
-export const runHref = (id: string): string =>
-  `/artifacts?run=${encodeURIComponent(id)}`
+/** A run's page. */
+export const runHref = (id: string): string => `/runs/${encodeURIComponent(id)}`
 
-function projectCard(card: ProjectCard, now: number): string {
+function projectCard(
+  card: ProjectCard,
+  now: number,
+  masonfile: boolean,
+): string {
   const runs = card.runs
     .map(
       (run) =>
@@ -401,7 +404,7 @@ function projectCard(card: ProjectCard, now: number): string {
     card.repository == null
       ? ''
       : `<small class="mono">${escape(card.repository)}</small>`
-  }<div class="meta">${card.defaultBranch == null ? '' : `<span>${icon('fork_right')} Default: <span class="mono">${escape(card.defaultBranch)}</span></span>`}${
+  }${masonfile ? `<a class="meta-link" href="/projects/${encodeURIComponent(card.slug)}">${icon('tune')} Project</a> <a class="meta-link" href="/projects/${encodeURIComponent(card.slug)}/masonfile">${icon('description')} Masonfile</a>` : ''}<div class="meta">${card.defaultBranch == null ? '' : `<span>${icon('fork_right')} Default: <span class="mono">${escape(card.defaultBranch)}</span></span>`}${
     card.webhook == null
       ? ''
       : `<span>${statusDot(card.webhook ? 'succeeded' : 'queued')} Webhook ${card.webhook ? 'active' : 'not set up'}</span>`
@@ -462,8 +465,9 @@ export function dashboardView(
         `<li><div><span class="mono">${escape(build.app)} ${escape(build.version)} (${escape(build.buildNumber)})</span><small>${platformChip(build.platform)} <span class="mono">${escape(build.branch)}</span> · ${escape(bytes(build.size))} · ${escape(ago(build.at, now))}</small></div></li>`,
     )
     .join('')
-  return `<div class="page-head"><div><div class="breadcrumbs"><span>Mason</span><span>/</span><span>${viewer.node === 'master' ? 'Master' : 'Builds'}</span></div><h1>Projects &amp; apps</h1><p>Every project's app IDs, their latest builds and runs.</p></div></div><div class="tiles">${tile('folder', 'Projects', String(data.tiles.projects))}${tile('apps', 'App IDs', String(data.tiles.apps))}${tile('speed', 'Success rate', rate, data.tiles.finished === 0 ? 'No finished runs in 30 days' : `${data.tiles.finished} runs in 30 days`)}${tile('storage', 'Artifact storage', bytes(data.tiles.storage))}</div><nav class="chips" aria-label="Platforms">${chips}</nav><div class="columns"><div>${
-    data.projects.map((card) => projectCard(card, now)).join('') ||
-    '<p class="empty-state">No projects match.</p>'
-  }</div><aside><section class="panel"><h2>${icon('hourglass_top')}Queue</h2><ul>${queue || '<li>Nothing is running.</li>'}</ul></section>${nodes}<section class="panel"><h2>${icon('deployed_code')}Recent builds</h2><ul>${builds || '<li>No builds yet.</li>'}</ul></section></aside></div>`
+  return `<div class="page-head"><div><div class="breadcrumbs"><span>Mason</span><span>/</span><span>${viewer.node === 'master' ? 'Master' : 'Builds'}</span></div><h1>Projects &amp; apps</h1><p>Every project's app IDs, their latest builds and runs.</p></div>${viewer.node === 'master' && (viewer.role === 'admin' || viewer.role === 'manager') ? `<a class="button" href="/projects/new">${icon('add')} Add project</a>` : ''}</div><div class="tiles">${tile('folder', 'Projects', String(data.tiles.projects))}${tile('apps', 'App IDs', String(data.tiles.apps))}${tile('speed', 'Success rate', rate, data.tiles.finished === 0 ? 'No finished runs in 30 days' : `${data.tiles.finished} runs in 30 days`)}${tile('storage', 'Artifact storage', bytes(data.tiles.storage))}</div><nav class="chips" aria-label="Platforms">${chips}</nav><div class="columns"><div>${
+    data.projects
+      .map((card) => projectCard(card, now, viewer.node === 'master'))
+      .join('') || '<p class="empty-state">No projects match.</p>'
+  }</div><aside><section class="panel" data-queue><h2>${icon('hourglass_top')}Queue</h2><ul>${queue || '<li>Nothing is running.</li>'}</ul></section>${nodes}<section class="panel"><h2>${icon('deployed_code')}Recent builds</h2><ul>${builds || '<li>No builds yet.</li>'}</ul></section></aside></div>`
 }

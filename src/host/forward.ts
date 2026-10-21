@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto'
 import express, { Router, type Request, type Response } from 'express'
 import { sessionContext } from '../auth/routes.js'
 import type { Stream } from '../link/link.js'
-import { isRunAction } from '../master/forward.js'
+import { isRunAction, isRunRead } from '../master/forward.js'
 import type { HostRuntime } from './runtime.js'
 
 const same = (a: string, b: string): boolean =>
@@ -80,45 +80,54 @@ export function forwardRoutes(host: HostRuntime): Router {
             res.status(401).json({ error: 'Sign in or use an API key' })
             return
           }
-          if (!isRunAction(req.method, req.originalUrl)) {
+          if (isRunRead(req.method, req.originalUrl)) {
+            account = {
+              id: context.account.id,
+              permissionVersion: context.session.permission_version,
+            }
+          } else if (!isRunAction(req.method, req.originalUrl)) {
             res.status(403).json({
               error:
-                'A host session may only request, cancel, restart or approve runs',
+                'A host session may only read run logs and events, or request, cancel, restart or approve runs',
             })
             return
           }
-          const origin = req.get('origin')
-          const proof =
-            req.get('x-mason-csrf') ??
-            ((): unknown => {
-              try {
-                return (
-                  JSON.parse(Buffer.from(req.body as Buffer).toString()) as {
-                    csrf?: unknown
-                  }
-                ).csrf
-              } catch {
-                return undefined
-              }
-            })()
-          let sameOrigin = false
-          try {
-            sameOrigin =
-              origin != null && new URL(origin).host === req.get('host')
-          } catch {
-            sameOrigin = false
-          }
-          if (
-            !sameOrigin ||
-            typeof proof !== 'string' ||
-            !same(proof, context.session.csrf)
-          ) {
-            res.status(403).json({ error: 'Invalid request proof' })
-            return
-          }
-          account = {
-            id: context.account.id,
-            permissionVersion: context.session.permission_version,
+          if (account != null) {
+            // A read needs no request proof.
+          } else {
+            const origin = req.get('origin')
+            const proof =
+              req.get('x-mason-csrf') ??
+              ((): unknown => {
+                try {
+                  return (
+                    JSON.parse(Buffer.from(req.body as Buffer).toString()) as {
+                      csrf?: unknown
+                    }
+                  ).csrf
+                } catch {
+                  return undefined
+                }
+              })()
+            let sameOrigin = false
+            try {
+              sameOrigin =
+                origin != null && new URL(origin).host === req.get('host')
+            } catch {
+              sameOrigin = false
+            }
+            if (
+              !sameOrigin ||
+              typeof proof !== 'string' ||
+              !same(proof, context.session.csrf)
+            ) {
+              res.status(403).json({ error: 'Invalid request proof' })
+              return
+            }
+            account = {
+              id: context.account.id,
+              permissionVersion: context.session.permission_version,
+            }
           }
         }
         const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0)

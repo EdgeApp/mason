@@ -25,6 +25,7 @@ import {
   approvalRolesFromGraph,
   notificationsFor,
 } from '../view/notifications.js'
+import { graphFromJson, runData, runView } from '../view/run.js'
 import { search } from '../view/search.js'
 import { page, shell, type Viewer } from '../view/shell.js'
 import { escape } from '../view/html.js'
@@ -149,7 +150,7 @@ function projectRoutes(host: HostRuntime): express.Router {
 function hostViewer(
   host: HostRuntime,
   req: express.Request,
-): { viewer: Viewer; accountId: number } | undefined {
+): { viewer: Viewer; accountId: number; csrf: string } | undefined {
   const context = sessionContext(req, host.accounts)
   if (context == null) return undefined
   const row = host.cache.db
@@ -161,6 +162,7 @@ function hostViewer(
   if (row == null || role == null) return undefined
   return {
     accountId: context.account.id,
+    csrf: context.session.csrf,
     viewer: {
       name: row.name,
       role,
@@ -183,6 +185,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
     title: string,
     body: string,
     active: string,
+    csrf?: string,
   ): void => {
     res.send(
       shell({
@@ -190,6 +193,10 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
         body,
         viewer,
         active,
+        scripts: ['/assets/run.js'],
+        ...(csrf == null
+          ? {}
+          : { head: `<meta name="mason-csrf" content="${escape(csrf)}">` }),
         banners: testBanner(context),
         notifications: notificationsFor(
           viewer,
@@ -296,6 +303,85 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       res.cookie(SESSION_COOKIE, token, cookieOptions)
       res.redirect(303, '/')
     })
+  router.get('/runs/:id', (req, res) => {
+    const found = hostViewer(host, req)
+    if (found == null) {
+      res.redirect(
+        303,
+        '/auth/login?return=' + encodeURIComponent(req.originalUrl),
+      )
+      return
+    }
+    if (found.viewer.role === 'tester') {
+      res
+        .status(403)
+        .send(page('Run', '<p>Runs are for developers and up.</p>'))
+      return
+    }
+    const db = host.cache.db
+    const id = String(req.params.id)
+    const run = runData(db, id, (job) => {
+      const row = db
+        .prepare('SELECT workflow,graph FROM jobs WHERE id=?')
+        .get(job) as { workflow: string; graph: string | null } | undefined
+      return row == null ? undefined : graphFromJson(row.graph, row.workflow)
+    })
+    if (run == null) {
+      res
+        .status(404)
+        .send(page('Run unavailable', '<p>There is no such run.</p>'))
+      return
+    }
+    const query = (name: string): string | undefined =>
+      typeof req.query[name] === 'string'
+        ? (req.query[name] as string)
+        : undefined
+    const stage = run.stages.some((entry) => entry.name === query('stage'))
+      ? query('stage')
+      : undefined
+    const step =
+      stage == null || query('step') == null ? undefined : Number(query('step'))
+    const logs = `/api/v2/runs/${encodeURIComponent(id)}/logs`
+    const role = found.viewer.role
+    render(
+      res,
+      found.viewer,
+      `${run.workflow} #${run.number}`,
+      runView(run, {
+        ...(stage == null ? {} : { selected: stage }),
+        ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
+        tab: query('tab') === 'timeline' ? 'timeline' : 'graph',
+        now: host.now(),
+        // The logs are on the master: a stage's arrive by its live stream, a step's are fetched.
+        log:
+          stage == null
+            ? {
+                unavailable:
+                  'The whole run’s log is on the master: download it, or choose a stage to follow its log here.',
+              }
+            : { text: '' },
+        ...(stage != null && step != null && Number.isSafeInteger(step)
+          ? {
+              logSource: `${logs}?stage=${encodeURIComponent(stage)}&step=${step}`,
+            }
+          : {}),
+        logOffset: 0,
+        can: {
+          cancel: true,
+          restart: true,
+          request: true,
+          approve: (name) =>
+            role === 'admin' ||
+            (
+              run.graph?.approvals[name]?.roles ?? ['admin', 'manager']
+            ).includes(role),
+        },
+        base: '',
+      }),
+      'dashboard',
+      found.csrf,
+    )
+  })
   router.get('/search', (req, res) => {
     const found = hostViewer(host, req)
     if (found == null) {
@@ -385,6 +471,16 @@ export function hostApp(
     })
     return app
   }
+  app.get('/assets/run.js', (_req, res) => {
+    res
+      .type('js')
+      .send(
+        readFileSync(
+          new URL('../browser/bundles/run.js', import.meta.url),
+          'utf8',
+        ),
+      )
+  })
   app.get('/assets/catalog.js', (_req, res) => {
     res
       .type('js')

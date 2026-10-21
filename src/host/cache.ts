@@ -79,7 +79,7 @@ const order = [
   'job',
 ]
 
-const HOST_SCHEMA = 2
+const HOST_SCHEMA = 3
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -94,6 +94,16 @@ function migrateHost(db: DatabaseSync): void {
     throw new Error('The host cache belongs to a newer Mason version')
   if (current === HOST_SCHEMA) return
   if (current < 1) migrateHostV1(db)
+  if (current < 2) migrateHostV2(db)
+  // Where each step's lines are in its stage log, replicated with the step.
+  db.exec(`BEGIN IMMEDIATE;
+    ALTER TABLE job_steps ADD COLUMN log_start INTEGER;
+    ALTER TABLE job_steps ADD COLUMN log_end INTEGER;
+    INSERT INTO host_meta(key,value) VALUES('host_schema','3') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+}
+
+function migrateHostV2(db: DatabaseSync): void {
   // Saved artifacts and test results of runs, replicated with their run.
   db.exec(`BEGIN IMMEDIATE;
     CREATE TABLE run_artifacts(job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, stage TEXT NOT NULL,

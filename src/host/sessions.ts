@@ -28,7 +28,7 @@ export function hostLogin(
       throw new SignInRefused('The provider did not confirm a verified email')
     const found = cache.db
       .prepare(
-        'SELECT a.id FROM account_addresses x JOIN accounts a ON a.id=x.account_id WHERE x.method=? AND lower(x.email)=lower(?) AND a.disabled=0',
+        "SELECT a.id FROM account_addresses x JOIN accounts a ON a.id=x.account_id WHERE x.method IN (?, '*') AND lower(x.email)=lower(?) AND a.disabled=0 ORDER BY x.method='*'",
       )
       .get(identity.provider, identity.email) as { id: number } | undefined
     if (found == null)

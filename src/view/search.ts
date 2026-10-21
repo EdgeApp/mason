@@ -77,7 +77,7 @@ export function search(scope: SearchScope, text: string): SearchResult[] {
   if (number != null)
     for (const run of db
       .prepare(
-        'SELECT j.id,j.number,j.workflow,j.branch,j.status,p.slug FROM jobs j JOIN projects p ON p.id=j.project_id WHERE j.number=? ORDER BY j.created DESC LIMIT 10',
+        "SELECT j.id,j.number,j.workflow,j.branch,j.status,p.slug FROM jobs j JOIN projects p ON p.id=j.project_id WHERE j.number=? AND j.workflow NOT LIKE '@%' ORDER BY j.created DESC LIMIT 10",
       )
       .all(Number(number)) as Array<{
       id: string

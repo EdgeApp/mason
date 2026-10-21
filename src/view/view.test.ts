@@ -333,6 +333,9 @@ describe('Design system and views', () => {
     assert.deepEqual(keys(viewer('admin')), [
       'dashboard',
       'artifacts',
+      'nodes',
+      'people',
+      'settings',
       'backups',
     ])
     assert.deepEqual(keys(viewer('developer')), ['dashboard', 'artifacts'])
@@ -525,7 +528,7 @@ describe('Design system and views', () => {
     // LIKE wildcards are matched literally.
     assert.deepEqual(find('%'), [])
     assert.equal(search(developer, 'phone')[0]!.href, '/?project=phones')
-    assert.equal(search(developer, '#2')[0]!.href, '/artifacts?run=run-2')
+    assert.equal(search(developer, '#2')[0]!.href, '/runs/run-2')
     assert.equal(
       search({ ...developer, viewer: viewer('developer', 'host') }, 'watch')[0]!
         .href,

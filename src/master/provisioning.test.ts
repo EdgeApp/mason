@@ -251,6 +251,7 @@ describe('Devices across nodes', function () {
       platform: 'ios',
     })
     tester = await master.people.create(admin, {
+      email: 'person15@example.test',
       name: 'Tess',
       role: 'tester',
       addresses: { google: 'tess@example.test' },

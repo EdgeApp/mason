@@ -1046,6 +1046,11 @@ export interface ProjectFacts {
   secrets: string[]
   /** Known node type names; omitted means any name is accepted. */
   nodeTypes?: string[]
+  /**
+   * Check the structure only, not what the project owns: the add-project
+   * wizard reads a Masonfile to learn which app IDs and secrets it names.
+   */
+  structureOnly?: boolean
 }
 
 /**
@@ -1076,6 +1081,7 @@ export function validateGraph(value: unknown, project: ProjectFacts): Graph {
       if (stage.kind === 'approval') continue
       selector(stage.on, what)
       tools(stage.tools, what)
+      if (project.structureOnly === true) continue
       if (
         typeof stage.on === 'string' &&
         stage.on !== 'master' &&

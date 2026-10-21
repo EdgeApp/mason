@@ -40,6 +40,14 @@ export const colors = {
   terminalText: '#E2E8F0',
   // The notes' #64748B is 3.75:1 on the terminal; this slate is the nearest that passes.
   lineNumber: '#7C8BA1',
+  /** ANSI colours on the terminal. */
+  ansiRed: '#F87171',
+  ansiGreen: '#4ADE80',
+  ansiYellow: '#FACC15',
+  ansiBlue: '#60A5FA',
+  ansiMagenta: '#E879F9',
+  ansiCyan: '#22D3EE',
+  ansiGray: '#94A3B8',
 } as const
 
 export type ColorToken = keyof typeof colors
@@ -83,6 +91,13 @@ export const textPairs: ReadonlyArray<
   ['warning', 'warningSoft'],
   ['terminalText', 'terminal'],
   ['lineNumber', 'terminal'],
+  ['ansiRed', 'terminal'],
+  ['ansiGreen', 'terminal'],
+  ['ansiYellow', 'terminal'],
+  ['ansiBlue', 'terminal'],
+  ['ansiMagenta', 'terminal'],
+  ['ansiCyan', 'terminal'],
+  ['ansiGray', 'terminal'],
 ]
 
 function channel(value: number): number {

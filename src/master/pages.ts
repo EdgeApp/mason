@@ -6,6 +6,15 @@ import {
   type WebAppContext,
 } from '../node/webApp.js'
 import { escape } from '../view/html.js'
+import {
+  masonfileView,
+  nodesView,
+  peopleView,
+  projectView,
+  settingsView,
+  wizardView,
+  type NodeRow,
+} from '../view/admin.js'
 import { artifactsView } from '../view/artifacts.js'
 import {
   dashboardData,
@@ -16,7 +25,10 @@ import {
   approvalNotifications,
   notificationsFor,
 } from '../view/notifications.js'
+import { graphFromJson, runData, runView } from '../view/run.js'
 import { search } from '../view/search.js'
+import { runLog } from './runsApi.js'
+import { discovery } from './wizard.js'
 import { shell, type Viewer } from '../view/shell.js'
 import { MASTER_SESSION_COOKIE, type MasterSession } from './auth.js'
 import { can } from './permissions.js'
@@ -93,7 +105,7 @@ function masterPage(
   const viewer = session == null ? undefined : viewerOf(session)
   return shell({
     title,
-    body: content.startsWith('<div class="page-head">')
+    body: content.startsWith('<div class="page-head')
       ? content
       : `<h1>${escape(title)}</h1>${content}`,
     ...(viewer == null
@@ -112,7 +124,7 @@ function masterPage(
         }),
     ...(active == null ? {} : { active }),
     banners: testBanner(context) + banner,
-    scripts: ['/assets/master.js'],
+    scripts: ['/assets/master.js', '/assets/run.js'],
   })
 }
 
@@ -319,6 +331,429 @@ export function masterPages(
       current,
       200,
       'artifacts',
+    )
+  })
+  app.get('/runs/:id', (req, res) => {
+    const current = session(req)
+    if (current == null) {
+      res.redirect(303, master.configured() ? '/sign-in' : '/')
+      return
+    }
+    const actor = sessionActor(current)
+    if (!can(actor, 'runs.read')) {
+      send(res, 'Run', '<p>Runs are for developers and up.</p>', current, 403)
+      return
+    }
+    const id = String(req.params.id)
+    const db = master.database.db
+    const run = runData(
+      db,
+      id,
+      (job) => {
+        const row = db
+          .prepare(
+            'SELECT j.workflow,g.graph FROM jobs j LEFT JOIN graphs g ON g.key=j.graph_key WHERE j.id=?',
+          )
+          .get(job) as { workflow: string; graph: string | null } | undefined
+        return row == null ? undefined : graphFromJson(row.graph, row.workflow)
+      },
+      {
+        repository: (project) =>
+          (
+            db
+              .prepare('SELECT repository FROM projects WHERE id=?')
+              .get(project) as { repository: string } | undefined
+          )?.repository,
+        nodeName: (fingerprint) => master.registry.get(fingerprint)?.name,
+      },
+    )
+    if (run == null) {
+      send(
+        res,
+        'Run unavailable',
+        '<p class="empty-state">There is no such run.</p>',
+        current,
+        404,
+      )
+      return
+    }
+    const query = (name: string): string | undefined =>
+      typeof req.query[name] === 'string'
+        ? (req.query[name] as string)
+        : undefined
+    const stage = run.stages.some((entry) => entry.name === query('stage'))
+      ? query('stage')
+      : undefined
+    const step =
+      stage == null || query('step') == null ? undefined : Number(query('step'))
+    let log: { text: string; first: number } | { unavailable: string }
+    try {
+      log = runLog(master, id, {
+        ...(stage == null ? {} : { stage }),
+        ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
+      }) ?? { unavailable: 'This run has no log.' }
+    } catch {
+      log = { unavailable: 'There is no such step.' }
+    }
+    const requester = can(actor, 'runs.request')
+    send(
+      res,
+      `${run.workflow} #${run.number}`,
+      runView(run, {
+        ...(stage == null ? {} : { selected: stage }),
+        ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
+        ...(stage != null && step == null && 'text' in log
+          ? { logOffset: Buffer.byteLength(log.text) }
+          : {}),
+        tab: query('tab') === 'timeline' ? 'timeline' : 'graph',
+        now: master.database.now(),
+        log,
+        can: {
+          cancel: requester,
+          restart: requester,
+          request: requester,
+          approve: (name) =>
+            can(actor, 'runs.approve') &&
+            (current.role === 'admin' ||
+              (
+                run.graph?.approvals[name]?.roles ?? ['admin', 'manager']
+              ).includes(current.role)),
+        },
+        base: '',
+      }),
+      current,
+      200,
+      'dashboard',
+    )
+  })
+  /** A page for those whose role allows an action; others get a 403 page. */
+  const guarded = (
+    path: string,
+    action: Parameters<typeof can>[1],
+    title: string,
+    active: string,
+    body: (
+      current: MasterSession,
+      req: express.Request,
+    ) => Promise<string> | string,
+  ): void => {
+    app.get(path, (req, res) => {
+      const current = session(req)
+      if (current == null) {
+        res.redirect(303, master.configured() ? '/sign-in' : '/')
+        return
+      }
+      if (!can(sessionActor(current), action)) {
+        send(
+          res,
+          title,
+          `<p>${escape(title)} is for those whose role allows it.</p>`,
+          current,
+          403,
+          active,
+        )
+        return
+      }
+      void Promise.resolve(body(current, req)).then(
+        (content) => {
+          send(res, title, content, current, 200, active)
+        },
+        (error: unknown) => {
+          send(
+            res,
+            title,
+            `<p class="state-failed">${escape((error as Error).message)}</p>`,
+            current,
+            400,
+            active,
+          )
+        },
+      )
+    })
+  }
+  guarded('/nodes', 'nodes.read', 'Nodes', 'nodes', (current) => {
+    const busy = cluster(master).nodes
+    return nodesView({
+      nodes: master.registry.list().map((node) => {
+        const details = master.nodeDetails(node.fingerprint) as {
+          checklist?: NodeRow['checklist']
+          inventory?: NodeRow['inventory'] & { version?: string }
+        }
+        const stage = master.database.db
+          .prepare(
+            "SELECT job_id||' '||name AS name FROM job_stages WHERE worker=? AND status='running' LIMIT 1",
+          )
+          .get(node.fingerprint) as { name: string } | undefined
+        return {
+          name: node.name,
+          fingerprint: node.fingerprint,
+          role: node.role,
+          type: node.type,
+          labels: node.labels,
+          slots: node.slots,
+          status:
+            node.role === 'host'
+              ? node.connected
+                ? 'idle'
+                : 'offline'
+              : (busy.find((entry) => entry.name === node.name)?.status ??
+                'offline'),
+          ...(stage == null ? {} : { stage: stage.name }),
+          ...(details.inventory == null
+            ? {}
+            : { inventory: details.inventory }),
+          checklist: details.checklist ?? [],
+          ...(node.version == null ? {} : { version: node.version }),
+        }
+      }),
+      types: (master.settings.value('nodeTypes') ?? {}) as Record<
+        string,
+        unknown
+      >,
+      pools: master.pools.pools().map((pool) => ({
+        name: pool.name,
+        type: pool.type,
+        size: pool.size,
+        maxNodes: pool.maxNodes,
+        machines: master.pools
+          .machines(pool.name)
+          .filter(
+            (row) =>
+              (row as { destroyed_at?: number | null }).destroyed_at == null,
+          ).length,
+      })),
+      budget: {
+        monthly: Number(
+          ((master.settings.value('cloud') ?? {}) as { monthlyBudget?: number })
+            .monthlyBudget ?? 200,
+        ),
+        ...(master.pools.notice() == null
+          ? {}
+          : { notice: master.pools.notice()! }),
+      },
+      ...(((master.settings.value('host') ?? {}) as { origin?: string })
+        .origin == null
+        ? {}
+        : {
+            host: ((master.settings.value('host') ?? {}) as { origin: string })
+              .origin,
+          }),
+      canChange: can(sessionActor(current), 'nodes.change'),
+    })
+  })
+  guarded('/settings', 'settings.read', 'Settings', 'settings', (current) => {
+    const actor = sessionActor(current)
+    const apple = master.apple.status()
+    return settingsView({
+      areas: master.settings
+        .names()
+        .filter((name) => name !== 'backup')
+        .map((name) => {
+          try {
+            return { name, value: master.settings.get(actor, name) }
+          } catch (error) {
+            return { name, value: undefined, error: (error as Error).message }
+          }
+        }),
+      apple: {
+        signedIn: apple.state === 'signedIn',
+        needsCode: apple.state === 'needsCode',
+        ...(apple.appleId == null ? {} : { appleId: apple.appleId }),
+        ...(apple.notice == null ? {} : { notice: apple.notice }),
+      },
+      keys: can(actor, 'keys.read')
+        ? master.keys.list().map((key) => ({
+            id: key.id,
+            name: key.name,
+            role: key.role,
+            createdAt: key.createdAt,
+            revoked: key.revoked,
+          }))
+        : [],
+      canChange: can(actor, 'settings.change'),
+      canRevoke: can(actor, 'keys.revoke'),
+    })
+  })
+  guarded('/people', 'people.read', 'People', 'people', (current) => {
+    const actor = sessionActor(current)
+    return peopleView({
+      people: master.people.list(actor).map((person) => ({
+        id: person.id,
+        name: person.name,
+        role: person.role,
+        ...(person.email == null ? {} : { email: person.email }),
+        addresses: person.addresses,
+        ...(person.username == null ? {} : { username: person.username }),
+      })),
+      groups: can(actor, 'groups.read') ? master.people.groups(actor) : [],
+      canChange: can(actor, 'people.change'),
+      canChangeGroups: can(actor, 'groups.change'),
+    })
+  })
+  guarded(
+    '/projects/new',
+    'projects.change',
+    'Add a project',
+    'dashboard',
+    (_current, req) => {
+      const slug =
+        typeof req.query.slug === 'string' ? req.query.slug : undefined
+      if (slug == null)
+        return wizardView({ owned: [], rules: [], webhook: false })
+      const project = master.projects.get(slug)
+      const found = discovery(master, project.id)
+      return wizardView({
+        slug,
+        repository: project.repository,
+        defaultBranch: project.defaultBranch,
+        ...(found == null ? {} : { discovery: found }),
+        owned: project.apps.map((entry) => entry.bundleId),
+        rules: project.rules.map((rule) => ({
+          pattern: rule.pattern,
+          mode: rule.mode,
+        })),
+        webhook: project.webhookSecret.set,
+      })
+    },
+  )
+  app.get('/projects/:slug', (req, res, next) => {
+    if (req.params.slug === 'new') {
+      next()
+      return
+    }
+    const current = session(req)
+    if (current == null) {
+      res.redirect(303, master.configured() ? '/sign-in' : '/')
+      return
+    }
+    const actor = sessionActor(current)
+    if (!can(actor, 'projects.read')) {
+      send(
+        res,
+        'Project',
+        '<p>Projects are for developers and up.</p>',
+        current,
+        403,
+      )
+      return
+    }
+    let project
+    try {
+      project = master.projects.get(String(req.params.slug))
+    } catch {
+      send(
+        res,
+        'Project',
+        '<p class="empty-state">There is no such project.</p>',
+        current,
+        404,
+      )
+      return
+    }
+    send(
+      res,
+      project.name,
+      projectView({
+        slug: project.slug,
+        name: project.name,
+        repository: project.repository,
+        defaultBranch: project.defaultBranch,
+        format: project.format,
+        apps: project.apps.map((entry) => ({
+          bundleId: entry.bundleId,
+          platforms: entry.platforms,
+          ...(entry.apple == null ? {} : { apple: { team: entry.apple.team } }),
+        })),
+        rules: project.rules.map((rule) => ({
+          pattern: rule.pattern,
+          mode: rule.mode,
+        })),
+        env: project.env,
+        files: project.files,
+        webhook: project.webhookSecret.set,
+        ...(project.signingLabel == null
+          ? {}
+          : { signingLabel: project.signingLabel }),
+        canChangeSecrets: can(actor, 'secrets.change'),
+      }),
+      current,
+      200,
+      'dashboard',
+    )
+  })
+  app.get('/projects/:slug/masonfile', (req, res, next) => {
+    // The wizard's path is not a project.
+    if (req.params.slug === 'new') {
+      next()
+      return
+    }
+    const current = session(req)
+    if (current == null) {
+      res.redirect(303, master.configured() ? '/sign-in' : '/')
+      return
+    }
+    if (!can(sessionActor(current), 'projects.read')) {
+      send(
+        res,
+        'Masonfile',
+        '<p>The Masonfile is for developers and up.</p>',
+        current,
+        403,
+      )
+      return
+    }
+    const slug = String(req.params.slug)
+    let project
+    try {
+      project = master.projects.get(slug)
+    } catch {
+      send(
+        res,
+        'Masonfile',
+        '<p class="empty-state">There is no such project.</p>',
+        current,
+        404,
+      )
+      return
+    }
+    const commits = master.database.db
+      .prepare(
+        'SELECT commit_sha AS sha,branch FROM (SELECT commit_sha,branch,ROW_NUMBER() OVER (PARTITION BY commit_sha ORDER BY created DESC) AS place,created FROM jobs WHERE project_id=? AND commit_sha IS NOT NULL) WHERE place=1 ORDER BY created DESC LIMIT 30',
+      )
+      .all(project.id) as Array<{ sha: string; branch: string }>
+    const commit =
+      typeof req.query.commit === 'string' ? req.query.commit : commits[0]?.sha
+    const file = project.entrypoint ?? 'Masonfile.ts'
+    const render = (extra: { text?: string; error?: string }): void => {
+      send(
+        res,
+        `${project.name} · Masonfile`,
+        masonfileView({
+          slug,
+          name: project.name,
+          commits,
+          ...(commit == null ? {} : { commit }),
+          file,
+          ...extra,
+        }),
+        current,
+        200,
+        'dashboard',
+      )
+    }
+    if (commit == null) {
+      render({ error: 'No run has a commit yet.' })
+      return
+    }
+    master.mirrors.show(slug, project.repository, commit, file).then(
+      (text) => {
+        render(
+          text == null ? { error: `${file} is not in that commit.` } : { text },
+        )
+      },
+      (error: unknown) => {
+        render({ error: (error as Error).message })
+      },
     )
   })
   app.get('/search', (req, res) => {

@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
 } from 'node:fs'
 import path from 'node:path'
 import type { Json, ParamValue, Role } from '../../types/mason/index.js'
@@ -59,6 +60,8 @@ import { cronMatches, masterTimeZone, parseCron } from './triggers.js'
 
 type Row = Record<string, unknown>
 
+/** The workflow name of a run that only reads the Masonfile (the add-project wizard). */
+export const DISCOVER = '@discover'
 export const SETUP = '@setup'
 const terminalJob = [
   'succeeded',
@@ -658,7 +661,9 @@ export class Scheduler {
     const project = this.project(job)
     let graph: Graph
     try {
+      const discover = job.workflow === DISCOVER
       graph = validateGraph(report.value, {
+        ...(discover ? { structureOnly: true } : {}),
         apps: project.apps.map((app) => app.bundleId),
         signs: Object.fromEntries(
           project.apps
@@ -670,15 +675,18 @@ export class Scheduler {
           ...project.files.map((file) => file.env ?? file.destination),
         ],
       })
-      for (const [key, scheme] of Object.entries(graph.buildNumbers))
-        this.options.buildNumbers.checkScheme(
-          project.id,
-          key,
-          String(job.branch),
-          scheme,
-        )
-      for (const [key, scheme] of Object.entries(graph.buildNumbers))
-        this.options.buildNumbers.declare(project.id, key, scheme)
+      // A discovery's graph is never run, so its schemes are not declared.
+      if (!discover)
+        for (const [key, scheme] of Object.entries(graph.buildNumbers))
+          this.options.buildNumbers.checkScheme(
+            project.id,
+            key,
+            String(job.branch),
+            scheme,
+          )
+      if (!discover)
+        for (const [key, scheme] of Object.entries(graph.buildNumbers))
+          this.options.buildNumbers.declare(project.id, key, scheme)
     } catch (error) {
       this.appendLog(id, SETUP, `${(error as Error).message}\n`)
       this.finishJob(id, 'failed', (error as Error).message)
@@ -716,6 +724,11 @@ export class Scheduler {
   /** Starts a job whose graph is known: checks its trigger, parameters and concurrency group, then creates its stages. */
   private begin(job: Row): void {
     const id = String(job.id)
+    // A discovery run only records the Masonfile's graph, for the add-project wizard.
+    if (job.workflow === DISCOVER) {
+      this.finishJob(id, 'succeeded', 'Read the Masonfile')
+      return
+    }
     const found = this.workflowOf(job)
     if (found == null) {
       this.finishJob(
@@ -2282,6 +2295,13 @@ export class Scheduler {
     return path.join(this.options.logs, job, `${encodeURIComponent(stage)}.log`)
   }
 
+  /** How long a stage's log is, in bytes. */
+  logSize(job: string, stage: string): number {
+    return (
+      statSync(this.logFile(job, stage), { throwIfNoEntry: false })?.size ?? 0
+    )
+  }
+
   private appendLog(job: string, stage: string, text: string): void {
     const file = this.logFile(job, stage)
     mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
@@ -2495,9 +2515,12 @@ export class Scheduler {
                 status: string
                 ms?: number
               }
+              // The step's lines are those its stage log gains while it runs.
+              const offset = this.logSize(id, name)
+              const done = String(step.status) !== 'running'
               this.db
                 .prepare(
-                  'INSERT INTO job_steps(job_id,stage,attempt,id,kind,title,status,ms,at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,stage,attempt,id) DO UPDATE SET status=excluded.status,ms=excluded.ms',
+                  'INSERT INTO job_steps(job_id,stage,attempt,id,kind,title,status,ms,at,log_start,log_end) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,stage,attempt,id) DO UPDATE SET status=excluded.status,ms=excluded.ms,log_end=excluded.log_end',
                 )
                 .run(
                   id,
@@ -2509,6 +2532,8 @@ export class Scheduler {
                   String(step.status),
                   step.ms ?? null,
                   this.now(),
+                  offset,
+                  done ? offset : null,
                 )
             }
             acked = record.seq

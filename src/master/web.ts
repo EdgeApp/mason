@@ -11,6 +11,7 @@ import { backupApi } from './backupApi.js'
 import { appleApi } from '../apple/api.js'
 import { masterPages } from './pages.js'
 import { projectsApi } from './projectsApi.js'
+import { wizardApi } from './wizard.js'
 import { runsApi } from './runsApi.js'
 import type { Master } from './runtime.js'
 
@@ -33,7 +34,7 @@ const bundle = (name: string): string =>
 export function masterApp(context: MasterWebContext): express.Express {
   const app = nodeWebApp(context)
   const master = context.master
-  for (const name of ['master', 'password-worker'])
+  for (const name of ['master', 'password-worker', 'run'])
     app.get(`/assets/${name}.js`, (_req, res) => {
       if (name === 'password-worker')
         res.set('Content-Security-Policy', masterContentSecurityPolicy)
@@ -50,6 +51,7 @@ export function masterApp(context: MasterWebContext): express.Express {
   )
   app.use(backupApi(master))
   app.use(appleApi(master))
+  app.use(wizardApi(master))
   app.use(projectsApi(master))
   app.use(runsApi(master))
   app.use(

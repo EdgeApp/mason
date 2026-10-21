@@ -1,4 +1,7 @@
+import { existsSync, readFileSync } from 'node:fs'
 import express, { Router } from 'express'
+import { lineAt, plainLog } from '../view/log.js'
+import { streamRunEvents, streamSnapshots } from './runEvents.js'
 import { AUTOMATIC_POLL_MS } from '../builder/automatic.js'
 import { branchName } from '../builder/config.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
@@ -137,12 +140,70 @@ export function runTarget(master: Master, id: string): Target {
   return { project: row.slug, branch: row.branch }
 }
 
+/** A run's log: the whole run's, one stage's, or one step's lines, numbered from where they start. */
+export function runLog(
+  master: Master,
+  id: string,
+  options: { stage?: string; step?: number } = {},
+): { text: string; first: number } | undefined {
+  if (master.jobs.job(id) == null) return undefined
+  if (options.stage == null)
+    return { text: master.scheduler.logs(id) ?? '', first: 1 }
+  const file = master.scheduler.logFile(id, options.stage)
+  const content = existsSync(file) ? readFileSync(file) : Buffer.alloc(0)
+  if (options.step == null) return { text: content.toString('utf8'), first: 1 }
+  const step = master.database.db
+    .prepare(
+      'SELECT log_start,log_end FROM job_steps WHERE job_id=? AND stage=? AND id=? ORDER BY attempt DESC LIMIT 1',
+    )
+    .get(id, options.stage, options.step) as
+    | { log_start: number | null; log_end: number | null }
+    | undefined
+  if (step == null) throw new NotFound('No such step')
+  const start = Math.min(step.log_start ?? 0, content.length)
+  const end = Math.min(step.log_end ?? content.length, content.length)
+  return {
+    text: content.subarray(start, end).toString('utf8'),
+    first: lineAt(content, start),
+  }
+}
+
+/** What a run's event stream compares: status, stages and the selected stage's steps. */
+export function runSnapshot(
+  master: Master,
+  id: string,
+  stage?: string,
+): string | undefined {
+  const db = master.database.db
+  const job = db
+    .prepare('SELECT status,finished FROM jobs WHERE id=?')
+    .get(id) as { status: string; finished: number | null } | undefined
+  if (job == null) return undefined
+  return JSON.stringify({
+    status: job.status,
+    finished: job.finished != null,
+    stages: db
+      .prepare(
+        "SELECT name,status,started,finished FROM job_stages WHERE job_id=? AND name NOT LIKE '@%' ORDER BY position",
+      )
+      .all(id),
+    steps:
+      stage == null
+        ? []
+        : db
+            .prepare(
+              'SELECT id,kind,title,status,ms FROM job_steps WHERE job_id=? AND stage=? AND attempt=(SELECT MAX(attempt) FROM job_steps WHERE job_id=? AND stage=?) ORDER BY id',
+            )
+            .all(id, stage, id, stage),
+  })
+}
+
 /** The v1 job API on the master (paths and fields unchanged) and `/api/v2/runs`. */
 export function runsApi(master: Master): Router {
   const router = Router()
   const auth = authenticate(master)
   router.use(
-    ['/api/jobs', '/api/queue', '/api/apps', '/api/v2/runs'],
+    ['/api/jobs', '/api/queue', '/api/apps', '/api/v2/runs', '/api/v2/queue'],
     express.json({ limit: '16kb', strict: true }),
     auth,
   )
@@ -399,13 +460,68 @@ export function runsApi(master: Master): Router {
       const id = String(req.params.id)
       allowRole(actorOf(res), 'runs.read')
       allow(actorOf(res), 'runs.read', runTarget(master, id))
-      const text = master.scheduler.logs(id)
+      const text = runLog(master, id, {
+        ...(typeof req.query.stage === 'string'
+          ? { stage: req.query.stage }
+          : {}),
+        ...(typeof req.query.step === 'string'
+          ? { step: Number(req.query.step) }
+          : {}),
+      })
       if (text == null) throw new NotFound('Run not found')
-      res.type('text/plain').send(text)
+      const plain = req.query.plain === '1'
+      res.set(
+        'Content-Disposition',
+        `attachment; filename="run-${id}${typeof req.query.stage === 'string' ? '-' + req.query.stage.replace(/[^A-Za-z0-9._-]/g, '_') : ''}${plain ? '' : '.ansi'}.log"`,
+      )
+      res.type('text/plain').send(plain ? plainLog(text.text) : text.text)
     } catch (error) {
       next(error)
     }
   })
-  router.use(['/api/jobs', '/api/queue', '/api/apps', '/api/v2/runs'], errors)
+  router.get('/api/v2/runs/:id/events', (req, res, next) => {
+    try {
+      const id = String(req.params.id)
+      allowRole(actorOf(res), 'runs.read')
+      allow(actorOf(res), 'runs.read', runTarget(master, id))
+      streamRunEvents(
+        req,
+        res,
+        {
+          snapshot: (stage) => runSnapshot(master, id, stage),
+          finished: () =>
+            (
+              master.database.db
+                .prepare('SELECT finished FROM jobs WHERE id=?')
+                .get(id) as { finished: number | null } | undefined
+            )?.finished != null,
+          logFile: (stage) => master.scheduler.logFile(id, stage),
+        },
+        { logs: true },
+      )
+    } catch (error) {
+      next(error)
+    }
+  })
+  router.get('/api/v2/queue/events', (req, res, next) => {
+    try {
+      allowRole(actorOf(res), 'runs.read')
+      streamSnapshots(req, res, 'queue', () =>
+        JSON.stringify(
+          master.database.db
+            .prepare(
+              "SELECT s.job_id AS job,s.name AS stage,s.status FROM job_stages s WHERE s.status IN ('running','queued','awaiting_approval') AND s.name NOT LIKE '@%' ORDER BY s.job_id,s.position",
+            )
+            .all(),
+        ),
+      )
+    } catch (error) {
+      next(error)
+    }
+  })
+  router.use(
+    ['/api/jobs', '/api/queue', '/api/apps', '/api/v2/runs', '/api/v2/queue'],
+    errors,
+  )
   return router
 }

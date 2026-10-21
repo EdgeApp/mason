@@ -148,7 +148,7 @@ export function artifactsView(
   }
   const runs = db
     .prepare(
-      `${select} WHERE p.enabled=1 AND (? IS NULL OR p.slug=?) AND (? IS NULL OR j.branch=?) ORDER BY j.created DESC LIMIT 50`,
+      `${select} WHERE p.enabled=1 AND j.workflow NOT LIKE '@%' AND (? IS NULL OR p.slug=?) AND (? IS NULL OR j.branch=?) ORDER BY j.created DESC LIMIT 50`,
     )
     .all(
       filter.project ?? null,

@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 9
+export const MASTER_SCHEMA = 10
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -304,6 +304,11 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       id TEXT PRIMARY KEY, job_id TEXT NOT NULL, stage TEXT NOT NULL, team_id TEXT NOT NULL,
       name TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL
     ) STRICT;`)
+  },
+  // 10: where each step's lines are in its stage log, so a step can show only its own.
+  (db): void => {
+    db.exec(`ALTER TABLE job_steps ADD COLUMN log_start INTEGER;
+    ALTER TABLE job_steps ADD COLUMN log_end INTEGER;`)
   },
 ]
 

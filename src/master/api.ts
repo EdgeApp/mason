@@ -16,7 +16,7 @@ import {
   type MasterAuth,
 } from './auth.js'
 import type { MasterDatabase } from './database.js'
-import { isRunAction, type Forwarder } from './forward.js'
+import { isRunAction, isRunRead, type Forwarder } from './forward.js'
 import type { NodeRegistry } from './nodes.js'
 import { allow } from './permissions.js'
 import { asRole, Forbidden, type Actor } from './roles.js'
@@ -104,7 +104,8 @@ export function authenticate(
         Number(row.disabled) !== 0 ||
         row.removed_at != null ||
         Number(row.permission_version) !== asserted.permissionVersion ||
-        !isRunAction(req.method, req.originalUrl)
+        (!isRunAction(req.method, req.originalUrl) &&
+          !isRunRead(req.method, req.originalUrl))
       ) {
         res.status(403).json({ error: 'The host session is not allowed this' })
         return

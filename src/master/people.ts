@@ -17,7 +17,9 @@ export interface Person {
   disabled: boolean
   /** Whether the account can sign in to the master with a password. */
   password: boolean
-  /** One address per host sign-in method the account may use. */
+  /** The person's email: any enabled sign-in method that verifies it signs them in. */
+  email?: string
+  /** Addresses for single methods, for someone whose address there differs. */
   addresses: Record<string, string>
   groups: number[]
   permissionVersion: number
@@ -65,9 +67,13 @@ const asPersonInput = asObject({
     if (typeof value !== 'boolean') throw new Error('disabled is true or false')
     return value
   }),
+  email: asOptional(asAddress),
   addresses: asOptional(asAddresses),
   password: asOptional(asPassword),
 })
+
+/** The address row that matches every sign-in method. */
+const ANY_METHOD = '*'
 /** A password reaches the master only as a client hash. */
 function refuseRawPassword(value: unknown): void {
   const password = (value as { password?: unknown } | null)?.password
@@ -109,12 +115,14 @@ export class People {
       .get(id)
     if (row == null) return undefined
     const addresses: Record<string, string> = {}
+    let email: string | undefined
     for (const entry of this.db
       .prepare(
         'SELECT method,email FROM account_addresses WHERE account_id=? ORDER BY method',
       )
       .all(id))
-      addresses[String(entry.method)] = String(entry.email)
+      if (entry.method === ANY_METHOD) email = String(entry.email)
+      else addresses[String(entry.method)] = String(entry.email)
     return {
       id: Number(row.id),
       name: String(row.name),
@@ -122,6 +130,7 @@ export class People {
       role: asRole(row.role),
       disabled: Number(row.disabled) === 1,
       password: row.password != null,
+      ...(email == null ? {} : { email }),
       addresses,
       groups: this.db
         .prepare(
@@ -141,6 +150,8 @@ export class People {
     const input = asPersonInput(value)
     if (input.name == null && input.username == null)
       throw new Error('A person needs a name or a username')
+    const email = input.email
+    if (email == null) throw new Error('A person needs an email address')
     const record =
       input.password == null
         ? null
@@ -169,7 +180,10 @@ export class People {
             this.master.now(),
           ).lastInsertRowid,
       )
-      this.setAddresses(id, input.addresses ?? {})
+      this.setAddresses(id, {
+        ...input.addresses,
+        [ANY_METHOD]: email,
+      })
       this.master.audit(actor, 'person.create', String(id))
       this.master.change('account', id)
       return id
@@ -226,6 +240,8 @@ export class People {
           id,
         )
       if (input.addresses != null) this.setAddresses(id, input.addresses)
+      if (input.email != null)
+        this.setAddresses(id, { [ANY_METHOD]: input.email })
       this.master.audit(actor, 'person.update', String(id))
       this.master.change('account', id)
     })
@@ -409,14 +425,21 @@ export class People {
         )
         .run(id, method)
       if (address == null) continue
+      // An email matches every method, so it may not be anyone else's address anywhere.
       if (
         this.db
           .prepare(
-            'SELECT 1 FROM account_addresses WHERE method=? AND email=? AND account_id!=?',
+            method === ANY_METHOD
+              ? 'SELECT 1 FROM account_addresses WHERE ?1 IS NOT NULL AND email=?2 AND account_id!=?3'
+              : "SELECT 1 FROM account_addresses WHERE (method=?1 OR method='*') AND email=?2 AND account_id!=?3",
           )
           .get(method, address, id) != null
       )
-        throw new Conflict(`Another person has that ${method} address`)
+        throw new Conflict(
+          method === ANY_METHOD
+            ? 'Another person has that email address'
+            : `Another person has that ${method} address`,
+        )
       this.db
         .prepare(
           'INSERT INTO account_addresses(account_id,method,email) VALUES(?,?,?)',

@@ -31,7 +31,7 @@ export const hostArea: SettingsArea = {
 
 export type SignInMethod = ProviderConfig & { enabled: boolean }
 
-const methodsOf = (value: SettingValue | undefined): SignInMethod[] =>
+export const methodsOf = (value: SettingValue | undefined): SignInMethod[] =>
   ((value?.methods ?? []) as SignInMethod[]).filter(
     (method) => method != null && typeof method === 'object',
   )

@@ -84,6 +84,7 @@ describe('Pages on the master and the host', function () {
     for (const role of ['admin', 'manager', 'developer', 'tester'] as const)
       accounts[role] = (
         await master.people.create(localOperator, {
+          email: `${role}.person@example.test`,
           name: `${role[0]!.toUpperCase()}${role.slice(1)} Person`,
           role,
           addresses: { google: `${role}@example.test` },

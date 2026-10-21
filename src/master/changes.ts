@@ -241,7 +241,7 @@ export function entities(
             ),
             job_steps: all(
               db,
-              'SELECT job_id,stage,attempt,id,kind,title,status,ms FROM job_steps WHERE job_id=?',
+              'SELECT job_id,stage,attempt,id,kind,title,status,ms,log_start,log_end FROM job_steps WHERE job_id=?',
               id,
             ),
             run_artifacts: all(

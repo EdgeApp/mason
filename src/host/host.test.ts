@@ -403,8 +403,33 @@ describe('Host cache, sign-in and offline serving', function () {
       assert.equal(refused.status, 400, `${provider} ${claims.email}`)
       assert.match(await refused.text(), reason)
     }
-    // A provider disabled on the master is not offered.
+    // A person's email signs them in through every enabled provider that confirms it.
     const master = c.master.master!
+    const eve = await master.people.create(admin, {
+      name: 'Eve',
+      email: 'eve@example.com',
+    })
+    await c.until(
+      () =>
+        runtime()
+          .cache.db.prepare('SELECT 1 FROM accounts WHERE id=?')
+          .get(eve.id) != null,
+      2000,
+      'Eve on the host',
+    )
+    for (const provider of ['first', 'second'] as const) {
+      const eveBrowser = browser()
+      assert.equal(
+        (await signIn(eveBrowser, provider, { email: 'EVE@example.com' }))
+          .status,
+        303,
+      )
+      assert.equal(
+        runtime().accounts.session(session(eveBrowser))!.account.id,
+        eve.id,
+      )
+    }
+    // A provider disabled on the master is not offered.
     await master.settings.set(admin, 'signIn', {
       methods: env.configs
         .filter((config) => config.id !== 'plain')

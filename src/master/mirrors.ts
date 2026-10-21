@@ -169,6 +169,48 @@ export class Mirrors {
   }
 
   /** `git upload-pack` on a mirror, for one worker fetch over its link. */
+  /** A file as it is at a commit, which the mirror fetches if it has to; undefined when the commit has none. */
+  async show(
+    project: string,
+    repository: string,
+    commit: string,
+    file: string,
+  ): Promise<string | undefined> {
+    if (!sha.test(commit) || !/^[\w./-]+$/.test(file) || file.includes('..'))
+      throw new Error('Name a commit and a file in it')
+    await this.ensure(project, repository, { commit })
+    return await this.git(this.dir(project, repository), [
+      'show',
+      `${commit}:${file}`,
+    ]).catch(() => undefined)
+  }
+
+  /** Whether the master can reach a repository, and its default branch. */
+  async defaultBranch(repository: string): Promise<string> {
+    const remote = await this.remote(repository)
+    const { stdout } = await run(
+      'git',
+      ['ls-remote', '--symref', remote.url, 'HEAD'],
+      {
+        env: { ...remote.env, GIT_TERMINAL_PROMPT: '0' },
+        timeout: 60_000,
+      },
+    ).catch((error: unknown) => {
+      throw new Error(
+        `The master cannot read ${repositoryName(repository)}: ${String(
+          (error as { stderr?: string }).stderr ?? (error as Error).message,
+        )
+          .trim()
+          .split('\n')
+          .pop()}`,
+      )
+    })
+    const branch = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(stdout)?.[1]
+    if (branch == null)
+      throw new Error(`${repositoryName(repository)} has no default branch`)
+    return branch
+  }
+
   uploadPack(
     project: string,
     repository: string,

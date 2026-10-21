@@ -175,6 +175,67 @@ export class GitHub {
     }
   }
 
+  /** An API token for the connection; none for an SSH deploy key. */
+  private async apiToken(): Promise<string | undefined> {
+    const connection = this.connection()
+    if (connection == null || connection.kind === 'ssh') return undefined
+    return connection.kind === 'token'
+      ? connection.token
+      : await this.installationToken(
+          connection.appId,
+          connection.installationId,
+          connection.privateKey,
+        )
+  }
+
+  /**
+   * Creates the repository's push webhook to `url` with `secret`. Returns
+   * false when the connection has no API access (an SSH deploy key), so an
+   * administrator adds it by hand.
+   */
+  async createWebhook(
+    repository: string,
+    url: string,
+    secret: string,
+  ): Promise<boolean> {
+    const token = await this.apiToken()
+    if (token == null) return false
+    const name =
+      /^(?:https:\/\/github\.com\/|git@github\.com:)([\w.-]+\/[\w.-]+?)(?:\.git)?$/.exec(
+        repository,
+      )?.[1]
+    if (name == null) throw new Error('Not a GitHub repository')
+    const response = await this.fetch(`${this.api}/repos/${name}/hooks`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: 'application/vnd.github+json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: 'web',
+        active: true,
+        events: ['push'],
+        config: { url, content_type: 'json', secret, insecure_ssl: '0' },
+      }),
+    })
+    if (response.status === 422) {
+      // GitHub already has a hook for this URL.
+      const body = (await response.json().catch(() => ({}))) as {
+        errors?: Array<{ message?: string }>
+      }
+      if (
+        body.errors?.some((error) =>
+          /already exists/i.test(error.message ?? ''),
+        )
+      )
+        return true
+    }
+    if (!response.ok)
+      throw new Error(`GitHub refused the webhook (${response.status})`)
+    return true
+  }
+
   /**
    * How git reaches a repository: the URL to use and the environment that
    * carries the credential. `run` receives a scratch directory for key files.

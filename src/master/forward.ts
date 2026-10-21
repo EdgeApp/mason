@@ -89,10 +89,22 @@ export function asForwardRequest(value: unknown): ForwardRequest {
   }
 }
 
+/** Run reads a host session may make: a run's logs and events, and the queue's events. */
+const RUN_READS = [
+  /^\/api\/v2\/runs\/[^/]+\/(logs|events)$/,
+  /^\/api\/v2\/queue\/events$/,
+]
+
 /** Whether a host session may make this request: one of the four run actions. */
 export function isRunAction(method: string, target: string): boolean {
   const pathname = target.split('?')[0]!
   return method === 'POST' && RUN_ACTIONS.some((rule) => rule.test(pathname))
+}
+
+/** Whether a host session may make this read, which needs no request proof. */
+export function isRunRead(method: string, target: string): boolean {
+  const pathname = target.split('?')[0]!
+  return method === 'GET' && RUN_READS.some((rule) => rule.test(pathname))
 }
 
 /**
@@ -171,7 +183,11 @@ export class Forwarder {
     try {
       if (this.server == null) throw new Error('The master is not serving')
       const request = asForwardRequest(value)
-      if (request.account != null && !isRunAction(request.method, request.path))
+      if (
+        request.account != null &&
+        !isRunAction(request.method, request.path) &&
+        !isRunRead(request.method, request.path)
+      )
         throw new Error(
           'A host session may only request, cancel, restart or approve runs',
         )
@@ -216,7 +232,13 @@ export class Forwarder {
           }) + '\n',
         ),
       )
-      for await (const chunk of response) await stream.write(chunk as Buffer)
+      try {
+        for await (const chunk of response) await stream.write(chunk as Buffer)
+      } catch (error) {
+        // The host went away mid-stream (an event stream's browser closed).
+        response.destroy()
+        throw error
+      }
       stream.end()
     } catch (error) {
       stream.abort((error as Error).message)
