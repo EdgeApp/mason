@@ -879,15 +879,3 @@ export class AppleDownloads {
     })
   }
 }
-
-/** The `apple` settings area holds the Apple ID only; the password goes through sign-in. */
-export function appleSetting(input: unknown): Record<string, unknown> {
-  const value = (input ?? {}) as { appleId?: unknown }
-  if (value.appleId == null) return {}
-  if (
-    typeof value.appleId !== 'string' ||
-    !/^[^\s@]+@[^\s@]+$/.test(value.appleId)
-  )
-    throw new Error('appleId is an email address')
-  return { appleId: value.appleId }
-}

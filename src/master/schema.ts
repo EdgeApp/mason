@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 8
+export const MASTER_SCHEMA = 9
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -265,6 +265,44 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed')),
       kind TEXT NOT NULL DEFAULT 'commit' CHECK(kind IN ('commit','orphan')),
       commit_sha TEXT, error TEXT, attempts INTEGER NOT NULL DEFAULT 1
+    ) STRICT;`)
+  },
+  (db): void => {
+    db.exec(`
+    ALTER TABLE project_apps ADD COLUMN apple TEXT;
+    ALTER TABLE projects ADD COLUMN signing_label TEXT;
+    CREATE TABLE apple_certificates (
+      id INTEGER PRIMARY KEY, team_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('development','distribution','developerIdApplication','developerIdInstaller')),
+      apple_id TEXT, serial TEXT NOT NULL, name TEXT NOT NULL, sha1 TEXT NOT NULL,
+      certificate TEXT NOT NULL, private_key TEXT NOT NULL, expires_at INTEGER NOT NULL,
+      source TEXT NOT NULL CHECK(source IN ('p12','match','created')),
+      revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0,1)), created_at INTEGER NOT NULL,
+      UNIQUE(team_id, serial)
+    ) STRICT;
+    CREATE TABLE apple_bundle_ids (
+      team_id TEXT NOT NULL, identifier TEXT NOT NULL, apple_id TEXT NOT NULL,
+      platform TEXT NOT NULL, capabilities TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL,
+      PRIMARY KEY(team_id, identifier)
+    ) STRICT;
+    CREATE TABLE apple_profiles (
+      id INTEGER PRIMARY KEY, team_id TEXT NOT NULL, bundle_id TEXT NOT NULL,
+      distribution TEXT NOT NULL, apple_id TEXT NOT NULL, name TEXT NOT NULL, uuid TEXT NOT NULL,
+      content TEXT NOT NULL, expires_at INTEGER NOT NULL, certificate_id INTEGER NOT NULL,
+      devices TEXT NOT NULL, capabilities TEXT NOT NULL, created_at INTEGER NOT NULL, deleted_at INTEGER
+    ) STRICT;
+    CREATE INDEX apple_profiles_current ON apple_profiles(team_id, bundle_id, distribution) WHERE deleted_at IS NULL;
+    CREATE TABLE apple_cache (
+      key TEXT PRIMARY KEY, value TEXT NOT NULL, fetched_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE apple_uploads (
+      id TEXT PRIMARY KEY, job_id TEXT NOT NULL, stage TEXT NOT NULL, team_id TEXT NOT NULL,
+      app_id TEXT NOT NULL, file_id TEXT NOT NULL, options TEXT NOT NULL,
+      state TEXT NOT NULL, build_id TEXT, result TEXT, created_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE apple_submissions (
+      id TEXT PRIMARY KEY, job_id TEXT NOT NULL, stage TEXT NOT NULL, team_id TEXT NOT NULL,
+      name TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL
     ) STRICT;`)
   },
 ]

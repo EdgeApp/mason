@@ -176,4 +176,33 @@ export class Journal {
         )
         .run(reason)
   }
+
+  /** Signing material a stage holds on this node, for crash recovery to remove. */
+  setSigning(
+    key: string,
+    value: { keychain: string; profiles: string[] },
+  ): void {
+    this.db
+      .prepare(
+        'INSERT INTO state(name,value) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value',
+      )
+      .run(`apple:${key}`, JSON.stringify(value))
+  }
+  signing(): Array<{ key: string; keychain: string; profiles: string[] }> {
+    return this.db
+      .prepare(
+        "SELECT name,value FROM state WHERE name LIKE 'apple:%' ORDER BY name",
+      )
+      .all()
+      .map((row) => ({
+        key: String(row.name).slice(6),
+        ...(JSON.parse(String(row.value)) as {
+          keychain: string
+          profiles: string[]
+        }),
+      }))
+  }
+  clearSigning(key: string): void {
+    this.db.prepare('DELETE FROM state WHERE name=?').run(`apple:${key}`)
+  }
 }

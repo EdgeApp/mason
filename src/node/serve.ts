@@ -85,6 +85,8 @@ export interface NodeOptions {
     | 'graceMs'
     | 'stashLimit'
     | 'appleEndpoints'
+    | 'appleFetch'
+    | 'appleSleep'
     | 'cloud'
     | 'now'
   >
@@ -111,6 +113,11 @@ export interface NodeOptions {
     | 'masterKey'
     | 'systemRun'
     | 'helper'
+    | 'appleCommand'
+    | 'appleExec'
+    | 'appleFetch'
+    | 'applePollMs'
+    | 'home'
   >
 }
 
@@ -326,6 +333,7 @@ export async function startNode(
               ? {}
               : { redialBaseMs: options.redialBaseMs }),
             onConfigured: (): void => clearSetupCode(dir),
+            testEndpoints: options.testEndpoints === true,
             ...options.masterOptions,
             scratch: privateScratch(dir),
             dir,

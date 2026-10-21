@@ -4,6 +4,7 @@ import { nodeWebApp, type WebAppContext } from '../node/webApp.js'
 import { accountsApi } from './accountsApi.js'
 import { masterApi } from './api.js'
 import { backupApi } from './backupApi.js'
+import { appleApi } from '../apple/api.js'
 import { masterPages } from './pages.js'
 import { projectsApi } from './projectsApi.js'
 import { runsApi } from './runsApi.js'
@@ -42,6 +43,7 @@ export function masterApp(context: MasterWebContext): express.Express {
     }),
   )
   app.use(backupApi(master))
+  app.use(appleApi(master))
   app.use(projectsApi(master))
   app.use(runsApi(master))
   app.use(

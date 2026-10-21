@@ -8,16 +8,20 @@ import { MasterKeys } from './keys.js'
 import { MasterAuth } from './auth.js'
 import { Forwarder } from './forward.js'
 import { People } from './people.js'
+import type { StageSigning } from '../pipeline/assignment.js'
+import { appleArea, AppleService } from '../apple/service.js'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { backupArea, Backups, type BackupSetting } from './backup.js'
 import { NodeRegistry } from './nodes.js'
 import { allow } from './permissions.js'
 import { localOperator } from './roles.js'
-import { Settings } from './settings.js'
+import { Settings, type SettingValue } from './settings.js'
 import { BuildNumbers } from './buildNumbers.js'
 import { GitHub, storedConnection, type GitHubOptions } from './github.js'
 import { Jobs } from './jobs.js'
 import { gitHeadLister, Poller, type HeadLister } from './poller.js'
-import { Projects } from './projects.js'
+import { Projects, type ProjectApp } from './projects.js'
 import { integer } from '../validation.js'
 import path from 'node:path'
 import { githubLfs, Mirrors, type RemoteResolver } from './mirrors.js'
@@ -30,7 +34,6 @@ import { runningInstall } from '../release/install.js'
 import { version } from '../version.js'
 import {
   AppleDownloads,
-  appleSetting,
   type AppleEndpoints,
   type AppleStatus,
   type AppleXcode,
@@ -94,6 +97,12 @@ export interface MasterOptions {
   now?: () => number
   /** Apple's sign-in and download hosts; a fake Apple in tests. */
   appleEndpoints?: AppleEndpoints
+  /** Whether the master runs with `--test-endpoints`: only then may Apple base URLs be set. */
+  testEndpoints?: boolean
+  /** How the master reaches Apple's API; a fake in tests. */
+  appleFetch?: typeof fetch
+  /** Waits between Apple API retries; instant in tests. */
+  appleSleep?: (ms: number) => Promise<void>
   /** Cloud pool internals for tests: the provider, the master's address, timings. */
   cloud?: Pick<
     PoolsOptions,
@@ -139,6 +148,8 @@ export class Master {
   readonly releases: Releases
   readonly updates: Updates
   readonly apple: AppleDownloads
+  /** Signing, profiles, TestFlight and notarization through App Store Connect. */
+  readonly appleSigning: AppleService
   readonly runtimes: RuntimeStore
   readonly nodeStates: NodeStates
   readonly changes: Changes
@@ -149,6 +160,7 @@ export class Master {
   private expiry: NodeJS.Timeout | undefined
   private backupTimer: NodeJS.Timeout | undefined
   private stopped = false
+  private readonly appleSetups = new Set<Promise<void>>()
   private compaction: NodeJS.Timeout | undefined
   constructor(
     db: DatabaseSync,
@@ -231,6 +243,39 @@ export class Master {
         ? {}
         : { endpoints: options.appleEndpoints }),
     })
+    this.appleSigning = new AppleService(this.database, {
+      setting: (): SettingValue | undefined => this.settings.value('apple'),
+      testEndpoints: options.testEndpoints === true,
+      scratch: options.scratch ?? path.join(dir, 'scratch'),
+      ...(options.appleFetch == null ? {} : { fetch: options.appleFetch }),
+      ...(options.appleSleep == null ? {} : { sleep: options.appleSleep }),
+      clone: async (repository, branch, into): Promise<void> => {
+        const access = /github\.com/.test(repository)
+          ? await this.github
+              .gitAccess(repository, options.scratch ?? '/tmp')
+              .catch(() => ({ url: repository, env: process.env }))
+          : { url: repository, env: process.env }
+        await promisify(execFile)(
+          'git',
+          [
+            'clone',
+            '-q',
+            '--depth',
+            '1',
+            '--branch',
+            branch,
+            '--',
+            access.url,
+            into,
+          ],
+          { env: access.env },
+        )
+      },
+    })
+    // An app ID with an Apple team gets its bundle IDs and profiles when it is added or changed.
+    this.database.listeners.add((entity, key) => {
+      if (entity === 'app') this.setupApple((app) => String(app.id) === key)
+    })
     this.runtimes = new RuntimeStore(path.join(dir, 'runtimes'))
     this.artifacts = new Artifacts({
       master: this.database,
@@ -240,6 +285,11 @@ export class Master {
     })
     this.scheduler = new Scheduler({
       artifacts: this.artifacts,
+      apple: {
+        signing: async (project, stage): Promise<StageSigning> =>
+          await this.appleSigning.signing(project, stage),
+        service: this.appleSigning,
+      },
       master: this.database,
       projects: this.projects,
       jobs: this.jobs,
@@ -294,7 +344,13 @@ export class Master {
         this.nodeStates.reconcileAll()
       },
     })
-    this.settings.register('apple', { validate: appleSetting })
+    this.settings.register('apple', {
+      ...appleArea(options.testEndpoints === true),
+      changed: (): void => {
+        // A new App Store Connect key checks again the app IDs whose setup was incomplete.
+        this.setupApple((app) => this.appleSigning.incomplete(app))
+      },
+    })
     this.settings.register('host', hostArea)
     this.settings.register('cloud', cloudArea)
     this.settings.register('storage', storageArea)
@@ -435,13 +491,38 @@ export class Master {
     )
     this.backupTimer.unref()
     this.apple.start()
+    for (const warning of this.appleSigning.startupWarnings())
+      (this.options.log ?? console.log)(warning)
     void this.apple.check().catch(() => undefined)
     void this.releases
       .importOwn(runningInstall().appRoot)
       .catch(() => undefined)
   }
+  /** Runs the Apple setup of the matching app IDs in the background; stop() waits for it. */
+  setupApple(which: (app: ProjectApp) => boolean): void {
+    if (this.stopped) return
+    for (const app of this.projects
+      .list()
+      .flatMap((project) => project.apps)
+      .filter((entry) => entry.apple != null && which(entry))) {
+      const setup: Promise<void> = this.appleSigning
+        .setupApp(app)
+        .then(
+          () => undefined,
+          (error: unknown) => {
+            ;(this.options.log ?? console.log)(
+              `Apple setup of ${app.bundleId} failed: ${(error as Error).message}`,
+            )
+          },
+        )
+        .finally(() => this.appleSetups.delete(setup))
+      this.appleSetups.add(setup)
+    }
+  }
+
   async stop(): Promise<void> {
     this.stopped = true
+    await Promise.all([...this.appleSetups])
     await this.forwarder.close()
     this.registry.stop()
     this.retention.stop()
@@ -499,6 +580,7 @@ export class Master {
     const backup = this.configured() ? this.backups.notice() : undefined
     return [
       ...(backup == null ? [] : [backup]),
+      ...this.appleSigning.notices(),
       ...(apple.notice == null ? [] : [apple.notice]),
       ...(cloud == null ? [] : [cloud]),
     ]

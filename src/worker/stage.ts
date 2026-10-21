@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
+  copyFileSync,
   createReadStream,
   createWriteStream,
   existsSync,
@@ -87,6 +88,36 @@ import {
 import type { TestFormat } from '../pipeline/tests.js'
 import { GitBridge } from './gitProxy.js'
 import { Journal } from './journal.js'
+import { archive, type ArchiveContext, type Exec } from './apple/archive.js'
+import {
+  notarize,
+  testflight,
+  type DistributeContext,
+} from './apple/distribute.js'
+import { spawnExec } from './apple/exec.js'
+import {
+  createStageKeychain,
+  removeStageKeychain,
+  stageKeychainPath,
+  type Command,
+} from './apple/keychain.js'
+import {
+  exportOptions,
+  installProfiles,
+  removeProfiles,
+  signingSnapshot,
+  type SigningSnapshot,
+} from './apple/profiles.js'
+import type { StageSigning } from '../pipeline/assignment.js'
+
+/** A signing stage's keychain, installed profiles and the settings it shows the stage. */
+interface StageApple {
+  signing: StageSigning
+  keychain: string
+  profiles: string[]
+  exportOptions: string
+  snapshot: SigningSnapshot
+}
 
 const run = promisify(execFile)
 
@@ -117,6 +148,16 @@ export interface WorkerOptions {
   restart?: () => void
   /** Runs system commands (xcodebuild, simctl, pkgutil, …) as the worker's user. */
   systemRun?: SystemRun
+  /** Runs `xcodebuild`, `codesign`, `plutil`, `stapler`; real tools otherwise. */
+  appleExec?: Exec
+  /** Runs `security` and `openssl` for stage keychains. */
+  appleCommand?: Command
+  /** The user's home, where Xcode reads provisioning profiles. */
+  home?: string
+  /** How the worker reaches Apple's upload URLs. */
+  appleFetch?: typeof fetch
+  /** How often TestFlight and notary progress is asked of the master. */
+  applePollMs?: number
   /** Calls the privileged helper; through its socket by default. */
   helper?: (op: string, args: Record<string, unknown>) => Promise<unknown>
 }
@@ -124,8 +165,13 @@ export interface WorkerOptions {
 /** Tools a stage can ask for that the system installs rather than the tools directory. */
 const systemTools = ['xcode', 'simulators', 'brew', 'apt', 'dnf'] as const
 
-const safe = (key: string): string =>
-  key.replace(/[^A-Za-z0-9._-]/g, (c) => `%${c.charCodeAt(0).toString(16)}`)
+/**
+ * A stage key as one file name: other characters, and `_` itself, become
+ * `_<hex>`, so names stay distinct. No `%`, which some tools in a stage's
+ * paths read as an escape (Xcode's clang-stat-cache cannot open such a path).
+ */
+export const safe = (key: string): string =>
+  key.replace(/[^A-Za-z0-9.-]/g, (c) => `_${c.charCodeAt(0).toString(16)}`)
 
 async function walk(root: string): Promise<string[]> {
   const { readdir } = await import('node:fs/promises')
@@ -216,7 +262,11 @@ export class WorkerRuntime {
   /** Each running stage's Xcode details and private simulator set, by run key. */
   private readonly prepared = new Map<
     string,
-    { xcode?: NonNullable<NodeInfo['xcode']>; simulatorSet?: string }
+    {
+      xcode?: NonNullable<NodeInfo['xcode']>
+      simulatorSet?: string
+      apple?: StageApple
+    }
   >()
 
   constructor(private readonly options: WorkerOptions) {
@@ -230,6 +280,9 @@ export class WorkerRuntime {
 
   /** Recovers from a restart: runs that were in progress have no process any more. */
   async start(): Promise<void> {
+    // Signing material a stage held when the worker stopped goes before anything runs.
+    for (const held of this.journal.signing())
+      await this.releaseSigning(held.key, held.keychain, held.profiles)
     for (const entry of this.journal.runs('running'))
       this.journal.finish(entry.key, {
         status: 'interrupted',
@@ -1011,6 +1064,7 @@ export class WorkerRuntime {
     const prepared: {
       xcode?: NonNullable<NodeInfo['xcode']>
       simulatorSet?: string
+      apple?: StageApple
     } = {}
     this.prepared.set(assignment.key, prepared)
     if (assignment.developerDir != null) {
@@ -1028,6 +1082,50 @@ export class WorkerRuntime {
       prepared.simulatorSet = simulatorSet(
         this.path('tmp', `stage-${safe(assignment.key)}`),
       )
+    if (assignment.apple != null) {
+      const signing = assignment.apple
+      const dir = this.path('keychains')
+      mkdirSync(dir, { recursive: true, mode: 0o700 })
+      const keychain = stageKeychainPath(dir, assignment.key)
+      // Recorded first, so a crash before the stage ends still removes it.
+      this.journal.setSigning(assignment.key, { keychain, profiles: [] })
+      await createStageKeychain(
+        keychain,
+        signing.identity,
+        this.options.appleCommand,
+      )
+      const profiles = installProfiles(signing, this.options.home)
+      this.journal.setSigning(assignment.key, { keychain, profiles })
+      const exportFile = path.join(
+        this.path('tmp', `stage-${safe(assignment.key)}`),
+        'ExportOptions.plist',
+      )
+      mkdirSync(path.dirname(exportFile), { recursive: true, mode: 0o700 })
+      writeFileSync(exportFile, exportOptions(signing))
+      prepared.apple = {
+        signing,
+        keychain,
+        profiles,
+        exportOptions: exportFile,
+        snapshot: signingSnapshot(signing, keychain, exportFile),
+      }
+      log(
+        `Signing with ${signing.identity.name}; profiles ${signing.profiles.map((profile) => profile.name).join(', ')}\n`,
+      )
+    }
+  }
+
+  /** Removes a stage's keychain from the search list and deletes it with the profiles it installed. */
+  private async releaseSigning(
+    key: string,
+    keychain: string,
+    profiles: string[],
+  ): Promise<void> {
+    await removeStageKeychain(keychain, this.options.appleCommand).catch(
+      () => undefined,
+    )
+    removeProfiles(profiles)
+    this.journal.clearSigning(key)
   }
 
   /** Removes a stage's simulators and, when disk is short, lets reconciliation clean up. */
@@ -1035,6 +1133,9 @@ export class WorkerRuntime {
     const prepared = this.prepared.get(key)
     this.prepared.delete(key)
     this.inUse.delete(key)
+    for (const held of this.journal.signing())
+      if (held.key === key)
+        await this.releaseSigning(held.key, held.keychain, held.profiles)
     if (prepared?.simulatorSet != null)
       await removeSimulatorSet(
         prepared.simulatorSet,
@@ -1126,6 +1227,13 @@ export class WorkerRuntime {
         files: assignment.files,
         buildNumbers: assignment.buildNumbers,
         outputs: assignment.outputs,
+        ...(this.prepared.get(assignment.key)?.apple == null
+          ? {}
+          : {
+              apple: {
+                signing: this.prepared.get(assignment.key)!.apple!.snapshot,
+              },
+            }),
       },
       log,
       timeout: assignment.timeout,
@@ -1413,6 +1521,21 @@ export class WorkerRuntime {
           })
         return null
       }
+      case 'apple.archive':
+        return await archive(
+          this.appleContext(assignment, dir, say),
+          args[1] as never,
+        )
+      case 'apple.testflight':
+        return await testflight(
+          this.distributeContext(assignment, dir, say),
+          args[1] as never,
+        )
+      case 'apple.notarize':
+        return await notarize(
+          this.distributeContext(assignment, dir, say),
+          args[1] as never,
+        )
       case 'publish':
         return await publish(
           this.artifactContext(assignment, dir, say),
@@ -1450,6 +1573,109 @@ export class WorkerRuntime {
       }
       default:
         throw new Error(`${method} is not available on this node yet`)
+    }
+  }
+
+  /** Keeps a log file as a run artifact when the stage can save artifacts. */
+  private keeper(
+    assignment: StageAssignment,
+    dir: string,
+    say: (text: string) => void,
+  ): ((name: string, file: string) => Promise<void>) | undefined {
+    if (assignment.uploads == null) return undefined
+    return async (name, file): Promise<void> => {
+      const copy = path.join(dir, '.mason-logs', path.basename(file))
+      mkdirSync(path.dirname(copy), { recursive: true })
+      copyFileSync(file, copy)
+      await save(
+        this.artifactContext(assignment, dir, say),
+        name,
+        path.relative(dir, copy),
+        { kind: 'file' },
+      )
+    }
+  }
+
+  private appleContext(
+    assignment: StageAssignment,
+    dir: string,
+    say: (text: string) => void,
+  ): ArchiveContext {
+    const prepared = this.prepared.get(assignment.key)?.apple
+    if (prepared == null)
+      throw new Error('This stage declared no Apple signing')
+    const scratch = path.join(
+      this.path('tmp', `stage-${safe(assignment.key)}`),
+      'apple',
+    )
+    mkdirSync(scratch, { recursive: true, mode: 0o700 })
+    const keep = this.keeper(assignment, dir, say)
+    return {
+      dir,
+      scratch,
+      signing: prepared.signing,
+      keychain: prepared.keychain,
+      exportOptions: prepared.exportOptions,
+      exec: this.options.appleExec ?? spawnExec,
+      log: say,
+      entitlements: async (values) =>
+        await this.request('apple.entitlements', {
+          key: assignment.key,
+          token: assignment.token,
+          entitlements: values,
+        }),
+      reinstall: (profiles): void => {
+        removeProfiles(prepared.profiles)
+        prepared.signing = { ...prepared.signing, profiles }
+        prepared.profiles = installProfiles(prepared.signing, this.options.home)
+        this.journal.setSigning(assignment.key, {
+          keychain: prepared.keychain,
+          profiles: prepared.profiles,
+        })
+        writeFileSync(prepared.exportOptions, exportOptions(prepared.signing))
+      },
+      ...(keep == null ? {} : { keep }),
+    }
+  }
+
+  private distributeContext(
+    assignment: StageAssignment,
+    dir: string,
+    say: (text: string) => void,
+  ): DistributeContext {
+    if (this.prepared.get(assignment.key)?.apple == null)
+      throw new Error('This stage declared no Apple signing')
+    const scratch = path.join(
+      this.path('tmp', `stage-${safe(assignment.key)}`),
+      'apple',
+    )
+    mkdirSync(scratch, { recursive: true, mode: 0o700 })
+    const keep = this.keeper(assignment, dir, say)
+    return {
+      dir,
+      scratch,
+      request: async <T>(
+        method: string,
+        params: Record<string, unknown>,
+      ): Promise<T> =>
+        await this.request<T>(
+          method,
+          { ...params, key: assignment.key, token: assignment.token },
+          5 * 60_000,
+        ),
+      connected: async (): Promise<void> => {
+        const controller = this.controllers.get(assignment.key)
+        await this.connected(controller?.signal ?? new AbortController().signal)
+      },
+      exec: this.options.appleExec ?? spawnExec,
+      log: say,
+      ...(keep == null ? {} : { keep }),
+      ...(this.options.appleFetch == null
+        ? {}
+        : { fetch: this.options.appleFetch }),
+      ...(this.options.applePollMs == null
+        ? {}
+        : { pollMs: this.options.applePollMs }),
     }
   }
 

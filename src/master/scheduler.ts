@@ -17,8 +17,10 @@ import {
 import type {
   SetupAssignment,
   StageAssignment,
+  StageSigning,
   RunReport,
 } from '../pipeline/assignment.js'
+import type { AppleService } from '../apple/service.js'
 import {
   decide,
   evaluateWhen,
@@ -126,6 +128,11 @@ export interface SchedulerOptions {
   masterChecklist?: () => ChecklistItem[]
   /** Publication: reservations and upload tokens at assignment, grants and queries from stages. */
   artifacts?: Artifacts
+  /** Apple signing: a signing stage's identity and profiles, and its TestFlight and notary calls. */
+  apple?: {
+    signing(project: Project, stage: GraphStage): Promise<StageSigning>
+    service: AppleService
+  }
   /** Cloud pools: a machine for a type no free node serves, and machines that are retiring. */
   cloud?: {
     demand(type: string): string | undefined
@@ -210,11 +217,39 @@ const noTools = { node: [], rust: [], java: [], android: [] }
  * assigns ready stages to workers whose inventory matches, recording every
  * transition in the database before it takes effect.
  */
+/**
+ * A signing stage runs only on nodes with the project's signing label, when
+ * the project sets one.
+ */
+export function withSigningLabel(
+  stage: GraphStage,
+  project: Project,
+): GraphStage {
+  const label = project.signingLabel
+  if (stage.apple == null || label == null) return stage
+  const on = stage.on
+  if (on === 'master') return stage
+  if (on == null) return { ...stage, on: { labels: [label] } }
+  if (typeof on === 'string')
+    return { ...stage, on: { type: on, labels: [label] } }
+  return {
+    ...stage,
+    on: { ...on, labels: [...new Set([...(on.labels ?? []), label])] },
+  }
+}
+
 export class Scheduler {
   private timer: NodeJS.Timeout | undefined
   private ticking: Promise<void> | undefined
   private again = false
   private readonly preparing = new Map<string, Promise<void>>()
+  /** Signing prepared for a stage, by `<job>/<stage>`, until it is placed. */
+  private readonly signing = new Map<
+    string,
+    | { state: 'pending' }
+    | { state: 'ready'; signing: StageSigning }
+    | { state: 'failed'; error: string }
+  >()
   private readonly ensured = new Set<string>()
   private lastSchedule = 0
   private stopped = false
@@ -616,6 +651,11 @@ export class Scheduler {
     try {
       graph = validateGraph(report.value, {
         apps: project.apps.map((app) => app.bundleId),
+        signs: Object.fromEntries(
+          project.apps
+            .filter((app) => app.apple != null)
+            .map((app) => [app.bundleId, app.apple!.bundleIds]),
+        ),
         secrets: [
           ...project.env.map((entry) => entry.name),
           ...project.files.map((file) => file.env ?? file.destination),
@@ -1161,6 +1201,46 @@ export class Scheduler {
   }
 
   /**
+   * Ensures a signing stage's profiles and identity on the master — Apple is
+   * asked only when a profile must be made or replaced — then pokes the
+   * scheduler to place the stage.
+   */
+  private prepareSigning(job: Row, stage: GraphStage, key: string): void {
+    const apple = this.options.apple
+    const id = String(job.id)
+    if (apple == null) {
+      this.signing.set(key, {
+        state: 'failed',
+        error: 'This master has no Apple signing',
+      })
+      this.poke()
+      return
+    }
+    this.signing.set(key, { state: 'pending' })
+    void apple
+      .signing(this.project(job), stage)
+      .then(
+        (signing) => {
+          this.appendLog(
+            id,
+            stage.name,
+            `Apple signing: ${signing.identity.name}; profiles ${signing.profiles.map((profile) => profile.name).join(', ')}\n`,
+          )
+          this.signing.set(key, { state: 'ready', signing })
+        },
+        (error: unknown) => {
+          this.signing.set(key, {
+            state: 'failed',
+            error: (error as Error).message,
+          })
+        },
+      )
+      .finally(() => {
+        this.poke()
+      })
+  }
+
+  /**
    * Installs the tools a stage is missing on the chosen worker while the stage
    * waits in `preparing`; the installers' logs go into the stage log.
    */
@@ -1446,8 +1526,13 @@ export class Scheduler {
   }
 
   /** Assigns a ready stage to a matching idle worker: reserves its build numbers and sends its snapshot. */
-  private assign(job: Row, stage: GraphStage, workflow: GraphWorkflow): void {
+  private assign(
+    job: Row,
+    graphStage: GraphStage,
+    workflow: GraphWorkflow,
+  ): void {
     const id = String(job.id)
+    const stage = withSigningLabel(graphStage, this.project(job))
     const worker = this.pick(stage, id)
     if (worker == null) {
       // Connected workers match the selector but none has an Xcode the range accepts.
@@ -1478,6 +1563,24 @@ export class Scheduler {
         }
       }
       return
+    }
+    // A signing stage waits for its identity and profiles before it is placed.
+    let signing: StageSigning | undefined
+    if (stage.apple != null) {
+      const key = `${id}/${stage.name}`
+      const prepared = this.signing.get(key)
+      if (prepared == null) {
+        this.prepareSigning(job, stage, key)
+        return
+      }
+      if (prepared.state === 'pending') return
+      this.signing.delete(key)
+      if (prepared.state === 'failed') {
+        this.appendLog(id, stage.name, `Apple signing: ${prepared.error}\n`)
+        this.finishStage(id, stage.name, 'failed', prepared.error)
+        return
+      }
+      signing = prepared.signing
     }
     if (!this.locks(job, stage)) return
     if (worker.missing.length > 0) {
@@ -1613,6 +1716,7 @@ export class Scheduler {
         ? {}
         : { developerDir: worker.developerDir }),
       ...(upload == null ? {} : { uploads: { ...upload, reservations } }),
+      ...(signing == null ? {} : { apple: signing }),
     }
     this.startStage(job, stage.name, attempt, token, worker, stage.timeout)
     this.send(worker, 'stage.run', assignment, id, stage.name)
@@ -2229,6 +2333,60 @@ export class Scheduler {
     return { job, row, name, attempt, project: this.project(job) }
   }
 
+  /** A signing stage's Apple context: its graph stage, team, app and platform. */
+  private appleStage(
+    job: Row,
+    name: string,
+    project: Project,
+  ): {
+    stage: GraphStage
+    signing: Pick<StageSigning, 'team' | 'app' | 'platform' | 'bundleIds'>
+    service: AppleService
+  } {
+    const service = this.options.apple?.service
+    const graphStage = this.workflowOf(job)?.workflow.stages.find(
+      (entry) => entry.name === name,
+    )
+    if (service == null || graphStage?.apple == null)
+      throw new LinkError('This stage declared no Apple signing', 'failed')
+    const stage = withSigningLabel(graphStage, project)
+    const appId =
+      stage.apple!.app ??
+      project.apps.find((app) => app.apple != null)?.bundleId
+    const app = project.apps.find((entry) => entry.bundleId === appId)
+    if (app?.apple == null)
+      throw new LinkError(
+        `The app ID ${String(appId)} has no Apple team`,
+        'failed',
+      )
+    const distribution = stage.apple!.distribution
+    return {
+      stage,
+      service,
+      signing: {
+        team: app.apple.team,
+        app: app.bundleId,
+        bundleIds: stage.apple!.bundleIds ?? app.apple.bundleIds,
+        platform:
+          distribution === 'developerId' ||
+          distribution === 'macAppStore' ||
+          !app.platforms.includes('ios')
+            ? 'macos'
+            : 'ios',
+      },
+    }
+  }
+
+  /** Apple's refusals reach the stage as link failures with Apple's explanation. */
+  private async appleCall<T>(body: () => Promise<T>): Promise<T> {
+    try {
+      return await body()
+    } catch (error) {
+      if (error instanceof LinkError) throw error
+      throw new LinkError((error as Error).message, 'failed')
+    }
+  }
+
   private allowedRepository(project: Project, repository: unknown): string {
     const wanted = String(repository).toLowerCase()
     const normalize = (value: string): string =>
@@ -2407,6 +2565,132 @@ export class Scheduler {
           } catch (error) {
             throw new LinkError((error as Error).message, 'failed')
           }
+        },
+        /** An archive's entitlements: capabilities they need are added, and the stage's profiles made again when any was. */
+        'apple.entitlements': async (params, link): Promise<unknown> => {
+          const { job, name, project } = this.authorize(params, link)
+          const { stage, signing, service } = this.appleStage(
+            job,
+            name,
+            project,
+          )
+          const entitlements = ((params as { entitlements?: unknown })
+            .entitlements ?? {}) as Record<string, Record<string, unknown>>
+          return await this.appleCall(async () => {
+            let changed = false
+            for (const [bundleId, values] of Object.entries(entitlements)) {
+              if (!signing.bundleIds.includes(bundleId)) continue
+              changed =
+                (await service.profiles.syncCapabilities(
+                  signing.team,
+                  bundleId,
+                  values,
+                  [signing.platform],
+                )) || changed
+            }
+            if (!changed) return { changed: false }
+            const again = await this.options.apple!.signing(project, stage)
+            this.appendLog(
+              String(job.id),
+              name,
+              'Apple signing: capabilities added from the archive’s entitlements; profiles made again\n',
+            )
+            return { changed: true, profiles: again.profiles }
+          })
+        },
+        /** `ctx.apple.testflight`: the build upload and Apple's pre-signed upload operations. */
+        'apple.testflight.start': async (params, link): Promise<unknown> => {
+          const { job, name, project } = this.authorize(params, link)
+          const { signing, service } = this.appleStage(job, name, project)
+          const input = params as {
+            fileName?: unknown
+            fileSize?: unknown
+            version?: unknown
+            buildNumber?: unknown
+            options?: unknown
+          }
+          if (
+            typeof input.fileName !== 'string' ||
+            !Number.isSafeInteger(input.fileSize) ||
+            typeof input.version !== 'string' ||
+            typeof input.buildNumber !== 'string'
+          )
+            throw new LinkError(
+              'A TestFlight upload needs the file, its size, version and build number',
+              'failed',
+            )
+          return await this.appleCall(
+            async () =>
+              await service.testflight.start({
+                job: String(job.id),
+                stage: name,
+                team: signing.team,
+                bundleId: signing.app,
+                platform: signing.platform,
+                fileName: input.fileName as string,
+                fileSize: input.fileSize as number,
+                version: input.version as string,
+                buildNumber: input.buildNumber as string,
+                options: (input.options ?? {}) as Parameters<
+                  AppleService['testflight']['start']
+                >[0]['options'],
+              }),
+          )
+        },
+        'apple.testflight.complete': async (params, link): Promise<unknown> => {
+          const { job } = this.authorize(params, link, false)
+          const service = this.options.apple?.service
+          if (service == null)
+            throw new LinkError('Apple signing is unavailable', 'failed')
+          return await this.appleCall(
+            async () =>
+              await service.testflight.complete(
+                String((params as { id?: unknown }).id),
+                String(job.id),
+              ),
+          )
+        },
+        'apple.testflight.status': async (params, link): Promise<unknown> => {
+          const { job } = this.authorize(params, link, false)
+          const service = this.options.apple?.service
+          if (service == null)
+            throw new LinkError('Apple signing is unavailable', 'failed')
+          return await this.appleCall(
+            async () =>
+              await service.testflight.status(
+                String((params as { id?: unknown }).id),
+                String(job.id),
+              ),
+          )
+        },
+        /** `ctx.apple.notarize`: a notary submission and its single-submission upload credentials. */
+        'apple.notary.start': async (params, link): Promise<unknown> => {
+          const { job, name, project } = this.authorize(params, link)
+          const { signing, service } = this.appleStage(job, name, project)
+          const input = params as { name?: unknown; sha256?: unknown }
+          return await this.appleCall(
+            async () =>
+              await service.notary.start({
+                job: String(job.id),
+                stage: name,
+                team: signing.team,
+                name: String(input.name ?? ''),
+                sha256: String(input.sha256 ?? ''),
+              }),
+          )
+        },
+        'apple.notary.status': async (params, link): Promise<unknown> => {
+          const { job } = this.authorize(params, link, false)
+          const service = this.options.apple?.service
+          if (service == null)
+            throw new LinkError('Apple signing is unavailable', 'failed')
+          return await this.appleCall(
+            async () =>
+              await service.notary.status(
+                String((params as { id?: unknown }).id),
+                String(job.id),
+              ),
+          )
         },
         /** `ctx.artifacts.fetch`: the matching run's artifact and a download grant, within the project. */
         'artifacts.query': (params, link): unknown => {

@@ -16,7 +16,7 @@ import {
   tests,
   type ArtifactContext,
 } from './artifacts.js'
-import { select } from './stage.js'
+import { safe, select } from './stage.js'
 
 const root = (): string =>
   mkdtempSync(
@@ -48,6 +48,16 @@ class Host {
     this.origin = `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`
   }
 }
+
+describe('Stage file names', () => {
+  it('U7.4 names a stage’s files by its key without characters tools read as escapes', () => {
+    assert.equal(safe('run-1/ios-adhoc/1'), 'run-1_2fios-adhoc_2f1')
+    assert.equal(safe('a_b'), 'a_5fb')
+    // Distinct keys stay distinct.
+    assert.notEqual(safe('a/b'), safe('a_2fb'))
+    assert.doesNotMatch(safe('x %/:?'), /[%/: ?]/)
+  })
+})
 
 describe('Worker artifact calls', function () {
   this.timeout(30_000)

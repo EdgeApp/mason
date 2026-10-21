@@ -41,6 +41,8 @@ export interface ProjectApp {
   bundleId: string
   name: string
   platforms: Platform[]
+  /** Apple signing: the team and every bundle ID the app signs (the app and its extensions). */
+  apple?: { team: string; bundleIds: string[] }
 }
 
 export interface Project {
@@ -67,6 +69,8 @@ export interface Project {
   repositories: string[]
   /** Whether `ctx.git.tag` with `push` may push tags to GitHub. */
   tagPushes: boolean
+  /** Signing stages run only on nodes with this label, when set. */
+  signingLabel?: string
 }
 
 const asProjectInput = asObject({
@@ -76,6 +80,8 @@ const asProjectInput = asObject({
     return [...new Set(list)]
   }),
   tagPushes: asOptional(asBoolean),
+  signingLabel: (value: unknown): string | null | undefined =>
+    value === undefined || value === null ? value : asLabel(value),
   name: asOptional(text(120)),
   repository: asOptional(repository),
   format: asOptional((value: unknown): 'pipeline' | 'script' => {
@@ -115,10 +121,33 @@ const asProjectInput = asObject({
   ),
 })
 
+/** A node label, as node assignments use them. */
+function asLabel(value: unknown): string {
+  const out = text(64)(value)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(out))
+    throw new Error('A label is letters, digits, dots, dashes and underscores')
+  return out
+}
+const asBundleId = (value: unknown): string => {
+  const out = text(160)(value)
+  if (!/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(out))
+    throw new Error(`${out} is not a bundle ID`)
+  return out
+}
 const asAppInput = asObject({
   bundleId: text(160),
   name: text(120),
   platforms: asArray(asPlatform),
+  apple: asOptional(
+    asObject({
+      team: (value: unknown): string => {
+        if (typeof value !== 'string' || !/^[A-Z0-9]{10}$/.test(value))
+          throw new Error('An Apple team ID is ten capital letters and digits')
+        return value
+      },
+      bundleIds: asOptional(asArray(asBundleId)),
+    }),
+  ),
 })
 
 const asSecretsInput = asObject({
@@ -159,13 +188,21 @@ export class Projects {
     const id = Number(row.id)
     const apps = this.db
       .prepare(
-        'SELECT a.id,a.slug,a.name FROM project_apps pa JOIN apps a ON a.id=pa.app_id WHERE pa.project_id=? ORDER BY a.position,a.id',
+        'SELECT a.id,a.slug,a.name,pa.apple FROM project_apps pa JOIN apps a ON a.id=pa.app_id WHERE pa.project_id=? ORDER BY a.position,a.id',
       )
       .all(id)
       .map((app) => ({
         id: Number(app.id),
         bundleId: String(app.slug),
         name: String(app.name),
+        ...(app.apple == null
+          ? {}
+          : {
+              apple: JSON.parse(String(app.apple)) as {
+                team: string
+                bundleIds: string[]
+              },
+            }),
         platforms: this.db
           .prepare(
             'SELECT platform FROM channels WHERE app_id=? AND enabled=1 ORDER BY platform',
@@ -188,6 +225,9 @@ export class Projects {
       script,
       repositories: JSON.parse(String(row.repositories ?? '[]')) as string[],
       tagPushes: row.tag_pushes === 1,
+      ...(row.signing_label == null
+        ? {}
+        : { signingLabel: String(row.signing_label) }),
       webhookSecret: { set: row.webhook_secret != null },
       apps,
       rules: this.rules(id),
@@ -359,6 +399,10 @@ export class Projects {
         this.db
           .prepare('UPDATE projects SET tag_pushes=? WHERE slug=?')
           .run(Number(input.tagPushes), slug)
+      if (input.signingLabel !== undefined)
+        this.db
+          .prepare('UPDATE projects SET signing_label=? WHERE slug=?')
+          .run(input.signingLabel, slug)
       this.master.audit(
         actor,
         existing == null ? 'project.create' : 'project.update',
@@ -428,6 +472,27 @@ export class Projects {
           'INSERT OR IGNORE INTO project_apps(app_id,project_id) VALUES(?,?)',
         )
         .run(app, project)
+      const apple =
+        input.apple == null
+          ? null
+          : {
+              team: input.apple.team,
+              bundleIds: [
+                ...new Set(input.apple.bundleIds ?? [input.bundleId]),
+              ],
+            }
+      if (
+        apple != null &&
+        apple.bundleIds.some(
+          (id) => id !== input.bundleId && !id.startsWith(`${input.bundleId}.`),
+        )
+      )
+        throw new Error(
+          `Each bundle ID of ${input.bundleId} is it or one of its extensions`,
+        )
+      this.db
+        .prepare('UPDATE project_apps SET apple=? WHERE app_id=?')
+        .run(apple == null ? null : JSON.stringify(apple), app)
       for (const platform of input.platforms) {
         const channel = this.db
           .prepare('SELECT id FROM channels WHERE app_id=? AND platform=?')

@@ -63,6 +63,8 @@ export interface StageAssignment {
   tools?: Tools
   /** The Xcode the master chose for the stage's `xcode` range. */
   developerDir?: string
+  /** Apple signing for a stage with an `apple` option: the identity and profiles it signs with. */
+  apple?: StageSigning
   /** The stage's upload token and reservations, and how to reach the host. */
   uploads?: {
     token: string
@@ -75,6 +77,33 @@ export interface StageAssignment {
       buildNumber: string
     }>
   }
+}
+
+/** What a signing stage receives from the master: never the App Store Connect key. */
+export interface StageSigning {
+  team: string
+  distribution:
+    | 'development'
+    | 'adHoc'
+    | 'appStore'
+    | 'developerId'
+    | 'macAppStore'
+  platform: 'ios' | 'macos'
+  /** The app ID the stage signs, and every bundle ID it signs (the app and its extensions). */
+  app: string
+  bundleIds: string[]
+  identity: {
+    name: string
+    sha1: string
+    certificate: string
+    privateKey: string
+  }
+  profiles: Array<{
+    bundleId: string
+    name: string
+    uuid: string
+    content: string
+  }>
 }
 
 export type Assignment = SetupAssignment | StageAssignment
@@ -98,12 +127,24 @@ export interface RunReport {
   xcodeVersion?: string
 }
 
-/** An assignment as the worker journals it: without secrets, files or injected contents. */
+/** An assignment as the worker journals it: without secrets, files, injected contents or signing keys. */
 export function redact(assignment: Assignment): Assignment {
   if (assignment.kind === 'setup') return assignment
-  const { secrets, files, inject, ...rest } = assignment
+  const { secrets, files, inject, apple, ...rest } = assignment
   return {
     ...rest,
+    ...(apple == null
+      ? {}
+      : {
+          apple: {
+            ...apple,
+            identity: { ...apple.identity, privateKey: '' },
+            profiles: apple.profiles.map((profile) => ({
+              ...profile,
+              content: '',
+            })),
+          },
+        }),
     secrets: Object.fromEntries(Object.keys(secrets).map((name) => [name, ''])),
     files: Object.fromEntries(Object.keys(files).map((name) => [name, ''])),
     ...(inject == null

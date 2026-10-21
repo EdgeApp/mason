@@ -940,6 +940,15 @@ export class Recorder {
         ].includes(apple.distribution as string))
     )
       throw new GraphError(`${what}: unknown apple distribution`)
+    if (
+      apple != null &&
+      ((apple.app != null && typeof apple.app !== 'string') ||
+        (apple.bundleIds != null &&
+          strings(apple.bundleIds, `${what} apple bundle IDs`).length === 0))
+    )
+      throw new GraphError(
+        `${what}: apple.app is an app ID and apple.bundleIds a list of bundle IDs`,
+      )
     return {
       ...defaults(stageName, extra.failFast ?? workflow.failFast),
       ...(extra.group == null ? {} : { group: extra.group }),
@@ -1031,6 +1040,8 @@ function checkStructure(graph: Graph): void {
 export interface ProjectFacts {
   /** Bundle IDs the project owns. */
   apps: string[]
+  /** Bundle IDs each app ID signs (the app and its extensions). */
+  signs?: Record<string, string[]>
   /** Names a stage may declare in `secrets`: environment values and injected files. */
   secrets: string[]
   /** Known node type names; omitted means any name is accepted. */
@@ -1080,12 +1091,21 @@ export function validateGraph(value: unknown, project: ProjectFacts): Graph {
       const apps = [
         ...stage.publishes,
         ...(stage.apple?.app == null ? [] : [stage.apple.app]),
-        ...(stage.apple?.bundleIds ?? []),
       ]
       for (const app of apps)
         if (!project.apps.includes(app))
           throw new GraphError(
             `${what} names app ID ${app}, which this project does not own`,
+          )
+      // A stage signs only bundle IDs its app ID is configured to sign.
+      const signs =
+        stage.apple?.app == null
+          ? Object.values(project.signs ?? {}).flat()
+          : (project.signs?.[stage.apple.app] ?? [stage.apple.app])
+      for (const bundleId of stage.apple?.bundleIds ?? [])
+        if (!signs.includes(bundleId) && !project.apps.includes(bundleId))
+          throw new GraphError(
+            `${what} signs bundle ID ${bundleId}, which no app ID of this project signs`,
           )
     }
     for (const trigger of workflow.triggers)
