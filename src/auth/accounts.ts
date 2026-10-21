@@ -62,9 +62,7 @@ export class Accounts {
   constructor(readonly store: Store) {}
   account(id: number): Account {
     return asAccount(
-      this.store.db
-        .prepare('SELECT * FROM accounts WHERE id=?')
-        .get(asId(id)),
+      this.store.db.prepare('SELECT * FROM accounts WHERE id=?').get(asId(id)),
     )
   }
   list(): Account[] {
@@ -130,6 +128,15 @@ export class Accounts {
           .run(identity.name, identity.email ?? null, id)
       }
       this.claimInvitation(identity, id)
+      return this.startSession(id, previousToken)
+    })
+  }
+  /** Starts a session for an account, ending the browser's previous one. */
+  startSession(
+    id: number,
+    previousToken?: string,
+  ): { token: string; session: Session; account: Account } {
+    return this.store.transaction(() => {
       if (previousToken != null)
         this.store.db
           .prepare('DELETE FROM sessions WHERE hash=?')
@@ -142,8 +149,7 @@ export class Accounts {
         permission_version: account.permission_version,
         csrf: randomToken(),
         created_at: this.store.now(),
-        expires_at:
-          this.store.now() + this.store.config.sessionDays * 86400000,
+        expires_at: this.store.now() + this.store.config.sessionDays * 86400000,
       }
       this.store.db
         .prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?)')
@@ -165,12 +171,7 @@ export class Accounts {
       .prepare(
         'SELECT * FROM invitations WHERE provider=? AND issuer=? AND email=? AND revoked=0 AND claimed_account IS NULL AND expires_at>?',
       )
-      .get(
-        identity.provider,
-        identity.issuer,
-        identity.email,
-        this.store.now(),
-      )
+      .get(identity.provider, identity.issuer, identity.email, this.store.now())
     if (row == null) return
     const invite = asInvitation(row)
     this.store.db
@@ -264,9 +265,7 @@ export class Accounts {
         'UPDATE accounts SET is_admin=?,permission_version=permission_version+1 WHERE id=?',
       )
       .run(Number(enabled), target)
-    this.store.db
-      .prepare('DELETE FROM sessions WHERE account_id=?')
-      .run(target)
+    this.store.db.prepare('DELETE FROM sessions WHERE account_id=?').run(target)
     this.audit(
       undefined,
       enabled ? 'admin.grant' : 'admin.revoke',
@@ -285,12 +284,7 @@ export class Accounts {
           .prepare(
             'SELECT account_id FROM identities WHERE provider=? AND issuer=? AND subject=? AND email=? AND email_verified=1',
           )
-          .get(
-            provider,
-            configured.issuer,
-            text(256)(subject),
-            asEmail(email),
-          ),
+          .get(provider, configured.issuer, text(256)(subject), asEmail(email)),
       )
       this.changeAdmin(row.account_id, true)
       return row.account_id
@@ -393,11 +387,6 @@ export class Accounts {
   audit(actor: number | undefined, action: string, target: string): void {
     this.store.db
       .prepare('INSERT INTO audit(actor,action,target,at) VALUES(?,?,?,?)')
-      .run(
-        actor ?? null,
-        text(80)(action),
-        text(256)(target),
-        this.store.now(),
-      )
+      .run(actor ?? null, text(80)(action), text(256)(target), this.store.now())
   }
 }

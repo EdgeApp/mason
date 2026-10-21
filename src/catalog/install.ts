@@ -42,7 +42,11 @@ export class Installations {
       )
         throw new Error('Tester access required')
       const build = this.store.build(buildId)
-      if (build == null) throw new Error('Build unavailable')
+      if (
+        build == null ||
+        !this.store.visible(context.account.id, build.app_id)
+      )
+        throw new Error('Build unavailable')
       const registry = new Devices(this.store)
       const owned = registry
         .list(context.account.id)
@@ -87,7 +91,11 @@ export class Installations {
       !(context.account.is_admin || context.account.is_tester)
     )
       return undefined
-    const build = this.store.build(grant.build_id)
+    const found = this.store.build(grant.build_id)
+    const build =
+      found != null && this.store.visible(context.account.id, found.app_id)
+        ? found
+        : undefined
     const devices = new Devices(this.store),
       device = devices
         .list(context.account.id)

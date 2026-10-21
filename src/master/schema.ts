@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 4
+export const MASTER_SCHEMA = 5
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -197,6 +197,16 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     CREATE TABLE schedule_fires (
       project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, workflow TEXT NOT NULL,
       branch TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(project_id, workflow, branch, at)
+    ) STRICT;`)
+  },
+  (db): void => {
+    db.exec(`
+    CREATE TABLE host_receipts (
+      id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('device','prepare','artifact')),
+      host TEXT NOT NULL, payload TEXT NOT NULL, received_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE xcode_mirrors (
+      version TEXT PRIMARY KEY, sha256 TEXT NOT NULL, size INTEGER NOT NULL, at INTEGER NOT NULL
     ) STRICT;`)
   },
 ]

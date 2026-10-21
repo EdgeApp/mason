@@ -1468,7 +1468,10 @@ describe('Releases, install.sh and updates', function () {
       } finally {
         server.close()
       }
-      const silent = createSocketServer(() => undefined).listen(
+      const held: Array<import('node:net').Socket> = []
+      const silent = createSocketServer((socket) => {
+        held.push(socket)
+      }).listen(
         path.join(dir, 'silent.sock'),
       )
       await new Promise((resolve) => silent.once('listening', resolve))
@@ -1478,6 +1481,7 @@ describe('Releases, install.sh and updates', function () {
           /did not answer/,
         )
       } finally {
+        for (const socket of held) socket.destroy()
         silent.close()
       }
     })

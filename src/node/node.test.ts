@@ -363,7 +363,7 @@ describe('Configuration-free nodes', function () {
       hostIO,
     )
     const host = await hostIO.node
-    assert.deepEqual(databaseFiles('host'), ['host.sqlite'])
+    assert.deepEqual(databaseFiles('host'), ['host-cache.sqlite'])
     assert(hostIO.lines.some((line) => line.startsWith('Pairing key: ')))
     assert(hostIO.lines.includes('Test endpoints are enabled.'))
     const page = await get(

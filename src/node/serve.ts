@@ -6,6 +6,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { asObject, asOptional, asString } from 'cleaners'
 import { hostApp } from '../host/web.js'
+import { HostRuntime, type HostOptions } from '../host/runtime.js'
 import { masterApp } from '../master/web.js'
 import { version } from '../version.js'
 import {
@@ -82,6 +83,8 @@ export interface NodeOptions {
   pollMs?: number
   /** Stages a worker runs at once (the master's node setting can lower it). */
   slots?: number
+  /** Host internals for tests: the clock and the OIDC transport. */
+  hostOptions?: Pick<HostOptions, 'now' | 'transport'>
   /** Worker internals for tests. */
   workerOptions?: Pick<
     WorkerOptions,
@@ -116,6 +119,8 @@ export interface NodeStatus {
   testEndpoints?: boolean
   /** What needs a person, such as the Apple ID's two-factor code. */
   notices?: string[]
+  /** A host's cache: whether its master's link is up, and how current it is. */
+  sync?: { online: boolean; revision: number; syncedAt?: number }
 }
 
 export interface RunningNode {
@@ -136,6 +141,8 @@ export interface RunningNode {
   localWorker?: Link
   /** On a worker, or a master with a worker: the worker role. */
   worker?: WorkerRuntime
+  /** On a host: its cache and what it serves from it. */
+  host?: HostRuntime
   status(): NodeStatus
   close(): Promise<void>
 }
@@ -178,7 +185,7 @@ function openDatabase(file: string): DatabaseSync {
 export function databaseFiles(role: Role, coWorker = false): string[] {
   if (role === 'master')
     return coWorker ? ['master.sqlite', 'worker.sqlite'] : ['master.sqlite']
-  return role === 'worker' ? ['worker.sqlite'] : ['host.sqlite']
+  return role === 'worker' ? ['worker.sqlite'] : ['host-cache.sqlite']
 }
 
 /** Whether a master database has its first local admin. */
@@ -266,6 +273,8 @@ export async function startNode(
     const identity = loadIdentity(dir, { renew: options.newKey === true })
     const databases = new Map<string, DatabaseSync>()
     for (const name of databaseFiles(options.role, options.coWorker)) {
+      // The host's cache is opened by its runtime, through the distribution store.
+      if (name === 'host-cache.sqlite') continue
       const db = openDatabase(path.join(dir, name))
       databases.set(name, db)
       cleanup.push(() => db.close())
@@ -303,12 +312,41 @@ export async function startNode(
             dir,
           })
     const configured = (): boolean => master?.configured() ?? false
+    let hostLink: () => Link | undefined = () => undefined
+    const hostRuntime =
+      options.role === 'host'
+        ? new HostRuntime({
+            dir,
+            link: (): Link | undefined => hostLink(),
+            log,
+            masterKey: (): KeyObject | undefined => {
+              const paired = pairing?.master()
+              return paired == null
+                ? undefined
+                : createPublicKey({
+                    key: Buffer.from(paired.publicKey, 'base64'),
+                    format: 'der',
+                    type: 'spki',
+                  })
+            },
+            ...options.hostOptions,
+          })
+        : undefined
+    if (hostRuntime != null) {
+      hostRuntime.start()
+      const running = hostRuntime
+      cleanup.push(async () => await running.stop())
+    }
     if (options.role === 'master' || options.role === 'host') {
       const certificate = webCertificate(identity, webOptions)
       const app =
         master != null
           ? masterApp({ role: 'master', testEndpoints, configured, master })
-          : hostApp({ role: 'host', testEndpoints })
+          : hostApp({
+              role: 'host',
+              testEndpoints,
+              ...(hostRuntime == null ? {} : { host: hostRuntime }),
+            })
       const server = await listenWeb(app, certificate, webOptions)
       cleanup.push(
         () =>
@@ -324,6 +362,11 @@ export async function startNode(
         url: `${scheme}://${host.includes(':') ? `[${host}]` : host}:${boundPort(server)}`,
         ...(certificate == null ? {} : { certificate }),
       }
+      if (hostRuntime != null)
+        hostRuntime.web = {
+          url: web.url,
+          ...(certificate == null ? {} : { pin: certificate.pin }),
+        }
     }
     if (options.role === 'worker' || options.role === 'host') {
       const server = await listenLink(
@@ -397,8 +440,25 @@ export async function startNode(
         methods:
           options.role === 'worker'
             ? workerMethods()
-            : (options.nodeMethods ?? {}),
-        onLink: () => worker?.flushSoon(),
+            : {
+                requests: { ...options.nodeMethods?.requests },
+                events: {
+                  ...hostRuntime?.methods().events,
+                  ...options.nodeMethods?.events,
+                },
+                streams: {
+                  ...hostRuntime?.methods().streams,
+                  ...options.nodeMethods?.streams,
+                },
+              },
+        onLink: () => {
+          worker?.flushSoon()
+          void hostRuntime
+            ?.connected()
+            .catch((error: unknown) =>
+              log(`Sync with the master failed: ${(error as Error).message}`),
+            )
+        },
         ...(options.heartbeatMs == null
           ? {}
           : { heartbeatMs: options.heartbeatMs }),
@@ -412,6 +472,7 @@ export async function startNode(
       const nodeLinks = links
       cleanup.push(() => nodeLinks.close())
       workerLink = (): Link | undefined => nodeLinks.current()
+      hostLink = workerLink
     }
     let registry: NodeRegistry | undefined
     let localWorker: Link | undefined
@@ -466,6 +527,17 @@ export async function startNode(
         ? { setup: configured() ? 'configured' : 'waiting' }
         : {}),
       testEndpoints,
+      ...(hostRuntime == null
+        ? {}
+        : {
+            sync: {
+              online: hostRuntime.online(),
+              revision: hostRuntime.cache.revision(),
+              ...(hostRuntime.cache.syncedAt() == null
+                ? {}
+                : { syncedAt: hostRuntime.cache.syncedAt()! }),
+            },
+          }),
       ...(master == null || master.notices().length === 0
         ? {}
         : { notices: master.notices() }),
@@ -474,6 +546,15 @@ export async function startNode(
       ...(master == null
         ? { pairing: () => pairing?.key() ?? null }
         : master.controlHandlers()),
+      ...(hostRuntime == null || !testEndpoints
+        ? {}
+        : {
+            // E2E only: moves the host's clock forward to test the offline grace window.
+            'test.clock': (args): { now: number } => {
+              hostRuntime.advanceClock(Number(args.ms ?? 0))
+              return { now: hostRuntime.now() }
+            },
+          }),
       ...(worker == null
         ? {}
         : {
@@ -525,6 +606,7 @@ export async function startNode(
       databases,
       ...(registry == null ? {} : { registry }),
       ...(master == null ? {} : { master }),
+      ...(hostRuntime == null ? {} : { host: hostRuntime }),
       ...(pairing == null ? {} : { pairing }),
       ...(links == null ? {} : { links }),
       ...(localWorker == null ? {} : { localWorker }),

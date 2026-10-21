@@ -8,6 +8,7 @@ import {
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { pinnedFetch } from '../../node/pinnedFetch.js'
 import type { NodeType } from '../../master/nodeTypes.js'
 import type { FullInventory } from '../inventory.js'
 import type { InstallRequest } from '../tools/index.js'
@@ -226,8 +227,12 @@ export interface ItemContext {
   log: (text: string) => void
   /** Calls the privileged helper. */
   helper: (op: string, args: Record<string, unknown>) => Promise<unknown>
-  /** Asks the master for an Xcode download authorization. */
-  authorize: (version: string) => Promise<{ url: string; cookie: string }>
+  /** Asks the master for an Xcode download authorization: Apple's one-file cookie, or the host mirror's pinned grant. */
+  authorize: (
+    version: string,
+  ) => Promise<{ url: string; cookie: string; pin?: string }>
+  /** Offers a downloaded `.xip` to the master for the host's mirror; the master refuses one it has. */
+  mirror?: (version: string, file: string) => Promise<void>
   /** Runs a tools-directory installer. */
   installTool: (request: InstallRequest) => Promise<void>
   /** The master's copy of an exported simulator runtime: fetched into `file`, or false when it has none. */
@@ -259,8 +264,14 @@ export async function downloadXcode(
   const dir = path.join(context.scratch, 'xcode')
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   const file = path.join(dir, `Xcode-${version}.xip`)
-  context.log(`Downloading Xcode ${version} from Apple\n`)
-  const response = await fetch(auth.url, { headers: { Cookie: auth.cookie } })
+  context.log(
+    `Downloading Xcode ${version} from ${auth.pin == null ? 'Apple' : 'the Mason host'}\n`,
+  )
+  const response = await pinnedFetch(
+    auth.url,
+    auth.cookie === '' ? {} : { headers: { Cookie: auth.cookie } },
+    auth.pin,
+  )
   if (!response.ok || response.body == null)
     throw new Error(
       `Apple refused the Xcode ${version} download (${response.status})`,
@@ -291,6 +302,8 @@ export async function performItem(
     case 'xcode': {
       const xip = await downloadXcode(item.version, context)
       try {
+        // The first node to download a version keeps a copy on the host for when Apple's session lapses.
+        await context.mirror?.(item.version, xip).catch(() => undefined)
         context.log(`Installing Xcode ${item.version}\n`)
         await context.helper('xcode.install', { version: item.version, xip })
       } finally {

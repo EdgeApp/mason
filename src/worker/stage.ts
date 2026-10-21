@@ -345,14 +345,19 @@ export class WorkerRuntime {
     return {
       log,
       helper: async (op, args): Promise<unknown> => await this.helper(op, args),
-      authorize: async (version): Promise<{ url: string; cookie: string }> => {
+      authorize: async (
+        version,
+      ): Promise<{ url: string; cookie: string; pin?: string }> => {
         const link = this.options.link()
         if (link == null) throw new Error('The master is not connected')
         return (await link.request(
           'xcode.authorize',
           { version },
           5 * 60 * 1000,
-        )) as { url: string; cookie: string }
+        )) as { url: string; cookie: string; pin?: string }
+      },
+      mirror: async (version, file): Promise<void> => {
+        await this.mirrorXcode(version, file)
       },
       installTool: async (request): Promise<void> => {
         const answer = await this.installTool(request)
@@ -414,6 +419,38 @@ export class WorkerRuntime {
         this.reconciling = undefined
       })
     return this.reconciling
+  }
+
+  /** Streams a downloaded Xcode to the master, which copies it to the host; refused once mirrored. */
+  private async mirrorXcode(version: string, file: string): Promise<void> {
+    const link = this.options.link()
+    if (link == null) return
+    const { createHash } = await import('node:crypto')
+    const hash = createHash('sha256')
+    for await (const chunk of createReadStream(file))
+      hash.update(chunk as Buffer)
+    const stream = link.openStream('xcode.mirror', {
+      version,
+      sha256: hash.digest('hex'),
+      size: lstatSync(file).size,
+    })
+    const done = new Promise<void>((resolve, reject) => {
+      stream.once('end', () => {
+        resolve()
+      })
+      stream.once('abort', (reason: string) => {
+        reject(new Error(reason))
+      })
+    })
+    done.catch(() => undefined)
+    try {
+      for await (const chunk of createReadStream(file))
+        await stream.write(chunk as Buffer)
+      stream.end()
+    } catch {
+      // Refused (already mirrored, no host): the install goes on.
+    }
+    await done
   }
 
   private async fetchRuntime(name: string, file: string): Promise<boolean> {

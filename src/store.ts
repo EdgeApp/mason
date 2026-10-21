@@ -109,6 +109,8 @@ export class Store {
     this.db.close()
   }
   transaction<T>(body: () => T): T {
+    // An inner call joins the transaction already open.
+    if (this.db.isTransaction) return body()
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const out = body()
@@ -157,6 +159,15 @@ export class Store {
           ).lastInsertRowid,
       ),
     )
+  }
+  /**
+   * Which apps an account may see: every enabled app here; a host limits
+   * testers to their groups' apps.
+   */
+  scope: (accountId: number) => ReadonlySet<number> | 'all' = () => 'all'
+  visible(accountId: number, appId: number): boolean {
+    const scope = this.scope(accountId)
+    return scope === 'all' || scope.has(appId)
   }
   apps(): Array<ReturnType<typeof asApp>> {
     return this.db

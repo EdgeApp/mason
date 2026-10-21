@@ -7,6 +7,8 @@ export const contentSecurityPolicy =
 export interface WebAppContext {
   role: 'master' | 'host'
   testEndpoints: boolean
+  /** The stylesheet; the base one by default. */
+  styles?: string
 }
 
 /** The banner every page shows while test endpoints are enabled. */
@@ -34,7 +36,7 @@ export function nodeWebApp(context: WebAppContext): express.Express {
     res.json({ status: 'ready', role: context.role })
   })
   app.get('/assets/style.css', (_req, res) => {
-    res.type('css').send(stylesheet)
+    res.type('css').send(context.styles ?? stylesheet)
   })
   return app
 }

@@ -16,7 +16,7 @@ import {
   type Session,
 } from './accounts.js'
 import { Providers } from './providers.js'
-import { asProviderId } from './providerConfig.js'
+import { asProviderId, type Identity } from './providerConfig.js'
 
 export const SESSION_COOKIE = '__Host-mason-session'
 const FLOW_COOKIE = '__Host-mason-oauth'
@@ -100,12 +100,32 @@ export function authLimiter(now: () => number): RequestHandler {
     next()
   }
 }
+export interface AuthOptions {
+  /** Who an identity signs in as; the legacy server creates accounts, a host only matches its cache. */
+  login?: (
+    identity: Identity,
+    previousToken: string | undefined,
+  ) => { token: string; session: Session; account: Account }
+  /** Whether the People pages are served (not on a host: accounts are managed on the master). */
+  people?: boolean
+}
+
 export function authRoutes(
   store: Store,
-  providers: Providers,
+  providersOrCurrent: Providers | (() => Providers),
   accounts = new Accounts(store),
+  options: AuthOptions = {},
 ): Router {
   const router = Router()
+  const current = (): Providers =>
+    typeof providersOrCurrent === 'function'
+      ? providersOrCurrent()
+      : providersOrCurrent
+  // The legacy server lists its configuration's providers; a host lists its cached ones.
+  const configured = (): Providers['providers'] =>
+    typeof providersOrCurrent === 'function'
+      ? providersOrCurrent().providers
+      : store.config.providers
   router.use(
     '/auth',
     authLimiter(() => store.now()),
@@ -113,17 +133,17 @@ export function authRoutes(
   router.get('/auth/login', (req, res) => {
     const destination = returnPath(req.query.return)
     if (
-      store.config.providers.length === 1 &&
+      configured().length === 1 &&
       req.query.signed_out !== '1' &&
       sessionContext(req, accounts) == null
     ) {
       res.redirect(
         303,
-        `/auth/start/${store.config.providers[0]!.id}?return=${encodeURIComponent(destination)}`,
+        `/auth/start/${configured()[0]!.id}?return=${encodeURIComponent(destination)}`,
       )
       return
     }
-    const links = store.config.providers
+    const links = configured()
       .map(
         (provider) =>
           `<a class="button" href="/auth/start/${escape(provider.id)}?return=${encodeURIComponent(destination)}">Sign in with ${escape(provider.name)}</a>`,
@@ -142,7 +162,7 @@ export function authRoutes(
     confirmed: boolean,
   ): Promise<void> => {
     const id = asProviderId(req.params.provider)
-    const provider = providers.provider(id)
+    const provider = current().provider(id)
     const context = sessionContext(req, accounts)
     const destination = returnPath(
       confirmed ? req.body.return : req.query.return,
@@ -175,7 +195,7 @@ export function authRoutes(
       verifier = randomToken(),
       nonce = randomToken(),
       browser = randomToken()
-    const target = await providers.authorize(
+    const target = await current().authorize(
       id,
       { state, verifier, nonce },
       confirmed,
@@ -219,7 +239,7 @@ export function authRoutes(
   })
   router.get('/auth/callback/:provider', async (req, res) => {
     const id = asProviderId(req.params.provider)
-    const provider = providers.provider(id)
+    const provider = current().provider(id)
     const state = text(128)(req.query.state)
     const browser = cookie(req, FLOW_COOKIE)
     if (browser == null) throw new Error('Missing browser transaction')
@@ -259,16 +279,22 @@ export function authRoutes(
       return row
     })
     res.clearCookie(FLOW_COOKIE, cookieOptions)
-    const callback = new URL(providers.redirectUri(id))
+    const callback = new URL(current().redirectUri(id))
     for (const [key, value] of new URL(req.originalUrl, store.config.origin)
       .searchParams)
       callback.searchParams.append(key, value)
-    const identity = await providers.identity(id, callback, {
+    const identity = await current().identity(id, callback, {
       state,
       verifier: transaction.verifier,
       nonce: transaction.nonce,
     })
-    const result = accounts.login(identity, cookie(req, SESSION_COOKIE))
+    const login =
+      options.login ??
+      ((
+        found: Identity,
+        token: string | undefined,
+      ): ReturnType<Accounts['login']> => accounts.login(found, token))
+    const result = login(identity, cookie(req, SESSION_COOKIE))
     res.cookie(SESSION_COOKIE, result.token, {
       ...cookieOptions,
       maxAge: result.session.expires_at - store.now(),
@@ -283,6 +309,7 @@ export function authRoutes(
     res.clearCookie(SESSION_COOKIE, cookieOptions)
     res.redirect(303, '/auth/login?signed_out=1')
   })
+  if (options.people === false) return router
   router.get('/people', (req, res) => {
     const context = sessionContext(req, accounts)
     if (context == null || !context.account.is_admin) {

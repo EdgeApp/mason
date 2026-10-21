@@ -5,7 +5,12 @@
  * node reconciles against its inventory.
  */
 
-import { LinkError, type Link, type MethodTable } from '../link/link.js'
+import {
+  LinkError,
+  type Link,
+  type MethodTable,
+  type Stream,
+} from '../link/link.js'
 import type { FullInventory } from '../worker/inventory.js'
 import type { ChecklistItem, Progress } from '../worker/system/reconcile.js'
 import type { AppleDownloads, AppleStatus } from './apple/developerDownloads.js'
@@ -235,6 +240,16 @@ export class NodeStates {
       apple: AppleDownloads
       runtimes: RuntimeStore
       storeInventory: (fingerprint: string, inventory: FullInventory) => void
+      /** The host's Xcode mirror: relay a node's first download, and authorize downloads from it. */
+      mirror?: {
+        authorize(
+          version: string,
+        ): { url: string; cookie: string; pin?: string } | undefined
+        relay(
+          params: { version: string; sha256: string; size: number },
+          stream: Stream,
+        ): Promise<void>
+      }
       /** Whether a stage preparing on this worker asked for this system install. */
       requested: (
         fingerprint: string,
@@ -281,10 +296,10 @@ export class NodeStates {
     fingerprint: string
     type: NodeType | undefined
   } {
-    const node = this.options.registry
-      .list()
-      .find((entry) => this.options.registry.link(entry.fingerprint) === link)
-    if (node?.role !== 'worker')
+    const fingerprint = link.peer?.fingerprint
+    const node =
+      fingerprint == null ? undefined : this.options.registry.get(fingerprint)
+    if (node?.role !== 'worker' || link.peerRole !== 'worker')
       throw new LinkError('Only workers ask for this', 'not_allowed')
     return { fingerprint: node.fingerprint, type: this.type(node.type) }
   }
@@ -332,7 +347,7 @@ export class NodeStates {
         'xcode.authorize': async (
           params,
           link,
-        ): Promise<{ url: string; cookie: string }> => {
+        ): Promise<{ url: string; cookie: string; pin?: string }> => {
           const { fingerprint, type } = this.worker(link)
           const version = String(
             (params as { version?: unknown }).version ?? '',
@@ -348,6 +363,9 @@ export class NodeStates {
           try {
             return await this.options.apple.authorize(version)
           } catch (error) {
+            // With Apple's session lapsed, the host's mirror serves the version a node downloaded before.
+            const mirror = this.options.mirror?.authorize(version)
+            if (mirror != null) return mirror
             throw new LinkError((error as Error).message, 'failed')
           }
         },
@@ -361,6 +379,21 @@ export class NodeStates {
         },
       },
       streams: {
+        /** A node's first download of an Xcode, copied to the host's storage. */
+        'xcode.mirror': async (stream, params, link): Promise<void> => {
+          try {
+            this.worker(link)
+            const relay = this.options.mirror?.relay
+            if (relay == null) throw new Error('No mirror')
+            await relay(
+              params as { version: string; sha256: string; size: number },
+              stream,
+            )
+            stream.end()
+          } catch (error) {
+            stream.abort((error as Error).message)
+          }
+        },
         'runtime.get': async (stream, params, link): Promise<void> => {
           try {
             this.worker(link)

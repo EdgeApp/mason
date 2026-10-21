@@ -105,6 +105,15 @@ export interface Cluster {
   repos: Map<string, FakeRepo>
   repo(name: string): FakeRepo
   startWorker(spec: WorkerSpec): Promise<RunningNode>
+  /** Starts a host, pairs it and waits for its first sync. */
+  startHost(
+    name: string,
+    options?: {
+      hostOptions?: NodeOptions['hostOptions']
+      testEndpoints?: boolean
+    },
+  ): Promise<RunningNode>
+  hosts: Map<string, RunningNode>
   stopWorker(name: string): Promise<void>
   restartMaster(): Promise<void>
   /** Closes a worker's link and keeps the master from redialing it for `ms`; resolves once it is back. */
@@ -270,6 +279,52 @@ export async function cluster(
     return node
   }
   for (const spec of options.workers ?? []) await startWorker(spec)
+  const hosts = new Map<string, RunningNode>()
+  const startHost: Cluster['startHost'] = async (name, hostSpec = {}) => {
+    const node = await startNode(
+      {
+        role: 'host',
+        data: path.join(root, name),
+        port: 0,
+        linkPort: 0,
+        listen: '127.0.0.1',
+        heartbeatMs: 0,
+        ...(hostSpec.testEndpoints ? { testEndpoints: true } : {}),
+        ...(hostSpec.hostOptions == null
+          ? {}
+          : { hostOptions: hostSpec.hostOptions }),
+      },
+      quiet,
+    )
+    hosts.set(name, node)
+    let fingerprint = fingerprints.get(name)
+    if (fingerprint == null) {
+      const record = await master.master!.registry.add(
+        `127.0.0.1:${node.link!.port}`,
+        node.pairing!.key()!,
+      )
+      fingerprint = record.fingerprint
+      fingerprints.set(name, fingerprint)
+      await master.master!.registry.assign(fingerprint, {
+        name,
+        type: '',
+        labels: [],
+      })
+    } else {
+      master
+        .master!.database.db.prepare(
+          'UPDATE nodes SET port=? WHERE fingerprint=?',
+        )
+        .run(node.link!.port, fingerprint)
+      await master.master!.registry.dial(fingerprint)
+    }
+    await until(
+      () => node.status().sync?.online ?? false,
+      10000,
+      `${name}'s first sync`,
+    )
+    return node
+  }
   const cluster: Cluster = {
     root,
     get master() {
@@ -288,6 +343,8 @@ export async function cluster(
       return repo
     },
     startWorker,
+    startHost,
+    hosts,
     async stopWorker(name) {
       await workers.get(name)?.close()
       workers.delete(name)
@@ -297,7 +354,7 @@ export async function cluster(
     },
     async drop(name, ms, during) {
       const fingerprint = fingerprints.get(name)!
-      const port = workers.get(name)!.link!.port
+      const port = (workers.get(name) ?? hosts.get(name))!.link!.port
       const db = master.master!.database.db
       db.prepare('UPDATE nodes SET port=1 WHERE fingerprint=?').run(fingerprint)
       master.master!.registry.link(fingerprint)?.close()
@@ -356,6 +413,7 @@ export async function cluster(
     until,
     async close() {
       for (const node of workers.values()) await node.close()
+      for (const node of hosts.values()) await node.close()
       await master.close()
     },
   }

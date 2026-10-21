@@ -75,6 +75,11 @@ export class Releases {
       .sort()
   }
 
+  /** A stored release's files and their SHA-256 digests. */
+  files(version: string): Record<string, string> {
+    return Object.fromEntries(sums(path.join(this.root, version)))
+  }
+
   list(): StoredRelease[] {
     const current = this.current()
     return this.versions().map((version) => ({

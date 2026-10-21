@@ -1,5 +1,6 @@
 import type { MasterDatabase } from './database.js'
 import { requireRole, type Actor } from './roles.js'
+import { publishedSettings } from './changes.js'
 
 /** A setting value is a JSON object. */
 export type SettingValue = Record<string, unknown>
@@ -18,6 +19,8 @@ export interface SettingsArea {
   secrets?: string[] | ((value: SettingValue | undefined) => string[])
   /** Called after a change commits, for areas published to the host or nodes. */
   changed?(value: SettingValue): void
+  /** What an administrator sees, for secrets nested below the top level. */
+  redact?(value: SettingValue): SettingValue
 }
 
 export class UnknownArea extends Error {
@@ -63,7 +66,7 @@ export class Settings {
         ? area.secrets(value)
         : (area.secrets ?? [])
     for (const field of secrets) out[field] = { set: value[field] != null }
-    return out
+    return area.redact == null ? out : area.redact(out)
   }
 
   async set(actor: Actor, name: string, input: unknown): Promise<SettingValue> {
@@ -81,6 +84,9 @@ export class Settings {
         )
         .run(name, JSON.stringify(value), this.master.now(), actor.label)
       this.master.audit(actor, 'settings.set', name)
+      // Areas the host holds reach it through the change log.
+      if ((publishedSettings as readonly string[]).includes(name))
+        this.master.change('setting', name)
     })
     area.changed?.(value)
     return this.get(actor, name)

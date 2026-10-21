@@ -39,6 +39,9 @@ import {
   storedNodeType,
 } from './nodeTypes.js'
 import { RuntimeStore } from './runtimes.js'
+import { Changes } from './changes.js'
+import { HostLinks } from './hosts.js'
+import { hostArea, hostProjection, signInArea } from './hostSettings.js'
 
 export { nodeTypesSetting }
 
@@ -100,7 +103,10 @@ export class Master {
   readonly apple: AppleDownloads
   readonly runtimes: RuntimeStore
   readonly nodeStates: NodeStates
+  readonly changes: Changes
+  readonly hosts: HostLinks
   private stopped = false
+  private compaction: NodeJS.Timeout | undefined
   constructor(
     db: DatabaseSync,
     readonly identity: Identity,
@@ -114,7 +120,7 @@ export class Master {
         mergeMethods(
           role === 'worker'
             ? mergeMethods(this.scheduler.methods(), this.nodeStates.methods())
-            : {},
+            : this.hosts.methods(),
           options.methods?.(role) ?? {},
         ),
       ...(options.heartbeatMs == null
@@ -216,6 +222,13 @@ export class Master {
       },
       requested: (fingerprint, tool, name): boolean =>
         this.scheduler.requested(fingerprint, tool, name),
+      mirror: {
+        authorize: (version): ReturnType<HostLinks['mirrorAuthorization']> =>
+          this.hosts.mirrorAuthorization(version),
+        relay: async (params, stream): Promise<void> => {
+          await this.hosts.mirror(params, stream)
+        },
+      },
       now: this.database.now,
     })
     this.retention = new Retention(this.database, this.scheduler, this.stashes)
@@ -226,12 +239,29 @@ export class Master {
       },
     })
     this.settings.register('apple', { validate: appleSetting })
+    this.settings.register('host', hostArea)
+    this.settings.register('signIn', signInArea)
     this.releases = new Releases(
       this.database,
       path.join(dir, 'releases'),
       identity,
       version,
     )
+    this.changes = new Changes(this.database, hostProjection, this.releases)
+    this.hosts = new HostLinks({
+      master: this.database,
+      registry: this.registry,
+      changes: this.changes,
+      projects: this.projects,
+      jobs: this.jobs,
+      releases: this.releases,
+      privateKey: identity.privateKey,
+      origins: (): { origin?: string; workerOrigin?: string } =>
+        (this.settings.value('host') ?? {}) as {
+          origin?: string
+          workerOrigin?: string
+        },
+    })
     this.updates = new Updates(
       this.registry,
       this.releases,
@@ -267,6 +297,15 @@ export class Master {
     this.scheduler.start()
     this.retention.start()
     this.updates.start()
+    this.hosts.start()
+    // The change log keeps seven days; a host further behind gets a snapshot.
+    this.compaction = setInterval(
+      () => {
+        if (!this.stopped) this.changes.compact()
+      },
+      60 * 60 * 1000,
+    )
+    this.compaction.unref()
     this.apple.start()
     void this.apple.check().catch(() => undefined)
     void this.releases
@@ -278,6 +317,8 @@ export class Master {
     this.registry.stop()
     this.retention.stop()
     this.updates.stop()
+    this.hosts.stop()
+    clearInterval(this.compaction)
     this.apple.stop()
     await this.poller.close()
     await this.scheduler.stop()

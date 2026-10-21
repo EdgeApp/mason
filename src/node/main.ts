@@ -20,6 +20,7 @@ import {
 import type { NodeRecord } from '../master/nodes.js'
 import type { MasterKey } from '../master/keys.js'
 import { importDeployment } from '../master/import.js'
+import { importHost } from '../host/import.js'
 import type { ClientPasswordCosts } from '../auth/passwordProtocol.js'
 import { readStdin, setupCommand, withStoppedMaster } from '../setup/cli.js'
 import { writePrivate } from './dataDir.js'
@@ -126,6 +127,7 @@ const usage = `Usage:
   mason apple sign-in [--apple-id <id>] [--password-stdin] | status | sign-out
   mason setup --username <name> --password-stdin [--api-key-out <file>]
   mason import --distribution <db> --builder <db> [--data <dir>]
+  mason host import --distribution <db> [--storage <dir>] [--data <dir>]
   mason keys create --role <role> [--name <n>] [--project <slug>]… [--branch <glob>]… [--app <id>]… --out <file>
   mason keys list | mason keys revoke <id>
   mason settings get <area> | mason settings set <area> --file <json>
@@ -759,6 +761,27 @@ export async function nodeMain(
     }
     if (first == null || first.startsWith('--'))
       return await roleCommand('master', argv, io)
+    if (first === 'host' && rest[0] === 'import') {
+      const args = parseArgs(
+        rest.slice(1),
+        ['--data', '--distribution', '--storage'],
+        [],
+      )
+      const distribution = single(args, '--distribution')
+      if (distribution == null || args.positional.length !== 0)
+        throw new Error(
+          'Usage: mason host import --distribution <db> [--storage <dir>] [--data <dir>]',
+        )
+      if (!existsSync(distribution))
+        throw new Error(`No database at ${distribution}`)
+      const storage = single(args, '--storage')
+      const summary = importHost(resolveDataDir(single(args, '--data')), {
+        distribution,
+        ...(storage == null ? {} : { storage }),
+      })
+      io.out(JSON.stringify(summary, null, 2))
+      return 0
+    }
     if ((roles as readonly string[]).includes(first))
       return await roleCommand(first as Role, rest, io)
     if (first === 'nodes') return await nodesCommand(rest, io)
