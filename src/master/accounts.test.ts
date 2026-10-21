@@ -239,15 +239,27 @@ describe('Master sign-in, setup, people and permissions', function () {
     assert.equal((await request(c.master, 'GET', '/')).status, 303)
     const home = await request(c.master, 'GET', '/', { cookie })
     assert.equal(home.status, 200)
-    assert.match(home.text, /Signed in as paul/)
+    assert.match(home.text, /<strong>paul<\/strong><small>admin · master/)
+    assert.match(home.text, /Projects &amp; apps/)
     assert.match(home.text, /This master is not backed up/)
-    assert.match(
+    // Only the pages that hash a password, and the worker, may run WebAssembly.
+    assert.doesNotMatch(
       home.headers.get('content-security-policy')!,
+      /wasm-unsafe-eval/,
+    )
+    assert.match(
+      (await request(c.master, 'GET', '/sign-in')).headers.get(
+        'content-security-policy',
+      )!,
       /script-src 'self' 'wasm-unsafe-eval'/,
     )
     const bundle = await request(c.master, 'GET', '/assets/password-worker.js')
     assert.equal(bundle.status, 200)
     assert.match(bundle.headers.get('content-type')!, /javascript/)
+    assert.match(
+      bundle.headers.get('content-security-policy')!,
+      /'wasm-unsafe-eval'/,
+    )
     assert.equal(
       (
         await request(c.master, 'DELETE', '/api/v2/session', {

@@ -399,6 +399,15 @@ export class Scheduler {
     )
     return graph == null || workflow == null ? undefined : { graph, workflow }
   }
+  /** The roles that may decide an approval stage, from its run's graph. */
+  approvalRoles(id: string, name: string): Role[] | undefined {
+    const job = this.job(id)
+    return job == null
+      ? undefined
+      : this.workflowOf(job)?.workflow.stages.find(
+          (entry) => entry.name === name,
+        )?.approval?.roles
+  }
   private params(job: Row): Record<string, ParamValue> {
     return JSON.parse(String(job.params)) as Record<string, ParamValue>
   }

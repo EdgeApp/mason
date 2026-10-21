@@ -9,7 +9,7 @@ import { Store, digest } from '../store.js'
 import { asId, integer, oneOf, text, type Build } from '../validation.js'
 import { randomUUID } from 'node:crypto'
 import { models } from './models.js'
-import { escape } from '../view.js'
+import { escape } from '../view/html.js'
 
 const states = ['pending', 'processing', 'registered', 'error'] as const
 export const asDevice = asObject({

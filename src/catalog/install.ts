@@ -14,7 +14,8 @@ import { Accounts, randomToken, type Session } from '../auth/accounts.js'
 import { csrf, navigation, sessionContext } from '../auth/routes.js'
 import { Store, digest } from '../store.js'
 import { asId, integer, type Build, type Format } from '../validation.js'
-import { escape, page } from '../view.js'
+import { escape } from '../view/html.js'
+import { page } from '../view/shell.js'
 
 const asGrant = asObject({
   hash: asString,

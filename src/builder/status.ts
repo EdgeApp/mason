@@ -1,4 +1,5 @@
-import { escape, stylesheet } from '../view.js'
+import { escape } from '../view/html.js'
+import { stylesheet } from '../view/stylesheet.js'
 import type { QueueEntry } from './server.js'
 
 export function duration(ms: number): string {

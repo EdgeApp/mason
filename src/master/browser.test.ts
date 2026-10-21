@@ -54,7 +54,7 @@ describe('Master sign-in in a real browser', () => {
           device: 'web-mason-master',
           platform: 'web',
           url: origin,
-          extra: { browser: wrapper, windowSize: '1100,820' },
+          extra: { browser: wrapper, windowSize: '1100x820' },
           artifacts: 'none',
           commandTimeout: 30000,
           outputDir: artifacts,
@@ -95,6 +95,7 @@ describe('Master sign-in in a real browser', () => {
         await visible('^Backups$')
         await screenshot('master-backup-prompt.png')
         assert.equal(node.master!.configured(), true)
+        await device.command('tapOn', { css: 'summary[aria-label="Account"]' })
         await device.command('tapOn', {
           css: 'form[data-mason="sign-out"] button',
         })
@@ -105,7 +106,7 @@ describe('Master sign-in in a real browser', () => {
           css: 'form[data-mason="sign-in"] button',
         })
         // The browser's hash matches the one the server stored at setup.
-        await visible('^Signed in as owner\\.$')
+        await visible('^Projects & apps$')
         await screenshot('master-signed-in.png')
       } finally {
         await daemon

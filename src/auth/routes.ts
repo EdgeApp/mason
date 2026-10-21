@@ -7,7 +7,8 @@ import {
 } from 'express'
 import { Store, digest } from '../store.js'
 import { asId, integer, object, text } from '../validation.js'
-import { escape, page } from '../view.js'
+import { escape } from '../view/html.js'
+import { page } from '../view/shell.js'
 import {
   Accounts,
   randomToken,
@@ -20,7 +21,7 @@ import { asProviderId, type Identity } from './providerConfig.js'
 
 export const SESSION_COOKIE = '__Host-mason-session'
 const FLOW_COOKIE = '__Host-mason-oauth'
-const cookieOptions = {
+export const cookieOptions = {
   httpOnly: true,
   secure: true,
   sameSite: 'lax' as const,
@@ -68,8 +69,9 @@ export function sessionContext(
 }
 const hidden = (session: Session): string =>
   `<input type="hidden" name="csrf" value="${escape(session.csrf)}">`
-export function navigation(session: Session, account: Account): string {
-  return `${account.is_admin ? '<a href="/people">People</a>' : ''}<a class="button register-device" href="/devices">Register Device</a><form method="post" action="/auth/logout">${hidden(session)}<button class="secondary">Sign out</button></form>`
+/** The tester pages' top-bar controls; administration is never offered here. */
+export function navigation(session: Session, _account: Account): string {
+  return `<a class="button register-device" href="/devices">Register Device</a><form method="post" action="/auth/logout">${hidden(session)}<button class="secondary">Sign out</button></form>`
 }
 export function authLimiter(now: () => number): RequestHandler {
   const clients = new Map<string, { count: number; until: number }>()

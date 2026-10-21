@@ -4,7 +4,8 @@ import { Accounts } from '../auth/accounts.js'
 import { navigation, sessionContext } from '../auth/routes.js'
 import { Store } from '../store.js'
 import { asId, type Build, type Platform } from '../validation.js'
-import { escape, page } from '../view.js'
+import { escape } from '../view/html.js'
+import { page } from '../view/shell.js'
 import { branchKey, branchName, labels, platform } from './platform.js'
 import { Installations } from './install.js'
 
@@ -61,7 +62,7 @@ export function catalogRoutes(
   const router = Router(),
     installations = new Installations(store)
   router.get(
-    ['/', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
+    ['/', '/apps', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
     (req, res) => {
       const context = sessionContext(req, accounts)
       if (context == null) {

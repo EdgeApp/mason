@@ -1,6 +1,10 @@
 import { readFileSync } from 'node:fs'
 import type express from 'express'
-import { nodeWebApp, type WebAppContext } from '../node/webApp.js'
+import {
+  masterContentSecurityPolicy,
+  nodeWebApp,
+  type WebAppContext,
+} from '../node/webApp.js'
 import { accountsApi } from './accountsApi.js'
 import { masterApi } from './api.js'
 import { backupApi } from './backupApi.js'
@@ -31,6 +35,8 @@ export function masterApp(context: MasterWebContext): express.Express {
   const master = context.master
   for (const name of ['master', 'password-worker'])
     app.get(`/assets/${name}.js`, (_req, res) => {
+      if (name === 'password-worker')
+        res.set('Content-Security-Policy', masterContentSecurityPolicy)
       res.type('js').send(bundle(name))
     })
   app.use(

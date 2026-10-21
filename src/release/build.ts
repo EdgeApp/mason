@@ -204,6 +204,10 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
           .relative(path.join(options.repo, 'lib'), source)
           .split(path.sep)[0] !== 'test',
     })
+    // The fonts, icons and logo the pages are drawn with, and their licences.
+    cpSync(path.join(options.repo, 'assets'), path.join(root, 'assets'), {
+      recursive: true,
+    })
     // Apple's Profile Service roots, which hosts verify device callbacks against.
     mkdirSync(path.join(root, 'src', 'devices'), { recursive: true })
     for (const name of readdirSync(path.join(options.repo, 'src', 'devices')))

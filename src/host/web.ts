@@ -1,13 +1,34 @@
 import express, { type ErrorRequestHandler, type RequestHandler } from 'express'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
-import { authRoutes, navigation, sessionContext } from '../auth/routes.js'
+import {
+  authRoutes,
+  cookieOptions,
+  navigation,
+  SESSION_COOKIE,
+  sessionContext,
+} from '../auth/routes.js'
 import { forwardRoutes } from './forward.js'
 import { deviceCallbackRoutes, deviceRoutes } from '../devices/routes.js'
 import { installationRoutes } from '../catalog/install.js'
 import { catalogRoutes } from '../catalog/routes.js'
-import { nodeWebApp, sendPage, type WebAppContext } from '../node/webApp.js'
-import { catalogStyles, escape, page, stylesheet } from '../view.js'
+import {
+  nodeWebApp,
+  sendPage,
+  testBanner,
+  type WebAppContext,
+} from '../node/webApp.js'
+import { artifactsView } from '../view/artifacts.js'
+import { dashboardData, dashboardView } from '../view/dashboard.js'
+import {
+  approvalNotifications,
+  approvalRolesFromGraph,
+  notificationsFor,
+} from '../view/notifications.js'
+import { search } from '../view/search.js'
+import { page, shell, type Viewer } from '../view/shell.js'
+import { escape } from '../view/html.js'
+import { stylesheet } from '../view/stylesheet.js'
 import type { HostRuntime } from './runtime.js'
 import { hostLogin } from './sessions.js'
 import { uploadRoutes } from '../upload/routes.js'
@@ -124,6 +145,177 @@ function projectRoutes(host: HostRuntime): express.Router {
   return router
 }
 
+/** The signed-in person as the views see them, from the host's cache. */
+function hostViewer(
+  host: HostRuntime,
+  req: express.Request,
+): { viewer: Viewer; accountId: number } | undefined {
+  const context = sessionContext(req, host.accounts)
+  if (context == null) return undefined
+  const row = host.cache.db
+    .prepare('SELECT name,role FROM accounts WHERE id=?')
+    .get(context.account.id) as { name: string; role: string } | undefined
+  const role = (['admin', 'manager', 'developer', 'tester'] as const).find(
+    (entry) => entry === row?.role,
+  )
+  if (row == null || role == null) return undefined
+  return {
+    accountId: context.account.id,
+    viewer: {
+      name: row.name,
+      role,
+      node: 'host',
+      signOut: `<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="${escape(context.session.csrf)}"><button class="secondary">Sign out</button></form>`,
+    },
+  }
+}
+
+/** The dashboard, artifacts and search for developers and up; testers keep the catalog. */
+function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
+  const router = express.Router()
+  const visible =
+    (accountId: number) =>
+    (appId: number): boolean =>
+      host.cache.store.visible(accountId, appId)
+  const render = (
+    res: express.Response,
+    viewer: Viewer,
+    title: string,
+    body: string,
+    active: string,
+  ): void => {
+    res.send(
+      shell({
+        title,
+        body,
+        viewer,
+        active,
+        banners: testBanner(context),
+        notifications: notificationsFor(
+          viewer,
+          approvalNotifications(host.cache.db, viewer, (job, stage) => {
+            const row = host.cache.db
+              .prepare('SELECT workflow,graph FROM jobs WHERE id=?')
+              .get(job) as
+              | { workflow: string; graph: string | null }
+              | undefined
+            return row == null
+              ? undefined
+              : approvalRolesFromGraph(row.graph, row.workflow, stage)
+          }),
+        ),
+      }),
+    )
+  }
+  router.get('/', (req, res, next) => {
+    const found = hostViewer(host, req)
+    if (found == null || found.viewer.role === 'tester') {
+      next()
+      return
+    }
+    const now = host.now()
+    const platform =
+      typeof req.query.platform === 'string' ? req.query.platform : undefined
+    const project =
+      typeof req.query.project === 'string' ? req.query.project : undefined
+    render(
+      res,
+      found.viewer,
+      'Projects & apps',
+      dashboardView(
+        dashboardData(
+          {
+            db: host.cache.db,
+            viewer: found.viewer,
+            now,
+            appVisible: visible(found.accountId),
+          },
+          {
+            ...(platform == null ? {} : { platform }),
+            ...(project == null ? {} : { project }),
+          },
+        ),
+        found.viewer,
+        now,
+      ),
+      'dashboard',
+    )
+  })
+  router.get('/artifacts', (req, res) => {
+    const found = hostViewer(host, req)
+    if (found == null) {
+      res.redirect(
+        303,
+        '/auth/login?return=' + encodeURIComponent(req.originalUrl),
+      )
+      return
+    }
+    if (found.viewer.role === 'tester') {
+      res
+        .status(403)
+        .send(page('Artifacts', '<p>Artifacts are for developers and up.</p>'))
+      return
+    }
+    const filter = (name: string): string | undefined =>
+      typeof req.query[name] === 'string'
+        ? (req.query[name] as string)
+        : undefined
+    const run = filter('run')
+    const project = filter('project')
+    const branch = filter('branch')
+    render(
+      res,
+      found.viewer,
+      'Artifacts',
+      artifactsView(
+        {
+          db: host.cache.db,
+          viewer: found.viewer,
+          now: host.now(),
+          appVisible: visible(found.accountId),
+          artifactBase: '',
+        },
+        {
+          ...(run == null ? {} : { run }),
+          ...(project == null ? {} : { project }),
+          ...(branch == null ? {} : { branch }),
+        },
+      ),
+      'artifacts',
+    )
+  })
+  // E2E only: a browser that cannot be handed a cookie (Safari in a
+  // Simulator) opens the session a test.session control request started.
+  if (context.testEndpoints)
+    router.get('/test/session/:token', (req, res) => {
+      const token = String(req.params.token)
+      if (host.accounts.session(token) == null) {
+        res.status(404).send('Not found')
+        return
+      }
+      res.cookie(SESSION_COOKIE, token, cookieOptions)
+      res.redirect(303, '/')
+    })
+  router.get('/search', (req, res) => {
+    const found = hostViewer(host, req)
+    if (found == null) {
+      res.status(401).json([])
+      return
+    }
+    res.json(
+      search(
+        {
+          db: host.cache.db,
+          viewer: found.viewer,
+          appVisible: visible(found.accountId),
+        },
+        typeof req.query.q === 'string' ? req.query.q : '',
+      ),
+    )
+  })
+  return router
+}
+
 /** The current release's installer and files, exactly as the master stores them. */
 export function releaseRoutes(
   host: Pick<HostRuntime, 'currentRelease' | 'xcodeFile' | 'granted'>,
@@ -179,7 +371,7 @@ export function releaseRoutes(
 export function hostApp(
   context: WebAppContext & { host?: HostRuntime },
 ): express.Express {
-  const app = nodeWebApp({ ...context, styles: stylesheet + catalogStyles })
+  const app = nodeWebApp({ ...context, styles: stylesheet })
   const host = context.host
   if (host == null) {
     app.use((_req, res) => {
@@ -243,6 +435,7 @@ export function hostApp(
   app.use(deviceRoutes(host.cache.store, host.accounts, host.devices))
   app.use(installationRoutes(host.cache.store, host.accounts))
   app.use(projectRoutes(host))
+  app.use(viewRoutes(host, context))
   app.use(catalogRoutes(host.cache.store, host.accounts))
   app.use((_req, res) => {
     res.status(404).send('Not found')
