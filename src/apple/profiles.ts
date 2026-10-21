@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import type { MasterDatabase } from '../master/database.js'
 import type { CertificateKind, Certificates } from './certificates.js'
 import { AppleApiError, type AppStoreConnect } from './connect.js'
@@ -284,10 +284,12 @@ export class Profiles {
       String(current.capabilities) === capabilities
     )
       return stageProfile(current)
-    const stamp = new Date(this.master.now())
+    // To the second, with a few random characters: profile names are unique
+    // per team, and several masters may share one.
+    const stamp = `${new Date(this.master.now())
       .toISOString()
       .replace(/\D/g, '')
-      .slice(0, 12)
+      .slice(0, 14)}-${randomBytes(2).toString('hex')}`
     const created = await this.connect(team).request<{
       data: {
         id: string

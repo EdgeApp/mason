@@ -21,7 +21,7 @@ import { parseArgs, parseRoleCommand, port, single } from './args.js'
 import { createCertificate, publicKeyPin } from './certificate.js'
 import { controlRequest } from './control.js'
 import { parsePairingKey } from './identity.js'
-import { nodeMain, processIO, type MainIO } from './main.js'
+import { localOrigin, nodeMain, processIO, type MainIO } from './main.js'
 import { asPin, pinnedAgent, pinnedFetch } from './pinnedFetch.js'
 import {
   databaseFiles,
@@ -154,6 +154,8 @@ describe('Configuration-free nodes', function () {
       '9501',
       '--listen',
       '127.0.0.1',
+      '--link-listen',
+      '0.0.0.0',
       '--web-plain',
       '--test-endpoints',
       '--new-key',
@@ -164,11 +166,14 @@ describe('Configuration-free nodes', function () {
     assert.equal(parsed.options.port, 9501)
     assert.equal(parsed.options.webPlain, true)
     assert.equal(parsed.options.newKey, true)
+    assert.equal(parsed.options.linkListen, '0.0.0.0')
     assert.deepEqual(parsed.serviceArgs, [
       '--port',
       '9501',
       '--listen',
       '127.0.0.1',
+      '--link-listen',
+      '0.0.0.0',
       '--web-plain',
       '--test-endpoints',
       '--worker',
@@ -597,6 +602,35 @@ describe('Configuration-free nodes', function () {
     assert.equal((await fetch(plainNode.web!.url + '/health')).status, 200)
     plain.stop()
     await plainDone
+    // A host behind a local terminator: plain web on loopback, the link on
+    // its own address.
+    const split = testIO()
+    const splitDone = nodeMain(
+      [
+        'host',
+        '--data',
+        path.join(root, 'split'),
+        '--port',
+        '0',
+        '--link-port',
+        '0',
+        '--listen',
+        '127.0.0.1',
+        '--web-plain',
+        '--link-listen',
+        '::1',
+      ],
+      split,
+    )
+    const splitNode = await split.node
+    assert.match(splitNode.web!.url, /^http:\/\/127\.0\.0\.1:/)
+    assert.equal(
+      (splitNode.link!.server.address() as AddressInfo).address,
+      '::1',
+    )
+    assert(split.lines.includes(`Link: [::1]:${splitNode.link!.port}`))
+    split.stop()
+    await splitDone
     const refused = testIO()
     assert.equal(
       await nodeMain(
@@ -646,6 +680,15 @@ describe('Configuration-free nodes', function () {
   })
 
   it('lists reachable addresses without link-local IPv6 ones', () => {
+    // A local command reaches a node listening everywhere on loopback.
+    assert.equal(
+      localOrigin('https://kefir:9400', 'kefir'),
+      'https://127.0.0.1:9400',
+    )
+    assert.equal(
+      localOrigin('https://10.0.0.5:9400', 'kefir'),
+      'https://10.0.0.5:9400',
+    )
     assert.deepEqual(reachableAddresses(9311, '10.0.0.5'), ['10.0.0.5:9311'])
     assert.deepEqual(reachableAddresses(9311, '::1'), ['[::1]:9311'])
     const all = reachableAddresses(9310)

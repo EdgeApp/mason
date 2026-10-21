@@ -117,6 +117,33 @@ describe('Master page script', () => {
     assert.equal(signIn.outputs.status!.textContent, '')
   })
 
+  it('signs in on a host through the endpoints its form names, and returns where it was going', async () => {
+    const signIn = form('sign-in', {
+      username: { value: 'tess' },
+      password: { value: 'Tess-Horse-9' },
+    })
+    Object.assign(signIn.dataset, {
+      parameters: '/auth/password/parameters',
+      session: '/auth/password',
+      return: '/apps/3',
+    })
+    const { calls, visits } = page([signIn], {
+      'POST /auth/password/parameters': { status: 200, body: { salt: 's' } },
+      'POST /auth/password': { status: 200, body: { signedIn: true } },
+    })
+    signIn.submit()
+    await settle()
+    assert.deepEqual(
+      calls.map((call) => call.url),
+      ['/auth/password/parameters', '/auth/password'],
+    )
+    assert.deepEqual(body(calls[1]!.init), {
+      username: 'tess',
+      clientHash: 'hash-of-Tess-Horse-9',
+    })
+    assert.deepEqual(visits, ['/apps/3'])
+  })
+
   it('shows a refusal with when to try again', async () => {
     const signIn = form('sign-in', {
       username: { value: 'paul' },

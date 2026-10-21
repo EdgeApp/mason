@@ -14,6 +14,7 @@ import { checkoutEnvironment } from '../worker/checkout.js'
 import { Journal } from '../worker/journal.js'
 import { WorkerRuntime } from '../worker/stage.js'
 import { cronMatches, parseCron } from './triggers.js'
+import { localOperator } from './roles.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -859,6 +860,29 @@ export async function read(ctx: Stage) {
     )
     assert.equal(linked.status, 'failed')
     assert.match(stage(linked, 'read').reason, /outside the workspace/)
+    // Giving a node a type sends it that type's software to reconcile.
+    const alpha = c.workers.get('alpha')!.worker!
+    const reconciled: unknown[] = []
+    const original = alpha.reconcileType.bind(alpha)
+    alpha.reconcileType = async (type): Promise<void> => {
+      reconciled.push(type)
+    }
+    const types = c.master.master!.settings.value('nodeTypes')
+    const before = c.master.master!.registry.get(c.fingerprint('alpha'))!.type
+    await c.master.master!.settings.set(localOperator, 'nodeTypes', {
+      ...types,
+      retyped: {},
+    })
+    reconciled.length = 0
+    await c.master.master!.registry.assign(c.fingerprint('alpha'), {
+      type: 'retyped',
+    })
+    await c.until(() => reconciled.length > 0, 5000, 'the type to reach alpha')
+    await c.master.master!.registry.assign(c.fingerprint('alpha'), {
+      type: before,
+    })
+    await c.master.master!.settings.set(localOperator, 'nodeTypes', types ?? {})
+    alpha.reconcileType = original
   })
 
   it('U7.13 the stages of a run share each sequence’s number, and app IDs in a sequence’s apps take theirs from it', async () => {

@@ -66,6 +66,7 @@ const roleValued = [
   '--port',
   '--link-port',
   '--listen',
+  '--link-listen',
   '--web-cert',
   '--web-key',
   '--user',
@@ -116,6 +117,7 @@ export function parseRoleCommand(role: Role, argv: string[]): RoleCommand {
   if (linkPort != null) options.linkPort = linkPort
   for (const [flag, key] of [
     ['--listen', 'listen'],
+    ['--link-listen', 'linkListen'],
     ['--web-cert', 'webCert'],
     ['--web-key', 'webKey'],
   ] as const) {
@@ -136,6 +138,7 @@ export function parseRoleCommand(role: Role, argv: string[]): RoleCommand {
     '--port',
     '--link-port',
     '--listen',
+    '--link-listen',
     '--web-cert',
     '--web-key',
     '--slots',

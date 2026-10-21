@@ -1,3 +1,4 @@
+import type { Actor } from './roles.js'
 import type { MasterDatabase } from './database.js'
 
 /** A build-number scheme as `setup` declares it. */
@@ -215,6 +216,32 @@ export class BuildNumbers {
       : (JSON.parse(row.scheme) as BuildNumberScheme)
   }
 
+  /** A project's sequences: each key's scheme and the last number per branch (`''` across branches). */
+  sequences(projectId: number): Array<{
+    key: string
+    scheme: BuildNumberScheme
+    last: Array<{ branch: string; value: string }>
+  }> {
+    return this.master.db
+      .prepare(
+        'SELECT key,scheme FROM build_number_schemes WHERE project_id=? ORDER BY key',
+      )
+      .all(projectId)
+      .map((row) => ({
+        key: String(row.key),
+        scheme: JSON.parse(String(row.scheme)) as BuildNumberScheme,
+        last: this.master.db
+          .prepare(
+            'SELECT branch,value FROM build_number_last WHERE project_id=? AND key=? ORDER BY branch',
+          )
+          .all(projectId, String(row.key))
+          .map((entry) => ({
+            branch: String(entry.branch),
+            value: String(entry.value),
+          })),
+      }))
+  }
+
   /** Fails when the scheme would render a value lower than one already issued. */
   checkScheme(
     projectId: number,
@@ -347,73 +374,77 @@ export class BuildNumbers {
   }
 
   /**
-   * Seeds counters from a copy of an earlier Mason's `files/buildNum.json`: an
-   * array of `{ branch, lastBuildDate, buildNumber }` with `YYMMDDCC`
-   * numbers. Each branch's counter for that date part rises to at least the
-   * entry's count plus `countBase`; nothing is lowered.
+   * Sets where a sequence stands: the next number reserved for the key (and,
+   * for a branch scheme, the branch) comes after `last`, which must have the
+   * scheme's format. Nothing is lowered. For a project moving to Mason with
+   * numbers already issued elsewhere.
    */
-  seed(projectId: number, key: string, entries: unknown): { branches: number } {
+  seed(
+    projectId: number,
+    key: string,
+    value: unknown,
+    actor: Actor,
+  ): { key: string; branch: string; last: string } {
     const scheme = this.scheme(projectId, key)
-    if (
-      scheme != null &&
-      (scheme.scope !== 'branch' || scheme.format !== 'YYMMDDCC')
-    )
-      throw new Error(`${key} is not a branch-scoped YYMMDDCC scheme`)
-    if (!Array.isArray(entries))
-      throw new Error('Expected the buildNum.json array')
-    const seen = new Set<string>()
-    const rows = entries.map((entry: unknown) => {
-      const row = entry as {
-        branch?: unknown
-        buildNumber?: unknown
-        lastBuildDate?: unknown
-      }
-      if (
-        row == null ||
-        typeof row.branch !== 'string' ||
-        row.branch === '' ||
-        !Number.isSafeInteger(row.buildNumber) ||
-        !/^\d{8}$/.test(String(row.buildNumber))
+    if (scheme == null)
+      throw new Error(
+        `${key} has no build-number scheme yet: run the project's setup first`,
       )
-        throw new Error(
-          'Each entry is {branch, lastBuildDate, buildNumber} with a YYMMDDCC number',
+    const input = (value ?? {}) as { branch?: unknown; last?: unknown }
+    if (
+      scheme.scope === 'branch' &&
+      (typeof input.branch !== 'string' || input.branch === '')
+    )
+      throw new Error(`${key} is numbered per branch: name the branch`)
+    const branch = scheme.scope === 'branch' ? String(input.branch) : ''
+    const last = String(input.last ?? '')
+    // One group per token: the count's digits, and the date part around them.
+    const tokens = parseFormat(scheme.format)
+    const match = new RegExp(
+      `^${tokens
+        .map((token) =>
+          token.kind === 'date'
+            ? `(\\d{${token.part.length}})`
+            : token.kind === 'count'
+              ? `(\\d{${token.width}})`
+              : token.kind === 'plain'
+                ? '(\\d+)'
+                : `(${token.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`,
         )
-      if (seen.has(row.branch))
-        throw new Error(`Duplicate branch ${row.branch}`)
-      seen.add(row.branch)
-      const text = String(row.buildNumber)
-      return {
-        branch: row.branch,
-        // The date part as a YYMMDDCC scheme renders it, without its count.
-        part: text.slice(0, 6) + '#',
-        count: Number(text.slice(6)),
-        value: text,
-      }
-    })
-    const base = this.countBase()
+        .join('')}$`,
+    ).exec(last)
+    if (match == null)
+      throw new Error(
+        `${last || 'An empty value'} does not have the ${scheme.format} format`,
+      )
+    const groups = match.slice(1)
+    const at = tokens.findIndex(
+      (token) => token.kind === 'count' || token.kind === 'plain',
+    )
+    const count = Number(groups[at])
+    const plain = tokens[at]!.kind === 'plain'
+    const part = plain
+      ? ''
+      : groups.map((text, i) => (i === at ? '#' : text)).join('')
     this.master.transaction(() => {
-      for (const row of rows) {
-        const count = row.count + base
+      this.master.db
+        .prepare(
+          'INSERT INTO build_numbers(project_id,key,branch,date_part,count) VALUES(?,?,?,?,?) ON CONFLICT(project_id,key,branch,date_part) DO UPDATE SET count=MAX(count,excluded.count)',
+        )
+        .run(projectId, key, branch, part, count)
+      const previous = this.last(projectId, key, branch)
+      if (previous == null || compareNumbers(last, previous) > 0)
         this.master.db
           .prepare(
-            'INSERT INTO build_numbers(project_id,key,branch,date_part,count) VALUES(?,?,?,?,?) ON CONFLICT(project_id,key,branch,date_part) DO UPDATE SET count=MAX(count,excluded.count)',
+            'INSERT INTO build_number_last(project_id,key,branch,value) VALUES(?,?,?,?) ON CONFLICT(project_id,key,branch) DO UPDATE SET value=excluded.value',
           )
-          .run(projectId, key, row.branch, row.part, count)
-        const seeded = row.part.slice(0, 6) + String(count).padStart(2, '0')
-        const last = this.last(projectId, key, row.branch)
-        if (last == null || compareNumbers(seeded, last) > 0)
-          this.master.db
-            .prepare(
-              'INSERT INTO build_number_last(project_id,key,branch,value) VALUES(?,?,?,?) ON CONFLICT(project_id,key,branch) DO UPDATE SET value=excluded.value',
-            )
-            .run(projectId, key, row.branch, seeded)
-      }
+          .run(projectId, key, branch, last)
       this.master.audit(
-        { role: 'admin', label: 'local operator' },
+        actor,
         'build-numbers.seed',
-        `${projectId}:${key}`,
+        `${projectId}:${key}:${branch}`,
       )
     })
-    return { branches: rows.length }
+    return { key, branch, last }
   }
 }

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { formatCheck, type ClusterReport } from '../master/clusterCheck.js'
 import { spawn } from 'node:child_process'
 import { helperPaths, serveHelper, systemContext } from '../helper/server.js'
 import {
@@ -6,6 +7,7 @@ import {
   serviceProgram,
   type RunningInstall,
 } from '../release/install.js'
+import { hostname } from 'node:os'
 import path from 'node:path'
 import { pinnedFetch } from './pinnedFetch.js'
 import { parseArgs, parseRoleCommand, single } from './args.js'
@@ -117,6 +119,7 @@ const usage = `Usage:
   mason worker [options]                 run a worker
   mason host [options]                   run the host
   mason status [--data <dir>] [--json]   show a node's state
+  mason cluster check [--json] [--data <dir>]   every node linked, versions, inventory, host cache lag, outbox, quarantines
   mason nodes add --address <address> --key <pairing key> [--data <dir>]
   mason nodes list [--json] [--data <dir>]
   mason nodes remove <fingerprint> [--data <dir>]
@@ -140,10 +143,20 @@ const usage = `Usage:
   mason keys list | mason keys revoke <id>
   mason settings get <area> | mason settings set <area> --file <json>
   mason projects list | get <slug> | set <slug> --file <json> | remove <slug>
-  mason build-numbers seed --project <slug> --key <key> --from <buildNum.json>
-Options: --data <dir> --port <n> --link-port <n> --listen <address>
+Options: --data <dir> --port <n> --link-port <n> --listen <address> --link-listen <address>
   --web-cert <file> --web-key <file> --web-plain --new-key --test-endpoints --slots <n>
   --install [--user <name>] --uninstall`
+
+/**
+ * The origin to reach a node on this computer: one listening on every
+ * interface reports the computer's host name, which DNS may not resolve, so
+ * loopback is used instead.
+ */
+export function localOrigin(web: string, host = hostname()): string {
+  const url = new URL(web)
+  if (url.hostname === host) url.hostname = '127.0.0.1'
+  return url.origin
+}
 
 /** Waits for a node service to come up and answer on its control socket. */
 async function waitForControl(
@@ -467,7 +480,7 @@ async function apiCommand(argv: string[], io: MainIO): Promise<number> {
       'status',
     )) as { web?: string; pin?: string }
     if (status.web == null) throw new Error('This node has no web listener')
-    url = status.web
+    url = localOrigin(status.web)
     pin ??= status.pin
   }
   const file = single(args, '--file')
@@ -537,30 +550,6 @@ async function projectsCommand(argv: string[], io: MainIO): Promise<number> {
     return 0
   }
   throw new Error(usage)
-}
-
-/** `mason build-numbers seed`: reads a copy of buildNum.json and never writes it. */
-async function buildNumbersCommand(
-  argv: string[],
-  io: MainIO,
-): Promise<number> {
-  const [action, ...rest] = argv
-  const args = parseArgs(rest, ['--data', '--project', '--key', '--from'], [])
-  const project = single(args, '--project')
-  const key = single(args, '--key')
-  const from = single(args, '--from')
-  if (action !== 'seed' || project == null || key == null || from == null)
-    throw new Error(
-      'Usage: mason build-numbers seed --project <slug> --key <key> --from <buildNum.json>',
-    )
-  const entries = JSON.parse(readFileSync(from, 'utf8')) as unknown
-  const result = (await controlRequest(
-    resolveDataDir(single(args, '--data')),
-    'buildNumbers.seed',
-    { project, key, entries },
-  )) as { branches: number }
-  io.out(`Seeded ${result.branches} branches of ${project} ${key}`)
-  return 0
 }
 
 /** `mason nodes …`: the master's nodes, through its control socket. */
@@ -935,6 +924,19 @@ export async function nodeMain(
     if ((roles as readonly string[]).includes(first))
       return await roleCommand(first as Role, rest, io)
     if (first === 'nodes') return await nodesCommand(rest, io)
+    if (first === 'cluster' && rest[0] === 'check') {
+      const args = parseArgs(rest.slice(1), ['--data'], ['--json'])
+      const report = (await controlRequest(
+        resolveDataDir(single(args, '--data')),
+        'cluster.check',
+      )) as ClusterReport
+      io.out(
+        args.flags.has('--json')
+          ? JSON.stringify(report, null, 2)
+          : formatCheck(report),
+      )
+      return report.green ? 0 : 1
+    }
     if (first === 'setup')
       return await setupCommand(rest, {
         out: io.out,
@@ -968,7 +970,6 @@ export async function nodeMain(
     if (first === 'keys') return await keysCommand(rest, io)
     if (first === 'settings') return await settingsCommand(rest, io)
     if (first === 'projects') return await projectsCommand(rest, io)
-    if (first === 'build-numbers') return await buildNumbersCommand(rest, io)
     if (first === 'runs') return await runsCommand(rest, io)
     if (first === 'helper') return await helperCommand(rest, io)
     if (first === 'releases') return await releasesCommand(rest, io)

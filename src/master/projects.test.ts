@@ -5,7 +5,6 @@ import { once } from 'node:events'
 import {
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
@@ -995,58 +994,48 @@ describe('Projects, branch rules and build numbers', function () {
     )
   })
 
-  it('seeds counters from the real buildNum.json shape without touching the file', async () => {
+  it('U5.6 sets where a sequence stands so the next number follows it, for any format, without lowering it', async () => {
     const today = day(2026, 10, 20)
     const { node, admin } = await master()
     try {
       const m = node.master!
-      await m.settings.set(localOperator, 'buildNumbers', { countBase: 50 })
       const project = m.projects.save(localOperator, 'teamstation', {
         repository: 'https://github.com/a/t',
       }).project
-      const file = path.join(root, 'buildNum.json')
-      const entries = [
-        {
-          branch: 'master',
-          lastBuildDate: '2026-10-20',
-          buildNumber: 26102003,
-        },
-        {
-          branch: 'feature/x',
-          lastBuildDate: '2026-10-18',
-          buildNumber: 26101807,
-        },
-      ]
-      writeFileSync(file, JSON.stringify(entries, null, 2))
-      const before = readFileSync(file)
-      const cli = io()
-      assert.equal(
-        await nodeMain(
-          [
-            'build-numbers',
-            'seed',
-            '--data',
-            node.dir,
-            '--project',
+      const daily = {
+        scope: 'branch',
+        format: 'YYMMDDCC',
+        timeZone: 'UTC',
+      } as const
+      // Only a declared scheme can be seeded.
+      assert.throws(
+        () =>
+          m.seed(
             'teamstation',
-            '--key',
             'app',
-            '--from',
-            file,
-          ],
-          cli,
-        ),
-        0,
+            { branch: 'master', last: '26102003' },
+            localOperator,
+          ),
+        /no build-number scheme yet/,
       )
-      assert.deepEqual(cli.lines, ['Seeded 2 branches of teamstation app'])
-      assert.deepEqual(readFileSync(file), before)
-      const daily = { scope: 'branch', format: 'YYMMDDCC' }
-      // Today's branch continues above the entry's count plus the base.
+      m.buildNumbers.declare(project.id, 'app', daily)
+      m.seed(
+        'teamstation',
+        'app',
+        { branch: 'master', last: '26102003' },
+        localOperator,
+      )
       assert.equal(
         m.buildNumbers.reserve(project.id, 'app', 'master', daily, 'm1', today),
-        '26102054',
+        '26102004',
       )
-      // The earlier day's entry seeds only that date part; today starts fresh.
+      // An earlier day's number seeds only that day; today starts fresh.
+      m.seed(
+        'teamstation',
+        'app',
+        { branch: 'feature/x', last: '26101807' },
+        localOperator,
+      )
       assert.equal(
         m.buildNumbers.reserve(
           project.id,
@@ -1056,82 +1045,94 @@ describe('Projects, branch rules and build numbers', function () {
           'f1',
           today,
         ),
-        '26102051',
+        '26102001',
       )
-      // Seeding a lower count leaves the counter alone.
-      m.seed('teamstation', 'app', [
-        {
-          branch: 'master',
-          lastBuildDate: '2026-10-20',
-          buildNumber: 26102001,
-        },
-      ])
+      // A lower number leaves the sequence alone.
+      m.seed(
+        'teamstation',
+        'app',
+        { branch: 'master', last: '26102001' },
+        localOperator,
+      )
       assert.equal(
         m.buildNumbers.reserve(project.id, 'app', 'master', daily, 'm2', today),
-        '26102055',
+        '26102005',
       )
-      for (const [bad, message] of [
-        [[{ branch: 'x', buildNumber: 'nope' }], /YYMMDDCC/],
-        [[{ branch: 'x', buildNumber: 123 }], /YYMMDDCC/],
-        [
-          [
-            { branch: 'a', buildNumber: 26102001 },
-            { branch: 'a', buildNumber: 26102002 },
-          ],
-          /Duplicate branch a/,
-        ],
-        [{ branch: 'x' }, /array/],
+      for (const [value, message] of [
+        [{ last: '26102001' }, /name the branch/],
+        [{ branch: 'x', last: 'nope' }, /does not have the YYMMDDCC format/],
+        [{ branch: 'x', last: '2610201' }, /does not have the YYMMDDCC format/],
+        [{ branch: 'x' }, /An empty value/],
       ] as const)
-        assert.throws(() => m.seed('teamstation', 'app', bad), message)
+        assert.throws(
+          () => m.seed('teamstation', 'app', value, localOperator),
+          message,
+        )
+      // A plain count with literals, numbered across branches.
+      m.buildNumbers.declare(project.id, 'plain', { format: '1.N' })
+      m.seed('teamstation', 'plain', { last: '1.41' }, localOperator)
       assert.equal(
         m.buildNumbers.reserve(
           project.id,
-          'app',
-          'a',
-          daily,
-          'unchanged',
+          'plain',
+          'any',
+          { format: '1.N' },
+          'p1',
           today,
         ),
-        '26102051',
+        '1.42',
       )
-      m.buildNumbers.declare(project.id, 'plain', { format: 'N' })
       assert.throws(
-        () => m.seed('teamstation', 'plain', entries),
-        /not a branch-scoped YYMMDDCC/,
+        () => m.seed('teamstation', '', { last: '1' }, localOperator),
+        /key is required/,
       )
-      assert.equal(m.buildNumbers.scheme(project.id, 'plain')!.format, 'N')
-      assert.throws(() => m.seed('teamstation', '', entries), /key is required/)
-      assert.throws(() => m.seed('missing', 'app', entries), /No project/)
+      assert.throws(
+        () => m.seed('missing', 'app', { last: '1' }, localOperator),
+        /No project/,
+      )
       // Managers and admins may seed over the API; developers may not.
       const developerKey = m.keys.create(localOperator, {
         role: 'developer',
       }).token
+      const body = {
+        project: 'teamstation',
+        key: 'app',
+        branch: 'release',
+        last: '26102030',
+      }
       assert.equal(
         (
-          await api(node, 'POST', '/api/v2/build-numbers/seed', developerKey, {
-            project: 'teamstation',
-            key: 'app',
-            entries,
-          })
+          await api(
+            node,
+            'POST',
+            '/api/v2/build-numbers/seed',
+            developerKey,
+            body,
+          )
         ).status,
         403,
       )
+      assert.deepEqual(
+        (await api(node, 'POST', '/api/v2/build-numbers/seed', admin, body))
+          .json,
+        { key: 'app', branch: 'release', last: '26102030' },
+      )
       assert.equal(
-        (
-          await api(node, 'POST', '/api/v2/build-numbers/seed', admin, {
-            project: 'teamstation',
-            key: 'app',
-            entries,
-          })
-        ).json.branches,
-        2,
+        m.buildNumbers.reserve(
+          project.id,
+          'app',
+          'release',
+          daily,
+          'r1',
+          today,
+        ),
+        '26102031',
       )
       assert.equal(
         (
           await api(node, 'POST', '/api/v2/build-numbers/seed', admin, {
+            ...body,
             project: 'nope',
-            key: 'app',
-            entries,
           })
         ).status,
         404,
@@ -1144,18 +1145,9 @@ describe('Projects, branch rules and build numbers', function () {
         ).status,
         400,
       )
+      // There is no command for it: the API is the way in.
       assert.equal(
-        await nodeMain(
-          [
-            'build-numbers',
-            'seed',
-            '--data',
-            node.dir,
-            '--project',
-            'teamstation',
-          ],
-          io(),
-        ),
+        await nodeMain(['build-numbers', 'seed', '--data', node.dir], io()),
         1,
       )
     } finally {

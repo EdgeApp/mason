@@ -689,9 +689,32 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       ).status,
       200,
     )
+    // Build numbers: each sequence and its last number; a manager sets where one stands.
+    const wizard = c.master.master!.projects.get('wizard')
+    c.master.master!.buildNumbers.declare(wizard.id, 'app.example.ui', {
+      scope: 'branch',
+      format: 'YYMMDDCC',
+    })
+    assert.equal(
+      (
+        await request(c.master, 'POST', '/api/v2/build-numbers/seed', {
+          ...manager2,
+          body: {
+            project: 'wizard',
+            key: 'app.example.ui',
+            branch: 'master',
+            last: '26102107',
+          },
+        })
+      ).status,
+      200,
+    )
     const projectPage = (
       await request(c.master, 'GET', '/projects/wizard', manager2)
     ).text
+    assert.match(projectPage, /app\.example\.ui<\/td><td class="mono">YYMMDDCC/)
+    assert.match(projectPage, /master<\/span> 26102107/)
+    assert.match(projectPage, /data-path="\/api\/v2\/build-numbers\/seed"/)
     assert.match(projectPage, /SIGNING_TOKEN/)
     assert.match(
       projectPage,
@@ -702,6 +725,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       await request(c.master, 'GET', '/projects/wizard', signIn('developer'))
     ).text
     assert.match(developerProject, /master<\/td><td>automatic/)
+    assert.doesNotMatch(developerProject, /build-numbers\/seed/)
     assert.doesNotMatch(
       developerProject,
       /data-path="\/api\/v2\/projects\/wizard\/secrets"/,

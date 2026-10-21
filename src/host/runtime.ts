@@ -17,6 +17,8 @@ import type { Link, MethodTable, Stream } from '../link/link.js'
 import type { Sync } from '../master/changes.js'
 import { HostCache } from './cache.js'
 import { Outbox } from './outbox.js'
+import type { HostStatus } from '../master/clusterCheck.js'
+import { version } from '../version.js'
 import { Webhooks } from './webhooks.js'
 import { HostArtifacts, HostObjects } from './artifacts.js'
 import type { DeviceRelay } from '../devices/store.js'
@@ -237,6 +239,15 @@ export class HostRuntime {
 
   methods(): MethodTable {
     return {
+      requests: {
+        /** For `mason cluster check`: the cache revision applied, and what the outbox holds. */
+        'host.status': (): HostStatus => ({
+          revision: this.cache.revision(),
+          outbox: this.outbox.pending().length,
+          refused: this.outbox.refused().length,
+          version,
+        }),
+      },
       events: {
         changes: (params): void => {
           this.apply(params as Sync)

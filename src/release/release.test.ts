@@ -41,7 +41,7 @@ import {
   type ServiceSystem,
 } from '../node/service.js'
 import { cluster } from '../test/cluster.js'
-import { repository, repositoryName } from '../version.js'
+import { releasesRepository, repository, repositoryName } from '../version.js'
 import { buildRelease, releaseMain, tarballName } from './build.js'
 import {
   checkOffer,
@@ -160,7 +160,11 @@ function serve(
   })
 }
 
-/** GitHub's release API for a private repository: nothing without a token. */
+/**
+ * GitHub's release API, pretty-printed as GitHub answers, for TeamStationApp/mason-releases (public) and
+ * TeamStationApp/mason (private: nothing without a token). A wrong token is
+ * refused everywhere, as GitHub does.
+ */
 function githubApi(
   releases: Record<string, string>,
   tampered = new Set<string>(),
@@ -172,15 +176,21 @@ function githubApi(
   // GitHub numbers assets; this remembers which file each number is.
   const assets: Array<[string, string]> = []
   return (url, res, req) => {
-    if (req.headers.authorization !== 'Bearer read-token') {
+    const repo = /^\/repos\/(TeamStationApp\/mason(?:-releases)?)\//.exec(
+      url.pathname,
+    )?.[1]
+    if (repo == null) return false
+    const authorization = req.headers.authorization
+    if (authorization != null && authorization !== 'Bearer read-token') {
+      res.writeHead(401).end('{"message":"Bad credentials"}')
+      return true
+    }
+    if (repo === 'TeamStationApp/mason' && authorization == null) {
       res.writeHead(404).end('{"message":"Not Found"}')
       return true
     }
-    const base = `http://${req.headers.host!}`
-    const asset =
-      /^\/repos\/TeamStationApp\/mason\/releases\/assets\/(\d+)$/.exec(
-        url.pathname,
-      )
+    const base = `http://${req.headers.host!}/repos/${repo}`
+    const asset = /\/releases\/assets\/(\d+)$/.exec(url.pathname)
     if (asset != null) {
       const [version, name] = assets[Number(asset[1])]!
       const file = path.join(releases[version]!, name)
@@ -190,10 +200,7 @@ function githubApi(
       )
       return true
     }
-    const route =
-      /^\/repos\/TeamStationApp\/mason\/releases\/(latest|tags\/v(.+))$/.exec(
-        url.pathname,
-      )
+    const route = /\/releases\/(latest|tags\/v(.+))$/.exec(url.pathname)
     if (route == null) return false
     const version =
       route[1] === 'latest'
@@ -211,17 +218,21 @@ function githubApi(
       .split('\n')
       .map((line) => line.split(/\s+/)[1]!)
     res.end(
-      JSON.stringify({
-        url: `${base}/repos/TeamStationApp/mason/releases/1`,
-        tag_name: `v${version}`,
-        assets: [...names, 'SHA256SUMS'].map((name) => ({
-          url: `${base}/repos/TeamStationApp/mason/releases/assets/${assets.push([version, name]) - 1}`,
-          id: assets.length - 1,
-          node_id: 'x',
-          name,
-          uploader: { login: 'paul' },
-        })),
-      }),
+      JSON.stringify(
+        {
+          url: `${base}/releases/1`,
+          tag_name: `v${version}`,
+          assets: [...names, 'SHA256SUMS'].map((name) => ({
+            url: `${base}/releases/assets/${assets.push([version, name]) - 1}`,
+            id: assets.length - 1,
+            node_id: 'x',
+            name,
+            uploader: { login: 'paul' },
+          })),
+        },
+        null,
+        2,
+      ),
     )
     return true
   }
@@ -345,6 +356,27 @@ describe('Releases, install.sh and updates', function () {
       [],
     )
     assert(!list.includes('node/bin/npm'))
+    // The installed release still knows where its releases are published.
+    const unpacked = path.join(root(), 'pkg')
+    mkdirSync(unpacked)
+    execFileSync('tar', [
+      '-xzf',
+      path.join(out, tarballName('0.1.1', 'linux-x64')),
+      '-C',
+      unpacked,
+      'mason-0.1.1/package.json',
+    ])
+    assert.equal(
+      (
+        JSON.parse(
+          readFileSync(
+            path.join(unpacked, 'mason-0.1.1', 'package.json'),
+            'utf8',
+          ),
+        ) as { masonReleases?: string }
+      ).masonReleases,
+      'TeamStationApp/mason-releases',
+    )
     assert(!list.includes('node/include/'))
     assert(!/mason-0\.1\.1\/lib\/[^\n]*\.test\.js\n/.test(list))
     assert(!list.includes('mason-0.1.1/lib/test/'))
@@ -500,17 +532,26 @@ describe('Releases, install.sh and updates', function () {
       )
     })
 
-    it('U9.1 needs a token for the private repository, refuses a mismatch, and installs from a host with none', async () => {
+    it('U9.1 installs from the public releases with no token, needs one for a private repository, refuses a mismatch, and installs from a host with none', async () => {
       const home = root()
       mkdirSync(path.join(home, 'tmp'))
-      const none = await bash(['--user'], {}, home)
+      const openHome = root()
+      mkdirSync(path.join(openHome, 'tmp'))
+      const open = await bash(['--user'], {}, openHome)
+      assert.equal(open.status, 0, open.out)
+      assert.match(open.out, /Installed Mason 0\.1\.2/)
+      const none = await bash(
+        ['--user'],
+        { MASON_REPO: 'TeamStationApp/mason' },
+        home,
+      )
       assert.notEqual(none.status, 0)
       assert.match(
         none.out,
-        /TeamStationApp\/mason is private: set GITHUB_TOKEN .* or sign in with 'gh auth login'/,
+        /TeamStationApp\/mason has no latest release \(a private repository needs GITHUB_TOKEN, or 'gh auth login'\)/,
       )
       const wrong = await bash(['--user'], { GITHUB_TOKEN: 'other' }, home)
-      assert.match(wrong.out, /could not download/)
+      assert.match(wrong.out, /has no latest release this token can read/)
       tampered.add(tarballName('0.1.2', here as never))
       try {
         const bad = await bash(['--user'], { GITHUB_TOKEN: 'read-token' }, home)
@@ -549,8 +590,15 @@ describe('Releases, install.sh and updates', function () {
             home,
           )
         ).out,
-        /could not download/,
+        /has no 9\.9\.9 release this token can read\n/,
       )
+      // A token never appears in what install.sh prints.
+      const leaked = await bash(
+        ['--user'],
+        { GITHUB_TOKEN: 'secret-token-x' },
+        home,
+      )
+      assert(!leaked.out.includes('secret-token-x'), leaked.out)
     })
 
     it('U9.1 mason update installs the newer release and keeps the data directory', async () => {
@@ -671,7 +719,7 @@ describe('Releases, install.sh and updates', function () {
       )
       await assert.rejects(
         store.fetch('v0.1.2', 'wrong', dir, github.base),
-        /GitHub answered 404/,
+        /GitHub answered 401/,
       )
       await assert.rejects(
         store.fetch('bad tag', 'read-token', dir, github.base),
@@ -679,14 +727,32 @@ describe('Releases, install.sh and updates', function () {
       )
       // Another repository is asked for its own releases; none named is refused.
       await assert.rejects(
-        store.fetch('v0.1.2', 'read-token', dir, github.base, 'someone/fork'),
+        store.fetch(
+          'v0.1.2',
+          undefined,
+          dir,
+          github.base,
+          'TeamStationApp/mason',
+        ),
         /GitHub answered 404/,
       )
       await assert.rejects(
         store.fetch('v0.1.2', 'read-token', dir, github.base, 'not a repo'),
         /Name the repository/,
       )
-      assert.equal(repository, 'TeamStationApp/mason')
+      assert.equal(repository, 'TeamStationApp/mason-releases')
+      assert.equal(
+        releasesRepository({ version: '1', repository: 'github:a/b' }),
+        'a/b',
+      )
+      assert.equal(
+        releasesRepository({
+          version: '1',
+          repository: 'github:a/b',
+          masonReleases: 'a/b-releases',
+        }),
+        'a/b-releases',
+      )
       for (const [given, name] of [
         ['https://github.com/a/b.git', 'a/b'],
         ['git@github.com:a/b.git', 'a/b'],
@@ -1335,7 +1401,7 @@ describe('Releases, install.sh and updates', function () {
         'create',
         'v0.1.8',
         '--repo',
-        'TeamStationApp/mason',
+        'TeamStationApp/mason-releases',
       ])
       assert(published[0]!.includes(path.join(out, 'SHA256SUMS')))
       const list = execFileSync(

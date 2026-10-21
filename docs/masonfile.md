@@ -108,7 +108,7 @@ Mason installs like Homebrew, with one command and no Node or npm needed
 beforehand:
 
 ```sh
-/bin/bash -c "$(curl -fsSL https://github.com/TeamStationApp/mason/releases/latest/download/install.sh)"
+/bin/bash -c "$(curl -fsSL https://github.com/TeamStationApp/mason-releases/releases/latest/download/install.sh)"
 # or: wget -qO- …/install.sh | bash
 ```
 
@@ -869,10 +869,12 @@ export async function buildMac(ctx: Stage) {
   should include a date (`YYMMDDCC`) or use `scope: 'app'`. Setup warns when a
   workflow that calls `ctx.apple.testflight` uses a per-branch scheme without a
   date.
-- An administrator seeds a project's counters from the current build-number
-  file with `mason build-numbers seed`, so sequences continue rather than
-  restart. Two Mason instances building the same apps keep apart with the
-  `countBase` setting, which offsets every count one instance renders.
+- A manager sets where a sequence stands, so numbers continue rather than
+  restart when a project moves to Mason: on the project's page, or with
+  `POST /api/v2/build-numbers/seed` and `{ project, key, branch, last }`. The
+  next number follows `last`; nothing is lowered. Two Mason instances building
+  the same apps keep apart with the `countBase` setting, which offsets every
+  count one instance renders.
 
 ## 9. Running while the master is away
 

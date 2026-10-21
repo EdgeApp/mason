@@ -7,12 +7,16 @@ import {
   navigation,
   SESSION_COOKIE,
   sessionContext,
+  type AuthOptions,
 } from '../auth/routes.js'
+import { LinkError, type Link } from '../link/link.js'
+import type { Session } from '../auth/accounts.js'
 import { forwardRoutes } from './forward.js'
 import { deviceCallbackRoutes, deviceRoutes } from '../devices/routes.js'
 import { installationRoutes } from '../catalog/install.js'
 import { catalogRoutes } from '../catalog/routes.js'
 import {
+  masterContentSecurityPolicy,
   nodeWebApp,
   sendPage,
   testBanner,
@@ -453,6 +457,44 @@ export function releaseRoutes(
   return router
 }
 
+/**
+ * Username and password sign-in on the host: the master checks the hash the
+ * browser made, with its lockouts, and answers only whose account it is; the
+ * host then signs that cached account in, with its role's limits.
+ */
+function hostPassword(host: HostRuntime): NonNullable<AuthOptions['password']> {
+  const link = (): Link => {
+    const current = host.options.link()
+    if (current == null || current.closed)
+      throw new LinkError('The master is unreachable', 'closed')
+    return current
+  }
+  return {
+    parameters: async (username): Promise<unknown> =>
+      await link().request('auth.parameters', { username }),
+    signIn: async (
+      value,
+      address,
+      previousToken,
+    ): Promise<{ token: string; session: Session }> => {
+      const { accountId } = (await link().request('auth.password', {
+        username: value.username,
+        clientHash: value.clientHash,
+        address,
+      })) as { accountId: number }
+      if (
+        host.cache.db
+          .prepare('SELECT 1 FROM accounts WHERE id=? AND disabled=0')
+          .get(accountId) == null
+      )
+        throw new Error(
+          'This account is not on the host yet; try again shortly',
+        )
+      return host.accounts.startSession(accountId, previousToken)
+    },
+  }
+}
+
 /** The host's public web listener: catalog, installs and sign-in from its cache. */
 export function hostApp(
   context: WebAppContext & { host?: HostRuntime },
@@ -519,6 +561,20 @@ export function hostApp(
   })
   app.use(offlineBanner(host))
   app.use(releaseRoutes(host))
+  // The sign-in page's script and the worker that hashes a password.
+  for (const name of ['master', 'password-worker'])
+    app.get(`/assets/${name}.js`, (_req, res) => {
+      if (name === 'password-worker')
+        res.set('Content-Security-Policy', masterContentSecurityPolicy)
+      res
+        .type('js')
+        .send(
+          readFileSync(
+            new URL(`../browser/bundles/${name}.js`, import.meta.url),
+            'utf8',
+          ),
+        )
+    })
   // The Profile Service posts a signed body, read raw before any form parser.
   app.use(deviceCallbackRoutes(host.cache.store, host.devices))
   app.use(express.urlencoded({ extended: false, limit: '16kb' }))
@@ -526,6 +582,7 @@ export function hostApp(
     authRoutes(host.cache.store, () => host.providers(), host.accounts, {
       login: hostLogin(host.cache, host.accounts),
       people: false,
+      password: hostPassword(host),
     }),
   )
   app.use(deviceRoutes(host.cache.store, host.accounts, host.devices))

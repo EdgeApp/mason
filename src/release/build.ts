@@ -13,7 +13,7 @@ import {
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { baseEnvironment } from '../builder/config.js'
-import { repositoryName } from '../version.js'
+import { releasesRepository } from '../version.js'
 import {
   download,
   extract,
@@ -227,6 +227,11 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
           version: options.version,
           private: true,
           type: 'module',
+          // Where `mason releases fetch` and updates find later releases.
+          ...(pkg.repository == null ? {} : { repository: pkg.repository }),
+          ...(pkg.masonReleases == null
+            ? {}
+            : { masonReleases: pkg.masonReleases }),
           dependencies: pkg.dependencies,
         },
         null,
@@ -330,12 +335,10 @@ export async function releaseMain(
   // The GitHub repository: --repo, or the checkout's package.json.
   const publishTo =
     value('--repo') ??
-    repositoryName(
-      (
-        JSON.parse(readFileSync(path.join(repo, 'package.json'), 'utf8')) as {
-          repository?: { url?: string } | string
-        }
-      ).repository,
+    releasesRepository(
+      JSON.parse(
+        readFileSync(path.join(repo, 'package.json'), 'utf8'),
+      ) as Parameters<typeof releasesRepository>[0],
     )
   if (tag != null && publishTo == null)
     throw new Error(

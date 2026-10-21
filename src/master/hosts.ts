@@ -72,6 +72,11 @@ export class HostLinks {
       onDevices?: () => void
       /** Runs a request the host forwards to the master's API. */
       forward?: (params: unknown, stream: Stream) => Promise<void>
+      /** Password sign-in on the host, checked by the master. */
+      password?: {
+        parameters: (username: unknown) => unknown
+        verify: (value: unknown, address: string) => Promise<number>
+      }
     },
   ) {}
 
@@ -460,6 +465,47 @@ export class HostLinks {
         'webhook.github': (params, link): WebhookResult => {
           this.host(link)
           return this.webhook(params)
+        },
+        /** A username's hashing parameters, for the host's sign-in page. */
+        'auth.parameters': (params, link): unknown => {
+          this.host(link)
+          if (this.options.password == null)
+            throw new LinkError('Password sign-in is unavailable', 'failed')
+          return this.options.password.parameters(
+            (params as { username?: unknown } | null)?.username,
+          )
+        },
+        /** Checks a password the host received; answers only whose it is. */
+        'auth.password': async (
+          params,
+          link,
+        ): Promise<{ accountId: number }> => {
+          this.host(link)
+          if (this.options.password == null)
+            throw new LinkError('Password sign-in is unavailable', 'failed')
+          const { username, clientHash, address } = (params ?? {}) as Record<
+            string,
+            unknown
+          >
+          try {
+            return {
+              accountId: await this.options.password.verify(
+                { username, clientHash },
+                `host:${String(address ?? '')}`,
+              ),
+            }
+          } catch (error) {
+            const refused = error as Error & { retryAt?: number }
+            throw new LinkError(
+              JSON.stringify({
+                error: refused.message,
+                ...(refused.retryAt == null
+                  ? {}
+                  : { retryAt: refused.retryAt }),
+              }),
+              'not_allowed',
+            )
+          }
         },
         'outbox.deliver': (
           params,

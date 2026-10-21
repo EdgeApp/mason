@@ -134,6 +134,15 @@ export class MasterAuth {
     value: unknown,
     address: string,
   ): Promise<{ token: string; session: MasterSession }> {
+    const id = await this.verify(value, address)
+    return this.master.transaction(() => this.start(id, address))
+  }
+
+  /**
+   * Checks a username and client hash, with the same lockouts as signing in,
+   * and answers the account's id: the host signs people in this way.
+   */
+  async verify(value: unknown, address: string): Promise<number> {
     rejectRawPassword(value)
     const input = asSignIn(value)
     const row = this.account(input.username)
@@ -167,13 +176,8 @@ export class MasterAuth {
       })
       throw new SignInRefused('The username or password is wrong')
     }
-    const id = Number(row!.id)
-    return this.master.transaction(() => {
-      this.db
-        .prepare('DELETE FROM sign_in_failures WHERE key=?')
-        .run(accountKey)
-      return this.start(id, address)
-    })
+    this.db.prepare('DELETE FROM sign_in_failures WHERE key=?').run(accountKey)
+    return Number(row!.id)
   }
 
   /** Starts a session for an account. */

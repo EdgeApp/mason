@@ -315,6 +315,8 @@ export class NodeRegistry extends EventEmitter {
     await this.link(fingerprint)
       ?.request('node.configure', assigned)
       .catch(() => undefined)
+    // A new type is new software to keep.
+    if (assigned.type !== row.type) this.emit('retyped', fingerprint)
     return this.get(fingerprint)!
   }
 

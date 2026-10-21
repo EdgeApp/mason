@@ -134,10 +134,11 @@ describe('Pages on the master and the host', function () {
       for (const resource of resources(reply.text))
         assert.match(resource, /^\/(?!\/)/, `${route} loads ${resource}`)
       assert.match(reply.csp, /font-src 'self'/)
-      // Only the master's sign-in page compiles the password hash.
+      // Only the sign-in pages compile the password hash.
       assert.equal(
         /wasm-unsafe-eval/.test(reply.csp),
-        node === c.master && route === '/sign-in',
+        (node === c.master && route === '/sign-in') ||
+          (node === host && route === '/auth/login'),
         route,
       )
     }

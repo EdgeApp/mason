@@ -23,6 +23,11 @@ import { cluster, type Cluster } from '../test/cluster.js'
 import { FakeApple } from '../test/fakeApple.js'
 import { FakeMac, fakeXcode } from '../test/fakeMac.js'
 import { importHost } from './import.js'
+import { clientPasswordHash } from '../auth/passwordKdf.js'
+import {
+  clientParameters,
+  DEFAULT_PASSWORD_COSTS,
+} from '../auth/passwordProtocol.js'
 import { releaseRoutes } from './web.js'
 
 // API responses are read field by field in assertions.
@@ -741,6 +746,77 @@ describe('Host cache, sign-in and offline serving', function () {
     ref: `refs/heads/${branch}`,
     after: commit,
     repository: { full_name: 'EdgeApp/edge-react-gui' },
+  })
+
+  it('U10.17 signs a master account in on the host with its username and password, checked by the master', async () => {
+    const master = c.master.master!
+    const p = clientParameters('b1'.repeat(16), DEFAULT_PASSWORD_COSTS)
+    const hugo = await master.people.create(admin, {
+      name: 'Hugo',
+      email: 'hugo@example.com',
+      username: 'hugo',
+      role: 'developer',
+      password: {
+        clientHash: await clientPasswordHash('Hugo-Horse-9', p),
+        clientParameters: p,
+      },
+    })
+    await c.until(
+      () =>
+        runtime()
+          .cache.db.prepare('SELECT 1 FROM accounts WHERE id=?')
+          .get(hugo.id) != null,
+      2000,
+      'Hugo on the host',
+    )
+    const hugoBrowser = browser()
+    const login = await hugoBrowser.get('/auth/login?return=/apps')
+    const form = await login.text()
+    assert.match(form, /data-session="\/auth\/password"/)
+    assert.match(form, /data-return="\/apps"/)
+    assert.match(
+      login.headers.get('content-security-policy')!,
+      /'wasm-unsafe-eval'/,
+    )
+    assert.equal(
+      (await hugoBrowser.get('/assets/password-worker.js')).status,
+      200,
+    )
+    const json = async (route: string, value: unknown): Promise<Response> =>
+      await hugoBrowser.get(route, {
+        method: 'POST',
+        headers: { origin: ORIGIN, 'content-type': 'application/json' },
+        body: JSON.stringify(value),
+      })
+    const given = (await (
+      await json('/auth/password/parameters', { username: 'Hugo' })
+    ).json()) as Parameters<typeof clientPasswordHash>[1]
+    const wrong = await json('/auth/password', {
+      username: 'hugo',
+      clientHash: await clientPasswordHash('not-it', given),
+    })
+    assert.equal(wrong.status, 401)
+    assert.match(((await wrong.json()) as { error: string }).error, /wrong/)
+    assert.equal(session(hugoBrowser), undefined)
+    const right = await json('/auth/password', {
+      username: 'hugo',
+      clientHash: await clientPasswordHash('Hugo-Horse-9', given),
+    })
+    assert.equal(right.status, 200)
+    const signedIn = runtime().accounts.session(session(hugoBrowser))!
+    assert.equal(signedIn.account.id, hugo.id)
+    assert.equal(signedIn.account.is_admin, 0)
+    // Without the master no password can be checked.
+    const link = runtime().options.link
+    runtime().options.link = (): undefined => undefined
+    try {
+      assert.equal(
+        (await json('/auth/password/parameters', { username: 'hugo' })).status,
+        503,
+      )
+    } finally {
+      runtime().options.link = link
+    }
   })
 
   it('U10.12 relays a signed push to the master, which verifies it and schedules it under the branch rules', async () => {

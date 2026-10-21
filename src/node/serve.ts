@@ -63,6 +63,8 @@ export interface NodeOptions {
   port?: number
   linkPort?: number
   listen?: string
+  /** The link listener's address when it differs from `listen` (a host whose web port is behind a local TLS terminator). */
+  linkListen?: string
   webCert?: string
   webKey?: string
   webPlain?: boolean
@@ -430,7 +432,7 @@ export async function startNode(
       const server = await listenLink(
         identity,
         options.linkPort ?? defaultPorts.link,
-        options.listen,
+        options.linkListen ?? options.listen,
       )
       cleanup.push(
         () =>
@@ -499,7 +501,10 @@ export async function startNode(
           options.role === 'worker'
             ? workerMethods()
             : {
-                requests: { ...options.nodeMethods?.requests },
+                requests: {
+                  ...hostRuntime?.methods().requests,
+                  ...options.nodeMethods?.requests,
+                },
                 events: {
                   ...hostRuntime?.methods().events,
                   ...options.nodeMethods?.events,
@@ -661,7 +666,9 @@ export async function startNode(
         `Setup code: ${setupCode}  (enter it on the setup page, or run mason setup)`,
       )
     if (link != null && pairing != null) {
-      log(`Link: ${reachableAddresses(link.port, options.listen).join(', ')}`)
+      log(
+        `Link: ${reachableAddresses(link.port, options.linkListen ?? options.listen).join(', ')}`,
+      )
       const paired = pairing.master()
       if (pairing.removed())
         log('Removed by its master; start with --new-key to pair it again.')

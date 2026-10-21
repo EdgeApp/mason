@@ -5,6 +5,7 @@
     "type": "git",
     "url": "https://github.com/TeamStationApp/mason.git"
   },
+  "masonReleases": "TeamStationApp/mason-releases",
   "private": true,
   "type": "module",
   "engines": {

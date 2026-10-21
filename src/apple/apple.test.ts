@@ -398,7 +398,10 @@ describe('Apple on the master', function () {
         platform: 'ios',
       })
     const first = await ensure('adHoc')
-    assert.match(first.name, /^Mason AdHoc app\.example\.signed \d{12}$/)
+    assert.match(
+      first.name,
+      /^Mason AdHoc app\.example\.signed \d{14}-[0-9a-f]{4}$/,
+    )
     assert.equal(posts(), 1)
     // The bundle ID was missing from the account, so it was made.
     assert(

@@ -675,6 +675,15 @@ export function masterPages(
           ? {}
           : { signingLabel: project.signingLabel }),
         canChangeSecrets: can(actor, 'secrets.change'),
+        buildNumbers: master.buildNumbers
+          .sequences(project.id)
+          .map((sequence) => ({
+            key: sequence.key,
+            format: sequence.scheme.format,
+            scope: sequence.scheme.scope,
+            last: sequence.last,
+          })),
+        canSeed: can(actor, 'buildNumbers.seed'),
       }),
       current,
       200,

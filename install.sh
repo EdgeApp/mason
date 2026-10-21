@@ -1,17 +1,17 @@
 #!/bin/bash
 # Installs Mason from a release: no Node.js or npm needed.
 #
-#   /bin/bash -c "$(curl -fsSL https://github.com/TeamStationApp/mason/releases/latest/download/install.sh)"
+#   /bin/bash -c "$(curl -fsSL https://github.com/TeamStationApp/mason-releases/releases/latest/download/install.sh)"
 #
 # Options: --version <x.y.z>   a release other than the latest
 #          --user              install under ~/.mason/app and ~/.local/bin, without sudo
 #          --from <url>        install a Mason host's copy of the current release (no token)
 #
-# While the repository is private, GitHub serves its releases only with a
-# token: GITHUB_TOKEN, or `gh auth token` when the GitHub CLI is signed in.
+# Releases come from MASON_REPO (public: no token). A private repository
+# needs a token: GITHUB_TOKEN, or `gh auth token` when the GitHub CLI is signed in.
 set -euo pipefail
 
-repo=${MASON_REPO:-TeamStationApp/mason}
+repo=${MASON_REPO:-TeamStationApp/mason-releases}
 api=${MASON_GITHUB_API:-https://api.github.com}
 from=${MASON_FROM:-}
 version=''
@@ -73,14 +73,18 @@ if [[ -n $from ]]; then
 else
   token=${GITHUB_TOKEN:-}
   if [[ -z $token ]] && command -v gh >/dev/null 2>&1; then token=$(gh auth token 2>/dev/null || true); fi
-  [[ -n $token ]] || fail "$repo is private: set GITHUB_TOKEN to a token that can read it, or sign in with 'gh auth login'"
-  auth=(-H "Authorization: Bearer $token" -H "X-GitHub-Api-Version: 2022-11-28")
+  auth=(-H "X-GitHub-Api-Version: 2022-11-28")
+  [[ -z $token ]] || auth+=(-H "Authorization: Bearer $token")
   if [[ -n $version ]]; then route="releases/tags/v$version"; else route=releases/latest; fi
-  fetch "$api/repos/$repo/$route" "$work/release.json" "${auth[@]}" -H 'Accept: application/vnd.github+json'
+  if ! curl -fsSL --retry 3 "${auth[@]}" -H 'Accept: application/vnd.github+json' -o "$work/release.json" "$api/repos/$repo/$route"; then
+    if [[ -n $token ]]; then fail "$repo has no ${version:-latest} release this token can read"; fi
+    fail "$repo has no ${version:-latest} release (a private repository needs GITHUB_TOKEN, or 'gh auth login')"
+  fi
+
   # Each asset object holds its API URL and then its name.
   asset() {
     local url
-    url=$(tr '{' '\n' < "$work/release.json" | grep "\"name\":\"$1\"" | grep -o '"url":"[^"]*/releases/assets/[0-9]*"' | head -1 | sed 's/"url":"\(.*\)"/\1/' || true)
+    url=$(tr -d '\n\r' < "$work/release.json" | sed -E 's/"[[:space:]]*:[[:space:]]*/":/g' | tr '{' '\n' | grep "\"name\":\"$1\"" | grep -o '"url":"[^"]*/releases/assets/[0-9]*"' | head -1 | sed 's/"url":"\(.*\)"/\1/' || true)
     [[ -n $url ]] || fail "the release has no $1"
     echo "$url"
   }

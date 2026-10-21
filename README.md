@@ -1,3 +1,134 @@
+# Mason
+
+Mason builds, signs and distributes apps. A cluster has three kinds of node,
+each the same `mason` program:
+
+- the **master** holds the only database: projects, people, keys, settings,
+  runs, build numbers and the Apple and GitHub credentials. It dials every
+  other node over an authenticated WebSocket link and decides what runs where.
+- **workers** run Masonfile stages. They keep no configuration of their own;
+  the master tells each one which tools its node type needs.
+- the **host** serves the catalog, installs, device registration and sign-in
+  from a replicated cache, and keeps serving builds while the master is away.
+  It holds no secrets.
+
+The Masonfile reference, with every option and the stage API, is
+[docs/masonfile.md](docs/masonfile.md).
+
+## Installing
+
+A release needs no Node.js or npm. On each computer:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://github.com/TeamStationApp/mason-releases/releases/latest/download/install.sh)"
+# or, once a host serves the current release:
+/bin/bash -c "$(curl -fsSL https://builds.example.test/install.sh)" -- --from https://builds.example.test
+```
+
+Then start each role as a service (data in `~/.mason` unless `--data` says
+otherwise):
+
+```sh
+sudo mason master --install --port 9400      # with --worker, the master also runs stages
+sudo mason worker --install --link-port 9410
+sudo mason host --install --port 8443 --link-port 9420
+mason status                                  # role, state, version, fingerprint, web address
+```
+
+A host on a public server can leave TLS to a terminator on the same machine,
+such as Caddy with `builds.example.test { reverse_proxy 127.0.0.1:9200 }`:
+its web port then serves plain HTTP on loopback, while the link stays on Mason's
+own TLS for the master to reach:
+
+```sh
+sudo mason host --install --listen 127.0.0.1 --port 9200 --web-plain --link-listen 0.0.0.0 --link-port 9310
+```
+
+On first start the master prints a six-digit setup code. Create the first
+administrator in the browser at the master's address, or from its terminal:
+
+```sh
+mason setup --username ada --password-stdin --api-key-out ~/.mason/admin.key
+```
+
+`mason update` installs a newer release on a node and restarts its services.
+
+## Pairing nodes
+
+A new worker or host prints a pairing key when it first starts. Pair it from
+the master's Nodes page (**Add node**), or from the master's computer:
+
+```sh
+mason nodes add --address 192.168.1.20:9410 --key mason1:…
+mason nodes set second --type mac-xcode --label apple-signing --slots 2
+mason settings set host --file host.json     # {"origin": "https://builds.example.test"}
+```
+
+Node types (`mason settings set nodeTypes`) list the software every node of
+that type keeps: Xcode versions, Node, Java, the Android SDK packages (their
+licences accepted by an administrator per type) and Homebrew or apt packages.
+Each node's page lists what still needs a person, such as a macOS permission.
+
+`mason cluster check` reports every node: linked or not, its Mason version
+against the master's, a worker's last inventory and quarantine, and the
+host's cache revision lag, outbox depth and refused messages. It exits
+non-zero until everything is green.
+
+## Projects
+
+A project is a GitHub repository with a Masonfile, the app IDs it owns, its
+secrets and its branch rules. Add one with **Add project** on the master's
+dashboard: the master reads the repository with its own GitHub credentials,
+reads the Masonfile on the default branch to list the app IDs it publishes,
+records the ones the project owns (with their Apple team), saves the branch
+rules and creates the GitHub webhook. From the terminal:
+
+```sh
+mason projects set phones --file project.json
+mason projects get phones
+```
+
+Branch rules are globs, first match wins: `automatic` builds every new
+commit (at most 20 automatic branches per project), `request` builds only
+when someone asks. Deleted branches stop polling; forks never build.
+
+## Pipelines
+
+A pipeline Masonfile declares workflows of stages, each with the node it
+runs on, the tools it needs, the secrets it may read and the app IDs it
+publishes. `setup` runs on a worker with no secrets; the master checks the
+graph it returns and schedules the stages. Requests come from the dashboard,
+`POST /api/v2/runs`, pushes and schedules:
+
+```sh
+mason api POST /api/v2/runs --file run.json   # {"project": "phones", "branch": "main", "params": {"seat": "1"}}
+mason runs list --project phones
+```
+
+Each run's page draws its stages as a graph, follows the selected stage's
+steps and log live, and offers approve, cancel, restart-from-a-stage and
+request-run. Apple signing, TestFlight and notarization use the master's App
+Store Connect key; a stage receives only the signing material it needs for its
+own duration.
+
+## Migrating from the standalone server and builder
+
+The master imports the existing distribution and builder databases before
+its first setup and the host imports the distribution's build files:
+
+```sh
+mason import --distribution distribution.sqlite --builder builder.sqlite
+mason host import --distribution distribution.sqlite --storage /srv/mason/storage
+```
+
+Where a build-number sequence should continue from numbers issued elsewhere,
+set its last number on the project's page (or `POST /api/v2/build-numbers/seed`).
+
+Existing sessions, devices, keys, builds and upload keys carry over, and the
+Zealot upload API (`version_exist`, `POST /api/apps/upload`) answers as
+before. Script-format Masonfiles keep working; a project moves to a pipeline
+Masonfile when it is ready. The sections below document the standalone
+builder and distribution server, which the cluster replaces.
 
 ## Builder role
 

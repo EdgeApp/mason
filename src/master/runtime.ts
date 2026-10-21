@@ -16,13 +16,14 @@ import { promisify } from 'node:util'
 import { backupArea, Backups, type BackupSetting } from './backup.js'
 import { NodeRegistry } from './nodes.js'
 import { allow } from './permissions.js'
-import { localOperator } from './roles.js'
+import { localOperator, type Actor } from './roles.js'
 import { Settings, type SettingValue } from './settings.js'
 import { BuildNumbers } from './buildNumbers.js'
 import { GitHub, storedConnection, type GitHubOptions } from './github.js'
 import { Jobs } from './jobs.js'
 import { gitHeadLister, Poller, type HeadLister } from './poller.js'
 import { Projects, type ProjectApp } from './projects.js'
+import { clusterCheck } from './clusterCheck.js'
 import { integer } from '../validation.js'
 import path from 'node:path'
 import { githubLfs, Mirrors, type RemoteResolver } from './mirrors.js'
@@ -164,6 +165,8 @@ export class Master {
   private backupTimer: NodeJS.Timeout | undefined
   private stopped = false
   private readonly appleSetups = new Set<Promise<void>>()
+  /** The latest Apple setup of each app ID, which the next one follows. */
+  private readonly appleQueue = new Map<string, Promise<void>>()
   private compaction: NodeJS.Timeout | undefined
   constructor(
     db: DatabaseSync,
@@ -404,6 +407,11 @@ export class Master {
       forward: async (params, stream): Promise<void> => {
         await this.forwarder.forward(params, stream)
       },
+      password: {
+        parameters: (username): unknown => this.auth.parameters(username),
+        verify: async (value, address): Promise<number> =>
+          await this.auth.verify(value, address),
+      },
       origins: (): { origin?: string; workerOrigin?: string } =>
         (this.settings.value('host') ?? {}) as {
           origin?: string
@@ -449,6 +457,9 @@ export class Master {
       (fingerprint) => this.scheduler.inventoryOf(fingerprint),
       (fingerprint) => this.scheduler.busy(fingerprint),
     )
+    this.registry.on('retyped', (fingerprint: string) => {
+      this.nodeStates.reconcile(fingerprint)
+    })
     // A worker that reconnects may be behind the current release.
     this.registry.on('connected', (fingerprint: string) => {
       setTimeout(() => {
@@ -520,8 +531,11 @@ export class Master {
       .list()
       .flatMap((project) => project.apps)
       .filter((entry) => entry.apple != null && which(entry))) {
-      const setup: Promise<void> = this.appleSigning
-        .setupApp(app)
+      // One setup per app ID at a time: a second waits, then finds what the
+      // first made, so Apple never gets the same profile twice.
+      const previous = this.appleQueue.get(app.bundleId) ?? Promise.resolve()
+      const setup: Promise<void> = previous
+        .then(async () => await this.appleSigning.setupApp(app))
         .then(
           () => undefined,
           (error: unknown) => {
@@ -530,7 +544,12 @@ export class Master {
             )
           },
         )
-        .finally(() => this.appleSetups.delete(setup))
+        .finally(() => {
+          this.appleSetups.delete(setup)
+          if (this.appleQueue.get(app.bundleId) === setup)
+            this.appleQueue.delete(app.bundleId)
+        })
+      this.appleQueue.set(app.bundleId, setup)
       this.appleSetups.add(setup)
     }
   }
@@ -578,15 +597,16 @@ export class Master {
     return this.projects.get(slug)
   }
 
-  /** Seeds a project's build-number counters from a copy of buildNum.json. */
+  /** Sets where a project's build-number sequence stands (`POST /api/v2/build-numbers/seed`). */
   seed(
     projectSlug: string,
     key: string,
-    entries: unknown,
-  ): { branches: number } {
+    value: unknown,
+    actor: Actor,
+  ): { key: string; branch: string; last: string } {
     const project = this.projects.get(projectSlug)
     if (key === '') throw new Error('A build-number key is required')
-    return this.buildNumbers.seed(project.id, key, entries)
+    return this.buildNumbers.seed(project.id, key, value, actor)
   }
 
   /** What needs a person on the master, for `mason status` and the dashboard. */
@@ -780,18 +800,13 @@ export class Master {
         this.projects.remove(actor, String(args.slug ?? ''))
         return null
       },
-      'buildNumbers.seed': (args) =>
-        this.seed(
-          String(args.project ?? ''),
-          String(args.key ?? ''),
-          args.entries,
-        ),
       'nodes.add': async (args) =>
         await this.registry.add(
           String(args.address ?? ''),
           String(args.key ?? ''),
         ),
       'nodes.list': () => this.registry.list(),
+      'cluster.check': async () => await clusterCheck(this),
       'nodes.set': async (args): Promise<unknown> => {
         const node = this.registry
           .list()

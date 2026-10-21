@@ -10,7 +10,13 @@ export interface Output {
   hidden: boolean
 }
 export interface Form {
-  dataset: { mason?: string }
+  /** `mason` names the action; a host's sign-in form also names its endpoints and where to go after. */
+  dataset: {
+    mason?: string
+    parameters?: string
+    session?: string
+    return?: string
+  }
   addEventListener: (
     type: 'submit',
     listener: (event: { preventDefault: () => void }) => void,
@@ -76,21 +82,24 @@ export function start(doc: PageDocument, deps: PageDeps): void {
   const actions: Record<string, (form: Form) => Promise<void>> = {
     'sign-in': async (form) => {
       const username = field(form, 'username')
-      const parameters = await call('POST', '/api/v2/session/parameters', {
-        username,
-      })
+      const parameters = await call(
+        'POST',
+        form.dataset.parameters ?? '/api/v2/session/parameters',
+        { username },
+      )
       if (!parameters.ok) throw new Error(await failure(parameters))
       const { clientHash } = await hashed({
         kind: 'hash',
         password: field(form, 'password'),
         parameters: (await parameters.json()) as never,
       })
-      const signedIn = await call('POST', '/api/v2/session', {
-        username,
-        clientHash,
-      })
+      const signedIn = await call(
+        'POST',
+        form.dataset.session ?? '/api/v2/session',
+        { username, clientHash },
+      )
       if (!signedIn.ok) throw new Error(await failure(signedIn))
-      deps.assign('/')
+      deps.assign(form.dataset.return ?? '/')
     },
     setup: async (form) => {
       const { clientHash, clientParameters } = await hashed({

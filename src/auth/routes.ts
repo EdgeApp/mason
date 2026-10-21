@@ -1,14 +1,15 @@
 import { asObject, asOptional, asString } from 'cleaners'
-import {
+import express, {
   Router,
   type Request,
   type Response,
   type RequestHandler,
 } from 'express'
+import { masterContentSecurityPolicy } from '../node/webApp.js'
 import { Store, digest } from '../store.js'
 import { asId, integer, object, text } from '../validation.js'
 import { escape } from '../view/html.js'
-import { page } from '../view/shell.js'
+import { page, shell } from '../view/shell.js'
 import {
   Accounts,
   randomToken,
@@ -110,6 +111,15 @@ export interface AuthOptions {
   ) => { token: string; session: Session; account: Account }
   /** Whether the People pages are served (not on a host: accounts are managed on the master). */
   people?: boolean
+  /** Username and password sign-in, checked by the master (a host). */
+  password?: {
+    parameters: (username: unknown) => Promise<unknown>
+    signIn: (
+      value: { username?: unknown; clientHash?: unknown },
+      address: string,
+      previousToken: string | undefined,
+    ) => Promise<{ token: string; session: Session }>
+  }
 }
 
 export function authRoutes(
@@ -136,6 +146,7 @@ export function authRoutes(
     const destination = returnPath(req.query.return)
     if (
       configured().length === 1 &&
+      options.password == null &&
       req.query.signed_out !== '1' &&
       sessionContext(req, accounts) == null
     ) {
@@ -151,13 +162,75 @@ export function authRoutes(
           `<a class="button" href="/auth/start/${escape(provider.id)}?return=${encodeURIComponent(destination)}">Sign in with ${escape(provider.name)}</a>`,
       )
       .join('')
+    if (options.password == null) {
+      res.send(
+        page(
+          'Sign in',
+          `<section class="card"><p>Sign in to request access to app builds. Access is managed by this Mason server.</p><div class="stack">${links || '<p>No sign-in provider is configured.</p>'}</div></section>`,
+        ),
+      )
+      return
+    }
+    // The browser hashes the password (Argon2id in WebAssembly) before it leaves.
+    res.set('Content-Security-Policy', masterContentSecurityPolicy)
     res.send(
-      page(
-        'Sign in',
-        `<section class="card"><p>Sign in to request access to app builds. Access is managed by this Mason server.</p><div class="stack">${links || '<p>No sign-in provider is configured.</p>'}</div></section>`,
-      ),
+      shell({
+        title: 'Sign in',
+        body: `<h1>Sign in</h1><section class="card"><p>Sign in to app builds and run logs with your Mason account.</p>${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username and password:</p>`}<form data-mason="sign-in" data-parameters="/auth/password/parameters" data-session="/auth/password" data-return="${escape(destination)}"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><button>Sign in</button><p data-field="status" hidden></p></form></section>`,
+        phone: true,
+        scripts: ['/assets/master.js'],
+      }),
     )
   })
+  if (options.password != null) {
+    const password = options.password
+    const json = express.json({ limit: '4kb' })
+    const refused = (res: Response, error: unknown): void => {
+      const detail = error as Error & { code?: string; retryAt?: number }
+      if (detail.code === 'closed' || detail.code === 'timeout') {
+        res.status(503).json({
+          error: 'Password sign-in needs the master; try again shortly',
+        })
+        return
+      }
+      let body: { error: string; retryAt?: number } = {
+        error: detail.message,
+      }
+      try {
+        body = JSON.parse(detail.message) as typeof body
+      } catch {
+        // A plain message.
+      }
+      res.status(401).json(body)
+    }
+    router.post('/auth/password/parameters', json, async (req, res) => {
+      try {
+        res.json(
+          await password.parameters(
+            (req.body as { username?: unknown } | null)?.username,
+          ),
+        )
+      } catch (error) {
+        refused(res, error)
+      }
+    })
+    router.post('/auth/password', json, async (req, res) => {
+      try {
+        const result = await password.signIn(
+          (req.body ?? {}) as { username?: unknown; clientHash?: unknown },
+          req.ip ?? '',
+          cookie(req, SESSION_COOKIE),
+        )
+        res.cookie(SESSION_COOKIE, result.token, {
+          ...cookieOptions,
+          maxAge: result.session.expires_at - store.now(),
+        })
+        res.json({ signedIn: true })
+      } catch (error) {
+        refused(res, error)
+      }
+    })
+  }
   const start = async (
     req: Request,
     res: Response,

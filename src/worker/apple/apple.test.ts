@@ -901,6 +901,32 @@ export async function sign(ctx: Stage) {
         'the app record notice gone',
       )
       assert.deepEqual(notices(), [noDevelopment])
+      // Two setups of a new app ID at once make each profile once.
+      const posts = (): number =>
+        apple.calls.filter(
+          (call) =>
+            call.method === 'POST' &&
+            call.path === '/v1/profiles' &&
+            JSON.stringify(call.body).includes('app.example.twice'),
+        ).length
+      master.projects.addApp({ role: 'admin', label: 'test' }, 'signed', {
+        bundleId: 'app.example.twice',
+        name: 'Twice',
+        platforms: ['ios'],
+        apple: { team: TEAM },
+      })
+      master.setupApple((app) => app.bundleId === 'app.example.twice')
+      await c.until(
+        () =>
+          master.appleSigning.profiles
+            .list()
+            .filter((profile) => profile.bundleId === 'app.example.twice')
+            .length >= 2,
+        5000,
+        'the new app ID’s profiles',
+      )
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      assert.equal(posts(), 2)
     })
 
     it('U14.2 the Apple certificates and profiles API: import, create, list without keys, remove', async () => {

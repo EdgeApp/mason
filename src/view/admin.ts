@@ -341,6 +341,50 @@ export function masonfileView(data: {
 }
 
 /** A project on the master: repository, app IDs, branch rules, webhook and secrets (names only; values are write-only). */
+/** A project's build-number sequences, and where a manager sets one's last number. */
+function buildNumbersPanel(data: {
+  slug: string
+  buildNumbers: Array<{
+    key: string
+    format: string
+    scope: string
+    last: Array<{ branch: string; value: string }>
+  }>
+  canSeed: boolean
+}): string {
+  const rows = data.buildNumbers
+    .map(
+      (sequence) =>
+        `<tr><td class="mono">${escape(sequence.key)}</td><td class="mono">${escape(sequence.format)}</td><td>${sequence.scope === 'branch' ? 'per branch' : 'across branches'}</td><td>${
+          sequence.last
+            .map(
+              (entry) =>
+                `<small>${entry.branch === '' ? '' : `<span class="mono">${escape(entry.branch)}</span> `}${escape(entry.value)}</small>`,
+            )
+            .join('') || '<small>none yet</small>'
+        }</td></tr>`,
+    )
+    .join('')
+  const form =
+    data.canSeed && data.buildNumbers.length > 0
+      ? apiForm(
+          '/api/v2/build-numbers/seed',
+          `<input type="hidden" name="project" value="${escape(data.slug)}"><label for="seed-key">Sequence</label><select id="seed-key" name="key">${data.buildNumbers.map((sequence) => `<option>${escape(sequence.key)}</option>`).join('')}</select><label for="seed-branch">Branch (for a per-branch sequence)</label><input id="seed-branch" name="branch"><label for="seed-last">Last number issued</label><input id="seed-last" name="last" required><p>The next build of that sequence gets the number after it. Nothing is lowered.</p>`,
+          `${icon('edit')} Set where it stands`,
+          {
+            fields: ['project', 'key', 'branch', 'last'],
+            then: 'reload',
+            className: 'secondary',
+          },
+        )
+      : ''
+  return `<section class="panel" id="build-numbers"><h2>${icon('label')}Build numbers</h2>${
+    rows === ''
+      ? '<p>The Masonfile declares no build numbers yet, or setup has not run.</p>'
+      : `<table class="list"><thead><tr><th>Sequence</th><th>Format</th><th>Scope</th><th>Last issued</th></tr></thead><tbody>${rows}</tbody></table>`
+  }${form}</section>`
+}
+
 export function projectView(data: {
   slug: string
   name: string
@@ -358,6 +402,13 @@ export function projectView(data: {
   webhook: boolean
   signingLabel?: string
   canChangeSecrets: boolean
+  buildNumbers: Array<{
+    key: string
+    format: string
+    scope: string
+    last: Array<{ branch: string; value: string }>
+  }>
+  canSeed: boolean
 }): string {
   const keep = {
     env: data.env.map((entry) => ({ name: entry.name, keep: true })),
@@ -380,7 +431,7 @@ export function projectView(data: {
           `<tr><td class="mono">${escape(rule.pattern)}</td><td>${escape(rule.mode)}</td></tr>`,
       )
       .join('') || '<tr><td>No rules: nothing builds.</td></tr>'
-  }</tbody></table><p>Default branch <span class="mono">${escape(data.defaultBranch)}</span> · ${escape(data.format)} Masonfile · webhook ${data.webhook ? 'set' : 'not set'}${data.signingLabel == null ? '' : ` · signs on nodes labelled <span class="mono">${escape(data.signingLabel)}</span>`}</p></section></div><aside><section class="panel"><h2>${icon('key')}Secrets</h2><ul class="plain">${
+  }</tbody></table><p>Default branch <span class="mono">${escape(data.defaultBranch)}</span> · ${escape(data.format)} Masonfile · webhook ${data.webhook ? 'set' : 'not set'}${data.signingLabel == null ? '' : ` · signs on nodes labelled <span class="mono">${escape(data.signingLabel)}</span>`}</p></section>${buildNumbersPanel(data)}</div><aside><section class="panel"><h2>${icon('key')}Secrets</h2><ul class="plain">${
     [
       ...data.env.map(
         (entry) =>

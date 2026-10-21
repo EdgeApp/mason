@@ -112,7 +112,8 @@ export function projectsApi(master: Master): Router {
       const input = (req.body ?? {}) as {
         project?: unknown
         key?: unknown
-        entries?: unknown
+        branch?: unknown
+        last?: unknown
       }
       allowRole(actorOf(res), 'buildNumbers.seed')
       allow(actorOf(res), 'buildNumbers.seed', {
@@ -121,7 +122,8 @@ export function projectsApi(master: Master): Router {
       return master.seed(
         String(input.project ?? ''),
         String(input.key ?? ''),
-        input.entries,
+        { branch: input.branch, last: input.last },
+        actorOf(res),
       )
     }),
   )
