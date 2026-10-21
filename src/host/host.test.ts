@@ -1106,6 +1106,22 @@ describe('Host cache, sign-in and offline serving', function () {
     server.close()
   })
 
+  it('U10.5 test endpoints move the host clock and open a session, only with --test-endpoints', async () => {
+    const { controlRequest } = await import('../node/control.js')
+    const before = runtime().now()
+    const moved = (await controlRequest(host.dir, 'test.clock', {
+      ms: 1000,
+    })) as { now: number }
+    assert(moved.now >= before + 1000)
+    runtime().resetClock()
+    const { token } = (await controlRequest(host.dir, 'test.session', {
+      account: 10,
+    })) as { token: string }
+    const b = browser()
+    b.cookies.set('__Host-mason-session', token)
+    assert.equal((await b.get('/')).status, 200)
+  })
+
   it('U10.15 validates the host and signIn areas, keeps client secrets write-only, and publishes them to the host', async () => {
     const settings = c.master.master!.settings
     await assert.rejects(

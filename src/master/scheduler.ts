@@ -42,6 +42,7 @@ import { selectXcode } from '../worker/tools/versions.js'
 import type { ChecklistItem } from '../worker/system/reconcile.js'
 import type { AppleXcode } from './apple/developerDownloads.js'
 import type { NodeType } from './nodeTypes.js'
+import type { Artifacts } from './artifacts.js'
 import type { BuildNumbers } from './buildNumbers.js'
 import type { MasterDatabase } from './database.js'
 import { atLeast, Forbidden, requireRole, type Actor } from './roles.js'
@@ -122,6 +123,8 @@ export interface SchedulerOptions {
   appleXcodes?: () => AppleXcode[]
   /** Manual steps on the master that block nodes (the Apple ID code). */
   masterChecklist?: () => ChecklistItem[]
+  /** Publication: reservations and upload tokens at assignment, grants and queries from stages. */
+  artifacts?: Artifacts
   /** Cloud pools: a machine for a type no free node serves, and machines that are retiring. */
   cloud?: {
     demand(type: string): string | undefined
@@ -1531,6 +1534,24 @@ export class Scheduler {
       platforms?: string[]
       envVars?: Array<Record<string, string>>
     }
+    // Each declared publication gets a reservation with its reserved number, and the stage a signed upload token.
+    const reserved = {
+      job: id,
+      stage: stage.name,
+      attempt,
+      project: project.id,
+    }
+    const reservations =
+      this.options.artifacts?.reserve(
+        reserved,
+        stage.publishes,
+        buildNumbers,
+      ) ?? []
+    const upload = this.options.artifacts?.uploadToken(
+      reserved,
+      reservations,
+      stage.timeout,
+    )
     const assignment: StageAssignment = {
       kind: stage.kind === 'script' ? 'script' : 'stage',
       key: `${id}/${stage.name}/${attempt}`,
@@ -1590,6 +1611,7 @@ export class Scheduler {
       ...(worker.developerDir == null
         ? {}
         : { developerDir: worker.developerDir }),
+      ...(upload == null ? {} : { uploads: { ...upload, reservations } }),
     }
     this.startStage(job, stage.name, attempt, token, worker, stage.timeout)
     this.send(worker, 'stage.run', assignment, id, stage.name)
@@ -1740,6 +1762,7 @@ export class Scheduler {
       )
       .run(status, this.now(), reason ?? null, id)
     this.db.prepare('DELETE FROM resource_locks WHERE job_id=?').run(id)
+    this.options.artifacts?.release(id)
     for (const row of this.stages(id))
       if (row.status === 'queued' || row.status === 'awaiting_approval')
         this.db
@@ -2275,6 +2298,23 @@ export class Scheduler {
             if (record.seq !== acked + 1) break
             if (record.kind === 'log')
               this.appendLog(id, name, String(record.data))
+            else if (record.kind === 'publication') {
+              const staged = JSON.parse(String(record.data)) as {
+                reservation: string
+                app: string
+                platform: string
+              }
+              this.options.artifacts?.markStaged(id, staged.reservation)
+              this.appendLog(
+                id,
+                name,
+                `Staged ${staged.app} for ${staged.platform} while the master was away; the host confirms it on reconnect\n`,
+              )
+            } else if (record.kind === 'tests')
+              this.options.artifacts?.tests(
+                { job: id, stage: name, attempt },
+                JSON.parse(String(record.data)),
+              )
             else if (record.kind === 'describe')
               this.db
                 .prepare('UPDATE jobs SET description=? WHERE id=?')
@@ -2351,6 +2391,45 @@ export class Scheduler {
             if (Date.now() > deadline) return { pending: true }
             await new Promise((resolve) => setTimeout(resolve, 250))
           }
+        },
+        /** A grant for one publication into the stage's reservation. */
+        'artifacts.grant': (params, link): unknown => {
+          const { job, name, attempt } = this.authorize(params, link)
+          const artifacts = this.options.artifacts
+          if (artifacts == null)
+            throw new LinkError('Publication is unavailable', 'failed')
+          try {
+            return artifacts.grant(
+              { job: String(job.id), stage: name, attempt },
+              params as Parameters<Artifacts['grant']>[1],
+            )
+          } catch (error) {
+            throw new LinkError((error as Error).message, 'failed')
+          }
+        },
+        /** `ctx.artifacts.fetch`: the matching run's artifact and a download grant, within the project. */
+        'artifacts.query': (params, link): unknown => {
+          const { project } = this.authorize(params, link)
+          const artifacts = this.options.artifacts
+          if (artifacts == null)
+            throw new LinkError('Artifacts are unavailable', 'failed')
+          try {
+            return artifacts.query(
+              project.id,
+              (params as { query?: Record<string, unknown> }).query ?? {},
+            )
+          } catch (error) {
+            throw new LinkError((error as Error).message, 'failed')
+          }
+        },
+        /** `ctx.tests`: the stage's parsed results. */
+        'artifacts.tests': (params, link): null => {
+          const { job, name, attempt } = this.authorize(params, link)
+          this.options.artifacts?.tests(
+            { job: String(job.id), stage: name, attempt },
+            (params as { summary?: unknown }).summary,
+          )
+          return null
         },
         'git.prepare': async (
           params,

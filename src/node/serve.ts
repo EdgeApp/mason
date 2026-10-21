@@ -87,7 +87,7 @@ export interface NodeOptions {
   /** Stages a worker runs at once (the master's node setting can lower it). */
   slots?: number
   /** Host internals for tests: the clock and the OIDC transport. */
-  hostOptions?: Pick<HostOptions, 'now' | 'transport'>
+  hostOptions?: Pick<HostOptions, 'now' | 'transport' | 'storageFetch'>
   /** Worker internals for tests. */
   workerOptions?: Pick<
     WorkerOptions,
@@ -561,6 +561,11 @@ export async function startNode(
               hostRuntime.advanceClock(Number(args.ms ?? 0))
               return { now: hostRuntime.now() }
             },
+            // E2E only: a session for an account, to open pages without an OIDC provider.
+            'test.session': (args): { token: string } => ({
+              token: hostRuntime.accounts.startSession(Number(args.account))
+                .token,
+            }),
           }),
       ...(worker == null
         ? {}

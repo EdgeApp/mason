@@ -8,6 +8,7 @@ import { nodeWebApp, sendPage, type WebAppContext } from '../node/webApp.js'
 import { catalogStyles, escape, page, stylesheet } from '../view.js'
 import type { HostRuntime } from './runtime.js'
 import { hostLogin } from './sessions.js'
+import { uploadRoutes } from '../upload/routes.js'
 
 const OFFLINE_BANNER =
   '<p class="notice" role="status">The Mason master is unreachable. You are seeing the last synced builds.</p>'
@@ -197,8 +198,11 @@ export function hostApp(
         readFileSync(new URL('../browser/client.js', import.meta.url), 'utf8'),
       )
   })
-  // Webhooks are relayed or kept for the master even past the grace window.
+  // Webhooks are relayed or kept for the master even past the grace window, and
+  // stages upload and fetch artifacts by their tokens and grants.
   app.use(host.webhooks.routes())
+  app.use(host.artifacts.routes(host.accounts))
+  app.use(uploadRoutes(host.cache.store, host.artifacts.uploadHooks()))
   app.use((_req, res, next) => {
     if (host.cache.host() == null) {
       sendPage(

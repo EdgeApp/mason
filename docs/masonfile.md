@@ -586,6 +586,8 @@ await ctx.tests('junit', 'reports/**/*.xml')
 ```
 
 - `ctx.artifacts.save(name, paths, options?)` saves files with the run.
+  Paths and `ctx.publish`'s `path` are relative to the checkout, or absolute
+  inside it, as `ctx.apple.archive` resolves with.
   `kind`: `file` (default), `report` (an HTML tree browsable on the host,
   opened at `entry`), `log`, `data`. Artifacts are listed on the run page and
   downloadable by developers, managers and admins. `visibleTo: 'testers'` also shows an

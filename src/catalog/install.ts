@@ -8,6 +8,7 @@ import {
   fstatSync,
   openSync,
 } from 'node:fs'
+import type { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { Accounts, randomToken, type Session } from '../auth/accounts.js'
 import { csrf, navigation, sessionContext } from '../auth/routes.js'
@@ -211,20 +212,44 @@ export function installationRoutes(
       res.status(404).send('Installation link is unavailable or expired')
       return
     }
+    // A host keeps builds through its storage driver (disk or S3); a standalone server on its disk.
+    const objects = store.objects
     let fd: number | undefined
-    try {
-      fd = openSync(
-        store.filePath(build.file_key),
-        constants.O_RDONLY | constants.O_NOFOLLOW,
-      )
-      const stat = fstatSync(fd)
-      if (!stat.isFile() || stat.size !== build.size) {
-        throw new Error('Unavailable file')
+    let open: (range?: { start: number; end: number }) => Promise<Readable>
+    if (objects != null) {
+      const head = await objects.head(build.file_key).catch(() => undefined)
+      if (head == null || head.size !== build.size) {
+        res.status(404).send('Build is no longer available')
+        return
       }
-    } catch {
-      if (fd != null) closeSync(fd)
-      res.status(404).send('Build is no longer available')
-      return
+      open = async (range): Promise<Readable> => {
+        const found = await objects.get(build.file_key, range)
+        if (found == null) throw new Error('Unavailable file')
+        return found.stream
+      }
+    } else {
+      try {
+        fd = openSync(
+          store.filePath(build.file_key),
+          constants.O_RDONLY | constants.O_NOFOLLOW,
+        )
+        const stat = fstatSync(fd)
+        if (!stat.isFile() || stat.size !== build.size) {
+          throw new Error('Unavailable file')
+        }
+      } catch {
+        if (fd != null) closeSync(fd)
+        res.status(404).send('Build is no longer available')
+        return
+      }
+      const local = fd
+      open = async (range): Promise<Readable> =>
+        createReadStream('', {
+          fd: local,
+          autoClose: true,
+          start: range?.start,
+          end: range?.end,
+        })
     }
     const etag = `"${build.digest}"`
     res.set({
@@ -242,7 +267,7 @@ export function installationRoutes(
         build.size,
       )
     } catch {
-      closeSync(fd)
+      if (fd != null) closeSync(fd)
       res.status(416).set('Content-Range', `bytes */${build.size}`).end()
       return
     }
@@ -255,20 +280,12 @@ export function installationRoutes(
       String(range == null ? build.size : range.end - range.start + 1),
     )
     if (req.method === 'HEAD') {
-      closeSync(fd)
+      if (fd != null) closeSync(fd)
       res.end()
       return
     }
     try {
-      await pipeline(
-        createReadStream('', {
-          fd,
-          autoClose: true,
-          start: range?.start,
-          end: range?.end,
-        }),
-        res,
-      )
+      await pipeline(await open(range), res)
     } catch {
       res.destroy()
     }

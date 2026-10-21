@@ -14,7 +14,12 @@ import {
 import path from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { promisify } from 'node:util'
-import type { Json, NodeInfo } from '../../types/mason/index.js'
+import type {
+  ArtifactOptions,
+  ArtifactQuery,
+  Json,
+  NodeInfo,
+} from '../../types/mason/index.js'
 import { baseEnvironment, relativePath } from '../builder/config.js'
 import {
   CommandFailure,
@@ -72,6 +77,14 @@ import {
 } from './system/xcode.js'
 import { xcodeLaunches } from './system/index.js'
 import { checkout } from './checkout.js'
+import {
+  fetchArtifacts,
+  publish,
+  save,
+  tests,
+  type ArtifactContext,
+} from './artifacts.js'
+import type { TestFormat } from '../pipeline/tests.js'
 import { GitBridge } from './gitProxy.js'
 import { Journal } from './journal.js'
 
@@ -1400,8 +1413,66 @@ export class WorkerRuntime {
           })
         return null
       }
+      case 'publish':
+        return await publish(
+          this.artifactContext(assignment, dir, say),
+          args[1] as never,
+        )
+      case 'artifacts.save': {
+        const [name, paths, options] = args as [
+          string,
+          string | string[],
+          ArtifactOptions,
+        ]
+        await save(
+          this.artifactContext(assignment, dir, say),
+          name,
+          paths,
+          options,
+        )
+        return null
+      }
+      case 'artifacts.fetch': {
+        const [query, into] = args as [ArtifactQuery, string]
+        return await fetchArtifacts(
+          this.artifactContext(assignment, dir, say),
+          query,
+          into,
+        )
+      }
+      case 'tests': {
+        const [format, paths] = args as [TestFormat, string | string[]]
+        return await tests(
+          this.artifactContext(assignment, dir, say),
+          format,
+          paths,
+        )
+      }
       default:
         throw new Error(`${method} is not available on this node yet`)
+    }
+  }
+
+  private artifactContext(
+    assignment: StageAssignment,
+    dir: string,
+    say: (text: string) => void,
+  ): ArtifactContext {
+    return {
+      assignment,
+      dir,
+      scratch: this.path('tmp', 'artifacts'),
+      request: async <T>(method: string, params: unknown): Promise<T> =>
+        await this.request<T>(method, params, 5 * 60_000),
+      connected: async (): Promise<void> => {
+        const controller = this.controllers.get(assignment.key)
+        await this.connected(controller?.signal ?? new AbortController().signal)
+      },
+      journal: (kind, data): void => {
+        this.journal.append(assignment.key, kind, data)
+      },
+      select,
+      log: say,
     }
   }
 

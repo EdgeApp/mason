@@ -47,7 +47,14 @@ import {
 } from './cloud/pools.js'
 import { Changes } from './changes.js'
 import { HostLinks } from './hosts.js'
-import { hostArea, hostProjection, signInArea } from './hostSettings.js'
+import {
+  hostArea,
+  hostProjection,
+  signInArea,
+  storageArea,
+} from './hostSettings.js'
+import { Artifacts } from './artifacts.js'
+import type { Graph } from '../pipeline/graph.js'
 
 export { nodeTypesSetting }
 
@@ -122,6 +129,8 @@ export class Master {
   readonly changes: Changes
   readonly hosts: HostLinks
   readonly pools: Pools
+  readonly artifacts: Artifacts
+  private expiry: NodeJS.Timeout | undefined
   private stopped = false
   private compaction: NodeJS.Timeout | undefined
   constructor(
@@ -204,7 +213,14 @@ export class Master {
         : { endpoints: options.appleEndpoints }),
     })
     this.runtimes = new RuntimeStore(path.join(dir, 'runtimes'))
+    this.artifacts = new Artifacts({
+      master: this.database,
+      privateKey: identity.privateKey,
+      host: (): ReturnType<HostLinks['access']> => this.hosts.access(),
+      retentionDays: (): number => 14,
+    })
     this.scheduler = new Scheduler({
+      artifacts: this.artifacts,
       master: this.database,
       projects: this.projects,
       jobs: this.jobs,
@@ -262,6 +278,7 @@ export class Master {
     this.settings.register('apple', { validate: appleSetting })
     this.settings.register('host', hostArea)
     this.settings.register('cloud', cloudArea)
+    this.settings.register('storage', storageArea)
     this.settings.register('signIn', signInArea)
     this.releases = new Releases(
       this.database,
@@ -277,6 +294,7 @@ export class Master {
       projects: this.projects,
       jobs: this.jobs,
       releases: this.releases,
+      artifacts: this.artifacts,
       privateKey: identity.privateKey,
       origins: (): { origin?: string; workerOrigin?: string } =>
         (this.settings.value('host') ?? {}) as {
@@ -346,6 +364,14 @@ export class Master {
     this.updates.start()
     this.hosts.start()
     this.pools.start()
+    // Expired builds and saved artifacts become deleting; the host removes the files.
+    this.expiry = setInterval(
+      () => {
+        if (!this.stopped) this.expire()
+      },
+      60 * 60 * 1000,
+    )
+    this.expiry.unref()
     // The change log keeps seven days; a host further behind gets a snapshot.
     this.compaction = setInterval(
       () => {
@@ -366,6 +392,7 @@ export class Master {
     this.retention.stop()
     this.updates.stop()
     this.hosts.stop()
+    clearInterval(this.expiry)
     await this.pools.stop()
     clearInterval(this.compaction)
     this.apple.stop()
@@ -537,7 +564,24 @@ export class Master {
             restartFrom: String(row.restart_from),
           }),
       stages: this.scheduler.stageViews(id),
+      ...this.artifacts.forRun(id),
     }
+  }
+
+  /** The hourly expiry of builds and of saved artifacts past their workflow's `keep.artifactDays`. */
+  expire(): { builds: number; artifacts: number } {
+    const db = this.database.db
+    return this.artifacts.expire((job) => {
+      const row = db
+        .prepare(
+          'SELECT j.workflow,g.graph FROM jobs j JOIN graphs g ON g.key=j.graph_key WHERE j.id=?',
+        )
+        .get(job) as { workflow: string; graph: string } | undefined
+      if (row == null) return undefined
+      return (JSON.parse(row.graph) as Graph).workflows.find(
+        (workflow) => workflow.name === row.workflow,
+      )?.keep.artifactDays
+    })
   }
 
   /** Operator commands; the control socket proves ownership of the data directory. */

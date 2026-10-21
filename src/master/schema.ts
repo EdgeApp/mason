@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 6
+export const MASTER_SCHEMA = 7
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -222,6 +222,25 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     CREATE TABLE cloud_snapshots (
       id INTEGER PRIMARY KEY, pool TEXT NOT NULL, provider_id TEXT NOT NULL, source_machine INTEGER,
       size_gb REAL NOT NULL, version TEXT NOT NULL, created_at INTEGER NOT NULL, deleted_at INTEGER
+    ) STRICT;`)
+  },
+  (db): void => {
+    db.exec(`
+    CREATE TABLE build_reservations (
+      id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, stage TEXT NOT NULL,
+      attempt INTEGER NOT NULL, project_id INTEGER NOT NULL, app_id INTEGER NOT NULL, platform TEXT NOT NULL,
+      build_number TEXT NOT NULL, created_at INTEGER NOT NULL, build_id INTEGER, staged_at INTEGER
+    ) STRICT;
+    CREATE INDEX build_reservations_job ON build_reservations(job_id, stage, attempt);
+    CREATE TABLE run_artifacts (
+      job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, stage TEXT NOT NULL, name TEXT NOT NULL,
+      kind TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL, visible_to TEXT, entry TEXT,
+      storage_key TEXT NOT NULL, created_at INTEGER NOT NULL, deleting INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(job_id, name)
+    ) STRICT;
+    CREATE TABLE run_tests (
+      job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, stage TEXT NOT NULL, attempt INTEGER NOT NULL,
+      summary TEXT NOT NULL, PRIMARY KEY(job_id, stage, attempt)
     ) STRICT;`)
   },
 ]

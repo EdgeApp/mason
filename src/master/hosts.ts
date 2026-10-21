@@ -14,6 +14,8 @@ import { repositoryName } from './mirrors.js'
 import type { NodeRegistry } from './nodes.js'
 import type { Projects } from './projects.js'
 import type { Releases } from './releases.js'
+import type { Artifacts, HostAccess } from './artifacts.js'
+import type { Format } from '../validation.js'
 import { ruleFor } from './rules.js'
 
 /** The only writes a host makes to the master. */
@@ -62,6 +64,8 @@ export class HostLinks {
       privateKey: KeyObject
       /** The host's public origins, from the `host` setting. */
       origins: () => { origin?: string; workerOrigin?: string }
+      /** Publication: what the host's staged uploads and saved artifacts become. */
+      artifacts?: Artifacts
       /** How long writes are gathered before a push; well under a second. */
       pushMs?: number
     },
@@ -193,6 +197,7 @@ export class HostLinks {
         return { receipt: id, duplicate: true }
       if (kind === 'device') this.device(payload)
       else if (kind === 'prepare') this.prepare(payload)
+      else this.artifact(payload)
       db.prepare(
         'INSERT INTO host_receipts(id,kind,host,payload,received_at) VALUES(?,?,?,?,?)',
       ).run(
@@ -238,6 +243,24 @@ export class HostLinks {
     this.options.master.change('account', account)
   }
 
+  /** A staged upload, a saved artifact, or a deleted file, from the host's outbox. */
+  private artifact(payload: unknown): void {
+    const artifacts = this.options.artifacts
+    if (artifacts == null)
+      throw new LinkError('Artifacts are unavailable', 'failed')
+    const value = (payload ?? {}) as { action?: unknown } & Record<
+      string,
+      unknown
+    >
+    if (value.action === 'staged')
+      artifacts.staged(value as unknown as Parameters<Artifacts['staged']>[0])
+    else if (value.action === 'saved')
+      artifacts.saved(value as unknown as Parameters<Artifacts['saved']>[0])
+    else if (value.action === 'deleted')
+      artifacts.deleted(value as Parameters<Artifacts['deleted']>[0])
+    else throw new LinkError('Unknown artifact message', 'failed')
+  }
+
   /** "Prepare for this device": the master queues the build request; the device milestone turns it into a pinned job. */
   private prepare(payload: unknown): void {
     const value = (payload ?? {}) as Record<string, unknown>
@@ -271,6 +294,18 @@ export class HostLinks {
         return { fingerprint: node.fingerprint, link }
     }
     return undefined
+  }
+
+  /**
+   * How workers reach the host: the worker origin (or the public origin),
+   * with the pin the host reported when it serves its own certificate.
+   */
+  access(): HostAccess | undefined {
+    const origins = this.options.origins()
+    const origin = origins.workerOrigin ?? origins.origin
+    if (origin == null) return undefined
+    const pin = [...this.webs.values()].find((web) => web.pin != null)?.pin
+    return { origin, ...(pin == null ? {} : { pin }) }
   }
 
   mirrored(version: string): boolean {
@@ -397,6 +432,32 @@ export class HostLinks {
           link,
         ): { receipt: string; duplicate: boolean } =>
           this.deliver(params, this.host(link)),
+        /** A staged pipeline upload, published at once while the link is up. */
+        'artifacts.staged': (params, link): unknown => {
+          this.host(link)
+          if (this.options.artifacts == null)
+            throw new LinkError('Artifacts are unavailable', 'failed')
+          try {
+            return this.options.artifacts.staged(
+              params as Parameters<Artifacts['staged']>[0],
+            )
+          } catch (error) {
+            throw new LinkError((error as Error).message, 'failed')
+          }
+        },
+        /** A Zealot-API upload the host staged, published through the master. */
+        'artifacts.zealot': (params, link): unknown => {
+          this.host(link)
+          if (this.options.artifacts == null)
+            throw new LinkError('Artifacts are unavailable', 'failed')
+          try {
+            return this.options.artifacts.zealot(
+              params as Parameters<Artifacts['zealot']>[0] & { format: Format },
+            )
+          } catch (error) {
+            throw new LinkError((error as Error).message, 'failed')
+          }
+        },
       },
       streams: {
         /** A file of the current release, for the host to serve `/install.sh` and the tarballs. */

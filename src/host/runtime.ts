@@ -17,6 +17,7 @@ import type { Sync } from '../master/changes.js'
 import { HostCache } from './cache.js'
 import { Outbox } from './outbox.js'
 import { Webhooks } from './webhooks.js'
+import { HostArtifacts, HostObjects } from './artifacts.js'
 
 export interface HostOptions {
   dir: string
@@ -28,6 +29,8 @@ export interface HostOptions {
   log?: (line: string) => void
   /** The paired master's public key, which signs Xcode mirror grants. */
   masterKey?: () => KeyObject | undefined
+  /** How S3 requests are made; tests reach a fake S3. */
+  storageFetch?: typeof fetch
 }
 
 const sha256File = async (file: string): Promise<string> => {
@@ -45,6 +48,8 @@ export class HostRuntime {
   readonly accounts: Accounts
   readonly outbox: Outbox
   readonly webhooks: Webhooks
+  readonly objects: HostObjects
+  readonly artifacts: HostArtifacts
   private synced: Link | undefined
   private offset = 0
   private timer: NodeJS.Timeout | undefined
@@ -62,6 +67,21 @@ export class HostRuntime {
       () => this.now(),
       (line) => this.options.log?.(line),
     )
+    this.objects = new HostObjects(
+      this.cache,
+      path.join(options.dir, 'storage'),
+      options.storageFetch,
+    )
+    this.cache.store.objects = this.objects
+    this.artifacts = new HostArtifacts({
+      cache: this.cache,
+      objects: this.objects,
+      outbox: this.outbox,
+      dir: options.dir,
+      link: (): Link | undefined => this.options.link(),
+      online: (): boolean => this.online(),
+      masterKey: (): KeyObject | undefined => this.options.masterKey?.(),
+    })
     this.webhooks = new Webhooks({
       db: this.cache.db,
       now: (): number => this.now(),
@@ -154,6 +174,9 @@ export class HostRuntime {
     if (this.stopped) return
     this.cache.apply(sync)
     void this.refreshRelease()
+    void this.artifacts.cleanup().catch((error: unknown) => {
+      this.options.log?.(`Artifact cleanup failed: ${(error as Error).message}`)
+    })
   }
 
   methods(): MethodTable {

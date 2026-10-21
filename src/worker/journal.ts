@@ -3,7 +3,7 @@ import type { DatabaseSync } from 'node:sqlite'
 /** One record a stage sends the master, in order: a log chunk, a step or the run description. */
 export interface Record {
   seq: number
-  kind: 'log' | 'step' | 'describe'
+  kind: 'log' | 'step' | 'describe' | 'publication' | 'tests'
   data: string
 }
 

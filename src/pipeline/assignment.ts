@@ -63,6 +63,18 @@ export interface StageAssignment {
   tools?: Tools
   /** The Xcode the master chose for the stage's `xcode` range. */
   developerDir?: string
+  /** The stage's upload token and reservations, and how to reach the host. */
+  uploads?: {
+    token: string
+    origin: string
+    pin?: string
+    reservations: Array<{
+      id: string
+      app: string
+      platform: string
+      buildNumber: string
+    }>
+  }
 }
 
 export type Assignment = SetupAssignment | StageAssignment

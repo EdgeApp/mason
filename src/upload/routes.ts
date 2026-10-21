@@ -10,7 +10,13 @@ import { createWriteStream } from 'node:fs'
 import { Transform, type Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { Store } from '../store.js'
-import { asChannel, asFormat, asId, type Format } from '../validation.js'
+import {
+  asChannel,
+  asFormat,
+  asId,
+  type Build,
+  type Format,
+} from '../validation.js'
 import { asUploadFields, asVersionFields, uploadFieldNames } from './fields.js'
 import { ApiKeys } from './keys.js'
 import { packageIdentity } from './metadata.js'
@@ -24,16 +30,36 @@ class UploadError extends Error {
     super(message)
   }
 }
+/**
+ * How a host runs the Zealot API: it stores channel keys as digests, and
+ * publishes through its master, answering 503 while the master is away.
+ */
+export interface UploadHooks {
+  channelKey(raw: string): string
+  available(): boolean
+  publish(
+    reservation: string,
+    input: {
+      channel: ReturnType<typeof asChannel>
+      keyId: string
+      file: string
+      publication: Record<string, unknown>
+    },
+  ): Promise<Build>
+}
+
 function authorize(
   store: Store,
   keys: ApiKeys,
   fields: Record<string, unknown>,
+  hooks?: UploadHooks,
 ): ReturnType<typeof asChannel> {
   try {
+    const raw = typeof fields.channel_key === 'string' ? fields.channel_key : ''
     const row = asObject({ id: asId })(
       store.db
         .prepare('SELECT id FROM channels WHERE channel_key=?')
-        .get(typeof fields.channel_key === 'string' ? fields.channel_key : ''),
+        .get(hooks == null ? raw : hooks.channelKey(raw)),
     )
     const channel = store.channel(row.id)
     keys.authenticate(fields.token, channel.app_id)
@@ -58,6 +84,7 @@ async function receive(
   req: Request,
   store: Store,
   keys: ApiKeys,
+  hooks?: UploadHooks,
 ): Promise<{
   reservation: string
   format: Format
@@ -147,7 +174,7 @@ async function receive(
           if (seen || name !== 'file')
             throw new UploadError(400, 'Exactly one file is required')
           seen = true
-          channel = authorize(store, keys, fields)
+          channel = authorize(store, keys, fields, hooks)
           format = asFormat(info.filename.split('.').pop()?.toLowerCase())
           const allowed: unknown = JSON.parse(channel.formats)
           if (!Array.isArray(allowed) || !allowed.includes(format))
@@ -194,7 +221,7 @@ async function receive(
     if (reservation == null || format == null || channel == null || size === 0)
       throw new UploadError(400, 'A nonempty package file is required')
     const cleaned = asUploadFields(fields)
-    authorize(store, keys, fields)
+    authorize(store, keys, fields, hooks)
     return {
       reservation,
       format,
@@ -215,7 +242,7 @@ async function receive(
     req.off('aborted', onAborted)
   }
 }
-export function uploadRoutes(store: Store): Router {
+export function uploadRoutes(store: Store, hooks?: UploadHooks): Router {
   const router = Router(),
     keys = new ApiKeys(store)
   const attempts = new Map<string, { count: number; until: number }>()
@@ -235,7 +262,12 @@ export function uploadRoutes(store: Store): Router {
   router.post('/api/apps/upload', async (req, res) => {
     let reservation: string | undefined
     try {
-      const received = await receive(req, store, keys)
+      if (hooks != null && !hooks.available())
+        throw new UploadError(
+          503,
+          'Publication needs the Mason master, which is unreachable; retry later',
+        )
+      const received = await receive(req, store, keys, hooks)
       reservation = received.reservation
       const { fields, channel, format, size, digest } = received
       if (Object.hasOwn(fields.custom_fields, 'masonUpload'))
@@ -247,7 +279,7 @@ export function uploadRoutes(store: Store): Router {
       )
       const deviceConfig = store.config.devices
       const provisioning =
-        format === 'ipa' && deviceConfig != null
+        format === 'ipa' && deviceConfig != null && hooks == null
           ? await inspectProvisioning(
               store.incomingPath(reservation),
               deviceConfig.trustStoreFile,
@@ -257,31 +289,59 @@ export function uploadRoutes(store: Store): Router {
       if (provisioning != null && provisioning.appId !== identity.bundleId)
         throw new Error('Provisioning profile does not match uploaded app')
       let build
+      const publication = {
+        channelId: channel.id,
+        branch: fields.branch,
+        commit: fields.git_commit,
+        ...identity,
+        format,
+        size,
+        digest,
+        changelog: fields.changelog,
+        source: fields.source,
+        customFields: JSON.stringify({
+          masonUpload: {
+            ci_url: fields.ci_url,
+            release_type: fields.release_type,
+            custom_fields: fields.custom_fields,
+          },
+        }),
+      }
       try {
-        build = store.publish(
-          reservation,
-          {
-            channelId: channel.id,
-            branch: fields.branch,
-            commit: fields.git_commit,
-            ...identity,
-            format,
-            size,
-            digest,
-            changelog: fields.changelog,
-            source: fields.source,
-            customFields: JSON.stringify({
-              masonUpload: {
-                ci_url: fields.ci_url,
-                release_type: fields.release_type,
-                custom_fields: fields.custom_fields,
-              },
-            }),
-          },
-          () => {
-            authorize(store, keys, fields)
-          },
-        )
+        if (hooks != null) {
+          authorize(store, keys, fields, hooks)
+          build = await hooks.publish(reservation, {
+            channel,
+            keyId: keys.authenticate(fields.token, channel.app_id).id,
+            file: store.incomingPath(reservation),
+            publication,
+          })
+          store.cancel(reservation)
+        } else
+          build = store.publish(
+            reservation,
+            {
+              channelId: channel.id,
+              branch: fields.branch,
+              commit: fields.git_commit,
+              ...identity,
+              format,
+              size,
+              digest,
+              changelog: fields.changelog,
+              source: fields.source,
+              customFields: JSON.stringify({
+                masonUpload: {
+                  ci_url: fields.ci_url,
+                  release_type: fields.release_type,
+                  custom_fields: fields.custom_fields,
+                },
+              }),
+            },
+            () => {
+              authorize(store, keys, fields)
+            },
+          )
       } catch (error) {
         if (
           error instanceof Error &&
@@ -295,11 +355,12 @@ export function uploadRoutes(store: Store): Router {
       }
       if (provisioning != null) saveProvisioning(store, build.id, provisioning)
       reservation = undefined
-      try {
-        store.prune()
-      } catch {
-        console.error('Mason post-upload retention check failed')
-      }
+      if (hooks == null)
+        try {
+          store.prune()
+        } catch {
+          console.error('Mason post-upload retention check failed')
+        }
       res.status(201).json(uploadResponse(store, build))
     } catch (error) {
       if (reservation != null) store.cancel(reservation)
@@ -312,7 +373,7 @@ export function uploadRoutes(store: Store): Router {
   router.get('/api/apps/version_exist', (req, res) => {
     try {
       const fields = asVersionFields(req.query),
-        channel = authorize(store, keys, fields)
+        channel = authorize(store, keys, fields, hooks)
       if (
         fields.git_commit == null &&
         (fields.release_version == null || fields.build_version == null)

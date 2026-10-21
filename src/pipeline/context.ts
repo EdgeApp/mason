@@ -3,6 +3,7 @@ import { existsSync, realpathSync, writeFileSync } from 'node:fs'
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type {
+  TestSummary,
   CommandOptions,
   CommandResult,
   Duration,
@@ -323,8 +324,21 @@ export function createContext(
       fetch: async (query, into) =>
         await service('artifacts.fetch', query, into),
     },
-    tests: async (format, paths, options) =>
-      await service('tests', format, paths, options ?? {}),
+    tests: async (format, paths, options) => {
+      const summary = (await service(
+        'tests',
+        format,
+        paths,
+        options ?? {},
+      )) as TestSummary
+      // Failing tests make the stage unstable, or fail it with failOn: 'failure'.
+      if (summary != null && summary.failed > 0) {
+        const reason = `${summary.failed} of ${summary.passed + summary.failed} tests failed`
+        if (options?.failOn === 'failure') throw new Error(reason)
+        out.unstable ??= reason
+      }
+      return summary
+    },
     publish: async (options) => await service('publish', options.app, options),
     log: {
       info: (message) => {

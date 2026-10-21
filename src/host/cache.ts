@@ -57,6 +57,8 @@ const tables: Record<
     children: {
       job_stages: { column: 'job_id', field: 'id' },
       job_steps: { column: 'job_id', field: 'id' },
+      run_artifacts: { column: 'job_id', field: 'id' },
+      run_tests: { column: 'job_id', field: 'id' },
     },
   },
   setting: { table: 'host_settings', key: 'area' },
@@ -77,7 +79,7 @@ const order = [
   'job',
 ]
 
-const HOST_SCHEMA = 1
+const HOST_SCHEMA = 2
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -91,6 +93,20 @@ function migrateHost(db: DatabaseSync): void {
   if (current > HOST_SCHEMA)
     throw new Error('The host cache belongs to a newer Mason version')
   if (current === HOST_SCHEMA) return
+  if (current < 1) migrateHostV1(db)
+  // Saved artifacts and test results of runs, replicated with their run.
+  db.exec(`BEGIN IMMEDIATE;
+    CREATE TABLE run_artifacts(job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, stage TEXT NOT NULL,
+      name TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL, visible_to TEXT, entry TEXT,
+      storage_key TEXT NOT NULL, created_at INTEGER NOT NULL, deleting INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(job_id, name)) STRICT;
+    CREATE TABLE run_tests(job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, stage TEXT NOT NULL,
+      attempt INTEGER NOT NULL, summary TEXT NOT NULL, PRIMARY KEY(job_id, stage, attempt)) STRICT;
+    INSERT INTO host_meta(key,value) VALUES('host_schema','2') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+}
+
+function migrateHostV1(db: DatabaseSync): void {
   db.exec(`BEGIN IMMEDIATE;
     ALTER TABLE accounts ADD COLUMN role TEXT NOT NULL DEFAULT 'tester';
     -- The master's keys carry every role; the distribution table allowed only upload and admin.
@@ -129,7 +145,7 @@ function migrateHost(db: DatabaseSync): void {
     CREATE TABLE job_steps(job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, stage TEXT NOT NULL,
       attempt INTEGER NOT NULL, id INTEGER NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
       status TEXT NOT NULL, ms INTEGER, PRIMARY KEY(job_id, stage, attempt, id)) STRICT;
-    INSERT INTO host_meta(key,value) VALUES('host_schema','${HOST_SCHEMA}');
+    INSERT INTO host_meta(key,value) VALUES('host_schema','1');
     COMMIT;`)
 }
 

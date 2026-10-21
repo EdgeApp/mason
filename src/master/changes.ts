@@ -47,7 +47,7 @@ const one = (
 ): Row | undefined => db.prepare(sql).get(...args) as Row | undefined
 
 /** Settings areas the host needs; anything else stays on the master. */
-export const publishedSettings = ['host', 'signIn'] as const
+export const publishedSettings = ['host', 'signIn', 'storage'] as const
 
 interface Entity {
   /** Every key, for a snapshot. */
@@ -242,6 +242,16 @@ export function entities(
             job_steps: all(
               db,
               'SELECT job_id,stage,attempt,id,kind,title,status,ms FROM job_steps WHERE job_id=?',
+              id,
+            ),
+            run_artifacts: all(
+              db,
+              'SELECT job_id,stage,name,kind,size,digest,visible_to,entry,storage_key,created_at,deleting FROM run_artifacts WHERE job_id=?',
+              id,
+            ),
+            run_tests: all(
+              db,
+              'SELECT job_id,stage,attempt,summary FROM run_tests WHERE job_id=?',
               id,
             ),
           },
