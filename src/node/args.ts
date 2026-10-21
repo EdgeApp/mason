@@ -70,6 +70,7 @@ const roleValued = [
   '--web-key',
   '--user',
   '--slots',
+  '--pairing-file',
 ] as const
 const roleSwitches = [
   '--web-plain',
@@ -89,6 +90,8 @@ export interface RoleCommand {
   dataFlag?: string
   /** Options to pass on to an installed service. */
   serviceArgs: string[]
+  /** A cloud machine's pairing material, moved into the data directory. */
+  pairingFile?: string
 }
 
 /** Parses `mason [master|worker|host] [options]`. */
@@ -143,7 +146,11 @@ export function parseRoleCommand(role: Role, argv: string[]): RoleCommand {
     if (args.flags.has(name)) serviceArgs.push(name)
   const user = single(args, '--user')
   const dataFlag = single(args, '--data')
+  const pairingFile = single(args, '--pairing-file')
+  if (pairingFile != null && role !== 'worker')
+    throw new Error('--pairing-file is for a worker')
   return {
+    ...(pairingFile == null ? {} : { pairingFile }),
     options,
     ...(dataFlag == null ? {} : { dataFlag }),
     install: args.flags.has('--install'),

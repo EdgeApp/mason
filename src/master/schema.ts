@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 5
+export const MASTER_SCHEMA = 6
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -207,6 +207,21 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     ) STRICT;
     CREATE TABLE xcode_mirrors (
       version TEXT PRIMARY KEY, sha256 TEXT NOT NULL, size INTEGER NOT NULL, at INTEGER NOT NULL
+    ) STRICT;`)
+  },
+  (db): void => {
+    db.exec(`
+    CREATE TABLE cloud_machines (
+      id INTEGER PRIMARY KEY, pool TEXT NOT NULL, provider_id TEXT, address TEXT, port INTEGER,
+      fingerprint TEXT, size TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('creating','pairing','ready','retiring','snapshotting','destroyed')),
+      created_at INTEGER NOT NULL, ready_at INTEGER, last_used INTEGER, destroyed_at INTEGER,
+      from_snapshot INTEGER, error TEXT
+    ) STRICT;
+    CREATE INDEX cloud_machines_state ON cloud_machines(state);
+    CREATE TABLE cloud_snapshots (
+      id INTEGER PRIMARY KEY, pool TEXT NOT NULL, provider_id TEXT NOT NULL, source_machine INTEGER,
+      size_gb REAL NOT NULL, version TEXT NOT NULL, created_at INTEGER NOT NULL, deleted_at INTEGER
     ) STRICT;`)
   },
 ]

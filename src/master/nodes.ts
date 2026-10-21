@@ -148,13 +148,48 @@ export class NodeRegistry extends EventEmitter {
    */
   async add(addressText: string, keyText: string): Promise<NodeRecord> {
     const key = parsePairingKey(keyText)
-    const address = parseAddress(addressText)
     const existing = this.row(key.fingerprint)
     if (existing != null && !existing.removed)
       throw new Error('This node is already paired')
+    return await this.pair(
+      addressText,
+      key.certificateHash,
+      key.secret,
+      key.fingerprint,
+    )
+  }
+
+  /**
+   * Pairs a cloud machine the master made: it pins the certificate it put in
+   * the machine's first-boot data, proves the one-time secret, and records the
+   * machine's own ML-DSA fingerprint from the handshake. A fingerprint the
+   * master already knows is refused, so no two machines share a key.
+   */
+  async addMachine(
+    addressText: string,
+    certificateHash: string,
+    secret: string,
+  ): Promise<NodeRecord> {
+    return await this.pair(
+      addressText,
+      certificateHash,
+      secret,
+      undefined,
+      'worker',
+    )
+  }
+
+  private async pair(
+    addressText: string,
+    certificateHash: string,
+    secret: string,
+    expected: string | undefined,
+    expectedRole?: 'worker' | 'host',
+  ): Promise<NodeRecord> {
+    const address = parseAddress(addressText)
     const { wire, exporter } = await dialWire(
       address,
-      key.certificateHash,
+      certificateHash,
       this.options.dialTimeoutMs,
     )
     let role: 'worker' | 'host' = 'worker'
@@ -164,10 +199,16 @@ export class NodeRegistry extends EventEmitter {
         role: 'master',
         exporter,
         dialer: true,
-        pairingSecret: key.secret,
-        acceptHello(hello) {
-          if (hello.fingerprint !== key.fingerprint)
+        pairingSecret: secret,
+        acceptHello: (hello) => {
+          if (expected != null && hello.fingerprint !== expected)
             throw new HandshakeRefused('Wrong node')
+          if (expected == null && this.row(hello.fingerprint) != null)
+            throw new HandshakeRefused(
+              'A known node cannot pair as a new machine',
+            )
+          if (expectedRole != null && hello.role !== expectedRole)
+            throw new HandshakeRefused('Wrong role')
           role = hello.role as 'worker' | 'host'
         },
       })
@@ -186,7 +227,7 @@ export class NodeRegistry extends EventEmitter {
         .run(
           peer.fingerprint,
           publicKey,
-          key.certificateHash,
+          certificateHash,
           role,
           address.host,
           address.port,

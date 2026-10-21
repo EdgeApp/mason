@@ -23,7 +23,8 @@ import { importDeployment } from '../master/import.js'
 import { importHost } from '../host/import.js'
 import type { ClientPasswordCosts } from '../auth/passwordProtocol.js'
 import { readStdin, setupCommand, withStoppedMaster } from '../setup/cli.js'
-import { writePrivate } from './dataDir.js'
+import { prepareDataDir, writePrivate } from './dataDir.js'
+import { PAIRING_FILE, readPairingFile } from './identity.js'
 import {
   hostSystem,
   installService,
@@ -222,11 +223,24 @@ async function roleCommand(
         ...(command.options.coWorker ? { coWorker: true } : {}),
         ...(command.dataFlag == null ? {} : { data: command.dataFlag }),
         ...(command.user == null ? {} : { user: command.user }),
+        ...(command.pairingFile == null
+          ? {}
+          : {
+              pairingFile: JSON.stringify(
+                readPairingFile(readFileSync(command.pairingFile, 'utf8')),
+              ),
+            }),
         program: io.program(),
         args: command.serviceArgs,
       },
       io.system(),
     )
+    if (command.pairingFile != null) {
+      rmSync(command.pairingFile, { force: true })
+      io.out(
+        'Moved the pairing file into the data directory; the master pairs with this machine itself.',
+      )
+    }
     io.out(
       `Installed ${installed.label} for ${installed.user} (${installed.file}); data in ${installed.data}.`,
     )
@@ -240,6 +254,7 @@ async function roleCommand(
       )
       io.out(`Installed ${helper.label} (${helper.file}).`)
     }
+    if (command.pairingFile != null) return 0
     if (role === 'master') {
       const code = path.join(installed.data, 'setup-code')
       await waitForControl(installed.data, 'status')
@@ -250,6 +265,17 @@ async function roleCommand(
         `Pairing key: ${String(await waitForControl(installed.data, 'pairing'))}`,
       )
     return 0
+  }
+  if (command.pairingFile != null) {
+    // In the foreground the pairing material goes into this user's data directory.
+    const dir = prepareDataDir(command.options.data)
+    writePrivate(
+      path.join(dir, PAIRING_FILE),
+      JSON.stringify(
+        readPairingFile(readFileSync(command.pairingFile, 'utf8')),
+      ),
+    )
+    rmSync(command.pairingFile, { force: true })
   }
   const node = await startNode(command.options, io.out)
   io.started?.(node)

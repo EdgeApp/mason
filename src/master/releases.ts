@@ -67,7 +67,8 @@ export class Releases {
       .sort(compareSemver)
   }
 
-  private platforms(version: string): string[] {
+  /** The platforms a stored release has tarballs for, `linux-x64`. */
+  platforms(version: string): string[] {
     return readdirSync(path.join(this.root, version))
       .map((name) => tarball.exec(name))
       .filter((match): match is RegExpExecArray => match != null)

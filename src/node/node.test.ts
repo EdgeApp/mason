@@ -734,6 +734,7 @@ describe('Configuration-free nodes', function () {
     assert.equal(unit.file, '/etc/systemd/system/mason-host.service')
     const content = sudo.files.get(unit.file)!.content
     assert.match(content, /^User=deploy$/m)
+    assert.match(content, /^OOMPolicy=continue$/m)
     assert.match(
       content,
       /^ExecStart=\/opt\/mason\/bin\/mason host --data \/home\/deploy\/.mason --port 9200 --web-plain --listen 127.0.0.1$/m,
@@ -962,6 +963,101 @@ describe('Configuration-free nodes', function () {
     )
     masterService.stop()
     await masterRunning
+  })
+
+  it('U11.3 moves a cloud machine’s pairing file into its data directory, owner-only, and prints no pairing key', async () => {
+    const made = createCertificate(['mason-linux-cloud-9'])
+    const secret = 'p'.repeat(43)
+    const file = path.join(root, 'pairing.json')
+    writeFileSync(
+      file,
+      JSON.stringify({ cert: made.cert, key: made.key, secret }),
+    )
+    const system = fakeSystem({
+      env: { SUDO_USER: 'paul' },
+      users: { paul: { uid: 501, gid: 20, home: root } },
+    })
+    const io = testIO({ system: () => system })
+    assert.equal(
+      await nodeMain(
+        [
+          'worker',
+          '--install',
+          '--pairing-file',
+          file,
+          '--link-port',
+          '9310',
+          '--listen',
+          '0.0.0.0',
+        ],
+        io,
+      ),
+      0,
+      io.errors.join('\n'),
+    )
+    assert(!existsSync(file))
+    const moved = system.files.get(
+      path.join(root, '.mason', 'pairing-file.json'),
+    )!
+    assert.equal(moved.mode, 0o600)
+    assert.equal(moved.uid, 501)
+    assert.equal(JSON.parse(moved.content).secret, secret)
+    assert(io.lines.some((line) => /Moved the pairing file/.test(line)))
+    assert(!io.lines.some((line) => line.startsWith('Pairing key:')))
+    // In the foreground the worker takes it on start: the master's certificate, its own new key.
+    writeFileSync(
+      file,
+      JSON.stringify({ cert: made.cert, key: made.key, secret }),
+    )
+    const data = path.join(root, 'machine')
+    // As on a machine restored from a snapshot: its predecessor was removed.
+    mkdirSync(data, { mode: 0o700 })
+    writeFileSync(path.join(data, 'removed'), 'Removed\n', { mode: 0o600 })
+    const service = testIO()
+    const running = nodeMain(
+      [
+        'worker',
+        '--data',
+        data,
+        '--link-port',
+        '0',
+        '--listen',
+        '127.0.0.1',
+        '--pairing-file',
+        file,
+      ],
+      service,
+    )
+    const node = await service.node
+    assert(!existsSync(file))
+    assert(!existsSync(path.join(data, 'pairing-file.json')))
+    assert.equal(
+      node.identity.certificateHash,
+      (await import('./certificate.js')).certificateHash(made.cert),
+    )
+    assert.equal(node.pairing!.key(), undefined)
+    assert(!node.pairing!.removed())
+    assert(!service.lines.some((line) => line.startsWith('Pairing key:')))
+    service.stop()
+    await running
+    writeFileSync(
+      file,
+      JSON.stringify({
+        cert: made.cert,
+        key: createCertificate(['x']).key,
+        secret,
+      }),
+    )
+    const refused = testIO()
+    assert.equal(
+      await nodeMain(
+        ['worker', '--data', path.join(root, 'other'), '--pairing-file', file],
+        refused,
+      ),
+      1,
+    )
+    assert.match(refused.errors.join('\n'), /does not match its key/)
+    assert.equal(await nodeMain(['host', '--pairing-file', file], testIO()), 1)
   })
 
   it('trusts a server by public-key pin and sends nothing to the wrong one', async () => {

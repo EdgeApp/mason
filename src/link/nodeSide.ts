@@ -6,8 +6,9 @@ import { asArray, asObject, asString } from 'cleaners'
 import type { WebSocketServer } from 'ws'
 import { readPrivate, writePrivate } from '../node/dataDir.js'
 import {
+  pairedByFile,
   pairingKey,
-  parsePairingKey,
+  pairingSecret,
   spendPairingKey,
   type Identity,
 } from '../node/identity.js'
@@ -42,10 +43,19 @@ export class Pairing {
     return existsSync(this.file('removed'))
   }
   /** The pairing key to print, or undefined when paired or removed. */
+  /** The pairing key to print; none for a machine paired by its master's pairing file. */
   key(): string | undefined {
-    return this.master() != null || this.removed()
+    return this.master() != null ||
+      this.removed() ||
+      pairedByFile(this.identity)
       ? undefined
       : pairingKey(this.identity)
+  }
+  /** The secret a master must prove, until the node is paired. */
+  secret(): string | undefined {
+    return this.master() != null || this.removed()
+      ? undefined
+      : pairingSecret(this.identity)
   }
   assignment(): Assignment | undefined {
     return existsSync(this.file('assigned.json'))
@@ -115,7 +125,7 @@ export function serveNodeLinks(
       return
     }
     const paired = pairing.master()
-    let pairingSecret: string | undefined
+    let proof: string | undefined
     void handshake(wire, {
       identity: pairing.identity,
       role: options.role,
@@ -139,16 +149,13 @@ export function serveNodeLinks(
             throw new HandshakeRefused('Not this node’s master')
           return
         }
-        const key = pairing.key()
-        if (key == null) throw new HandshakeRefused('Not pairable')
-        pairingSecret = parsePairingKey(key).secret
+        const secret = pairing.secret()
+        if (secret == null) throw new HandshakeRefused('Not pairable')
+        proof = secret
       },
       checkPairing(mac, masterTranscript) {
         if (paired != null) return
-        if (
-          pairingSecret == null ||
-          !checkMac(pairingSecret, mac, masterTranscript)
-        )
+        if (proof == null || !checkMac(proof, mac, masterTranscript))
           throw new HandshakeRefused('Pairing refused')
       },
     }).then(

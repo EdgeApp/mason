@@ -13,7 +13,7 @@ import {
 import { existsSync, rmSync } from 'node:fs'
 import { hostname } from 'node:os'
 import path from 'node:path'
-import { asObject, asString } from 'cleaners'
+import { asObject, asOptional, asString } from 'cleaners'
 import {
   certificateHash,
   createCertificate,
@@ -106,7 +106,12 @@ export function loadIdentity(
   }
 }
 
-const asPairing = asObject({ nonce: asString, secretHash: asString })
+const asPairing = asObject({
+  nonce: asString,
+  secretHash: asString,
+  /** Set when a master's pairing file supplied the secret. */
+  secret: asOptional(asString),
+})
 
 /**
  * The secret is derived from the node's private key and a stored nonce, so
@@ -142,6 +147,27 @@ export function pairingKey(identity: Identity): string {
   return `${PAIRING_PREFIX}${identity.fingerprint}.${identity.certificateHash}.${secretFor(identity, nonce)}`
 }
 
+/**
+ * The secret a pairing proves: the one a master's pairing file supplied, or
+ * the one this node derives and prints in its pairing key.
+ */
+export function pairingSecret(identity: Identity): string {
+  const file = path.join(identity.dir, files.pairing)
+  if (existsSync(file)) {
+    const stored = asPairing(JSON.parse(readPrivate(file)))
+    if (stored.secret != null) return stored.secret
+  }
+  return parsePairingKey(pairingKey(identity)).secret
+}
+
+/** Whether the pairing secret came from a master's pairing file, so no key is printed. */
+export function pairedByFile(identity: Identity): boolean {
+  const file = path.join(identity.dir, files.pairing)
+  return (
+    existsSync(file) && asPairing(JSON.parse(readPrivate(file))).secret != null
+  )
+}
+
 /** Checks a pairing secret against the stored hash. */
 export function checkPairingSecret(
   identity: Identity,
@@ -155,6 +181,54 @@ export function checkPairingSecret(
   )
   const offered = Buffer.from(hashSecret(secret), 'hex')
   return stored.length === offered.length && timingSafeEqual(stored, offered)
+}
+
+/** What a master puts on a cloud machine at first boot: its TLS certificate and key, and a one-time secret. */
+export const asPairingFile = asObject({
+  cert: asString,
+  key: asString,
+  secret: asString,
+})
+export type PairingFile = ReturnType<typeof asPairingFile>
+
+/** The pairing material's file inside a data directory, until the node first starts. */
+export const PAIRING_FILE = 'pairing-file.json'
+
+/** Checks pairing material: a certificate matching its key, and a 43-character secret. */
+export function readPairingFile(text: string): PairingFile {
+  const file = asPairingFile(JSON.parse(text))
+  if (
+    !new X509Certificate(file.cert).checkPrivateKey(createPrivateKey(file.key))
+  )
+    throw new Error('The pairing file’s certificate does not match its key')
+  if (!/^[A-Za-z0-9_-]{43}$/.test(file.secret))
+    throw new Error('The pairing file’s secret is invalid')
+  return file
+}
+
+/**
+ * Applies a master-made pairing file: the node keeps its own new ML-DSA
+ * identity, takes the master's certificate (which the master pins when it
+ * dials), and waits for the one-time secret. The file is deleted. Like
+ * `--new-key`, it ends any earlier pairing: a machine restored from a
+ * snapshot carries its predecessor's removal.
+ */
+export function applyPairingFile(dir: string, file: string): void {
+  const pairing = readPairingFile(readPrivate(file))
+  for (const name of ['removed', 'master.json', 'assigned.json'])
+    rmSync(path.join(dir, name), { force: true })
+  loadIdentity(dir, { renew: true })
+  writePrivate(path.join(dir, files.cert), pairing.cert)
+  writePrivate(path.join(dir, files.key), pairing.key)
+  writePrivate(
+    path.join(dir, files.pairing),
+    JSON.stringify({
+      nonce: 'pairing-file',
+      secretHash: hashSecret(pairing.secret),
+      secret: pairing.secret,
+    }),
+  )
+  rmSync(file, { force: true })
 }
 
 /** Spends the pairing key once the node is paired. */

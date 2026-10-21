@@ -22,10 +22,12 @@ import {
   writePrivate,
 } from './dataDir.js'
 import {
+  applyPairingFile,
   clearSetupCode,
   fingerprint,
   loadIdentity,
   newSetupCode,
+  PAIRING_FILE,
   type Identity,
 } from './identity.js'
 import { certificateHash, publicKeyPin } from './certificate.js'
@@ -78,6 +80,7 @@ export interface NodeOptions {
     | 'graceMs'
     | 'stashLimit'
     | 'appleEndpoints'
+    | 'cloud'
     | 'now'
   >
   pollMs?: number
@@ -270,6 +273,10 @@ export async function startNode(
   }
   try {
     claimRole(dir, options.role)
+    // A cloud machine's first start takes the pairing material its master made.
+    const pairingFile = path.join(dir, PAIRING_FILE)
+    if (options.role === 'worker' && existsSync(pairingFile))
+      applyPairingFile(dir, pairingFile)
     const identity = loadIdentity(dir, { renew: options.newKey === true })
     const databases = new Map<string, DatabaseSync>()
     for (const name of databaseFiles(options.role, options.coWorker)) {
@@ -594,6 +601,8 @@ export async function startNode(
       if (pairing.removed())
         log('Removed by its master; start with --new-key to pair it again.')
       else if (paired != null) log(`Paired with master ${paired.fingerprint}`)
+      else if (pairing.key() == null)
+        log('Waiting for the master that made this machine’s pairing file')
       else log(`Pairing key: ${pairing.key()!}`)
     }
     return {

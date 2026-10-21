@@ -122,6 +122,11 @@ export interface SchedulerOptions {
   appleXcodes?: () => AppleXcode[]
   /** Manual steps on the master that block nodes (the Apple ID code). */
   masterChecklist?: () => ChecklistItem[]
+  /** Cloud pools: a machine for a type no free node serves, and machines that are retiring. */
+  cloud?: {
+    demand(type: string): string | undefined
+    draining(fingerprint: string): boolean
+  }
 }
 
 /** A stage needs an Xcode when it has an `apple` option or asks for macOS. */
@@ -984,6 +989,7 @@ export class Scheduler {
       const inventory = this.inventory(node.fingerprint)
       if (link == null || inventory == null || inventory.quarantine != null)
         continue
+      if (this.options.cloud?.draining(node.fingerprint) === true) continue
       const load = Number(
         (
           this.db
@@ -1453,6 +1459,20 @@ export class Scheduler {
           this.neverLaunches(stage) ??
             `No connected node for this stage has or can install an Xcode matching ${stage.tools?.xcode ?? 'its node type’s default'}`,
         )
+      else {
+        // A type backed by a cloud pool starts a machine; the stage shows why it waits.
+        const type = typeof stage.on === 'string' ? stage.on : stage.on?.type
+        const reason =
+          type == null ? undefined : this.options.cloud?.demand(type)
+        if (reason != null && this.stage(id, stage.name)?.reason !== reason) {
+          this.db
+            .prepare(
+              "UPDATE job_stages SET reason=? WHERE job_id=? AND name=? AND status='queued'",
+            )
+            .run(reason, id, stage.name)
+          this.options.master.change('job', id)
+        }
+      }
       return
     }
     if (!this.locks(job, stage)) return

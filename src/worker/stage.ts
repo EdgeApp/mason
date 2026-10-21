@@ -6,6 +6,7 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -596,6 +597,53 @@ export class WorkerRuntime {
     }
   }
 
+  /**
+   * Before a cloud machine is snapshotted: removes its identity, pairing,
+   * stage directories and Mason keychains, keeps its tools and caches, takes
+   * no further stage, and reports anything that would not go.
+   */
+  scrub(): { removed: string[]; remaining: string[] } {
+    this.stopped = true
+    for (const controller of this.controllers.values())
+      controller.abort(new Error('The machine is retiring'))
+    const targets = [
+      ...[
+        'identity.key',
+        'identity.pub',
+        'tls.crt',
+        'tls.key',
+        'pairing.json',
+        'pairing-file.json',
+        'master.json',
+        'assigned.json',
+      ].map((name) => this.path(name)),
+      ...['checkouts', 'workspaces', 'sources', 'tmp', 'logs', 'keychains'].map(
+        (name) => this.path(name),
+      ),
+    ]
+    const keychains = path.join(
+      process.env.HOME ?? '/nonexistent',
+      'Library',
+      'Keychains',
+    )
+    if (existsSync(keychains))
+      for (const name of readdirSync(keychains))
+        if (/^mason-.*\.keychain(-db)?$/.test(name))
+          targets.push(path.join(keychains, name))
+    const removed: string[] = []
+    for (const target of targets) {
+      if (!existsSync(target)) continue
+      rmSync(target, { recursive: true, force: true })
+      removed.push(path.basename(target))
+    }
+    return {
+      removed,
+      remaining: targets
+        .filter((target) => existsSync(target))
+        .map((target) => path.basename(target)),
+    }
+  }
+
   /** Clears the quarantine after an operator checked the node (`mason recover`). */
   recover(): void {
     this.journal.setQuarantine(undefined)
@@ -650,6 +698,8 @@ export class WorkerRuntime {
         'setup.run': (params) => this.accept(params as SetupAssignment),
         'stage.run': (params) => this.accept(params as StageAssignment),
         'tools.install': async (params) => await this.installTool(params),
+        'node.scrub': (): { removed: string[]; remaining: string[] } =>
+          this.scrub(),
         'node.reconcile': (params): { started: true } => {
           const type = (params as { type?: NodeType }).type
           void this.reconcileType(type)

@@ -8,6 +8,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import path from 'node:path'
+import { PAIRING_FILE } from './identity.js'
 import type { Role } from './serve.js'
 
 /** What service installation needs from the operating system. */
@@ -48,6 +49,8 @@ export interface ServiceRequest {
   program: string[]
   /** Options passed on to the service (`--port`, `--link-port`, …). */
   args: string[]
+  /** A cloud machine's pairing file's content, written owner-only into the data directory. */
+  pairingFile?: string
 }
 
 export interface ServiceInstall {
@@ -124,6 +127,14 @@ export function installService(
   const owner = { uid: user.uid, gid: user.gid }
   const data = path.resolve(request.data ?? path.join(user.home, '.mason'))
   system.makeDirectory(data, owner, 0o700)
+  // A cloud machine's pairing material is in place before the service first starts.
+  if (request.pairingFile != null)
+    system.writeFile(
+      path.join(data, PAIRING_FILE),
+      request.pairingFile,
+      owner,
+      0o600,
+    )
   const label = serviceLabel(request.role)
   const command = [
     ...request.program,
@@ -175,6 +186,9 @@ Environment=HOME=${systemdWord(user.home)}
 ExecStart=${command.map(systemdWord).join(' ')}
 Restart=always
 RestartSec=5
+# A stage's process killed for memory fails that stage; the default (stop)
+# would stop the whole service and cancel every stage on it.
+OOMPolicy=continue
 UMask=0077
 
 [Install]

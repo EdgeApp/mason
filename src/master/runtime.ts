@@ -39,6 +39,12 @@ import {
   storedNodeType,
 } from './nodeTypes.js'
 import { RuntimeStore } from './runtimes.js'
+import {
+  cloudArea,
+  Pools,
+  type CloudSetting,
+  type PoolsOptions,
+} from './cloud/pools.js'
 import { Changes } from './changes.js'
 import { HostLinks } from './hosts.js'
 import { hostArea, hostProjection, signInArea } from './hostSettings.js'
@@ -72,6 +78,16 @@ export interface MasterOptions {
   now?: () => number
   /** Apple's sign-in and download hosts; a fake Apple in tests. */
   appleEndpoints?: AppleEndpoints
+  /** Cloud pool internals for tests: the provider, the master's address, timings. */
+  cloud?: Pick<
+    PoolsOptions,
+    | 'provider'
+    | 'publicAddress'
+    | 'tickMs'
+    | 'pairTimeoutMs'
+    | 'linkPort'
+    | 'log'
+  >
 }
 
 /** Merges two method tables; the first wins on a clash. */
@@ -105,6 +121,7 @@ export class Master {
   readonly nodeStates: NodeStates
   readonly changes: Changes
   readonly hosts: HostLinks
+  readonly pools: Pools
   private stopped = false
   private compaction: NodeJS.Timeout | undefined
   constructor(
@@ -210,6 +227,10 @@ export class Master {
       appleXcodes: (): AppleXcode[] => this.apple.cachedXcodes(),
       masterChecklist: (): ChecklistItem[] =>
         masterChecklist(this.apple.status(), this.nodeStates.wantsXcode()),
+      cloud: {
+        demand: (type): string | undefined => this.pools.demand(type),
+        draining: (fingerprint): boolean => this.pools.draining(fingerprint),
+      },
     })
     this.nodeStates = new NodeStates({
       registry: this.registry,
@@ -240,6 +261,7 @@ export class Master {
     })
     this.settings.register('apple', { validate: appleSetting })
     this.settings.register('host', hostArea)
+    this.settings.register('cloud', cloudArea)
     this.settings.register('signIn', signInArea)
     this.releases = new Releases(
       this.database,
@@ -261,6 +283,31 @@ export class Master {
           origin?: string
           workerOrigin?: string
         },
+    })
+    this.pools = new Pools({
+      master: this.database,
+      registry: this.registry,
+      setting: (): CloudSetting | undefined =>
+        this.settings.value('cloud') as CloudSetting | undefined,
+      busy: (fingerprint): boolean => this.scheduler.busy(fingerprint),
+      release: (): string | undefined => this.releases.current(),
+      releasePlatforms: (version: string): string[] =>
+        this.releases.platforms(version),
+      hostOrigin: (): string | undefined => {
+        const host = (this.settings.value('host') ?? {}) as {
+          origin?: string
+          workerOrigin?: string
+        }
+        return host.workerOrigin ?? host.origin
+      },
+      publicAddress: async (): Promise<string | undefined> => {
+        const response = await fetch('https://api.ipify.org', {
+          signal: AbortSignal.timeout(10_000),
+        })
+        return response.ok ? (await response.text()).trim() : undefined
+      },
+      log: (line): void => console.log(line),
+      ...options.cloud,
     })
     this.updates = new Updates(
       this.registry,
@@ -298,6 +345,7 @@ export class Master {
     this.retention.start()
     this.updates.start()
     this.hosts.start()
+    this.pools.start()
     // The change log keeps seven days; a host further behind gets a snapshot.
     this.compaction = setInterval(
       () => {
@@ -318,6 +366,7 @@ export class Master {
     this.retention.stop()
     this.updates.stop()
     this.hosts.stop()
+    await this.pools.stop()
     clearInterval(this.compaction)
     this.apple.stop()
     await this.poller.close()
@@ -363,7 +412,11 @@ export class Master {
   /** What needs a person on the master: the Apple ID code, for `mason status` and the dashboard. */
   notices(): string[] {
     const apple = this.apple.status()
-    return apple.notice == null ? [] : [apple.notice]
+    const cloud = this.pools.notice()
+    return [
+      ...(apple.notice == null ? [] : [apple.notice]),
+      ...(cloud == null ? [] : [cloud]),
+    ]
   }
 
   /** Signs the Apple ID in; Apple usually asks for a two-factor code next. */
@@ -572,6 +625,7 @@ export class Master {
         return null
       },
       'runtimes.list': () => this.runtimes.list(),
+      'cloud.status': () => this.pools.view(),
       'nodes.remove': (args): null => {
         this.registry.remove(String(args.fingerprint ?? ''))
         return null
