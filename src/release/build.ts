@@ -204,9 +204,10 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
           .relative(path.join(options.repo, 'lib'), source)
           .split(path.sep)[0] !== 'test',
     })
+    // Apple's Profile Service roots, which hosts verify device callbacks against.
     mkdirSync(path.join(root, 'src', 'devices'), { recursive: true })
     for (const name of readdirSync(path.join(options.repo, 'src', 'devices')))
-      if (name.endsWith('.rb'))
+      if (name.endsWith('.pem'))
         copyFileSync(
           path.join(options.repo, 'src', 'devices', name),
           path.join(root, 'src', 'devices', name),

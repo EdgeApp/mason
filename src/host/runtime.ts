@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -18,6 +19,7 @@ import { HostCache } from './cache.js'
 import { Outbox } from './outbox.js'
 import { Webhooks } from './webhooks.js'
 import { HostArtifacts, HostObjects } from './artifacts.js'
+import type { DeviceRelay } from '../devices/store.js'
 
 export interface HostOptions {
   dir: string
@@ -31,6 +33,8 @@ export interface HostOptions {
   masterKey?: () => KeyObject | undefined
   /** How S3 requests are made; tests reach a fake S3. */
   storageFetch?: typeof fetch
+  /** Whether the host runs with `--test-endpoints`: only then may an extra Profile Service root be trusted. */
+  testEndpoints?: boolean
 }
 
 const sha256File = async (file: string): Promise<string> => {
@@ -47,6 +51,8 @@ export class HostRuntime {
   readonly cache: HostCache
   readonly accounts: Accounts
   readonly outbox: Outbox
+  /** Device registrations and preparation requests, sent to the master. */
+  readonly devices: DeviceRelay
   readonly webhooks: Webhooks
   readonly objects: HostObjects
   readonly artifacts: HostArtifacts
@@ -73,6 +79,13 @@ export class HostRuntime {
       options.storageFetch,
     )
     this.cache.store.objects = this.objects
+    this.devices = {
+      enqueue: (kind, payload): void => {
+        this.outbox.enqueue(kind, payload)
+        void this.outbox.flush(this.options.link())
+      },
+    }
+    this.trustRoots()
     this.artifacts = new HostArtifacts({
       cache: this.cache,
       objects: this.objects,
@@ -132,6 +145,49 @@ export class HostRuntime {
         providers: new Providers(origin, methods, this.options.transport),
       }
     return this.providerCache.providers
+  }
+
+  private get extraRootFile(): string {
+    return path.join(this.options.dir, 'device-trust-extra.pem')
+  }
+
+  /**
+   * Device callbacks verify against Apple's Profile Service roots, plus an
+   * extra root only when the host runs with `--test-endpoints`; a stored
+   * extra root is otherwise ignored with a warning.
+   */
+  private trustRoots(): void {
+    const apple = readFileSync(
+      new URL('../../src/devices/apple-roots.pem', import.meta.url),
+      'utf8',
+    )
+    let extra = ''
+    if (existsSync(this.extraRootFile)) {
+      if (this.options.testEndpoints === true)
+        extra = readFileSync(this.extraRootFile, 'utf8')
+      else
+        this.options.log?.(
+          'Ignoring the extra Profile Service trust root: this host was not started with --test-endpoints',
+        )
+    }
+    const file = path.join(this.options.dir, 'device-trust.pem')
+    writeFileSync(file, apple.trimEnd() + '\n' + extra, { mode: 0o600 })
+    ;(this.cache.store.config as { devices?: unknown }).devices = {
+      trustStoreFile: file,
+      openssl: 'openssl',
+    }
+  }
+
+  /** Trusts one more Profile Service root (a test fixture's); refused without `--test-endpoints`. */
+  setTrustRoot(pem: string): void {
+    if (this.options.testEndpoints !== true)
+      throw new Error(
+        'An extra Profile Service trust root can only be set on a host started with --test-endpoints (400)',
+      )
+    if (!/-----BEGIN CERTIFICATE-----/.test(pem))
+      throw new Error('The trust root is a PEM certificate')
+    writeFileSync(this.extraRootFile, pem, { mode: 0o600 })
+    this.trustRoots()
   }
 
   start(): void {

@@ -1,14 +1,9 @@
 import { backfillDevices } from './devices/backfill.js'
-import {
-  runDeviceWorker,
-  asWorkerConfig,
-  DeviceWorker,
-} from './devices/worker.js'
 import { builderCommand } from './builder/cli.js'
 import { keyCommand } from './upload/keyCli.js'
 import { realpathSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
-import { loadConfig, readPrivateJson } from './config.js'
+import { loadConfig } from './config.js'
 import { serve } from './server.js'
 import { Accounts } from './auth/accounts.js'
 import { rewriteTeamStationSubjects } from './auth/rewriteTeamStationSubjects.js'
@@ -133,36 +128,12 @@ if (
 ) {
   try {
     if (
-      process.argv[2] === 'devices-bootstrap' &&
-      process.argv[3] === '--config' &&
-      process.argv.length === 5
-    ) {
-      const worker = new DeviceWorker(
-        asWorkerConfig(readPrivateJson(process.argv[4]!)),
-      )
-      void worker
-        .bootstrap()
-        .finally(() => worker.close())
-        .catch(() => {
-          console.error('Mason signing profile preparation failed')
-          process.exitCode = 1
-        })
-    } else if (
       process.argv[2] === 'devices-inspect' &&
       process.argv[3] === '--config' &&
       process.argv.length === 5
     ) {
       void backfillDevices(process.argv[4]!).catch(() => {
         console.error('Mason device metadata inspection failed')
-        process.exitCode = 1
-      })
-    } else if (
-      process.argv[2] === 'devices-worker' &&
-      process.argv[3] === '--config' &&
-      process.argv.length === 5
-    ) {
-      void runDeviceWorker(process.argv[4]!).catch(() => {
-        console.error('Mason device worker failed; check private settings')
         process.exitCode = 1
       })
     } else if (process.argv[2] === 'builder') {

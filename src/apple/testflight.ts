@@ -195,63 +195,75 @@ export class TestFlight {
     if (state === 'failed')
       return { state: 'failed', error: String(row.result) }
     if (state === 'uploading') return { state: 'uploading' }
-    const api = this.api(String(row.team_id))
-    const options = JSON.parse(String(row.options)) as TestflightOptions & {
-      version: string
-      buildNumber: string
-    }
-    let build = row.build_id == null ? undefined : String(row.build_id)
-    if (build == null) {
-      const upload = await api.request<{
-        data: Resource<{
-          state?: string
-          stateDetails?: {
-            errors?: Array<{ description?: string; message?: string }>
-          }
-        }>
-      }>('GET', `/v1/buildUploads/${id}?include=build`)
-      const uploadState = upload.data.attributes.state
-      if (uploadState === 'FAILED') {
-        const errors = upload.data.attributes.stateDetails?.errors ?? []
-        return this.fail(
-          id,
-          `App Store Connect rejected the upload: ${
-            errors
-              .map((error) => error.description ?? error.message)
-              .filter(Boolean)
-              .join('; ') || 'no detail'
-          }`,
-        )
+    // A dropped connection or Apple's own outage while waiting is not the
+    // build's failure: the worker asks again shortly.
+    try {
+      const api = this.api(String(row.team_id))
+      const options = JSON.parse(String(row.options)) as TestflightOptions & {
+        version: string
+        buildNumber: string
       }
-      build = upload.data.relationships?.build?.data?.id ?? undefined
-      if (build == null) return { state: 'processing' }
+      let build = row.build_id == null ? undefined : String(row.build_id)
+      if (build == null) {
+        // Apple reports the state as `{ state, errors, warnings }`.
+        const upload = await api.request<{
+          data: Resource<{
+            state?: {
+              state?: string
+              errors?: Array<{ description?: string; message?: string }>
+            }
+          }>
+        }>('GET', `/v1/buildUploads/${id}?include=build`)
+        const uploadState = upload.data.attributes.state?.state
+        if (uploadState === 'FAILED') {
+          const errors = upload.data.attributes.state?.errors ?? []
+          return this.fail(
+            id,
+            `App Store Connect rejected the upload: ${
+              errors
+                .map((error) => error.description ?? error.message)
+                .filter(Boolean)
+                .join('; ') || 'no detail'
+            }`,
+          )
+        }
+        build = upload.data.relationships?.build?.data?.id ?? undefined
+        if (build == null) return { state: 'processing' }
+        this.db
+          .prepare('UPDATE apple_uploads SET build_id=? WHERE id=?')
+          .run(build, id)
+      }
+      if (options.waitForProcessing !== false) {
+        const detail = await api.request<{
+          data: Resource<{ processingState: string }>
+        }>('GET', `/v1/builds/${build}`)
+        const processing = detail.data.attributes.processingState
+        if (processing === 'FAILED' || processing === 'INVALID')
+          return this.fail(
+            id,
+            `App Store Connect could not process the build (${processing})`,
+          )
+        if (processing !== 'VALID') return { state: 'processing' }
+      }
+      await this.finish(api, String(row.app_id), build, options)
+      const result: TestflightResult = {
+        buildId: build,
+        version: options.version,
+        buildNumber: options.buildNumber,
+        state: options.waitForProcessing === false ? 'PROCESSING' : 'VALID',
+      }
       this.db
-        .prepare('UPDATE apple_uploads SET build_id=? WHERE id=?')
-        .run(build, id)
+        .prepare("UPDATE apple_uploads SET state='done',result=? WHERE id=?")
+        .run(JSON.stringify(result), id)
+      return { state: 'done', result }
+    } catch (error) {
+      if (
+        error instanceof TypeError ||
+        (error instanceof AppleApiError && error.status >= 500)
+      )
+        return { state: 'processing' }
+      throw error
     }
-    if (options.waitForProcessing !== false) {
-      const detail = await api.request<{
-        data: Resource<{ processingState: string }>
-      }>('GET', `/v1/builds/${build}`)
-      const processing = detail.data.attributes.processingState
-      if (processing === 'FAILED' || processing === 'INVALID')
-        return this.fail(
-          id,
-          `App Store Connect could not process the build (${processing})`,
-        )
-      if (processing !== 'VALID') return { state: 'processing' }
-    }
-    await this.finish(api, String(row.app_id), build, options)
-    const result: TestflightResult = {
-      buildId: build,
-      version: options.version,
-      buildNumber: options.buildNumber,
-      state: options.waitForProcessing === false ? 'PROCESSING' : 'VALID',
-    }
-    this.db
-      .prepare("UPDATE apple_uploads SET state='done',result=? WHERE id=?")
-      .run(JSON.stringify(result), id)
-    return { state: 'done', result }
   }
 
   private fail(id: string, error: string): TestflightStatus {
@@ -268,16 +280,23 @@ export class TestFlight {
     build: string,
     options: TestflightOptions,
   ): Promise<void> {
-    if (options.usesNonExemptEncryption != null)
-      await api.request('PATCH', `/v1/builds/${build}`, {
-        data: {
-          type: 'builds',
-          id: build,
-          attributes: {
-            usesNonExemptEncryption: options.usesNonExemptEncryption,
+    if (options.usesNonExemptEncryption != null) {
+      // Apple refuses to change an answer the app's Info.plist already gave
+      // (ITSAppUsesNonExemptEncryption).
+      const current = await api.request<{
+        data: Resource<{ usesNonExemptEncryption?: boolean | null }>
+      }>('GET', `/v1/builds/${build}?fields[builds]=usesNonExemptEncryption`)
+      if (current.data.attributes.usesNonExemptEncryption == null)
+        await api.request('PATCH', `/v1/builds/${build}`, {
+          data: {
+            type: 'builds',
+            id: build,
+            attributes: {
+              usesNonExemptEncryption: options.usesNonExemptEncryption,
+            },
           },
-        },
-      })
+        })
+    }
     if (options.whatToTest != null && options.whatToTest !== '') {
       const localizations = await api.all<{ locale: string }>(
         `/v1/builds/${build}/betaBuildLocalizations`,

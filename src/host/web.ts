@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { authRoutes, navigation, sessionContext } from '../auth/routes.js'
 import { forwardRoutes } from './forward.js'
+import { deviceCallbackRoutes, deviceRoutes } from '../devices/routes.js'
 import { installationRoutes } from '../catalog/install.js'
 import { catalogRoutes } from '../catalog/routes.js'
 import { nodeWebApp, sendPage, type WebAppContext } from '../node/webApp.js'
@@ -230,6 +231,8 @@ export function hostApp(
   })
   app.use(offlineBanner(host))
   app.use(releaseRoutes(host))
+  // The Profile Service posts a signed body, read raw before any form parser.
+  app.use(deviceCallbackRoutes(host.cache.store, host.devices))
   app.use(express.urlencoded({ extended: false, limit: '16kb' }))
   app.use(
     authRoutes(host.cache.store, () => host.providers(), host.accounts, {
@@ -237,6 +240,7 @@ export function hostApp(
       people: false,
     }),
   )
+  app.use(deviceRoutes(host.cache.store, host.accounts, host.devices))
   app.use(installationRoutes(host.cache.store, host.accounts))
   app.use(projectRoutes(host))
   app.use(catalogRoutes(host.cache.store, host.accounts))

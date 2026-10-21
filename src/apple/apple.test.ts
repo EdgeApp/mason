@@ -590,6 +590,8 @@ describe('Apple on the master', function () {
       },
     )
     apple.processingPolls = 3
+    // Apple answers 503 once while the build processes: the wait goes on.
+    apple.failStatus = 1
     const result = await testflight(distribute(dir, 1), {
       path: 'App.ipa',
       whatToTest: 'New sign-in',
@@ -598,6 +600,7 @@ describe('Apple on the master', function () {
     })
     assert.equal(result.version, '2.1.0')
     assert.equal(result.buildNumber, '421')
+    assert.equal(apple.failStatus, 0)
     assert.equal(result.state, 'VALID')
     const build = apple.builds.get(result.buildId)!
     assert.deepEqual(build.groups, ['GROUP1', 'GROUP2'])
@@ -654,6 +657,28 @@ describe('Apple on the master', function () {
     await assert.rejects(
       testflight(distribute(dir), { path: 'App.dmg' }),
       /an \.ipa or a \.pkg/,
+    )
+    // The app's Info.plist already answered export compliance: Mason leaves it.
+    apple.declaredEncryption = false
+    const patches = (): number =>
+      apple.calls.filter(
+        (call) =>
+          call.method === 'PATCH' && call.path.startsWith('/v1/builds/'),
+      ).length
+    const before = patches()
+    const declared = await testflight(distribute(dir), {
+      path: 'App.ipa',
+      groups: ['Internal'],
+      usesNonExemptEncryption: false,
+    })
+    assert.equal(patches(), before)
+    assert.deepEqual(apple.builds.get(declared.buildId)!.groups, ['GROUP1'])
+    apple.declaredEncryption = undefined
+    // Apple rejects the processed upload: the stage fails with Apple's reason.
+    apple.rejectUpload = 'Missing required icon file.'
+    await assert.rejects(
+      testflight(distribute(dir), { path: 'App.ipa', groups: ['Internal'] }),
+      /rejected the upload: Missing required icon file\./,
     )
   })
 
@@ -731,8 +756,11 @@ describe('Apple on the master', function () {
     const dir = root('notary-')
     writeFileSync(path.join(dir, 'App.dmg'), randomBytes(2048))
     execs.length = 0
+    // An outage while the submission is checked is waited out.
+    apple.failStatus = 1
     const accepted = await notarize(distribute(dir), { path: 'App.dmg' })
     assert.equal(accepted.status, 'accepted')
+    assert.equal(apple.failStatus, 0)
     const upload = apple.s3.at(-1)!
     assert.equal(upload.size, 2048)
     assert.equal(upload.headers['x-amz-security-token'], 'fake-session-token')

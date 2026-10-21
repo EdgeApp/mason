@@ -1,15 +1,14 @@
 import express, { Router } from 'express'
-import { asArray, asString } from 'cleaners'
+import { asString } from 'cleaners'
 import QRCode from 'qrcode'
-import { Accounts, sameSecret, type Session } from '../auth/accounts.js'
+import { Accounts, type Session } from '../auth/accounts.js'
 import { csrf, navigation, sessionContext } from '../auth/routes.js'
-import { readPrivateJson } from '../config.js'
 import { Store, digest } from '../store.js'
-import { asId, object, oneOf, text } from '../validation.js'
+import { asId, text } from '../validation.js'
 import { escape, page } from '../view.js'
 import { verifyCms } from './cms.js'
 import { decodePlist } from './plist.js'
-import { DEVICE_COOKIE, Devices } from './store.js'
+import { DEVICE_COOKIE, Devices, type DeviceRelay } from './store.js'
 
 const cookieOptions = {
   httpOnly: true,
@@ -26,9 +25,12 @@ const labels: Record<string, string> = {
   registered: 'Registered with Apple',
   error: 'Preparation needs attention',
 }
-export function deviceCallbackRoutes(store: Store): Router {
+export function deviceCallbackRoutes(
+  store: Store,
+  relay?: DeviceRelay,
+): Router {
   const router = Router(),
-    devices = new Devices(store)
+    devices = new Devices(store, relay)
   let active = 0
   const windows = new Map<string, { count: number; at: number }>()
   router.post(
@@ -106,9 +108,10 @@ export function deviceCallbackRoutes(store: Store): Router {
 export function deviceRoutes(
   store: Store,
   accounts = new Accounts(store),
+  relay?: DeviceRelay,
 ): Router {
   const router = Router(),
-    devices = new Devices(store)
+    devices = new Devices(store, relay)
   router.get(
     ['/devices', '/devices/complete/:token', '/devices/qr'],
     async (req, res) => {
@@ -121,7 +124,7 @@ export function deviceRoutes(
         return
       }
       const { account, session } = context
-      if (!(account.is_admin || account.is_tester)) {
+      if (!devices.allowed(account)) {
         res.status(403).send('Tester access required')
         return
       }
@@ -141,9 +144,24 @@ export function deviceRoutes(
             'SELECT device_id FROM device_challenges WHERE hash=? AND account_id=? AND expires_at>?',
           )
           .get(digest(String(req.params.token)), account.id, store.now())
+        // On a host the registration went to the master; its device row comes back by UDID.
+        const sent = devices.registration(String(req.params.token), account.id)
         const device = row?.device_id
           ? devices.list(account.id).find((d) => d.id === row.device_id)
-          : undefined
+          : sent == null
+            ? undefined
+            : devices.list(account.id).find((d) => d.udid === sent)
+        if (device == null && sent != null) {
+          res.set('Refresh', '5')
+          res.send(
+            page(
+              'Registering device',
+              '<section class="card"><p>Mason has your device and is registering it with Apple. This page updates by itself.</p></section>',
+              navigation(session, account),
+            ),
+          )
+          return
+        }
         if (device) {
           const model = device.model.replace(
             /^(iPhone|iPad|iPod)(.+)$/,
@@ -218,7 +236,7 @@ export function deviceRoutes(
     const context = sessionContext(req, accounts)
     if (
       !context ||
-      !(context.account.is_admin || context.account.is_tester) ||
+      !devices.allowed(context.account) ||
       !store.config.devices
     ) {
       res.status(403).send('Tester access required')
@@ -236,7 +254,7 @@ export function deviceRoutes(
   })
   router.post('/devices/:id/:action', (req, res) => {
     const context = sessionContext(req, accounts)
-    if (!context || !(context.account.is_admin || context.account.is_tester)) {
+    if (!context || !devices.allowed(context.account)) {
       res.status(403).send('Tester access required')
       return
     }
@@ -253,28 +271,21 @@ export function deviceRoutes(
         res.cookie(DEVICE_COOKIE, String(device.id), cookieOptions)
         break
       case 'rename':
-        store.db
-          .prepare(
-            'UPDATE account_devices SET name=? WHERE account_id=? AND device_id=?',
-          )
-          .run(text(120)(req.body.name), context.account.id, device.id)
+        devices.act(
+          context.account.id,
+          device,
+          'rename',
+          text(120)((req.body as { name?: unknown }).name),
+        )
         break
       case 'retry':
-        store.db
-          .prepare(
-            "UPDATE devices SET status='pending',message='',updated_at=? WHERE id=? AND status='error'",
-          )
-          .run(store.now(), device.id)
+        devices.act(context.account.id, device, 'retry')
         break
       case 'remove': {
         const wasSelected =
           devices.selected(context.account.id, req.headers.cookie)?.id ===
           device.id
-        store.db
-          .prepare(
-            'DELETE FROM account_devices WHERE account_id=? AND device_id=?',
-          )
-          .run(context.account.id, device.id)
+        devices.act(context.account.id, device, 'remove')
         if (wasSelected) res.clearCookie(DEVICE_COOKIE, cookieOptions)
         break
       }
@@ -293,7 +304,7 @@ export function deviceRoutes(
     const context = sessionContext(req, accounts)
     if (
       !context ||
-      !(context.account.is_admin || context.account.is_tester) ||
+      !devices.allowed(context.account) ||
       !store.config.devices
     ) {
       res.status(403).send('Tester access required')
@@ -317,87 +328,6 @@ export function deviceRoutes(
         navigation(context.session, context.account),
       ),
     )
-  })
-  return router
-}
-export function deviceWorkerRoutes(store: Store): Router {
-  const router = Router()
-  router.use(
-    '/api/device-provisioning',
-    (req, res, next) => {
-      const cfg = store.config.devices
-      if (!cfg) {
-        res.status(404).end()
-        return
-      }
-      const expected = object({ token: text(64) })(
-        readPrivateJson(cfg.workerTokenFile),
-      ).token
-      const received = (req.headers.authorization ?? '').replace(/^Bearer /, '')
-      if (
-        !req.headers.authorization?.startsWith('Bearer ') ||
-        !/^[a-f0-9]{64}$/.test(received) ||
-        !sameSecret(received, expected)
-      ) {
-        res.status(401).end()
-        return
-      }
-      next()
-    },
-    express.json({ limit: '128kb' }),
-  )
-  router.get('/api/device-provisioning', (_req, res) => {
-    const devices = store.db
-      .prepare(
-        `SELECT d.*,min(a.name) name FROM devices d JOIN account_devices a ON a.device_id=d.id JOIN accounts u ON u.id=a.account_id WHERE u.disabled=0 AND (u.is_tester=1 OR u.is_admin=1) GROUP BY d.id ORDER BY d.id`,
-      )
-      .all()
-    const requests = store.db
-      .prepare(
-        `SELECT r.id,r.device_id,r.status,b.branch,b.commit_hash,a.slug app FROM device_build_requests r JOIN builds b ON b.id=r.build_id JOIN apps a ON a.id=b.app_id JOIN accounts u ON u.id=r.account_id JOIN account_devices ad ON ad.account_id=r.account_id AND ad.device_id=r.device_id WHERE u.disabled=0 AND (u.is_tester=1 OR u.is_admin=1) AND r.status='pending'`,
-      )
-      .all()
-    res.json({ devices, requests })
-  })
-  router.post('/api/device-provisioning', (req, res) => {
-    const report = object({
-      devices: asArray(
-        object({
-          id: asId,
-          status: oneOf([
-            'pending',
-            'processing',
-            'registered',
-            'error',
-          ] as const),
-          message: text(500, 0),
-        }),
-      ),
-      requests: asArray(
-        object({
-          id: asId,
-          status: oneOf(['pending', 'queued', 'error'] as const),
-          message: text(500, 0),
-        }),
-      ),
-    })(req.body)
-    if (report.devices.length > 500 || report.requests.length > 500)
-      throw new Error('Report too large')
-    store.transaction(() => {
-      for (const d of report.devices)
-        store.db
-          .prepare(
-            'UPDATE devices SET status=?,message=?,updated_at=? WHERE id=?',
-          )
-          .run(d.status, d.message, store.now(), d.id)
-      for (const r of report.requests)
-        store.db
-          .prepare(
-            'UPDATE device_build_requests SET status=?,message=? WHERE id=?',
-          )
-          .run(r.status, r.message, r.id)
-    })
-    res.json({ ok: true })
   })
   return router
 }

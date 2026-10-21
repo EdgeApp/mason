@@ -602,6 +602,21 @@ describe('Host cache, sign-in and offline serving', function () {
       )
       .get() as Json
     assert.equal(device.name, 'Tess’s iPhone')
+    // The prepare request became a job pinned to build 100's branch and commit;
+    // it is removed so later cases start with no waiting job.
+    const pinned = await c.until(
+      () =>
+        master.database.db
+          .prepare(
+            'SELECT r.status,j.id,j.requested_commit,b.commit_hash FROM device_build_requests r JOIN jobs j ON j.id=r.message JOIN builds b ON b.id=r.build_id WHERE r.build_id=100',
+          )
+          .get() as Json,
+      10_000,
+      'the pinned job',
+    )
+    assert.equal(pinned.status, 'queued')
+    assert.equal(pinned.requested_commit, pinned.commit_hash)
+    master.database.db.prepare('DELETE FROM jobs WHERE id=?').run(pinned.id)
     // The device reaches the host's cache through the change log.
     await c.until(
       () =>

@@ -1205,11 +1205,7 @@ describe('Configuration-free nodes', function () {
       return { code, out, err }
     }
     const missing = path.join(root, 'missing.json')
-    for (const command of [
-      'devices-bootstrap',
-      'devices-inspect',
-      'devices-worker',
-    ]) {
+    for (const command of ['devices-inspect']) {
       const result = await runCli([command, '--config', missing])
       assert.equal(result.code, 1)
       assert.match(result.err, /failed/)

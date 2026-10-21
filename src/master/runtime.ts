@@ -8,6 +8,7 @@ import { MasterKeys } from './keys.js'
 import { MasterAuth } from './auth.js'
 import { Forwarder } from './forward.js'
 import { People } from './people.js'
+import { Provisioning } from './provisioning.js'
 import type { StageSigning } from '../pipeline/assignment.js'
 import { appleArea, AppleService } from '../apple/service.js'
 import { execFile } from 'node:child_process'
@@ -150,6 +151,8 @@ export class Master {
   readonly apple: AppleDownloads
   /** Signing, profiles, TestFlight and notarization through App Store Connect. */
   readonly appleSigning: AppleService
+  /** Devices and prepare requests from the host, provisioned with Apple. */
+  readonly provisioning: Provisioning
   readonly runtimes: RuntimeStore
   readonly nodeStates: NodeStates
   readonly changes: Changes
@@ -395,6 +398,9 @@ export class Master {
       releases: this.releases,
       artifacts: this.artifacts,
       privateKey: identity.privateKey,
+      onDevices: (): void => {
+        if (!this.stopped) void this.provisioning.poke()
+      },
       forward: async (params, stream): Promise<void> => {
         await this.forwarder.forward(params, stream)
       },
@@ -403,6 +409,14 @@ export class Master {
           origin?: string
           workerOrigin?: string
         },
+    })
+    this.provisioning = new Provisioning({
+      master: this.database,
+      apple: this.appleSigning,
+      projects: this.projects,
+      jobs: this.jobs,
+      scheduler: this.scheduler,
+      log: (line): void => (this.options.log ?? console.log)(line),
     })
     this.pools = new Pools({
       master: this.database,
@@ -490,6 +504,7 @@ export class Master {
       60 * 60 * 1000,
     )
     this.backupTimer.unref()
+    this.provisioning.start()
     this.apple.start()
     for (const warning of this.appleSigning.startupWarnings())
       (this.options.log ?? console.log)(warning)
@@ -532,6 +547,7 @@ export class Master {
     await this.pools.stop()
     clearInterval(this.compaction)
     clearInterval(this.backupTimer)
+    this.provisioning.stop()
     this.apple.stop()
     await this.poller.close()
     await this.scheduler.stop()

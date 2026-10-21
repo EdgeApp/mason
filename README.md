@@ -230,43 +230,22 @@ Enable registration in the private distribution configuration:
 
 ```json
 "devices": {
-  "workerTokenFile": "/private/mason/device-worker-key.json",
   "trustStoreFile": "/srv/mason/src/devices/apple-roots.pem",
   "openssl": "openssl"
 }
 ```
 
-The owner-only worker key file contains `{"token":"<64 random hex digits>"}`.
-Use a separate random key for this worker, not an upload or builder API key.
-`GET` and `POST /api/device-provisioning` require that Bearer key. They are for
-one trusted provisioning worker, not browser access. The provided Apple root
-certificates are public certificates from Apple's PKI website.
+The provided Apple root certificates are public certificates from Apple's PKI
+website.
 
-On the signing Mac, run `node lib/cli.js devices-worker --config <private file>`.
-Its owner-only configuration contains `origin`, `tokenFile`,
-`builderConfigFile`, `stateDirectory`, `bundle`, `gemfile`, `bundlePath`, optional
-`ruby`, and `apple: {teamId, certificateId, loginFile}`. `apple.apiKeyFile` can
-replace the saved Apple login/session file. These credentials must be permitted
-to register devices and create provisioning profiles. A saved Apple login can
-expire and require renewed authentication; API keys are preferable for long-term
-unattended operation.
-
-The worker polls over HTTPS every 30 seconds. It registers the device, creates
-new ad hoc profiles using the existing distribution certificate and enabled
-Apple devices, and keeps the fresh profiles in a private local cache. It does
-not revoke certificates or commit to application/signing repositories. An
-immutable Mason-owned bundle shim supplies the profiles to the existing build
-adapter after read-only Match imports its certificate. Mason's stored app
-settings are updated; branch origins, secrets and other app settings remain
-intact. Apple processing delays and credential/quota failures remain visible.
-
-A registration queues iOS-only builds of configured default branches even if
-Git has not changed. Preparation jobs pin their commit, persist their batch and
-idempotency keys, and allow at most two retries after the initial attempt. They
-do not consume or reset the source-change automatic-build budget. Multiple
-pending devices are handled together. Existing queued jobs retain their original
-configuration snapshot. Historical packages remain immutable: **Prepare for
-this device** queues a new build of that package's exact branch and commit.
+In a Mason cluster the host serves registration and sends each device to the
+master through its outbox. The master registers the device with Apple through
+its App Store Connect key, replaces the development and ad hoc profiles of
+every iOS app ID with the full list of enabled devices (the new profile is
+made before the old one is deleted), and queues iOS builds of each project's
+automatic branches; no worker and no Apple credential outside the master is
+involved. **Prepare for this device** queues a new build of that package's
+exact branch and commit.
 
 Mason verifies and records device membership and expiry from each uploaded
 IPA's embedded Apple-signed ad hoc profile, including the app identifier.
@@ -274,8 +253,7 @@ Installation grants are bound to the selected account-owned device and checked
 again at manifest/artifact download. Unregistered, incompatible and expired
 profiles are never presented as ready. Android and desktop downloads keep their
 existing behavior. `devices-inspect --config <distribution config>` backfills
-retained IPAs. `devices-bootstrap --config <worker config>` verifies Apple
-credentials and prepares the existing device set before starting the daemon.
+retained IPAs.
 
 Apple's annual device allowance still applies. Removing an account association
 does not disable the device at Apple, recover a device slot, or revoke downloaded

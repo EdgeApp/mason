@@ -135,6 +135,7 @@ const usage = `Usage:
   mason api <GET|POST|PUT|DELETE> <path> [--file <json>] [--key-file <file>] [--url <origin>] [--pin <pin>]
   mason import --distribution <db> --builder <db> [--data <dir>]
   mason host import --distribution <db> [--storage <dir>] [--data <dir>]
+  mason host trust-root --file <pem> [--data <dir>]   a test Profile Service root (--test-endpoints only)
   mason keys create --role <role> [--name <n>] [--project <slug>]… [--branch <glob>]… [--app <id>]… --out <file>
   mason keys list | mason keys revoke <id>
   mason settings get <area> | mason settings set <area> --file <json>
@@ -893,6 +894,23 @@ export async function nodeMain(
     }
     if (first == null || first.startsWith('--'))
       return await roleCommand('master', argv, io)
+    if (first === 'host' && rest[0] === 'trust-root') {
+      const args = parseArgs(rest.slice(1), ['--data', '--file'], [])
+      const file = single(args, '--file')
+      if (file == null || args.positional.length !== 0)
+        throw new Error(
+          'Usage: mason host trust-root --file <pem> [--data <dir>]',
+        )
+      await controlRequest(
+        resolveDataDir(single(args, '--data')),
+        'devices.trustRoot',
+        {
+          pem: readFileSync(file, 'utf8'),
+        },
+      )
+      io.out('The host now also trusts that Profile Service root')
+      return 0
+    }
     if (first === 'host' && rest[0] === 'import') {
       const args = parseArgs(
         rest.slice(1),

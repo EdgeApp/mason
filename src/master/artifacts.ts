@@ -277,6 +277,7 @@ export class Artifacts {
     fileKey: string
     changelog?: string
     metadata?: Record<string, unknown>
+    provisioning?: unknown
   }): Build {
     return this.options.master.transaction(() => {
       const reservation = this.db
@@ -351,9 +352,37 @@ export class Artifacts {
           'UPDATE build_reservations SET build_id=?,staged_at=COALESCE(staged_at,?) WHERE id=?',
         )
         .run(build.id, now, reservation.id)
+      this.recordProvisioning(build, payload.provisioning)
       this.options.master.change('build', build.id)
       return build
     })
+  }
+
+  /** An ad hoc IPA's devices and expiry, as the host read them from its embedded profile. */
+  private recordProvisioning(build: Build, value: unknown): void {
+    if (value == null) return
+    const p = value as {
+      devices?: unknown
+      expiresAt?: unknown
+      team?: unknown
+      appId?: unknown
+    }
+    if (
+      !Array.isArray(p.devices) ||
+      !p.devices.every(
+        (device) =>
+          typeof device === 'string' && /^[A-F0-9-]{20,40}$/.test(device),
+      ) ||
+      !Number.isSafeInteger(p.expiresAt) ||
+      typeof p.team !== 'string' ||
+      p.appId !== build.bundle_id
+    )
+      throw new Error('The provisioning profile does not match the build')
+    this.db
+      .prepare(
+        'INSERT INTO build_provisioning(build_id,devices,expires_at,team) VALUES(?,?,?,?) ON CONFLICT(build_id) DO UPDATE SET devices=excluded.devices,expires_at=excluded.expires_at,team=excluded.team',
+      )
+      .run(build.id, JSON.stringify(p.devices), Number(p.expiresAt), p.team)
   }
 
   /** A Zealot-API upload the host staged: published like the standalone server, through the master. */
@@ -409,6 +438,10 @@ export class Artifacts {
           now,
           retentionDays: this.options.retentionDays(),
         })
+      this.recordProvisioning(
+        build,
+        (payload as { provisioning?: unknown }).provisioning,
+      )
       this.options.master.change('build', build.id)
       return build
     })

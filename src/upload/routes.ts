@@ -1,6 +1,7 @@
 import {
   inspectProvisioning,
   saveProvisioning,
+  type Provisioning,
 } from '../devices/provisioning.js'
 import Busboy from 'busboy'
 import { asObject } from 'cleaners'
@@ -278,13 +279,18 @@ export function uploadRoutes(store: Store, hooks?: UploadHooks): Router {
         fields.custom_fields,
       )
       const deviceConfig = store.config.devices
+      const inspect = async (): Promise<Provisioning> =>
+        await inspectProvisioning(
+          store.incomingPath(reservation!),
+          deviceConfig!.trustStoreFile,
+          deviceConfig!.openssl,
+        )
+      // A host passes an ad hoc profile's devices to the master; another IPA has none.
       const provisioning =
-        format === 'ipa' && deviceConfig != null && hooks == null
-          ? await inspectProvisioning(
-              store.incomingPath(reservation),
-              deviceConfig.trustStoreFile,
-              deviceConfig.openssl,
-            )
+        format === 'ipa' && deviceConfig != null
+          ? hooks == null
+            ? await inspect()
+            : await inspect().catch(() => undefined)
           : undefined
       if (provisioning != null && provisioning.appId !== identity.bundleId)
         throw new Error('Provisioning profile does not match uploaded app')
@@ -314,7 +320,10 @@ export function uploadRoutes(store: Store, hooks?: UploadHooks): Router {
             channel,
             keyId: keys.authenticate(fields.token, channel.app_id).id,
             file: store.incomingPath(reservation),
-            publication,
+            publication: {
+              ...publication,
+              ...(provisioning == null ? {} : { provisioning }),
+            },
           })
           store.cancel(reservation)
         } else
@@ -353,7 +362,8 @@ export function uploadRoutes(store: Store, hooks?: UploadHooks): Router {
           )
         throw error
       }
-      if (provisioning != null) saveProvisioning(store, build.id, provisioning)
+      if (provisioning != null && hooks == null)
+        saveProvisioning(store, build.id, provisioning)
       reservation = undefined
       if (hooks == null)
         try {

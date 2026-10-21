@@ -26,6 +26,7 @@ import {
 import type { StorageSetting } from '../master/hostSettings.js'
 import { digest } from '../store.js'
 import { packageIdentity } from '../upload/metadata.js'
+import { inspectProvisioning } from '../devices/provisioning.js'
 import type { UploadHooks } from '../upload/routes.js'
 import type { Build, Format } from '../validation.js'
 import type { HostCache } from './cache.js'
@@ -322,6 +323,18 @@ export class HostArtifacts {
           400,
           `The package's build number ${identity.buildNumber} is not the reserved ${expected.buildNumber}`,
         )
+      // An ad hoc IPA's devices and expiry go with it, so the host offers it only to those devices.
+      const devices = this.options.cache.store.config.devices
+      const provisioning =
+        expected.format === 'ipa' && devices != null
+          ? await inspectProvisioning(
+              staging,
+              devices.trustStoreFile,
+              devices.openssl,
+            ).catch(() => undefined)
+          : undefined
+      if (provisioning != null && provisioning.appId !== identity.bundleId)
+        throw new Refused(400, 'The provisioning profile is for another app')
       const fileKey = `${reservation}.${expected.format}`
       await this.options.objects.put(fileKey, staging, received.sha256)
       this.options.cache.db
@@ -342,6 +355,7 @@ export class HostArtifacts {
         ...(changelog == null
           ? {}
           : { changelog: decodeURIComponent(changelog) }),
+        ...(provisioning == null ? {} : { provisioning }),
       })
       const origin = this.options.cache.store.config.origin
       if (build == null) {

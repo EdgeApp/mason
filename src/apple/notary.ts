@@ -1,5 +1,5 @@
 import type { MasterDatabase } from '../master/database.js'
-import type { AppStoreConnect } from './connect.js'
+import { AppleApiError, type AppStoreConnect } from './connect.js'
 
 /** The temporary, single-submission S3 credentials Apple returns for an upload. */
 export interface NotaryUpload {
@@ -96,9 +96,21 @@ export class Notary {
       .get(id, job) as { team_id: string } | undefined
     if (row == null) throw new Error('No such notary submission for this run')
     const api = this.api(row.team_id)
-    const answer = await api.request<{
-      data: { attributes: { status: string } }
-    }>('GET', `/submissions/${encodeURIComponent(id)}`, undefined, 'notary')
+    let answer: { data: { attributes: { status: string } } }
+    try {
+      answer = await api.request<{
+        data: { attributes: { status: string } }
+      }>('GET', `/submissions/${encodeURIComponent(id)}`, undefined, 'notary')
+    } catch (error) {
+      // A dropped connection or Apple's own outage is not the submission's
+      // failure: the worker asks again shortly.
+      if (
+        error instanceof TypeError ||
+        (error instanceof AppleApiError && error.status >= 500)
+      )
+        return { status: 'in-progress' }
+      throw error
+    }
     const status = answer.data.attributes.status
     this.master.db
       .prepare('UPDATE apple_submissions SET status=? WHERE id=?')

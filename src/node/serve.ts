@@ -346,6 +346,7 @@ export async function startNode(
             dir,
             link: (): Link | undefined => hostLink(),
             log,
+            testEndpoints: options.testEndpoints === true,
             masterKey: (): KeyObject | undefined => {
               const paired = pairing?.master()
               return paired == null
@@ -603,6 +604,15 @@ export async function startNode(
       ...(master == null
         ? { pairing: () => pairing?.key() ?? null }
         : master.controlHandlers()),
+      ...(hostRuntime == null
+        ? {}
+        : {
+            // Refused unless the host runs with --test-endpoints.
+            'devices.trustRoot': (args): null => {
+              hostRuntime.setTrustRoot(String(args.pem ?? ''))
+              return null
+            },
+          }),
       ...(hostRuntime == null || !testEndpoints
         ? {}
         : {

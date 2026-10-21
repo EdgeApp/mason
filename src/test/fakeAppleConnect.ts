@@ -139,6 +139,14 @@ export class FakeAppleConnect {
   readonly s3: Array<{ path: string; headers: Doc; size: number }> = []
   /** Answers the next request with 429 this many times. */
   throttle = 0
+  /** Answers device registrations with 500 this many times. */
+  failDevices = 0
+  /** Status reads (a build, a notary submission) that answer 503 first, as during an Apple outage. */
+  failStatus = 0
+  /** Apple's reason for rejecting the next upload, as when the app has no icon. */
+  rejectUpload: string | undefined
+  /** The export-compliance answer the next build's Info.plist gives, which Apple then refuses to change. */
+  declaredEncryption: boolean | undefined
   processingPolls = 1
   profileDays = 365
   readonly team: string
@@ -373,20 +381,37 @@ export class FakeAppleConnect {
       }
     }
     // Devices and profiles.
-    if (p === '/v1/devices')
+    if (p === '/v1/devices' && method === 'POST') {
+      if (this.failDevices > 0) {
+        this.failDevices--
+        return { status: 500, json: { errors: [{ title: 'Apple is busy' }] } }
+      }
+      const item = {
+        type: 'devices',
+        id: this.id('DEVICE'),
+        attributes: { ...data!.attributes, status: 'ENABLED' },
+      }
+      this.devices.push(item)
+      return { status: 201, json: { data: item } }
+    }
+    if (p === '/v1/devices') {
+      const wanted = (field: string, value: unknown): boolean => {
+        const filter = url.searchParams.get(`filter[${field}]`)
+        return filter == null || filter === value
+      }
       return {
         status: 200,
         json: this.page(
           url,
           this.devices.filter(
             (device) =>
-              device.attributes.status ===
-                url.searchParams.get('filter[status]') &&
-              device.attributes.platform ===
-                url.searchParams.get('filter[platform]'),
+              wanted('status', device.attributes.status) &&
+              wanted('platform', device.attributes.platform) &&
+              wanted('udid', device.attributes.udid),
           ),
         ),
       }
+    }
     if (p === '/v1/profiles' && method === 'POST') {
       const id = this.id('PROFILE')
       const uuid = randomUUID().toUpperCase()
@@ -489,7 +514,10 @@ export class FakeAppleConnect {
       const upload = [...this.uploads.values()].find(
         (item) => item.file === uploadFile[1],
       )!
-      upload.attributes.state = 'PROCESSING'
+      upload.attributes.state =
+        this.rejectUpload == null ? 'PROCESSING' : 'FAILED'
+      upload.errors = this.rejectUpload
+      this.rejectUpload = undefined
       return {
         status: 200,
         json: {
@@ -511,6 +539,9 @@ export class FakeAppleConnect {
           id: build,
           attributes: {
             processingState: 'PROCESSING',
+            ...(this.declaredEncryption == null
+              ? {}
+              : { usesNonExemptEncryption: this.declaredEncryption }),
             version: upload.attributes.cfBundleVersion,
           },
           polls: 0,
@@ -525,7 +556,16 @@ export class FakeAppleConnect {
           data: {
             type: 'buildUploads',
             id: upload.id,
-            attributes: { state: upload.attributes.state },
+            attributes: {
+              state: {
+                state: upload.attributes.state,
+                errors:
+                  upload.errors == null
+                    ? []
+                    : [{ code: '90022', description: upload.errors }],
+                warnings: [],
+              },
+            },
             relationships: {
               build: {
                 data:
@@ -539,9 +579,27 @@ export class FakeAppleConnect {
       }
     }
     const buildRead = /^\/v1\/builds\/([^/]+)$/.exec(p)
+    if (buildRead != null && method === 'GET' && this.failStatus > 0) {
+      this.failStatus--
+      return { status: 503, json: { errors: [{ title: 'Apple is busy' }] } }
+    }
     if (buildRead != null) {
       const build = this.builds.get(buildRead[1]!)!
       if (method === 'PATCH') {
+        if (
+          'usesNonExemptEncryption' in data!.attributes &&
+          build.attributes.usesNonExemptEncryption != null
+        )
+          return {
+            status: 409,
+            json: {
+              errors: [
+                {
+                  title: 'You cannot update when the value is already set.',
+                },
+              ],
+            },
+          }
         Object.assign(build.attributes, data!.attributes)
         return { status: 200, json: { data: build } }
       }
@@ -660,6 +718,10 @@ export class FakeAppleConnect {
             },
           },
         }
+      if (this.failStatus > 0) {
+        this.failStatus--
+        return { status: 503, json: { errors: [{ title: 'Apple is busy' }] } }
+      }
       if (++entry.polls >= 2)
         entry.status = /rejected/.test(entry.name) ? 'Invalid' : 'Accepted'
       return {

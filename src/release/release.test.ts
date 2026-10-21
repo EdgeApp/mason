@@ -326,7 +326,7 @@ describe('Releases, install.sh and updates', function () {
       'mason-0.1.1/lib/cli.js',
       'mason-0.1.1/package.json',
       'mason-0.1.1/THIRD_PARTY_LICENCES.md',
-      'mason-0.1.1/src/devices/apple-provision.rb',
+      'mason-0.1.1/src/devices/apple-roots.pem',
     ])
       assert(list.includes(entry + '\n'), entry)
     assert(
@@ -1471,9 +1471,7 @@ describe('Releases, install.sh and updates', function () {
       const held: Array<import('node:net').Socket> = []
       const silent = createSocketServer((socket) => {
         held.push(socket)
-      }).listen(
-        path.join(dir, 'silent.sock'),
-      )
+      }).listen(path.join(dir, 'silent.sock'))
       await new Promise((resolve) => silent.once('listening', resolve))
       try {
         await assert.rejects(

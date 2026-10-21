@@ -68,6 +68,8 @@ export class HostLinks {
       artifacts?: Artifacts
       /** How long writes are gathered before a push; well under a second. */
       pushMs?: number
+      /** Called after a device or a prepare request arrives, to provision it. */
+      onDevices?: () => void
       /** Runs a request the host forwards to the master's API. */
       forward?: (params: unknown, stream: Stream) => Promise<void>
     },
@@ -209,6 +211,9 @@ export class HostLinks {
         JSON.stringify(payload ?? null),
         this.options.master.now(),
       )
+      // Devices and prepare requests are provisioned once the receipt is written.
+      if (kind === 'device' || kind === 'prepare')
+        setImmediate(() => this.options.onDevices?.())
       return { receipt: id, duplicate: false }
     })
   }
@@ -228,6 +233,33 @@ export class HostLinks {
       throw new LinkError('device.accountId is required', 'failed')
     const db = this.options.master.db
     const now = this.options.master.now()
+    const action = value.action ?? 'register'
+    if (action !== 'register') {
+      // A change a tester made on the host to a device of theirs.
+      const row = db
+        .prepare(
+          'SELECT d.id FROM devices d JOIN account_devices a ON a.device_id=d.id WHERE d.udid=? AND a.account_id=?',
+        )
+        .get(udid, account) as { id: number } | undefined
+      if (row == null) return
+      if (action === 'rename')
+        db.prepare(
+          'UPDATE account_devices SET name=? WHERE account_id=? AND device_id=?',
+        ).run(text('name', 120), account, row.id)
+      else if (action === 'retry')
+        db.prepare(
+          "UPDATE devices SET status='pending',message='',updated_at=? WHERE id=? AND status='error'",
+        ).run(now, row.id)
+      else if (action === 'remove')
+        db.prepare(
+          'DELETE FROM account_devices WHERE account_id=? AND device_id=?',
+        ).run(account, row.id)
+      else
+        throw new LinkError(`Unknown device action ${String(action)}`, 'failed')
+      this.options.master.change('device', row.id)
+      this.options.master.change('account', account)
+      return
+    }
     db.prepare(
       "INSERT INTO devices(udid,product,model,os_version,status,created_at,updated_at) VALUES(?,?,?,?,'pending',?,?) ON CONFLICT(udid) DO UPDATE SET product=excluded.product,model=excluded.model,os_version=excluded.os_version,updated_at=excluded.updated_at",
     ).run(udid, text('product'), text('model'), text('osVersion'), now, now)
