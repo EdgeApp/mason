@@ -683,9 +683,30 @@ describe('Master database, setup and import', function () {
         (await create(developer.json.token, { role: 'manager' })).status,
         403,
       )
+      // A scoped key makes keys only within its own scopes.
       assert.equal(
         (await create(developer.json.token, { role: 'tester' })).status,
+        403,
+      )
+      assert.equal(
+        (
+          await create(developer.json.token, {
+            role: 'tester',
+            projects: ['fixtures'],
+            branches: ['feature/*'],
+          })
+        ).status,
         201,
+      )
+      assert.equal(
+        (
+          await create(developer.json.token, {
+            role: 'tester',
+            projects: ['other'],
+            branches: ['feature/*'],
+          })
+        ).status,
+        403,
       )
       const tester = await create(admin!, { role: 'tester' })
       assert.equal(

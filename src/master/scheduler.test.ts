@@ -1415,7 +1415,7 @@ export async function quick(ctx: Stage) {}
         { role: 'tester', label: 'tester' },
         { project: 'timers' },
       ),
-      /Not allowed for this role/,
+      /Not allowed for the tester role/,
     )
     for (const run of runs('timers')) await finished(c, run.id)
   })
@@ -1760,7 +1760,7 @@ export async function use(ctx: Stage) { await ctx.unstash('s'); console.log('usi
     )
     assert.equal(
       (await c.api('POST', '/api/v2/runs/nope/approve', {})).status,
-      400,
+      404,
     )
     // A new commit that adds a parameter accepts it at once.
     const posts = c.repo('fixtures/posts')

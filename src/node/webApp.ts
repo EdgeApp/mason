@@ -3,6 +3,11 @@ import { escape, page, stylesheet } from '../view.js'
 
 export const contentSecurityPolicy =
   "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+/** The master's pages also compile the password worker's WebAssembly. */
+export const masterContentSecurityPolicy = contentSecurityPolicy.replace(
+  "script-src 'self'",
+  "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'",
+)
 
 export interface WebAppContext {
   role: 'master' | 'host'
@@ -28,7 +33,10 @@ export function nodeWebApp(context: WebAppContext): express.Express {
       'Cache-Control': 'no-store',
       'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
-      'Content-Security-Policy': contentSecurityPolicy,
+      'Content-Security-Policy':
+        context.role === 'master'
+          ? masterContentSecurityPolicy
+          : contentSecurityPolicy,
     })
     next()
   })

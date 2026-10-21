@@ -2,9 +2,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import { isIP } from 'node:net'
 import { asRequest, commitHash } from '../builder/config.js'
 import type { MasterDatabase } from './database.js'
-import { matches, ruleFor } from './rules.js'
+import { ruleFor } from './rules.js'
 import type { Projects, Project } from './projects.js'
-import { Forbidden, requireRole, type Actor } from './roles.js'
+import { allow, allowRole } from './permissions.js'
+import type { Actor } from './roles.js'
 
 export const statuses = [
   'queued',
@@ -111,27 +112,13 @@ export class Jobs {
       .map((row) => this.view(row))
   }
 
-  /** Whether an actor's key scopes allow a project and branch. */
-  static allowed(actor: Actor, project: Project, branch: string): boolean {
-    const scopes = actor.scopes
-    if (scopes == null) return true
-    if (scopes.projects.length !== 0 && !scopes.projects.includes(project.slug))
-      return false
-    if (
-      scopes.branches.length !== 0 &&
-      !scopes.branches.some((pattern) => matches(pattern, branch))
-    )
-      return false
-    return true
-  }
-
   /**
    * `POST /api/jobs`: a requested build. `app` names a project or one of its
    * app IDs; the branch must match one of the project's rules and the key's
    * scopes.
    */
   request(actor: Actor, value: unknown, clientIp?: string): JobView {
-    requireRole(actor, 'developer')
+    allowRole(actor, 'runs.request')
     let request = asRequest(value)
     const project = this.projects.resolve(request.app)
     if (project == null || !project.enabled)
@@ -142,8 +129,7 @@ export class Jobs {
       throw new BranchRefused(
         `No branch rule of ${project.slug} allows ${branch}`,
       )
-    if (!Jobs.allowed(actor, project, branch))
-      throw new Forbidden('This key does not cover that project or branch')
+    allow(actor, 'runs.request', { project: project.slug, branch })
     const platforms = project.script.platforms
     if (
       request.platforms != null &&

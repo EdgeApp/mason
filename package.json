@@ -11,13 +11,13 @@
     "node": ">=24.14.0 <25"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/bundle-browser.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:masonfiles": "tsc -p tsconfig.examples.json",
     "check:doc-examples": "node scripts/check-doc-examples.ts",
     "lint": "eslint src",
-    "test": "tsc && mocha --require=./lib/test/fixtureRoots.test.js --import=tsx --timeout 10000 'src/**/*.test.ts'",
-    "coverage": "tsc && NODE_DISABLE_COMPILE_CACHE=1 c8 --all --include 'src/**/*.ts' --include 'lib/**/*.js' --exclude 'src/**/*.test.ts' --exclude 'lib/**/*.test.js' --exclude-after-remap --reporter text --reporter json --reporter lcov --check-coverage --per-file --lines 90 mocha --require=./lib/test/fixtureRoots.test.js --timeout 10000 'lib/**/*.test.js'",
+    "test": "tsc && node scripts/bundle-browser.mjs && mocha --require=./lib/test/fixtureRoots.test.js --import=tsx --timeout 10000 'src/**/*.test.ts'",
+    "coverage": "tsc && node scripts/bundle-browser.mjs && NODE_DISABLE_COMPILE_CACHE=1 c8 --all --include 'src/**/*.ts' --include 'lib/**/*.js' --exclude 'src/**/*.test.ts' --exclude 'lib/**/*.test.js' --exclude 'lib/browser/bundles/**' --exclude-after-remap --reporter text --reporter json --reporter lcov --check-coverage --per-file --lines 90 mocha --require=./lib/test/fixtureRoots.test.js --timeout 10000 'lib/**/*.test.js'",
     "start": "node lib/cli.js serve",
     "mason": "node lib/cli.js"
   },
@@ -45,6 +45,7 @@
     "@types/ws": "8.18.1",
     "@types/yauzl": "3.4.0",
     "c8": "12.0.0",
+    "esbuild": "0.28.2",
     "eslint": "9.39.1",
     "mocha": "12.0.3",
     "oidc-provider": "9.12.2",

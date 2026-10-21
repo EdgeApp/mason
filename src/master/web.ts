@@ -1,6 +1,10 @@
+import { readFileSync } from 'node:fs'
 import type express from 'express'
-import { nodeWebApp, sendPage, type WebAppContext } from '../node/webApp.js'
+import { nodeWebApp, type WebAppContext } from '../node/webApp.js'
+import { accountsApi } from './accountsApi.js'
 import { masterApi } from './api.js'
+import { backupApi } from './backupApi.js'
+import { masterPages } from './pages.js'
 import { projectsApi } from './projectsApi.js'
 import { runsApi } from './runsApi.js'
 import type { Master } from './runtime.js'
@@ -8,39 +12,54 @@ import type { Master } from './runtime.js'
 export interface MasterWebContext extends WebAppContext {
   configured: () => boolean
   master: Master
+  /** The code the master printed, until the first account exists. */
+  setupCode?: () => string | undefined
+  onConfigured?: () => void
+  restore?: Parameters<typeof accountsApi>[1]['restore']
 }
+
+const bundle = (name: string): string =>
+  readFileSync(
+    new URL(`../browser/bundles/${name}.js`, import.meta.url),
+    'utf8',
+  )
 
 /** The master's web listener: its UI and API. */
 export function masterApp(context: MasterWebContext): express.Express {
   const app = nodeWebApp(context)
-  app.use(projectsApi(context.master))
-  app.use(runsApi(context.master))
+  const master = context.master
+  for (const name of ['master', 'password-worker'])
+    app.get(`/assets/${name}.js`, (_req, res) => {
+      res.type('js').send(bundle(name))
+    })
+  app.use(
+    accountsApi(master, {
+      setupCode: context.setupCode ?? ((): undefined => undefined),
+      ...(context.onConfigured == null
+        ? {}
+        : { onConfigured: context.onConfigured }),
+      ...(context.restore == null ? {} : { restore: context.restore }),
+    }),
+  )
+  app.use(backupApi(master))
+  app.use(projectsApi(master))
+  app.use(runsApi(master))
   app.use(
     masterApi({
-      keys: context.master.keys,
-      settings: context.master.settings,
-      registry: context.master.registry,
-      nodeDetails: (fingerprint) => context.master.nodeDetails(fingerprint),
+      keys: master.keys,
+      credentials: master,
+      settings: master.settings,
+      registry: master.registry,
+      nodeDetails: (fingerprint) => master.nodeDetails(fingerprint),
       apple: {
-        status: () => context.master.apple.status(),
+        status: () => master.apple.status(),
         signIn: async (actor, appleId, password) =>
-          await context.master.appleSignIn(actor, appleId, password),
-        code: async (actor, code) =>
-          await context.master.appleCode(actor, code),
+          await master.appleSignIn(actor, appleId, password),
+        code: async (actor, code) => await master.appleCode(actor, code),
       },
     }),
   )
-  app.get('/', (_req, res) => {
-    if (context.configured())
-      sendPage(res, context, 'Mason', '<p>This master is set up.</p>')
-    else
-      sendPage(
-        res,
-        context,
-        'Set up this master',
-        '<section class="card"><p>This Mason master has no account yet. Create the first account with <code>mason setup</code> on this computer, using the setup code the master printed when it started.</p></section>',
-      )
-  })
+  masterPages(app, context, master)
   app.use((_req, res) => {
     res.status(404).send('Not found')
   })

@@ -7,9 +7,19 @@ import express, {
 import { LinkError } from '../link/link.js'
 import { HandshakeRefused } from '../link/handshake.js'
 import { PinMismatch } from '../link/network.js'
-import type { MasterKeys } from './keys.js'
+import { MasterKeys } from './keys.js'
+import { cookie } from '../auth/routes.js'
+import {
+  checkCsrf,
+  MASTER_SESSION_COOKIE,
+  sessionActor,
+  type MasterAuth,
+} from './auth.js'
+import type { MasterDatabase } from './database.js'
+import { isRunAction, type Forwarder } from './forward.js'
 import type { NodeRegistry } from './nodes.js'
-import { Forbidden, requireRole, type Actor } from './roles.js'
+import { allow } from './permissions.js'
+import { asRole, Forbidden, type Actor } from './roles.js'
 import { Settings, UnknownArea } from './settings.js'
 
 export class NotFound extends Error {}
@@ -22,6 +32,8 @@ export class Unauthorized extends Error {
 
 export interface ApiContext {
   keys: MasterKeys
+  /** Sessions and forwarded host identities, beside bearer keys. */
+  credentials?: Credentials
   settings: Settings
   registry: NodeRegistry
   /** What the master knows about a node beyond its record: inventory and update state. */
@@ -41,22 +53,86 @@ export function actorOf(res: Response): Actor {
   return actor
 }
 
-/** Bearer API keys; master sessions join in with master sign-in. */
-export function authenticate(keys: MasterKeys): express.RequestHandler {
+/** What `authenticate` checks requests against. */
+export interface Credentials {
+  keys: MasterKeys
+  /** Master sessions; without it only bearer keys are accepted. */
+  auth?: MasterAuth
+  /** The API socket for requests the host forwards. */
+  forwarder?: Forwarder
+  database?: MasterDatabase
+}
+
+/**
+ * Bearer API keys, master sessions (with the CSRF proof on any request
+ * that changes something), and, on the API socket only, a host session's
+ * account for the four run actions: accepted while the account is enabled
+ * and its permission version unchanged, audited as through the host.
+ */
+export function authenticate(
+  credentials: Credentials | MasterKeys,
+): express.RequestHandler {
+  const { keys, auth, forwarder, database } =
+    credentials instanceof MasterKeys ? { keys: credentials } : credentials
   return (req, res, next) => {
-    const header = req.get('authorization') ?? ''
-    const match = /^Bearer (\S+)$/.exec(header)
-    const key = match == null ? undefined : keys.authenticate(match[1])
-    if (key == null) {
-      res.status(401).json({ error: 'An API key is required' })
+    const header = req.get('authorization')
+    if (header != null) {
+      const match = /^Bearer (\S+)$/.exec(header)
+      const key = match == null ? undefined : keys.authenticate(match[1])
+      if (key == null) {
+        res.status(401).json({ error: 'An API key is required' })
+        return
+      }
+      try {
+        res.locals.actor = keys.actor(key)
+      } catch (error) {
+        res.status(403).json({ error: (error as Error).message })
+        return
+      }
+      next()
       return
     }
-    try {
-      res.locals.actor = keys.actor(key)
-    } catch (error) {
-      res.status(403).json({ error: (error as Error).message })
+    const asserted = forwarder?.asserted(req)
+    if (asserted != null && database != null) {
+      const row = database.db
+        .prepare(
+          'SELECT role,disabled,removed_at,permission_version FROM accounts WHERE id=?',
+        )
+        .get(asserted.accountId) as Record<string, unknown> | undefined
+      if (
+        row == null ||
+        Number(row.disabled) !== 0 ||
+        row.removed_at != null ||
+        Number(row.permission_version) !== asserted.permissionVersion ||
+        !isRunAction(req.method, req.originalUrl)
+      ) {
+        res.status(403).json({ error: 'The host session is not allowed this' })
+        return
+      }
+      res.locals.actor = {
+        role: asRole(row.role),
+        accountId: asserted.accountId,
+        label: `host:${asserted.accountId}`,
+      } satisfies Actor
+      next()
       return
     }
+    const session =
+      forwarder?.forwarded(req) === true
+        ? undefined
+        : auth?.session(cookie(req, MASTER_SESSION_COOKIE))
+    if (session == null) {
+      res.status(401).json({ error: 'Sign in or use an API key' })
+      return
+    }
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method))
+      try {
+        checkCsrf(req, session)
+      } catch (error) {
+        res.status(403).json({ error: (error as Error).message })
+        return
+      }
+    res.locals.actor = sessionActor(session)
     next()
   }
 }
@@ -99,7 +175,7 @@ export function masterApi(context: ApiContext): Router {
   router.use(
     '/api/v2',
     express.json({ limit: '1mb' }),
-    authenticate(context.keys),
+    authenticate(context.credentials ?? context.keys),
   )
 
   router.get(
@@ -118,7 +194,7 @@ export function masterApi(context: ApiContext): Router {
   router.get(
     '/api/v2/keys',
     json((_req, res) => {
-      requireRole(actorOf(res), 'manager')
+      allow(actorOf(res), 'keys.read')
       return context.keys.list()
     }),
   )
@@ -133,6 +209,7 @@ export function masterApi(context: ApiContext): Router {
     '/api/v2/keys/:id',
     json((req, res) => {
       const id = String(req.params.id)
+      allow(actorOf(res), 'keys.revoke')
       if (context.keys.get(id) == null) throw new NotFound('No such key')
       context.keys.revoke(actorOf(res), id)
       return null
@@ -142,7 +219,7 @@ export function masterApi(context: ApiContext): Router {
   router.get(
     '/api/v2/nodes',
     json((_req, res) => {
-      requireRole(actorOf(res), 'manager')
+      allow(actorOf(res), 'nodes.read')
       return context.registry.list().map((node) => ({
         ...node,
         ...context.nodeDetails?.(node.fingerprint),
@@ -152,7 +229,7 @@ export function masterApi(context: ApiContext): Router {
   router.post(
     '/api/v2/nodes',
     json(async (req, res) => {
-      requireRole(actorOf(res), 'manager')
+      allow(actorOf(res), 'nodes.change')
       const body = (req.body ?? {}) as { address?: unknown; key?: unknown }
       if (typeof body.address !== 'string' || typeof body.key !== 'string')
         throw new Error('Expected {address, key}')
@@ -173,7 +250,7 @@ export function masterApi(context: ApiContext): Router {
   router.delete(
     '/api/v2/nodes/:fingerprint',
     json((req, res) => {
-      requireRole(actorOf(res), 'manager')
+      allow(actorOf(res), 'nodes.change')
       const fingerprint = String(req.params.fingerprint)
       if (context.registry.get(fingerprint) == null)
         throw new NotFound('No such node')
@@ -188,7 +265,7 @@ export function masterApi(context: ApiContext): Router {
     router.get(
       '/api/v2/apple/session',
       json((_req, res) => {
-        requireRole(actorOf(res), 'manager')
+        allow(actorOf(res), 'apple.change')
         return apple.status()
       }),
     )

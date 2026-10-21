@@ -2,12 +2,12 @@ import express, { Router } from 'express'
 import { AUTOMATIC_POLL_MS } from '../builder/automatic.js'
 import { branchName } from '../builder/config.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
-import { BranchRefused, IdempotencyConflict, Jobs, QueueFull } from './jobs.js'
+import { BranchRefused, IdempotencyConflict, QueueFull } from './jobs.js'
 import { ProjectNotFound } from './projects.js'
-import { Forbidden, requireRole, type Actor } from './roles.js'
+import { allow, allowRole, covers, type Target } from './permissions.js'
 import type { Master } from './runtime.js'
 import { isGlob } from './rules.js'
-import { GraphError, ParamsError, RunRefused, Scheduler } from './scheduler.js'
+import { GraphError, ParamsError, RunRefused } from './scheduler.js'
 
 /** A job in the fields the builder's v1 job API returns, plus `stages`. */
 export function v1Job(
@@ -126,15 +126,21 @@ const errors: express.ErrorRequestHandler = (error, req, res, next) => {
   apiErrors(error, req, res, next)
 }
 
-function logsAllowed(actor: Actor): void {
-  if (!Scheduler.canSeeLogs(actor))
-    throw new Forbidden('Logs are for developers, managers and admins')
+/** The project and branch of a run, for a key's scopes. */
+export function runTarget(master: Master, id: string): Target {
+  const row = master.database.db
+    .prepare(
+      'SELECT p.slug,j.branch FROM jobs j JOIN projects p ON p.id=j.project_id WHERE j.id=?',
+    )
+    .get(id) as { slug: string; branch: string } | undefined
+  if (row == null) throw new NotFound('Run not found')
+  return { project: row.slug, branch: row.branch }
 }
 
 /** The v1 job API on the master (paths and fields unchanged) and `/api/v2/runs`. */
 export function runsApi(master: Master): Router {
   const router = Router()
-  const auth = authenticate(master.keys)
+  const auth = authenticate(master)
   router.use(
     ['/api/jobs', '/api/queue', '/api/apps', '/api/v2/runs'],
     express.json({ limit: '16kb', strict: true }),
@@ -150,6 +156,7 @@ export function runsApi(master: Master): Router {
         req.socket.remoteAddress?.replace(/^::ffff:/, ''),
       )
       master.scheduler.poke()
+      master.database.audit(actorOf(res), 'run.request', job.id)
       res.status(202)
       return v1Job(master, job.id)
     }),
@@ -157,16 +164,20 @@ export function runsApi(master: Master): Router {
   router.get(
     '/api/jobs/:id',
     json((req, res) => {
-      requireRole(actorOf(res), 'developer')
-      const job = v1Job(master, String(req.params.id))
+      const id = String(req.params.id)
+      allowRole(actorOf(res), 'runs.read')
+      allow(actorOf(res), 'runs.read', runTarget(master, id))
+      const job = v1Job(master, id)
       if (job == null) throw new NotFound('Job not found')
       return job
     }),
   )
   router.get('/api/jobs/:id/log', (req, res, next) => {
     try {
-      logsAllowed(actorOf(res))
-      const text = master.scheduler.logs(String(req.params.id))
+      const id = String(req.params.id)
+      allowRole(actorOf(res), 'runs.read')
+      allow(actorOf(res), 'runs.read', runTarget(master, id))
+      const text = master.scheduler.logs(id)
       if (text == null) throw new NotFound('Build log not found')
       res.type('text/plain').send(text)
     } catch (error) {
@@ -175,8 +186,10 @@ export function runsApi(master: Master): Router {
   })
   router.get('/api/jobs/:id/logs', (req, res, next) => {
     try {
-      logsAllowed(actorOf(res))
-      const text = master.scheduler.logs(String(req.params.id))
+      const id = String(req.params.id)
+      allowRole(actorOf(res), 'runs.read')
+      allow(actorOf(res), 'runs.read', runTarget(master, id))
+      const text = master.scheduler.logs(id)
       if (text == null) throw new NotFound('Build log not found')
       res.set('X-Mason-Log-Capture', 'full')
       res.attachment(`mason-build-${String(req.params.id)}.log`)
@@ -187,11 +200,14 @@ export function runsApi(master: Master): Router {
   })
   router.post('/api/jobs/:id/cancel', (req, res, next) => {
     try {
-      requireRole(actorOf(res), 'developer')
-      if (!master.scheduler.cancel(String(req.params.id))) {
+      const id = String(req.params.id)
+      allowRole(actorOf(res), 'runs.request')
+      allow(actorOf(res), 'runs.request', runTarget(master, id))
+      if (!master.scheduler.cancel(id)) {
         res.status(409).json({ error: 'Job is not active' })
         return
       }
+      master.database.audit(actorOf(res), 'run.cancel', id)
       res.json({ cancelled: true })
     } catch (error) {
       next(error)
@@ -200,27 +216,35 @@ export function runsApi(master: Master): Router {
   router.get(
     '/api/queue',
     json((_req, res) => {
-      requireRole(actorOf(res), 'developer')
-      return master.jobs.pending().map((job) => queueEntry(master, job.id))
+      const actor = actorOf(res)
+      allowRole(actor, 'runs.read')
+      return master.jobs
+        .pending()
+        .filter((job) => covers(actor, runTarget(master, job.id)))
+        .map((job) => queueEntry(master, job.id))
     }),
   )
   router.get(
     '/api/apps',
     json((_req, res) => {
-      requireRole(actorOf(res), 'developer')
-      return master.projects.list().map((project) => ({
-        slug: project.slug,
-        name: project.name,
-        enabled: project.enabled,
-        platforms: [...new Set(project.apps.flatMap((app) => app.platforms))],
-        ...buildSettings(master, project.slug),
-      }))
+      const actor = actorOf(res)
+      allowRole(actor, 'apps.read')
+      return master.projects
+        .list()
+        .filter((project) => covers(actor, { project: project.slug }))
+        .map((project) => ({
+          slug: project.slug,
+          name: project.name,
+          enabled: project.enabled,
+          platforms: [...new Set(project.apps.flatMap((app) => app.platforms))],
+          ...buildSettings(master, project.slug),
+        }))
     }),
   )
   router.get(
     '/api/apps/:slug/build-settings',
     json((req, res) => {
-      requireRole(actorOf(res), 'developer')
+      allow(actorOf(res), 'apps.read', { project: String(req.params.slug) })
       return buildSettings(master, String(req.params.slug))
     }),
   )
@@ -229,6 +253,8 @@ export function runsApi(master: Master): Router {
     json((req, res) => {
       const actor = actorOf(res)
       const slug = String(req.params.slug)
+      allowRole(actor, 'projects.change')
+      allow(actor, 'projects.change', { project: slug })
       const body = (req.body ?? {}) as {
         defaultBranch?: unknown
         automaticBranches?: unknown
@@ -259,14 +285,21 @@ export function runsApi(master: Master): Router {
   router.get(
     '/api/v2/runs',
     json((req, res) => {
-      requireRole(actorOf(res), 'developer')
-      return master.runs(req.query)
+      const actor = actorOf(res)
+      allowRole(actor, 'runs.read')
+      return master.runs(req.query).filter((run) =>
+        covers(actor, {
+          project: (run as { project: string }).project,
+          branch: (run as { branch: string }).branch,
+        }),
+      )
     }),
   )
   router.post(
     '/api/v2/runs',
     json(async (req, res) => {
       const actor = actorOf(res)
+      allowRole(actor, 'runs.request')
       const body = (req.body ?? {}) as {
         project?: unknown
         app?: unknown
@@ -281,8 +314,7 @@ export function runsApi(master: Master): Router {
       if (project == null) throw new RunRefused('Unknown project')
       const branch =
         body.branch == null ? project.defaultBranch : branchName(body.branch)
-      if (!Jobs.allowed(actor, project, branch))
-        throw new Forbidden('This key does not cover that project or branch')
+      allow(actor, 'runs.request', { project: project.slug, branch })
       const job = await master.scheduler.request(actor, {
         project: project.slug,
         branch,
@@ -292,6 +324,7 @@ export function runsApi(master: Master): Router {
         ...(body.params === undefined ? {} : { params: body.params }),
         ...(typeof body.commit === 'string' ? { commit: body.commit } : {}),
       })
+      master.database.audit(actor, 'run.request', job.id)
       res.status(202)
       return master.run(job.id)
     }),
@@ -299,24 +332,29 @@ export function runsApi(master: Master): Router {
   router.get(
     '/api/v2/runs/:id',
     json((req, res) => {
-      requireRole(actorOf(res), 'developer')
-      const run = master.run(String(req.params.id))
-      if (run == null) throw new NotFound('Run not found')
-      return run
+      const id = String(req.params.id)
+      allowRole(actorOf(res), 'runs.read')
+      allow(actorOf(res), 'runs.read', runTarget(master, id))
+      return master.run(id)
     }),
   )
   router.post(
     '/api/v2/runs/:id/cancel',
     json((req, res) => {
-      requireRole(actorOf(res), 'developer')
-      if (master.run(String(req.params.id)) == null)
-        throw new NotFound('Run not found')
-      return { cancelled: master.scheduler.cancel(String(req.params.id)) }
+      const id = String(req.params.id)
+      allowRole(actorOf(res), 'runs.request')
+      allow(actorOf(res), 'runs.request', runTarget(master, id))
+      const cancelled = master.scheduler.cancel(id)
+      if (cancelled) master.database.audit(actorOf(res), 'run.cancel', id)
+      return { cancelled }
     }),
   )
   router.post(
     '/api/v2/runs/:id/restart',
     json((req, res) => {
+      const id = String(req.params.id)
+      allowRole(actorOf(res), 'runs.request')
+      allow(actorOf(res), 'runs.request', runTarget(master, id))
       const stage = (req.body as { stage?: unknown } | null)?.stage
       if (typeof stage !== 'string')
         throw new RunRefused('Name the stage to restart from')
@@ -325,6 +363,7 @@ export function runsApi(master: Master): Router {
         String(req.params.id),
         stage,
       )
+      master.database.audit(actorOf(res), 'run.restart', job.id)
       res.status(201)
       return master.run(job.id)
     }),
@@ -337,6 +376,9 @@ export function runsApi(master: Master): Router {
         approve?: unknown
         params?: unknown
       }
+      const id = String(req.params.id)
+      allowRole(actorOf(res), 'runs.approve')
+      allow(actorOf(res), 'runs.approve', runTarget(master, id))
       if (typeof body.stage !== 'string')
         throw new RunRefused('Name the approval')
       master.scheduler.approve(
@@ -348,13 +390,16 @@ export function runsApi(master: Master): Router {
           ...(body.params === undefined ? {} : { params: body.params }),
         },
       )
-      return master.run(String(req.params.id))
+      master.database.audit(actorOf(res), 'run.approve', `${id}/${body.stage}`)
+      return master.run(id)
     }),
   )
   router.get('/api/v2/runs/:id/logs', (req, res, next) => {
     try {
-      logsAllowed(actorOf(res))
-      const text = master.scheduler.logs(String(req.params.id))
+      const id = String(req.params.id)
+      allowRole(actorOf(res), 'runs.read')
+      allow(actorOf(res), 'runs.read', runTarget(master, id))
+      const text = master.scheduler.logs(id)
       if (text == null) throw new NotFound('Run not found')
       res.type('text/plain').send(text)
     } catch (error) {

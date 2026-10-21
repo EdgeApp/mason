@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
@@ -9,6 +9,11 @@ import {
   clientParameters,
   type ClientPasswordCosts,
 } from '../auth/passwordProtocol.js'
+import {
+  applyPendingRestore,
+  PENDING_RESTORE,
+  restoreBackup,
+} from '../master/backup.js'
 import { MasterDatabase } from '../master/database.js'
 import { MasterKeys } from '../master/keys.js'
 import { parseArgs, single } from '../node/args.js'
@@ -66,9 +71,18 @@ export async function setupCommand(
 ): Promise<number> {
   const args = parseArgs(
     argv,
-    ['--data', '--username', '--api-key-out'],
-    ['--password-stdin'],
+    [
+      '--data',
+      '--username',
+      '--api-key-out',
+      '--repository',
+      '--key-file',
+      '--branch',
+      '--date',
+    ],
+    ['--password-stdin', '--restore'],
   )
+  if (args.flags.has('--restore')) return await restoreCommand(args, io)
   const username = asUsername(single(args, '--username'))
   if (!args.flags.has('--password-stdin') || args.positional.length !== 0)
     throw new Error(
@@ -115,6 +129,68 @@ export async function setupCommand(
     io.out(`Admin API key written to ${keyFile}`)
   }
   return 0
+}
+
+/**
+ * `mason setup --restore --repository <url> --key-file <file> [--branch <name>]
+ * [--date YYYY-MM-DD]`: rebuilds an unconfigured, stopped master from its
+ * encrypted backup, under the data directory's lock.
+ */
+async function restoreCommand(
+  args: ReturnType<typeof parseArgs>,
+  io: SetupIO,
+): Promise<number> {
+  const repository = single(args, '--repository')
+  const keyFile = single(args, '--key-file')
+  if (repository == null || keyFile == null || args.positional.length !== 0)
+    throw new Error(
+      'Usage: mason setup --restore --repository <url> --key-file <file> [--branch <name>] [--date YYYY-MM-DD]',
+    )
+  const data = resolveDataDir(single(args, '--data'))
+  const dir = prepareDataDir(data)
+  let lock: ReturnType<typeof lockDataDir>
+  try {
+    lock = lockDataDir(dir)
+  } catch {
+    throw new Error('Stop the master before restoring it')
+  }
+  try {
+    claimRole(dir, 'master')
+    const file = path.join(dir, 'master.sqlite')
+    if (existsSync(file)) {
+      const db = new DatabaseSync(file, { enableForeignKeyConstraints: true })
+      try {
+        if (new MasterDatabase(db).configured())
+          throw new Error(
+            'This master is already set up; restore into an unconfigured master',
+          )
+      } finally {
+        db.close()
+      }
+    }
+    const branch = single(args, '--branch')
+    const date = single(args, '--date')
+    const restored = await restoreBackup({
+      repository,
+      key: readFileSync(keyFile, 'utf8'),
+      ...(branch == null ? {} : { branch }),
+      ...(date == null ? {} : { date }),
+      target: path.join(dir, PENDING_RESTORE),
+      scratch: path.join(dir, 'scratch'),
+    })
+    applyPendingRestore(dir, () => undefined)
+    clearSetupCode(dir)
+    io.out(
+      `Restored the master from ${date == null ? 'its latest backup' : `the backup of ${date}`}: ${Object.entries(
+        restored.tables,
+      )
+        .map(([table, count]) => `${count} ${table}`)
+        .join(', ')}.`,
+    )
+    return 0
+  } finally {
+    lock.release()
+  }
 }
 
 /** Reads all of standard input. */

@@ -172,7 +172,10 @@ describe('Apple ID downloads', () => {
       assert.equal(status.state, 'needsCode')
       assert.equal(status.codeVia, 'a trusted device')
       assert.match(String(status.notice), /two-factor code/)
-      assert.deepEqual(master.notices(), [status.notice])
+      // Backups are not configured in this test; only the Apple notice matters here.
+      const notices = (): string[] =>
+        master.notices().filter((line) => !/backed up/.test(line))
+      assert.deepEqual(notices(), [status.notice])
       await assert.rejects(master.apple.submitCode('12'), /six digits/)
       await assert.rejects(
         master.apple.submitCode('000000'),
@@ -184,7 +187,7 @@ describe('Apple ID downloads', () => {
         apple.code,
       )
       assert.equal(status.state, 'signedIn')
-      assert.deepEqual(master.notices(), [])
+      assert.deepEqual(notices(), [])
       await assert.rejects(
         master.apple.submitCode(apple.code),
         /No sign-in is waiting/,

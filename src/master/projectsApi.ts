@@ -8,7 +8,7 @@ import {
   NotFound,
 } from './api.js'
 import { ProjectConflict, ProjectNotFound } from './projects.js'
-import { requireRole } from './roles.js'
+import { allow, allowRole, covers } from './permissions.js'
 import type { Master } from './runtime.js'
 
 /** Maps project and job errors onto the API's status codes. */
@@ -23,21 +23,26 @@ const errors: express.ErrorRequestHandler = (error, req, res, next) => {
 /** `/api/v2/projects` and build-number seeding. */
 export function projectsApi(master: Master): Router {
   const router = Router()
-  const auth = authenticate(master.keys)
+  const auth = authenticate(master)
   const body = express.json({ limit: '1mb' })
   router.use('/api/v2/projects', body, auth)
   router.get(
     '/api/v2/projects',
     json((_req, res) => {
-      requireRole(actorOf(res), 'developer')
-      return master.projects.list()
+      const actor = actorOf(res)
+      allowRole(actor, 'projects.read')
+      return master.projects
+        .list()
+        .filter((project) => covers(actor, { project: project.slug }))
     }),
   )
   router.get(
     '/api/v2/projects/:slug',
     json((req, res) => {
-      requireRole(actorOf(res), 'developer')
-      return master.projects.get(String(req.params.slug))
+      const slug = String(req.params.slug)
+      allowRole(actorOf(res), 'projects.read')
+      allow(actorOf(res), 'projects.read', { project: slug })
+      return master.projects.get(slug)
     }),
   )
   router.put(
@@ -104,12 +109,15 @@ export function projectsApi(master: Master): Router {
     body,
     auth,
     json((req, res) => {
-      requireRole(actorOf(res), 'admin')
       const input = (req.body ?? {}) as {
         project?: unknown
         key?: unknown
         entries?: unknown
       }
+      allowRole(actorOf(res), 'buildNumbers.seed')
+      allow(actorOf(res), 'buildNumbers.seed', {
+        project: String(input.project ?? ''),
+      })
       return master.seed(
         String(input.project ?? ''),
         String(input.key ?? ''),

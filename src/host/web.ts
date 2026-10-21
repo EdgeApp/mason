@@ -2,6 +2,7 @@ import express, { type ErrorRequestHandler, type RequestHandler } from 'express'
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { authRoutes, navigation, sessionContext } from '../auth/routes.js'
+import { forwardRoutes } from './forward.js'
 import { installationRoutes } from '../catalog/install.js'
 import { catalogRoutes } from '../catalog/routes.js'
 import { nodeWebApp, sendPage, type WebAppContext } from '../node/webApp.js'
@@ -203,6 +204,7 @@ export function hostApp(
   app.use(host.webhooks.routes())
   app.use(host.artifacts.routes(host.accounts))
   app.use(uploadRoutes(host.cache.store, host.artifacts.uploadHooks()))
+  app.use(forwardRoutes(host))
   app.use((_req, res, next) => {
     if (host.cache.host() == null) {
       sendPage(

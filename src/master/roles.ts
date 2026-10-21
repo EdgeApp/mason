@@ -41,6 +41,3 @@ export class Forbidden extends Error {
     super(message)
   }
 }
-export function requireRole(actor: Actor, minimum: Role): void {
-  if (!atLeast(actor.role, minimum)) throw new Forbidden()
-}

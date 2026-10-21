@@ -5,8 +5,13 @@ import type { MethodTable } from '../link/link.js'
 import { createFirstAdmin } from '../setup/setup.js'
 import { MasterDatabase } from './database.js'
 import { MasterKeys } from './keys.js'
+import { MasterAuth } from './auth.js'
+import { Forwarder } from './forward.js'
+import { People } from './people.js'
+import { backupArea, Backups, type BackupSetting } from './backup.js'
 import { NodeRegistry } from './nodes.js'
-import { localOperator, requireRole } from './roles.js'
+import { allow } from './permissions.js'
+import { localOperator } from './roles.js'
 import { Settings } from './settings.js'
 import { BuildNumbers } from './buildNumbers.js'
 import { GitHub, storedConnection, type GitHubOptions } from './github.js'
@@ -71,6 +76,10 @@ export interface MasterOptions {
   scratch?: string
   /** The data directory: mirrors, stashes and logs live under it. */
   dir?: string
+  /** Push attempts before a backup fails. */
+  backupAttempts?: number
+  /** Where the master's own messages go; the console by default. */
+  log?: (line: string) => void
   /** How mirrors reach a repository; the GitHub connection otherwise. */
   remote?: RemoteResolver
   /** The scheduler's pass interval. */
@@ -110,6 +119,12 @@ function mergeMethods(a: MethodTable, b: MethodTable): MethodTable {
 export class Master {
   readonly database: MasterDatabase
   readonly keys: MasterKeys
+  /** Master sign-in and sessions. */
+  readonly auth: MasterAuth
+  /** People, their roles and addresses, and the groups testers see. */
+  readonly people: People
+  /** The API socket for requests the host forwards. */
+  readonly forwarder = new Forwarder()
   readonly settings: Settings
   readonly registry: NodeRegistry
   readonly projects: Projects
@@ -130,7 +145,9 @@ export class Master {
   readonly hosts: HostLinks
   readonly pools: Pools
   readonly artifacts: Artifacts
+  readonly backups: Backups
   private expiry: NodeJS.Timeout | undefined
+  private backupTimer: NodeJS.Timeout | undefined
   private stopped = false
   private compaction: NodeJS.Timeout | undefined
   constructor(
@@ -140,6 +157,8 @@ export class Master {
   ) {
     this.database = new MasterDatabase(db, options.now)
     this.keys = new MasterKeys(this.database)
+    this.auth = new MasterAuth(this.database)
+    this.people = new People(this.database)
     this.settings = new Settings(this.database)
     this.registry = new NodeRegistry(db, identity, {
       methods: (role): MethodTable =>
@@ -280,6 +299,30 @@ export class Master {
     this.settings.register('cloud', cloudArea)
     this.settings.register('storage', storageArea)
     this.settings.register('signIn', signInArea)
+    this.backups = new Backups({
+      master: this.database,
+      dir,
+      scratch: options.scratch ?? path.join(dir, 'scratch'),
+      setting: (): BackupSetting | undefined =>
+        this.settings.value('backup') as BackupSetting | undefined,
+      fingerprint: identity.fingerprint,
+      github: async (
+        repository,
+      ): Promise<{
+        url: string
+        env: NodeJS.ProcessEnv
+      }> => await this.github.gitAccess(repository, options.scratch ?? '/tmp'),
+      ...(options.backupAttempts == null
+        ? {}
+        : { attempts: options.backupAttempts }),
+    })
+    this.settings.register('backup', {
+      ...backupArea,
+      changed: (): void => {
+        // The key is made when backups are first configured.
+        this.backups.key()
+      },
+    })
     this.releases = new Releases(
       this.database,
       path.join(dir, 'releases'),
@@ -296,6 +339,9 @@ export class Master {
       releases: this.releases,
       artifacts: this.artifacts,
       privateKey: identity.privateKey,
+      forward: async (params, stream): Promise<void> => {
+        await this.forwarder.forward(params, stream)
+      },
       origins: (): { origin?: string; workerOrigin?: string } =>
         (this.settings.value('host') ?? {}) as {
           origin?: string
@@ -380,6 +426,14 @@ export class Master {
       60 * 60 * 1000,
     )
     this.compaction.unref()
+    // Hourly backups once configured; a weekly reminder until they work.
+    this.backupTimer = setInterval(
+      () => {
+        if (!this.stopped) void this.backupTick()
+      },
+      60 * 60 * 1000,
+    )
+    this.backupTimer.unref()
     this.apple.start()
     void this.apple.check().catch(() => undefined)
     void this.releases
@@ -388,6 +442,7 @@ export class Master {
   }
   async stop(): Promise<void> {
     this.stopped = true
+    await this.forwarder.close()
     this.registry.stop()
     this.retention.stop()
     this.updates.stop()
@@ -395,6 +450,7 @@ export class Master {
     clearInterval(this.expiry)
     await this.pools.stop()
     clearInterval(this.compaction)
+    clearInterval(this.backupTimer)
     this.apple.stop()
     await this.poller.close()
     await this.scheduler.stop()
@@ -436,14 +492,29 @@ export class Master {
     return this.buildNumbers.seed(project.id, key, entries)
   }
 
-  /** What needs a person on the master: the Apple ID code, for `mason status` and the dashboard. */
+  /** What needs a person on the master, for `mason status` and the dashboard. */
   notices(): string[] {
     const apple = this.apple.status()
     const cloud = this.pools.notice()
+    const backup = this.configured() ? this.backups.notice() : undefined
     return [
+      ...(backup == null ? [] : [backup]),
       ...(apple.notice == null ? [] : [apple.notice]),
       ...(cloud == null ? [] : [cloud]),
     ]
+  }
+
+  /** The hourly backup, and the weekly reminder while there is none. */
+  async backupTick(): Promise<void> {
+    this.auth.prune()
+    if (!this.configured()) return
+    if (this.backups.status().configured)
+      await this.backups.backup().catch(() => undefined)
+    const reminder = this.backups.remind()
+    if (reminder != null)
+      (this.options.log ?? console.log)(
+        `${reminder}; configure backups in Settings → Backups or with PUT /api/v2/settings/backup`,
+      )
   }
 
   /** Signs the Apple ID in; Apple usually asks for a two-factor code next. */
@@ -452,7 +523,7 @@ export class Master {
     appleId: unknown,
     password: unknown,
   ): Promise<AppleStatus> {
-    requireRole(actor, 'manager')
+    allow(actor, 'apple.change')
     const id =
       typeof appleId === 'string' && appleId !== ''
         ? appleId
@@ -469,7 +540,7 @@ export class Master {
     actor: typeof localOperator,
     code: unknown,
   ): Promise<AppleStatus> {
-    requireRole(actor, 'manager')
+    allow(actor, 'apple.change')
     const status = await this.apple.submitCode(String(code ?? ''))
     this.database.audit(actor, 'apple.code', status.appleId ?? '')
     if (status.state === 'signedIn') {
@@ -672,6 +743,24 @@ export class Master {
       'cloud.status': () => this.pools.view(),
       'nodes.remove': (args): null => {
         this.registry.remove(String(args.fingerprint ?? ''))
+        return null
+      },
+      backup: async () => await this.backups.backup(),
+      'backup.status': () => this.backups.status(),
+      'people.list': () => this.people.list(actor),
+      'people.add': async (args) => await this.people.create(actor, args.value),
+      'people.set': async (args) =>
+        await this.people.update(actor, Number(args.id), args.value),
+      'people.remove': (args): null => {
+        this.people.remove(actor, Number(args.id))
+        return null
+      },
+      'groups.list': () => this.people.groups(actor),
+      'groups.add': (args) => this.people.createGroup(actor, args.value),
+      'groups.set': (args) =>
+        this.people.updateGroup(actor, Number(args.id), args.value),
+      'groups.remove': (args): null => {
+        this.people.removeGroup(actor, Number(args.id))
         return null
       },
     }

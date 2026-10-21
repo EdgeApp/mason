@@ -68,6 +68,8 @@ export class HostLinks {
       artifacts?: Artifacts
       /** How long writes are gathered before a push; well under a second. */
       pushMs?: number
+      /** Runs a request the host forwards to the master's API. */
+      forward?: (params: unknown, stream: Stream) => Promise<void>
     },
   ) {}
 
@@ -460,6 +462,20 @@ export class HostLinks {
         },
       },
       streams: {
+        /** A request the host forwards to the master's API (`api.forward`). */
+        'api.forward': async (stream, params, link): Promise<void> => {
+          try {
+            this.host(link)
+          } catch (error) {
+            stream.abort((error as Error).message)
+            return
+          }
+          if (this.options.forward == null) {
+            stream.abort('The master does not forward requests')
+            return
+          }
+          await this.options.forward(params, stream)
+        },
         /** A file of the current release, for the host to serve `/install.sh` and the tarballs. */
         'release.get': async (stream, params, link): Promise<void> => {
           try {

@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 7
+export const MASTER_SCHEMA = 8
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -241,6 +241,30 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     CREATE TABLE run_tests (
       job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, stage TEXT NOT NULL, attempt INTEGER NOT NULL,
       summary TEXT NOT NULL, PRIMARY KEY(job_id, stage, attempt)
+    ) STRICT;`)
+  },
+  (db): void => {
+    db.exec(`
+    ALTER TABLE accounts ADD COLUMN removed_at INTEGER;
+    CREATE TABLE master_sessions (
+      hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      permission_version INTEGER NOT NULL, csrf TEXT NOT NULL, address TEXT NOT NULL,
+      created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX master_sessions_account ON master_sessions(account_id);
+    CREATE TABLE sign_in_failures (
+      key TEXT PRIMARY KEY, failures INTEGER NOT NULL, first_at INTEGER NOT NULL,
+      locked_until INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+    CREATE TABLE backup_confirmations (
+      account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+      key_digest TEXT NOT NULL, confirmed_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE backup_runs (
+      id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, finished_at INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('running','succeeded','failed')),
+      kind TEXT NOT NULL DEFAULT 'commit' CHECK(kind IN ('commit','orphan')),
+      commit_sha TEXT, error TEXT, attempts INTEGER NOT NULL DEFAULT 1
     ) STRICT;`)
   },
 ]

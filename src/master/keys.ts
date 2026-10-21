@@ -1,13 +1,13 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { asArray, asObject, asOptional, asString } from 'cleaners'
 import { integer, text } from '../validation.js'
+import { allow, allowRole, scoped } from './permissions.js'
 import type { MasterDatabase } from './database.js'
 import {
   asKeyRole,
   atLeast,
   Forbidden,
   rank,
-  requireRole,
   type Actor,
   type KeyRole,
 } from './roles.js'
@@ -78,10 +78,22 @@ export class MasterKeys {
 
   /** Creates a key no higher than the creator's role; the token is shown once. */
   create(actor: Actor, value: unknown): MasterKey & { token: string } {
+    allowRole(actor, 'keys.create')
     const request = asKeyRequest(value)
     if (request.role !== 'upload' && rank(request.role) > rank(actor.role))
       throw new Forbidden('A key cannot have a higher role than its creator')
-    requireRole(actor, 'developer')
+    // A scoped key makes keys only within its own projects and branches.
+    if (scoped(actor)) {
+      const scopes = actor.scopes!
+      const within = (mine: string[], theirs: string[]): boolean =>
+        mine.length === 0 ||
+        (theirs.length !== 0 && theirs.every((entry) => mine.includes(entry)))
+      if (
+        !within(scopes.projects, request.projects) ||
+        !within(scopes.branches, request.branches)
+      )
+        throw new Forbidden('A key cannot have wider scopes than its creator')
+    }
     if (request.role === 'upload' && request.apps.length === 0)
       throw new Error('An upload key names the apps it may publish')
     if (request.role !== 'upload' && request.apps.length !== 0)
@@ -135,7 +147,7 @@ export class MasterKeys {
   }
 
   revoke(actor: Actor, id: string): void {
-    requireRole(actor, 'manager')
+    allow(actor, 'keys.revoke')
     this.master.transaction(() => {
       const key = this.get(text(64)(id))
       if (key == null) throw new Error('No such key')
@@ -181,12 +193,31 @@ export class MasterKeys {
     return key
   }
 
-  /** The actor an authenticated key acts as; upload keys act as nobody here. */
+  /**
+   * The actor an authenticated key acts as: no higher than its creator's
+   * current role, and nothing once the creator is disabled or removed.
+   * Keys with no creator (the local operator's, imported ones) act as their
+   * own role.
+   */
   actor(key: MasterKey): Actor {
     if (key.role === 'upload')
       throw new Forbidden('Upload keys only publish through the upload API')
+    let role = key.role
+    const creator = this.db
+      .prepare(
+        'SELECT a.role,a.disabled,a.removed_at FROM api_keys k JOIN accounts a ON a.id=k.creator WHERE k.id=?',
+      )
+      .get(key.id) as
+      | { role: string; disabled: number; removed_at: number | null }
+      | undefined
+    if (creator != null) {
+      if (Number(creator.disabled) !== 0 || creator.removed_at != null)
+        throw new Forbidden('The key’s owner is disabled')
+      const owner = asKeyRole(creator.role)
+      if (owner !== 'upload' && rank(owner) < rank(role)) role = owner
+    }
     return {
-      role: key.role,
+      role,
       keyId: key.id,
       label: `key:${key.id}`,
       scopes: { projects: key.projects, branches: key.branches },

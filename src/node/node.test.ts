@@ -268,7 +268,7 @@ describe('Configuration-free nodes', function () {
     assert.equal(masterConfigured(db), true)
     assert.match(
       (await get(url + '/', node.identity.pin)).body,
-      /This master is set up/,
+      /<h1>Sign in<\/h1>/,
     )
     io.stop()
     assert.equal(await done, 0)

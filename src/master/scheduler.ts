@@ -45,7 +45,8 @@ import type { NodeType } from './nodeTypes.js'
 import type { Artifacts } from './artifacts.js'
 import type { BuildNumbers } from './buildNumbers.js'
 import type { MasterDatabase } from './database.js'
-import { atLeast, Forbidden, requireRole, type Actor } from './roles.js'
+import { allowRole } from './permissions.js'
+import { Forbidden, type Actor } from './roles.js'
 import type { Jobs, JobView } from './jobs.js'
 import type { Mirrors } from './mirrors.js'
 import { IN_PROCESS, type NodeRecord, type NodeRegistry } from './nodes.js'
@@ -1903,7 +1904,7 @@ export class Scheduler {
       commit?: string
     },
   ): Promise<JobView> {
-    requireRole(actor, 'developer')
+    allowRole(actor, 'runs.request')
     const project = this.options.projects.resolve(input.project)
     if (project == null || !project.enabled)
       throw new RunRefused('Unknown or disabled project')
@@ -2017,7 +2018,7 @@ export class Scheduler {
 
   /** A new run that reuses every stage not depending on `from`, and reruns `from` and its dependents. */
   restart(actor: Actor, id: string, from: string): JobView {
-    requireRole(actor, 'developer')
+    allowRole(actor, 'runs.request')
     const job = this.job(id)
     if (job == null) throw new RunRefused('No such run')
     if (!terminalJob.includes(String(job.status)))
@@ -2556,9 +2557,6 @@ export class Scheduler {
   }
 
   /** Whether the actor may see logs: developers and above. */
-  static canSeeLogs(actor: Actor): boolean {
-    return atLeast(actor.role, 'developer')
-  }
 }
 
 export { GraphError, ParamsError }

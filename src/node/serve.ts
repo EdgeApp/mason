@@ -8,6 +8,11 @@ import { asObject, asOptional, asString } from 'cleaners'
 import { hostApp } from '../host/web.js'
 import { HostRuntime, type HostOptions } from '../host/runtime.js'
 import { masterApp } from '../master/web.js'
+import {
+  applyPendingRestore,
+  PENDING_RESTORE,
+  restoreBackup,
+} from '../master/backup.js'
 import { version } from '../version.js'
 import {
   serveControl,
@@ -84,6 +89,11 @@ export interface NodeOptions {
     | 'now'
   >
   pollMs?: number
+  /**
+   * After a restore from the first-run page; by default the process exits
+   * with 75 so its service manager starts it again with the restored data.
+   */
+  onRestore?: () => void
   /** Stages a worker runs at once (the master's node setting can lower it). */
   slots?: number
   /** Host internals for tests: the clock and the OIDC transport. */
@@ -278,6 +288,8 @@ export async function startNode(
     if (options.role === 'worker' && existsSync(pairingFile))
       applyPairingFile(dir, pairingFile)
     const identity = loadIdentity(dir, { renew: options.newKey === true })
+    // A restore made on the first-run page takes effect on this start.
+    if (options.role === 'master') applyPendingRestore(dir, log)
     const databases = new Map<string, DatabaseSync>()
     for (const name of databaseFiles(options.role, options.coWorker)) {
       // The host's cache is opened by its runtime, through the distribution store.
@@ -348,13 +360,43 @@ export async function startNode(
       const certificate = webCertificate(identity, webOptions)
       const app =
         master != null
-          ? masterApp({ role: 'master', testEndpoints, configured, master })
+          ? masterApp({
+              role: 'master',
+              testEndpoints,
+              configured,
+              master,
+              setupCode: (): string | undefined =>
+                configured() ? undefined : setupCode,
+              onConfigured: (): void => {
+                setupCode = undefined
+                clearSetupCode(dir)
+              },
+              restore: async (input): Promise<unknown> => {
+                const restored = await restoreBackup({
+                  ...input,
+                  target: path.join(dir, PENDING_RESTORE),
+                  scratch: privateScratch(dir),
+                })
+                log(
+                  'Restored the master from its backup; it restarts with that data',
+                )
+                ;(
+                  options.onRestore ??
+                  ((): void => {
+                    setTimeout(() => process.exit(75), 200).unref()
+                  })
+                )()
+                return { restored: restored.tables, restart: true }
+              },
+            })
           : hostApp({
               role: 'host',
               testEndpoints,
               ...(hostRuntime == null ? {} : { host: hostRuntime }),
             })
       const server = await listenWeb(app, certificate, webOptions)
+      // Requests the host forwards reach the same app on an owner-only socket.
+      if (master != null) await master.forwarder.listen(app, dir)
       cleanup.push(
         () =>
           new Promise<void>((resolve) => {

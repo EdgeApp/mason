@@ -1,5 +1,6 @@
 import type { MasterDatabase } from './database.js'
-import { requireRole, type Actor } from './roles.js'
+import { allow } from './permissions.js'
+import type { Actor } from './roles.js'
 import { publishedSettings } from './changes.js'
 
 /** A setting value is a JSON object. */
@@ -57,7 +58,7 @@ export class Settings {
 
   /** What an administrator sees: secret fields as `{ set: true }`. */
   get(actor: Actor, name: string): SettingValue {
-    requireRole(actor, 'manager')
+    allow(actor, 'settings.read')
     const area = this.area(name)
     const value = this.value(name) ?? {}
     const out: SettingValue = { ...value }
@@ -70,7 +71,7 @@ export class Settings {
   }
 
   async set(actor: Actor, name: string, input: unknown): Promise<SettingValue> {
-    requireRole(actor, 'manager')
+    allow(actor, 'settings.change')
     const area = this.area(name)
     const previous = this.value(name)
     const value = await area.validate(input, previous, {

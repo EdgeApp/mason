@@ -20,12 +20,16 @@ const MAX_SOCKET_PATH = 100
  * `/tmp/mason-control-<uid>`, an owner-only directory of the data directory's
  * owner. Both paths are the same for the owner and for root.
  */
-export function controlSocketPath(dir: string): string {
-  const inside = path.join(dir, 'control.sock')
+export function controlSocketPath(dir: string, kind = 'control'): string {
+  const inside = path.join(dir, `${kind}.sock`)
   if (Buffer.byteLength(inside) <= MAX_SOCKET_PATH) return inside
   const owner = existsSync(dir) ? statSync(dir).uid : (process.getuid?.() ?? 0)
   const name = createHash('sha256').update(dir).digest('hex').slice(0, 24)
-  return path.join(runtimeRoot(), `mason-control-${owner}`, name + '.sock')
+  return path.join(
+    runtimeRoot(),
+    `mason-control-${owner}`,
+    kind === 'control' ? name + '.sock' : `${name}-${kind}.sock`,
+  )
 }
 const runtimeRoot = (): string => realpathSync('/tmp')
 

@@ -7,6 +7,7 @@ import {
   type RunningInstall,
 } from '../release/install.js'
 import path from 'node:path'
+import { pinnedFetch } from './pinnedFetch.js'
 import { parseArgs, parseRoleCommand, single } from './args.js'
 import { controlRequest } from './control.js'
 import { resolveDataDir } from './dataDir.js'
@@ -127,6 +128,11 @@ const usage = `Usage:
   mason update [--version <x.y.z>]         install a newer release and restart the services
   mason apple sign-in [--apple-id <id>] [--password-stdin] | status | sign-out
   mason setup --username <name> --password-stdin [--api-key-out <file>]
+  mason setup --restore --repository <url> --key-file <file> [--branch <b>] [--date YYYY-MM-DD]
+  mason backup                             back up now (the master does it hourly once configured)
+  mason people list | add --file <json> | set <id> --file <json> | remove <id>
+  mason groups list | add --file <json> | set <id> --file <json> | remove <id>
+  mason api <GET|POST|PUT|DELETE> <path> [--file <json>] [--key-file <file>] [--url <origin>] [--pin <pin>]
   mason import --distribution <db> --builder <db> [--data <dir>]
   mason host import --distribution <db> [--storage <dir>] [--data <dir>]
   mason keys create --role <role> [--name <n>] [--project <slug>]… [--branch <glob>]… [--app <id>]… --out <file>
@@ -379,6 +385,106 @@ async function settingsCommand(argv: string[], io: MainIO): Promise<number> {
     return 0
   }
   throw new Error(usage)
+}
+
+/** `mason people …` and `mason groups …`, through the master's control socket. */
+async function peopleCommand(
+  kind: 'people' | 'groups',
+  argv: string[],
+  io: MainIO,
+): Promise<number> {
+  const [action, ...rest] = argv
+  const args = parseArgs(rest, ['--data', '--file'], ['--json'])
+  const data = resolveDataDir(single(args, '--data'))
+  const file = single(args, '--file')
+  const value =
+    file == null
+      ? undefined
+      : (JSON.parse(readFileSync(file, 'utf8')) as unknown)
+  const print = (result: unknown): number => {
+    io.out(JSON.stringify(result, null, 2))
+    return 0
+  }
+  if (action === 'list' && args.positional.length === 0)
+    return print(await controlRequest(data, `${kind}.list`))
+  if (action === 'add' && value != null && args.positional.length === 0)
+    return print(await controlRequest(data, `${kind}.add`, { value }))
+  if (action === 'set' && value != null && args.positional.length === 1)
+    return print(
+      await controlRequest(data, `${kind}.set`, {
+        id: Number(args.positional[0]),
+        value,
+      }),
+    )
+  if (action === 'remove' && args.positional.length === 1) {
+    await controlRequest(data, `${kind}.remove`, {
+      id: Number(args.positional[0]),
+    })
+    io.out(`Removed ${args.positional[0]}`)
+    return 0
+  }
+  throw new Error(
+    `Usage: mason ${kind} list | add --file <json> | set <id> --file <json> | remove <id>`,
+  )
+}
+
+/**
+ * `mason api <method> <path>`: one request to a master's API with an API key
+ * (`--key-file`, or `MASON_API_KEY`), at the local master's web address and
+ * pin unless `--url` and `--pin` name another. Prints the response body and
+ * exits 1 on an error status.
+ */
+async function apiCommand(argv: string[], io: MainIO): Promise<number> {
+  const args = parseArgs(
+    argv,
+    ['--data', '--file', '--key-file', '--url', '--pin'],
+    [],
+  )
+  const [method, target] = args.positional
+  if (
+    method == null ||
+    target == null ||
+    args.positional.length !== 2 ||
+    !['GET', 'POST', 'PUT', 'DELETE'].includes(method.toUpperCase()) ||
+    !target.startsWith('/api/')
+  )
+    throw new Error(
+      'Usage: mason api <GET|POST|PUT|DELETE> <path> [--file <json>] [--key-file <file>] [--url <origin>] [--pin <pin>]',
+    )
+  const keyFile = single(args, '--key-file')
+  const token =
+    keyFile == null
+      ? process.env.MASON_API_KEY
+      : readFileSync(keyFile, 'utf8').trim()
+  if (token == null || token === '')
+    throw new Error('Give an API key with --key-file or MASON_API_KEY')
+  let url = single(args, '--url')
+  let pin = single(args, '--pin')
+  if (url == null) {
+    const status = (await controlRequest(
+      resolveDataDir(single(args, '--data')),
+      'status',
+    )) as { web?: string; pin?: string }
+    if (status.web == null) throw new Error('This node has no web listener')
+    url = status.web
+    pin ??= status.pin
+  }
+  const file = single(args, '--file')
+  const response = await pinnedFetch(
+    new URL(target, url).href,
+    {
+      method: method.toUpperCase(),
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(file == null ? {} : { 'content-type': 'application/json' }),
+      },
+      ...(file == null ? {} : { body: readFileSync(file, 'utf8') }),
+    },
+    pin,
+  )
+  const text = await response.text()
+  io.out(text === '' ? `HTTP ${response.status}` : text)
+  return response.ok ? 0 : 1
 }
 
 /** `mason projects …`, through the master's control socket. */
@@ -818,6 +924,29 @@ export async function nodeMain(
         ...(io.passwordCosts == null ? {} : { costs: io.passwordCosts }),
       })
     if (first === 'import') return await importCommand(rest, io)
+    if (first === 'people' || first === 'groups')
+      return await peopleCommand(first, rest, io)
+    if (first === 'api') return await apiCommand(rest, io)
+    if (first === 'backup') {
+      const args = parseArgs(rest, ['--data'], [])
+      if (args.positional.length !== 0) throw new Error('Usage: mason backup')
+      const status = (await controlRequest(
+        resolveDataDir(single(args, '--data')),
+        'backup',
+      )) as {
+        backedUp: boolean
+        lastSuccess?: { commit: string }
+        lastFailure?: { error: string }
+      }
+      if (status.backedUp) {
+        io.out(`Backed up: ${status.lastSuccess!.commit}`)
+        return 0
+      }
+      io.out(
+        `The backup failed: ${status.lastFailure?.error ?? 'unknown error'}`,
+      )
+      return 1
+    }
     if (first === 'keys') return await keysCommand(rest, io)
     if (first === 'settings') return await settingsCommand(rest, io)
     if (first === 'projects') return await projectsCommand(rest, io)

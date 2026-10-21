@@ -1102,11 +1102,13 @@ describe('Projects, branch rules and build numbers', function () {
       assert.equal(m.buildNumbers.scheme(project.id, 'plain')!.format, 'N')
       assert.throws(() => m.seed('teamstation', '', entries), /key is required/)
       assert.throws(() => m.seed('missing', 'app', entries), /No project/)
-      // Only admins may seed over the API.
-      const manager = m.keys.create(localOperator, { role: 'manager' }).token
+      // Managers and admins may seed over the API; developers may not.
+      const developerKey = m.keys.create(localOperator, {
+        role: 'developer',
+      }).token
       assert.equal(
         (
-          await api(node, 'POST', '/api/v2/build-numbers/seed', manager, {
+          await api(node, 'POST', '/api/v2/build-numbers/seed', developerKey, {
             project: 'teamstation',
             key: 'app',
             entries,

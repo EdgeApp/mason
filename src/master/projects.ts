@@ -17,7 +17,8 @@ import type { NodeSelector } from '../../types/mason/index.js'
 import { asNodeSelector } from '../pipeline/graph.js'
 import type { MasterDatabase } from './database.js'
 import { asRules, type BranchRule } from './rules.js'
-import { requireRole, type Actor } from './roles.js'
+import { allow, allowRole } from './permissions.js'
+import type { Actor } from './roles.js'
 
 export class ProjectNotFound extends Error {
   constructor(slug: string) {
@@ -287,8 +288,9 @@ export class Projects {
     slugValue: unknown,
     value: unknown,
   ): { created: boolean; project: Project } {
-    requireRole(actor, 'manager')
+    allowRole(actor, 'projects.change')
     const slug = asProjectSlug(slugValue)
+    allow(actor, 'projects.change', { project: slug })
     const input = asProjectInput(value ?? {})
     return this.master.transaction(() => {
       const existing = this.db
@@ -368,7 +370,7 @@ export class Projects {
   }
 
   remove(actor: Actor, slug: string): void {
-    requireRole(actor, 'manager')
+    allow(actor, 'projects.change', { project: slug })
     this.master.transaction(() => {
       const row = this.row(slug)
       const busy = this.db
@@ -390,7 +392,7 @@ export class Projects {
    * channel per platform. An app belongs to one project only.
    */
   addApp(actor: Actor, slug: string, value: unknown): ProjectApp {
-    requireRole(actor, 'manager')
+    allow(actor, 'projects.change', { project: slug })
     const input = asAppInput(value)
     if (
       input.platforms.length === 0 ||
@@ -459,7 +461,7 @@ export class Projects {
 
   /** Releases an app ID from a project; the app and its builds stay. */
   removeApp(actor: Actor, slug: string, bundleId: string): void {
-    requireRole(actor, 'manager')
+    allow(actor, 'projects.change', { project: slug })
     this.master.transaction(() => {
       const project = Number(this.row(slug).id)
       const result = this.db
@@ -478,7 +480,7 @@ export class Projects {
    * `keep: true` reuses the stored value, and an entry left out is removed.
    */
   setSecrets(actor: Actor, slug: string, value: unknown): Project {
-    requireRole(actor, 'manager')
+    allow(actor, 'secrets.change', { project: slug })
     const input = asSecretsInput(value ?? {})
     return this.master.transaction(() => {
       const project = Number(this.row(slug).id)
@@ -550,7 +552,7 @@ export class Projects {
   }
 
   setRules(actor: Actor, slug: string, value: unknown): Project {
-    requireRole(actor, 'manager')
+    allow(actor, 'projects.change', { project: slug })
     const rules = asRules(value)
     return this.master.transaction(() => {
       const project = Number(this.row(slug).id)
