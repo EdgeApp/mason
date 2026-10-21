@@ -445,6 +445,40 @@ describe('Worker tooling', function () {
       toolEnvironment({ xcode: 'latest' }, tools, '/usr/bin'),
       {},
     )
+    // Homebrew formulae: Homebrew's bin follows the tools, before the service's PATH.
+    assert.deepEqual(
+      toolEnvironment(
+        { brew: ['cocoapods'] },
+        tools,
+        '/usr/bin',
+        '/opt/homebrew/bin/brew',
+      ),
+      { PATH: '/opt/homebrew/bin:/usr/bin' },
+    )
+    const withRust = toolEnvironment(
+      { rust: '1.82.0', brew: ['cocoapods'] },
+      tools,
+      '/usr/bin',
+      '/opt/homebrew/bin/brew',
+    ).PATH!
+    assert(
+      withRust.startsWith(path.join(tools, 'rust', '1.82.0', 'cargo', 'bin')),
+    )
+    assert(withRust.endsWith(':/opt/homebrew/bin:/usr/bin'))
+    // No Homebrew on the computer, or no formulae: PATH is left alone.
+    assert.deepEqual(
+      toolEnvironment({ brew: ['cocoapods'] }, tools, '/usr/bin', null),
+      {},
+    )
+    assert.deepEqual(
+      toolEnvironment(
+        { brew: [] },
+        tools,
+        '/usr/bin',
+        '/opt/homebrew/bin/brew',
+      ),
+      {},
+    )
   })
 
   it('U8.3 unpacks zips in-process, keeping modes and links, and nothing outside the target', async () => {
@@ -778,7 +812,7 @@ export async function use(ctx: Stage) {
       assert.equal(none.status, 'failed')
       assert.equal(
         use(none).reason,
-        'No connected node for this stage has an Xcode matching 99',
+        'No connected node for this stage has or can install an Xcode matching 99',
       )
     })
 

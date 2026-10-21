@@ -7,6 +7,7 @@ import {
   installedPackages,
   sdkRoot,
 } from './android.js'
+import { brewPath } from '../system/index.js'
 import { readMarker, type InstallContext } from './common.js'
 import { installJava, javaEnvironment, javaHome } from './java.js'
 import { installNode, nodeEnvironment } from './node.js'
@@ -18,8 +19,9 @@ export const installable = ['node', 'rust', 'java', 'android'] as const
 export type InstallableTool = (typeof installable)[number]
 
 export interface InstallRequest {
-  tool: InstallableTool
-  /** A version for node, rust and java; sdkmanager packages for android. */
+  /** A tools-directory installer, or a system install (`xcode`, `simulators`, `brew`, `apt`, `dnf`) the worker does through its helper. */
+  tool: InstallableTool | 'xcode' | 'simulators' | 'brew' | 'apt' | 'dnf'
+  /** A version for node, rust, java and xcode; sdkmanager packages for android; names for the system tools. */
   version?: string
   packages?: string[]
   /** For android: whether the node's type records an administrator's licence acceptance. */
@@ -112,12 +114,14 @@ export function missingTools(
 
 /**
  * The environment a stage gets for its `tools`: each tool's `bin` first on
- * `PATH`, and its home variables.
+ * `PATH`, and its home variables. A stage that lists Homebrew formulae gets
+ * Homebrew's `bin` after them, since a service's own `PATH` lacks it.
  */
 export function toolEnvironment(
   tools: Tools | undefined,
   toolsDir: string,
   basePath: string,
+  brew: string | null = brewPath() ?? null,
 ): Record<string, string> {
   if (tools == null) return {}
   const installed = installedTools(toolsDir)
@@ -136,6 +140,8 @@ export function toolEnvironment(
   const java = pick('java')
   if (java != null) add(javaEnvironment(path.join(toolsDir, 'java', java)))
   if (tools.android != null) add(androidEnvironment(toolsDir))
+  if ((tools.brew ?? []).length > 0 && brew != null)
+    paths.push(path.dirname(brew))
   if (paths.length === 0) return env
   return { ...env, PATH: [...paths, basePath].join(path.delimiter) }
 }

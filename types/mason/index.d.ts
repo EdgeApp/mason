@@ -349,6 +349,8 @@ export interface NodeInfo {
   arch: Arch
   labels: string[]
   xcode?: { version: string; build: string; path: string; sdks: string[] }
+  /** The stage's own simulator device set, for `simctl --set`, when it lists simulators (also `MASON_SIMULATOR_SET`). */
+  simulatorSet?: string
 }
 
 export interface ArtifactOptions {

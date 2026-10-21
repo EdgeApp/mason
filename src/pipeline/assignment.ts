@@ -82,6 +82,8 @@ export interface RunReport {
   exitCode?: number
   /** Set when the guardian could not prove the run's processes stopped. */
   quarantine?: string
+  /** A setup run's copy of the repository's `.xcode-version`. */
+  xcodeVersion?: string
 }
 
 /** An assignment as the worker journals it: without secrets, files or injected contents. */

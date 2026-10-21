@@ -4,11 +4,19 @@ import { decodePlist } from '../devices/plist.js'
 import type { Inventory } from './baseInventory.js'
 import { installedTools, type InstalledTools } from './tools/index.js'
 import type { XcodeInstall } from './tools/versions.js'
+import type { SystemInventory } from './system/index.js'
+import type { ChecklistItem } from './system/reconcile.js'
 
 /** The inventory a worker reports on link open and after every install. */
 export interface FullInventory extends Inventory {
   xcodes: XcodeInstall[]
   tools: InstalledTools
+  /** Whether the privileged helper answers on this node. */
+  helper?: 'ready' | 'missing'
+  /** System software and settings beyond the tools directory. */
+  system?: SystemInventory
+  /** Manual steps only a person can do. */
+  checklist?: ChecklistItem[]
 }
 
 /** Xcodes installed as `Xcode*.app` bundles: version, build, path and whether it is a beta. */

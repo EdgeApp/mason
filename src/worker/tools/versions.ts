@@ -5,6 +5,9 @@ export interface XcodeInstall {
   build: string
   path: string
   beta: boolean
+  /** Whether it runs on the node's macOS; unknown until the node has checked. */
+  launches?: boolean
+  launchError?: string
 }
 
 const parts = (version: string): number[] =>

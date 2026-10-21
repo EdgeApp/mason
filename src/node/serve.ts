@@ -34,7 +34,7 @@ import {
   type WebCertificate,
   type WebOptions,
 } from './web.js'
-import { createPublicKey } from 'node:crypto'
+import { createPublicKey, type KeyObject } from 'node:crypto'
 import type { Server as HttpsServer } from 'node:https'
 import { Link, type MethodTable } from '../link/link.js'
 import { Pairing, serveNodeLinks, type NodeLinks } from '../link/nodeSide.js'
@@ -76,6 +76,7 @@ export interface NodeOptions {
     | 'timeZone'
     | 'graceMs'
     | 'stashLimit'
+    | 'appleEndpoints'
     | 'now'
   >
   pollMs?: number
@@ -84,7 +85,16 @@ export interface NodeOptions {
   /** Worker internals for tests. */
   workerOptions?: Pick<
     WorkerOptions,
-    'inspect' | 'flushMs' | 'applications' | 'toolSources'
+    | 'inspect'
+    | 'flushMs'
+    | 'applications'
+    | 'toolSources'
+    | 'install'
+    | 'restart'
+    | 'helperSocket'
+    | 'masterKey'
+    | 'systemRun'
+    | 'helper'
   >
 }
 
@@ -104,6 +114,8 @@ export interface NodeStatus {
   master?: string
   setup?: 'waiting' | 'configured'
   testEndpoints?: boolean
+  /** What needs a person, such as the Apple ID's two-factor code. */
+  notices?: string[]
 }
 
 export interface RunningNode {
@@ -344,6 +356,17 @@ export async function startNode(
         link: (): Link | undefined => workerLink(),
         assignment: (): typeof localAssignment =>
           pairing?.assignment() ?? localAssignment,
+        masterKey: (): KeyObject | undefined => {
+          if (options.coWorker) return identity.publicKey
+          const master = pairing?.master()
+          return master == null
+            ? undefined
+            : createPublicKey({
+                key: Buffer.from(master.publicKey, 'base64'),
+                format: 'der',
+                type: 'spki',
+              })
+        },
         ...(options.slots == null ? {} : { slots: options.slots }),
         ...options.workerOptions,
       })
@@ -360,7 +383,10 @@ export async function startNode(
         ...options.nodeMethods?.requests,
       },
       events: { ...options.nodeMethods?.events },
-      streams: { ...options.nodeMethods?.streams },
+      streams: {
+        ...worker?.methods().streams,
+        ...options.nodeMethods?.streams,
+      },
     })
     if (link != null) {
       pairing = new Pairing(dir, identity)
@@ -376,7 +402,10 @@ export async function startNode(
         ...(options.heartbeatMs == null
           ? {}
           : { heartbeatMs: options.heartbeatMs }),
-        onPaired: (fingerprint) => log(`Paired with master ${fingerprint}`),
+        onPaired: (fingerprint) => {
+          log(`Paired with master ${fingerprint}`)
+          worker?.trustMaster()
+        },
         onRemoved: () =>
           log('Removed by its master; start with --new-key to pair it again.'),
       })
@@ -437,6 +466,9 @@ export async function startNode(
         ? { setup: configured() ? 'configured' : 'waiting' }
         : {}),
       testEndpoints,
+      ...(master == null || master.notices().length === 0
+        ? {}
+        : { notices: master.notices() }),
     })
     const nodeHandlers: Record<string, ControlHandler> = {
       ...(master == null

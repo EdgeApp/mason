@@ -44,6 +44,32 @@ import {
   type InstallRequest,
 } from './tools/index.js'
 import { defaultSources, type ToolSources } from './tools/common.js'
+import type { KeyObject } from 'node:crypto'
+import { helperPaths, helperRequest } from '../helper/server.js'
+import { runningInstall, type RunningInstall } from '../release/install.js'
+import { receiveUpdate, restartProcess } from './update.js'
+import type { NodeType } from '../master/nodeTypes.js'
+import {
+  systemInventory,
+  systemRun,
+  type SystemInventory,
+  type SystemRun,
+} from './system/index.js'
+import {
+  checklist,
+  freeBytes,
+  performItem,
+  reconcile,
+  reconcilePlan,
+  type ItemContext,
+  type ReconcileItem,
+} from './system/reconcile.js'
+import {
+  prepareXcode,
+  removeSimulatorSet,
+  simulatorSet,
+} from './system/xcode.js'
+import { xcodeLaunches } from './system/index.js'
 import { checkout } from './checkout.js'
 import { GitBridge } from './gitProxy.js'
 import { Journal } from './journal.js'
@@ -67,7 +93,22 @@ export interface WorkerOptions {
   applications?: string
   /** Where installers download from. */
   toolSources?: ToolSources
+  /** The paired master's public key, for its signed updates. */
+  masterKey?: () => KeyObject | undefined
+  /** The privileged helper's socket. */
+  helperSocket?: string
+  /** How this Mason was installed; the running process's install by default. */
+  install?: RunningInstall
+  /** Restarts into a newly installed release; exits for the service manager by default. */
+  restart?: () => void
+  /** Runs system commands (xcodebuild, simctl, pkgutil, …) as the worker's user. */
+  systemRun?: SystemRun
+  /** Calls the privileged helper; through its socket by default. */
+  helper?: (op: string, args: Record<string, unknown>) => Promise<unknown>
 }
+
+/** Tools a stage can ask for that the system installs rather than the tools directory. */
+const systemTools = ['xcode', 'simulators', 'brew', 'apt', 'dnf'] as const
 
 const safe = (key: string): string =>
   key.replace(/[^A-Za-z0-9._-]/g, (c) => `%${c.charCodeAt(0).toString(16)}`)
@@ -149,6 +190,20 @@ export class WorkerRuntime {
   private flushing: Promise<void> | undefined
   private again = false
   private stopped = false
+  /** System software and settings, refreshed in the background. */
+  private system: SystemInventory | undefined
+  private refreshing: Promise<void> | undefined
+  /** The node type's definition the master last sent. */
+  private nodeType: NodeType | undefined
+  private reconciling: Promise<void> | undefined
+  private reconcileAgain = false
+  /** Xcode bundles running stages use, by run key. */
+  private readonly inUse = new Map<string, string>()
+  /** Each running stage's Xcode details and private simulator set, by run key. */
+  private readonly prepared = new Map<
+    string,
+    { xcode?: NonNullable<NodeInfo['xcode']>; simulatorSet?: string }
+  >()
 
   constructor(private readonly options: WorkerOptions) {
     this.journal = new Journal(options.db)
@@ -167,6 +222,8 @@ export class WorkerRuntime {
         reason: 'The worker restarted while this ran',
       } satisfies RunReport)
     this.journal.prune()
+    this.trustMaster()
+    void this.refreshSystem()
     await this.bridge.listen()
     this.timer = setInterval(() => {
       this.flushSoon()
@@ -185,24 +242,259 @@ export class WorkerRuntime {
     this.bridge.close()
   }
 
+  private get run(): SystemRun {
+    return this.options.systemRun ?? systemRun
+  }
+
+  private async helper(
+    op: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    return await (
+      this.options.helper ??
+      ((name, values): Promise<unknown> =>
+        helperRequest(this.helperSocket, name, values))
+    )(op, args)
+  }
+
+  private helperReady(): boolean {
+    return existsSync(this.helperSocket)
+  }
+
+  /** Re-reads system software and settings, then tells the master. */
+  async refreshSystem(): Promise<void> {
+    if (this.refreshing != null) return await this.refreshing
+    this.refreshing = (async (): Promise<void> => {
+      if (this.stopped) return
+      const base = this.inventory()
+      const system = await systemInventory({
+        os: base.os,
+        arch: base.arch,
+        xcodes: base.xcodes,
+        run: this.run,
+      })
+      // A worker that stopped meanwhile has closed its journal.
+      if (this.stopped) return
+      this.system = system
+      const link = this.options.link()
+      if (link != null && !link.closed && !this.stopped)
+        try {
+          link.event('node.inventory', { inventory: this.inventory() })
+        } catch {
+          // The next connection sends it.
+        }
+    })()
+      .catch(() => undefined)
+      .finally(() => {
+        this.refreshing = undefined
+      })
+    return await this.refreshing
+  }
+
   inventory(): FullInventory {
     const assigned = this.options.assignment()
     const quarantine = this.journal.quarantine()
-    return fullInventory(
-      baseInventory({
-        dir: this.options.dir,
-        ...(assigned == null ? {} : assigned),
-        version: this.options.version,
-        ...(this.options.slots == null ? {} : { slots: this.options.slots }),
-        ...(quarantine == null ? {} : { quarantine }),
-      }),
-      {
-        toolsDir: this.path('tools'),
-        ...(this.options.applications == null
-          ? {}
-          : { applications: this.options.applications }),
+    const full = this.baseFull(assigned, quarantine)
+    const system = this.system
+    const xcodes = full.xcodes.map((install) => {
+      const launch = system?.launches[install.path]
+      return launch == null
+        ? install
+        : {
+            ...install,
+            launches: launch.ok,
+            ...(launch.error == null ? {} : { launchError: launch.error }),
+          }
+    })
+    const state = {
+      inventory: { ...full, xcodes, ...(system == null ? {} : { system }) },
+      inUse: [...this.inUse.values()],
+    }
+    return {
+      ...state.inventory,
+      checklist: checklist(this.nodeType, state, full.helper === 'ready'),
+    }
+  }
+
+  private baseFull(
+    assigned: ReturnType<WorkerOptions['assignment']>,
+    quarantine: string | undefined,
+  ): FullInventory {
+    return {
+      ...fullInventory(
+        baseInventory({
+          dir: this.options.dir,
+          ...(assigned == null ? {} : assigned),
+          version: this.options.version,
+          ...(this.options.slots == null ? {} : { slots: this.options.slots }),
+          ...(quarantine == null ? {} : { quarantine }),
+        }),
+        {
+          toolsDir: this.path('tools'),
+          ...(this.options.applications == null
+            ? {}
+            : { applications: this.options.applications }),
+        },
+      ),
+      helper: this.helperReady() ? 'ready' : 'missing',
+    }
+  }
+
+  /** What system items need from the node and the master. */
+  private itemContext(log: (text: string) => void): ItemContext {
+    return {
+      log,
+      helper: async (op, args): Promise<unknown> => await this.helper(op, args),
+      authorize: async (version): Promise<{ url: string; cookie: string }> => {
+        const link = this.options.link()
+        if (link == null) throw new Error('The master is not connected')
+        return (await link.request(
+          'xcode.authorize',
+          { version },
+          5 * 60 * 1000,
+        )) as { url: string; cookie: string }
       },
-    )
+      installTool: async (request): Promise<void> => {
+        const answer = await this.installTool(request)
+        log(answer.log)
+        if (!answer.ok) throw new Error(answer.error)
+      },
+      fetchRuntime: async (name, file): Promise<boolean> =>
+        await this.fetchRuntime(name, file),
+      storeRuntime: async (name, file): Promise<void> => {
+        await this.storeRuntime(name, file)
+      },
+      run: this.run,
+      scratch: this.path('tmp', 'system'),
+      xcodes: () => this.inventory().xcodes,
+      launches: async (install) => (await xcodeLaunches(install, this.run)).ok,
+    }
+  }
+
+  /** Brings the node to its type's state; a request during a pass runs another pass after it. */
+  reconcileType(type: NodeType | undefined): Promise<void> {
+    if (type != null) this.nodeType = type
+    if (this.reconciling != null) {
+      this.reconcileAgain = true
+      return this.reconciling
+    }
+    this.reconciling = (async (): Promise<void> => {
+      do {
+        this.reconcileAgain = false
+        const current = this.nodeType
+        if (current == null || this.stopped) return
+        await this.refreshSystem()
+        const plan = reconcilePlan(current, {
+          inventory: this.inventory(),
+          inUse: [...this.inUse.values()],
+        })
+        if (plan.length === 0) continue
+        let log = ''
+        const results = await reconcile(plan, {
+          ...this.itemContext((text) => {
+            log += text
+          }),
+          helperReady: this.helperReady(),
+          progress: (progress) => {
+            this.options.link()?.event('node.progress', progress)
+          },
+          freeDisk: () => freeBytes(this.options.dir),
+          thresholdBytes: current.diskThresholdGb * 1024 ** 3,
+        })
+        await this.refreshSystem()
+        this.options.link()?.event('node.reconciled', {
+          results,
+          log: log.slice(-64 * 1024),
+          inventory: this.inventory(),
+        })
+      } while (this.reconcileAgain && !this.stopped)
+    })()
+      .catch(() => undefined)
+      .finally(() => {
+        this.reconciling = undefined
+      })
+    return this.reconciling
+  }
+
+  private async fetchRuntime(name: string, file: string): Promise<boolean> {
+    const link = this.options.link()
+    if (link == null) throw new Error('The master is not connected')
+    const { stored } = (await link.request('runtime.lookup', { name })) as {
+      stored: boolean
+    }
+    if (!stored) return false
+    const out = createWriteStream(file, { mode: 0o600 })
+    const stream = link.openStream('runtime.get', { name })
+    await new Promise<void>((resolve, reject) => {
+      stream.on('data', (chunk: Buffer) => out.write(chunk))
+      stream.once('end', () => {
+        stream.end()
+        out.end(() => {
+          resolve()
+        })
+      })
+      stream.once('abort', (reason: string) => {
+        out.destroy()
+        reject(new Error(`Runtime ${name}: ${reason}`))
+      })
+    })
+    return true
+  }
+
+  private async storeRuntime(name: string, file: string): Promise<void> {
+    const link = this.options.link()
+    if (link == null) throw new Error('The master is not connected')
+    const stream = link.openStream('runtime.put', { name })
+    const done = new Promise<void>((resolve, reject) => {
+      stream.once('end', () => {
+        resolve()
+      })
+      stream.once('abort', (reason: string) => {
+        reject(new Error(`Runtime ${name}: ${reason}`))
+      })
+    })
+    done.catch(() => undefined)
+    for await (const chunk of createReadStream(file))
+      await stream.write(chunk as Buffer)
+    stream.end()
+    await done
+  }
+
+  /** A stage's system tools as reconciliation items: an Xcode, runtimes, packages. */
+  private systemItems(request: {
+    tool: string
+    version?: string
+    packages?: string[]
+  }): ReconcileItem[] {
+    const packages = request.packages ?? []
+    switch (request.tool) {
+      case 'xcode':
+        return [
+          {
+            id: `xcode:${request.version ?? ''}`,
+            kind: 'xcode',
+            version: request.version ?? '',
+          },
+        ]
+      case 'simulators':
+        return packages.map((name) => ({
+          id: `runtime:${name}`,
+          kind: 'runtime',
+          name,
+        }))
+      case 'brew':
+        return packages.map((formula) => ({
+          id: `brew:${formula}`,
+          kind: 'brew',
+          formula,
+        }))
+      default:
+        return packages.map((name) => ({
+          id: `${request.tool}:${name}`,
+          kind: request.tool as 'apt' | 'dnf',
+          package: name,
+        }))
+    }
   }
 
   /**
@@ -225,6 +517,23 @@ export class WorkerRuntime {
     })
     await previous
     try {
+      if ((systemTools as readonly string[]).includes(request?.tool)) {
+        if (!this.helperReady())
+          throw new Error(
+            'The helper is not installed: run sudo mason worker --install',
+          )
+        const context = this.itemContext((text) => {
+          log += text
+        })
+        // Tools-directory installs inside an item would wait on this one.
+        context.installTool = async (): Promise<void> => {
+          throw new Error('Not a system tool')
+        }
+        for (const item of this.systemItems(request))
+          await performItem(item, context)
+        await this.refreshSystem()
+        return { ok: true, log, inventory: this.inventory() }
+      }
       if (!(installable as readonly string[]).includes(request?.tool))
         throw new Error(`${String(request?.tool)} is not a tool Mason installs`)
       const base = this.inventory()
@@ -256,8 +565,44 @@ export class WorkerRuntime {
   }
 
   /** Methods the worker accepts from its master. */
+  private get helperSocket(): string {
+    return (
+      this.options.helperSocket ??
+      helperPaths(process.platform === 'darwin' ? 'darwin' : 'linux').socket
+    )
+  }
+
+  /**
+   * Hands the master's key to the privileged helper, which keeps the first
+   * one it gets and refuses any other. Without a helper this waits for
+   * `sudo mason worker --install`.
+   */
+  trustMaster(): void {
+    const key = this.options.masterKey?.()
+    if (key == null) return
+    void helperRequest(this.helperSocket, 'key.set', {
+      publicKey: key.export({ type: 'spki', format: 'der' }).toString('base64'),
+    }).catch(() => undefined)
+  }
+
   methods(): MethodTable {
+    const install = this.options.install ?? runningInstall()
     return {
+      streams: {
+        'update.install': async (stream, params): Promise<void> => {
+          await receiveUpdate(stream, params, {
+            masterKey: () => this.options.masterKey?.(),
+            version: this.options.version,
+            busy: () => this.executions.size > 0,
+            install,
+            scratch: this.path('tmp', 'updates'),
+            helperSocket: this.helperSocket,
+            restart: () => {
+              ;(this.options.restart ?? ((): void => restartProcess(install)))()
+            },
+          })
+        },
+      },
       requests: {
         'worker.state': () => ({
           inventory: this.inventory(),
@@ -268,6 +613,11 @@ export class WorkerRuntime {
         'setup.run': (params) => this.accept(params as SetupAssignment),
         'stage.run': (params) => this.accept(params as StageAssignment),
         'tools.install': async (params) => await this.installTool(params),
+        'node.reconcile': (params): { started: true } => {
+          const type = (params as { type?: NodeType }).type
+          void this.reconcileType(type)
+          return { started: true }
+        },
         'job.forget': (params): null => {
           this.forgetJob(String((params as { job?: unknown }).job))
           return null
@@ -415,6 +765,7 @@ export class WorkerRuntime {
       if (assignment.kind !== 'setup' && assignment.workspace.path != null)
         release = await this.lockWorkspace(dir, say)
       if (signal.aborted) throw signal.reason
+      if (assignment.kind !== 'setup') await this.prepareStage(assignment, say)
       const ticket = { key, token: assignment.token }
       if (assignment.kind === 'setup' || assignment.checkout.enabled)
         await checkout({
@@ -485,6 +836,7 @@ export class WorkerRuntime {
     } finally {
       release?.()
       this.busy.delete(slot)
+      await this.releaseStage(key)
     }
     if (report.quarantine != null) this.journal.setQuarantine(report.quarantine)
     log.write('', true)
@@ -520,7 +872,19 @@ export class WorkerRuntime {
           ? {}
           : { inspect: this.options.inspect }),
       })
-      return { status: 'succeeded', value: graph as Json }
+      // Stages that need Xcode and name none use the repository's .xcode-version.
+      const file = path.join(dir, '.xcode-version')
+      const xcodeVersion =
+        existsSync(file) &&
+        lstatSync(file).isFile() &&
+        lstatSync(file).size < 256
+          ? readFileSync(file, 'utf8')
+          : undefined
+      return {
+        status: 'succeeded',
+        value: graph as Json,
+        ...(xcodeVersion == null ? {} : { xcodeVersion }),
+      }
     } catch (error) {
       if (error instanceof SetupFailed)
         return {
@@ -535,11 +899,74 @@ export class WorkerRuntime {
     }
   }
 
+  /**
+   * Readies a stage's Xcode (first launch when needed; the log starts with
+   * `xcodebuild -version`, path and SDKs) and, for a stage that lists
+   * simulators, a device set of its own.
+   */
+  private async prepareStage(
+    assignment: StageAssignment,
+    log: (text: string) => void,
+  ): Promise<void> {
+    const prepared: {
+      xcode?: NonNullable<NodeInfo['xcode']>
+      simulatorSet?: string
+    } = {}
+    this.prepared.set(assignment.key, prepared)
+    if (assignment.developerDir != null) {
+      this.inUse.set(
+        assignment.key,
+        path.dirname(path.dirname(assignment.developerDir)),
+      )
+      prepared.xcode = await prepareXcode(assignment.developerDir, {
+        run: this.run,
+        helper: async (op, args) => await this.helper(op, args),
+        log,
+      })
+    }
+    if ((assignment.tools?.simulators ?? []).length > 0)
+      prepared.simulatorSet = simulatorSet(
+        this.path('tmp', `stage-${safe(assignment.key)}`),
+      )
+  }
+
+  /** Removes a stage's simulators and, when disk is short, lets reconciliation clean up. */
+  private async releaseStage(key: string): Promise<void> {
+    const prepared = this.prepared.get(key)
+    this.prepared.delete(key)
+    this.inUse.delete(key)
+    if (prepared?.simulatorSet != null)
+      await removeSimulatorSet(
+        prepared.simulatorSet,
+        this.run,
+        prepared.xcode == null
+          ? {}
+          : {
+              DEVELOPER_DIR: path.join(
+                prepared.xcode.path,
+                'Contents',
+                'Developer',
+              ),
+            },
+      ).catch(() => undefined)
+    const type = this.nodeType
+    if (
+      type != null &&
+      !this.stopped &&
+      freeBytes(this.options.dir) < type.diskThresholdGb * 1024 ** 3
+    )
+      void this.reconcileType(undefined)
+  }
+
   /** A stage's non-secret environment, with its tools first on `PATH` and its Xcode. */
   private stageEnvironment(
     assignment: StageAssignment,
   ): Record<string, string> {
+    const prepared = this.prepared.get(assignment.key)
     return {
+      ...(prepared?.simulatorSet == null
+        ? {}
+        : { MASON_SIMULATOR_SET: prepared.simulatorSet }),
       ...assignment.env,
       ...toolEnvironment(
         assignment.tools,
@@ -552,14 +979,19 @@ export class WorkerRuntime {
     }
   }
 
-  private node(): NodeInfo {
+  private node(key?: string): NodeInfo {
     const inventory = this.inventory()
+    const prepared = key == null ? undefined : this.prepared.get(key)
     return {
       name: inventory.name,
       type: inventory.type,
       os: inventory.os,
       arch: inventory.arch,
       labels: inventory.labels,
+      ...(prepared?.xcode == null ? {} : { xcode: prepared.xcode }),
+      ...(prepared?.simulatorSet == null
+        ? {}
+        : { simulatorSet: prepared.simulatorSet }),
     }
   }
 
@@ -588,7 +1020,7 @@ export class WorkerRuntime {
           attempt: assignment.attempt,
           matrix: assignment.matrix,
         },
-        node: this.node(),
+        node: this.node(assignment.key),
         env: this.stageEnvironment(assignment),
         secrets: assignment.secrets,
         files: assignment.files,

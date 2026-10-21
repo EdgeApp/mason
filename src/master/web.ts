@@ -20,6 +20,14 @@ export function masterApp(context: MasterWebContext): express.Express {
       keys: context.master.keys,
       settings: context.master.settings,
       registry: context.master.registry,
+      nodeDetails: (fingerprint) => context.master.nodeDetails(fingerprint),
+      apple: {
+        status: () => context.master.apple.status(),
+        signIn: async (actor, appleId, password) =>
+          await context.master.appleSignIn(actor, appleId, password),
+        code: async (actor, code) =>
+          await context.master.appleCode(actor, code),
+      },
     }),
   )
   app.get('/', (_req, res) => {

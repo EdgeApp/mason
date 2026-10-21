@@ -302,3 +302,88 @@ export function hostSystem(
     },
   }
 }
+
+export const HELPER_LABEL = 'app.mason.helper'
+
+/**
+ * Installs the privileged helper as a root LaunchDaemon (macOS) or systemd
+ * unit (Linux) serving the given user's Mason service.
+ */
+export function installHelperService(
+  request: Pick<ServiceRequest, 'user' | 'program'>,
+  system: ServiceSystem,
+): { label: string; file: string } {
+  const user = serviceUser(
+    {
+      role: 'worker',
+      program: request.program,
+      args: [],
+      ...(request.user == null ? {} : { user: request.user }),
+    },
+    system,
+  )
+  const command = [...request.program, 'helper', '--user', user.name]
+  const root = { uid: 0, gid: 0 }
+  if (system.platform === 'darwin') {
+    const file = `/Library/LaunchDaemons/${HELPER_LABEL}.plist`
+    const plist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${HELPER_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+${command.map((word) => `    <string>${xml(word)}</string>`).join('\n')}
+  </array>
+  <key>UserName</key><string>root</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Library/Logs/mason-helper.log</string>
+  <key>StandardErrorPath</key><string>/Library/Logs/mason-helper.log</string>
+</dict>
+</plist>
+`
+    system.writeFile(file, plist, root, 0o644)
+    system.run('launchctl', ['bootout', `system/${HELPER_LABEL}`], true)
+    system.run('launchctl', ['bootstrap', 'system', file])
+    return { label: HELPER_LABEL, file }
+  }
+  const file = '/etc/systemd/system/mason-helper.service'
+  const content = `[Unit]
+Description=Mason privileged helper for ${user.name}
+
+[Service]
+ExecStart=${command.map(systemdWord).join(' ')}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+`
+  system.writeFile(file, content, root, 0o644)
+  system.run('systemctl', ['daemon-reload'])
+  system.run('systemctl', ['enable', 'mason-helper'])
+  system.run('systemctl', ['restart', 'mason-helper'])
+  return { label: 'mason-helper', file }
+}
+
+/** Stops and removes the helper; its stored master key goes with it. */
+export function uninstallHelperService(
+  system: ServiceSystem,
+  keyFile: string,
+): { label: string; file: string } {
+  if (system.euid !== 0)
+    throw new Error('Removing a service needs root: run it with sudo')
+  system.removeFile(keyFile)
+  if (system.platform === 'darwin') {
+    const file = `/Library/LaunchDaemons/${HELPER_LABEL}.plist`
+    system.run('launchctl', ['bootout', `system/${HELPER_LABEL}`], true)
+    system.removeFile(file)
+    return { label: HELPER_LABEL, file }
+  }
+  const file = '/etc/systemd/system/mason-helper.service'
+  system.run('systemctl', ['disable', '--now', 'mason-helper'], true)
+  system.removeFile(file)
+  system.run('systemctl', ['daemon-reload'])
+  return { label: 'mason-helper', file }
+}

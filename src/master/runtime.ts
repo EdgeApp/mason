@@ -6,7 +6,7 @@ import { createFirstAdmin } from '../setup/setup.js'
 import { MasterDatabase } from './database.js'
 import { MasterKeys } from './keys.js'
 import { NodeRegistry } from './nodes.js'
-import { localOperator } from './roles.js'
+import { localOperator, requireRole } from './roles.js'
 import { Settings } from './settings.js'
 import { BuildNumbers } from './buildNumbers.js'
 import { GitHub, storedConnection, type GitHubOptions } from './github.js'
@@ -19,6 +19,28 @@ import { githubLfs, Mirrors, type RemoteResolver } from './mirrors.js'
 import { Retention } from './retention.js'
 import { Scheduler } from './scheduler.js'
 import { Stashes } from './stash.js'
+import { Releases } from './releases.js'
+import { Updates } from './updates.js'
+import { runningInstall } from '../release/install.js'
+import { version } from '../version.js'
+import {
+  AppleDownloads,
+  appleSetting,
+  type AppleEndpoints,
+  type AppleStatus,
+  type AppleXcode,
+} from './apple/developerDownloads.js'
+import type { ChecklistItem } from '../worker/system/reconcile.js'
+import {
+  masterChecklist,
+  NodeStates,
+  type NodeType,
+  nodeTypesSetting,
+  storedNodeType,
+} from './nodeTypes.js'
+import { RuntimeStore } from './runtimes.js'
+
+export { nodeTypesSetting }
 
 export interface MasterOptions {
   methods?: (role: 'worker' | 'host') => MethodTable
@@ -45,43 +67,8 @@ export interface MasterOptions {
   stashLimit?: number
   /** The master's clock. */
   now?: () => number
-}
-
-/**
- * Per-node-type settings. `androidLicensesAccepted: true` records who
- * accepted the Android SDK licences for that type, and when; the worker's
- * Android installer accepts them only then.
- */
-export function nodeTypesSetting(
-  input: unknown,
-  previous: Record<string, unknown> | undefined,
-  context: { actor: { label: string }; now: number },
-): Record<string, unknown> {
-  if (input == null || typeof input !== 'object' || Array.isArray(input))
-    throw new Error('nodeTypes maps node type names to their settings')
-  const out: Record<string, unknown> = {}
-  for (const [type, value] of Object.entries(input)) {
-    if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(type))
-      throw new Error(`Invalid node type ${type}`)
-    const fields = (value ?? {}) as { androidLicensesAccepted?: unknown }
-    const before = (
-      previous?.[type] as { androidLicensesAccepted?: unknown } | undefined
-    )?.androidLicensesAccepted
-    if (fields.androidLicensesAccepted === true)
-      out[type] = {
-        androidLicensesAccepted: before ?? {
-          by: context.actor.label,
-          at: context.now,
-        },
-      }
-    else if (
-      fields.androidLicensesAccepted == null ||
-      fields.androidLicensesAccepted === false
-    )
-      out[type] = {}
-    else throw new Error('androidLicensesAccepted is true or false')
-  }
-  return out
+  /** Apple's sign-in and download hosts; a fake Apple in tests. */
+  appleEndpoints?: AppleEndpoints
 }
 
 /** Merges two method tables; the first wins on a clash. */
@@ -108,6 +95,12 @@ export class Master {
   readonly stashes: Stashes
   readonly scheduler: Scheduler
   readonly retention: Retention
+  readonly releases: Releases
+  readonly updates: Updates
+  readonly apple: AppleDownloads
+  readonly runtimes: RuntimeStore
+  readonly nodeStates: NodeStates
+  private stopped = false
   constructor(
     db: DatabaseSync,
     readonly identity: Identity,
@@ -119,7 +112,9 @@ export class Master {
     this.registry = new NodeRegistry(db, identity, {
       methods: (role): MethodTable =>
         mergeMethods(
-          role === 'worker' ? this.scheduler.methods() : {},
+          role === 'worker'
+            ? mergeMethods(this.scheduler.methods(), this.nodeStates.methods())
+            : {},
           options.methods?.(role) ?? {},
         ),
       ...(options.heartbeatMs == null
@@ -179,6 +174,13 @@ export class Master {
       path.join(dir, 'stashes'),
       options.stashLimit,
     )
+    this.apple = new AppleDownloads(this.database, {
+      keyFile: path.join(dir, 'apple.key'),
+      ...(options.appleEndpoints == null
+        ? {}
+        : { endpoints: options.appleEndpoints }),
+    })
+    this.runtimes = new RuntimeStore(path.join(dir, 'runtimes'))
     this.scheduler = new Scheduler({
       master: this.database,
       projects: this.projects,
@@ -197,9 +199,55 @@ export class Master {
             | { androidLicensesAccepted?: unknown }
             | undefined
         )?.androidLicensesAccepted != null,
+      nodeType: (name): NodeType | undefined =>
+        storedNodeType(this.settings.value('nodeTypes')?.[name]),
+      appleXcodes: (): AppleXcode[] => this.apple.cachedXcodes(),
+      masterChecklist: (): ChecklistItem[] =>
+        masterChecklist(this.apple.status(), this.nodeStates.wantsXcode()),
+    })
+    this.nodeStates = new NodeStates({
+      registry: this.registry,
+      settings: this.settings,
+      apple: this.apple,
+      runtimes: this.runtimes,
+      storeInventory: (fingerprint, inventory): void => {
+        this.scheduler.storeInventory(fingerprint, inventory)
+        this.scheduler.poke()
+      },
+      requested: (fingerprint, tool, name): boolean =>
+        this.scheduler.requested(fingerprint, tool, name),
+      now: this.database.now,
     })
     this.retention = new Retention(this.database, this.scheduler, this.stashes)
-    this.settings.register('nodeTypes', { validate: nodeTypesSetting })
+    this.settings.register('nodeTypes', {
+      validate: nodeTypesSetting,
+      changed: () => {
+        this.nodeStates.reconcileAll()
+      },
+    })
+    this.settings.register('apple', { validate: appleSetting })
+    this.releases = new Releases(
+      this.database,
+      path.join(dir, 'releases'),
+      identity,
+      version,
+    )
+    this.updates = new Updates(
+      this.registry,
+      this.releases,
+      (fingerprint) => this.scheduler.inventoryOf(fingerprint),
+      (fingerprint) => this.scheduler.busy(fingerprint),
+    )
+    // A worker that reconnects may be behind the current release.
+    this.registry.on('connected', (fingerprint: string) => {
+      setTimeout(() => {
+        if (!this.stopped) void this.updates.tick()
+      }, 2000).unref()
+      // Once the scheduler has its inventory, the node reconciles its type's software.
+      setTimeout(() => {
+        if (!this.stopped) this.nodeStates.reconcile(fingerprint)
+      }, 1000).unref()
+    })
   }
 
   /** Starts dialing nodes and polling repositories. */
@@ -218,10 +266,19 @@ export class Master {
     })
     this.scheduler.start()
     this.retention.start()
+    this.updates.start()
+    this.apple.start()
+    void this.apple.check().catch(() => undefined)
+    void this.releases
+      .importOwn(runningInstall().appRoot)
+      .catch(() => undefined)
   }
   async stop(): Promise<void> {
+    this.stopped = true
     this.registry.stop()
     this.retention.stop()
+    this.updates.stop()
+    this.apple.stop()
     await this.poller.close()
     await this.scheduler.stop()
   }
@@ -260,6 +317,78 @@ export class Master {
     const project = this.projects.get(projectSlug)
     if (key === '') throw new Error('A build-number key is required')
     return this.buildNumbers.seed(project.id, key, entries)
+  }
+
+  /** What needs a person on the master: the Apple ID code, for `mason status` and the dashboard. */
+  notices(): string[] {
+    const apple = this.apple.status()
+    return apple.notice == null ? [] : [apple.notice]
+  }
+
+  /** Signs the Apple ID in; Apple usually asks for a two-factor code next. */
+  async appleSignIn(
+    actor: typeof localOperator,
+    appleId: unknown,
+    password: unknown,
+  ): Promise<AppleStatus> {
+    requireRole(actor, 'manager')
+    const id =
+      typeof appleId === 'string' && appleId !== ''
+        ? appleId
+        : String(this.settings.value('apple')?.appleId ?? '')
+    if (typeof password !== 'string') throw new Error('A password is required')
+    await this.settings.set(actor, 'apple', { appleId: id })
+    const status = await this.apple.signIn(id, password)
+    this.database.audit(actor, 'apple.signIn', id)
+    this.nodeStates.reconcileAll()
+    return status
+  }
+
+  async appleCode(
+    actor: typeof localOperator,
+    code: unknown,
+  ): Promise<AppleStatus> {
+    requireRole(actor, 'manager')
+    const status = await this.apple.submitCode(String(code ?? ''))
+    this.database.audit(actor, 'apple.code', status.appleId ?? '')
+    if (status.state === 'signedIn') {
+      this.nodeStates.reconcileAll()
+      this.scheduler.poke()
+    }
+    return status
+  }
+
+  /** A node's last inventory summary and update state, for the nodes API. */
+  nodeDetails(fingerprint: string): Record<string, unknown> {
+    const inventory = this.scheduler.inventoryOf(fingerprint)
+    const update = this.updates.state(fingerprint)
+    const checklist = [
+      ...(inventory?.checklist ?? []),
+      ...masterChecklist(this.apple.status(), this.nodeStates.wantsXcode()),
+    ]
+    return {
+      checklist,
+      ...this.nodeStates.details(fingerprint),
+      ...(inventory == null
+        ? {}
+        : {
+            inventory: {
+              version: inventory.version,
+              os: inventory.os,
+              osVersion: inventory.osVersion,
+              arch: inventory.arch,
+              freeDisk: inventory.freeDisk,
+              xcodes: inventory.xcodes ?? [],
+              tools: inventory.tools,
+              ...(inventory.system == null ? {} : { system: inventory.system }),
+              ...(inventory.helper == null ? {} : { helper: inventory.helper }),
+              ...(inventory.quarantine == null
+                ? {}
+                : { quarantine: inventory.quarantine }),
+            },
+          }),
+      ...(update == null ? {} : { update }),
+    }
   }
 
   /** Runs, newest first, filtered by project, workflow, branch and status. */
@@ -367,7 +496,41 @@ export class Master {
         return await this.registry.assign(node.fingerprint, args.value as never)
       },
       'runs.cleanup': () => this.retention.cleanup(),
+      'releases.list': () => this.releases.list(),
+      'releases.add': async (args): Promise<string> => {
+        const added = await this.releases.add(String(args.dir ?? ''))
+        void this.updates.tick()
+        return added
+      },
+      'releases.fetch': async (args): Promise<string> => {
+        const connection = this.settings.value('github') as
+          | { kind?: string; token?: string }
+          | undefined
+        return await this.releases.fetch(
+          String(args.tag ?? ''),
+          connection?.kind === 'token'
+            ? connection.token
+            : (process.env.GITHUB_TOKEN ?? undefined),
+          this.options.scratch ?? '/tmp',
+        )
+      },
+      'releases.current': (args): { current: string | null } => {
+        if (typeof args.version === 'string') {
+          this.releases.setCurrent(args.version)
+          void this.updates.tick()
+        }
+        return { current: this.releases.current() ?? null }
+      },
       'runs.list': (args) => this.runs(args),
+      'apple.status': () => this.apple.status(),
+      'apple.signIn': async (args) =>
+        await this.appleSignIn(actor, args.appleId, args.password),
+      'apple.code': async (args) => await this.appleCode(actor, args.code),
+      'apple.signOut': async (): Promise<null> => {
+        await this.apple.signOut()
+        return null
+      },
+      'runtimes.list': () => this.runtimes.list(),
       'nodes.remove': (args): null => {
         this.registry.remove(String(args.fingerprint ?? ''))
         return null

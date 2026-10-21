@@ -12,6 +12,7 @@ import { startNode, type NodeOptions, type RunningNode } from '../node/serve.js'
 import { pinnedFetch } from '../node/pinnedFetch.js'
 import { createFirstAdmin } from '../setup/setup.js'
 import { listHeads } from '../master/github.js'
+import { quietMac } from './fakeMac.js'
 import { canonical } from '../worker/gitProxy.js'
 
 const quiet = (): void => undefined
@@ -158,7 +159,9 @@ export async function cluster(
     heartbeatMs: 0,
     redialBaseMs: 50,
     pollMs: 3600000,
-    ...(options.coWorker ? { coWorker: true } : {}),
+    ...(options.coWorker
+      ? { coWorker: true, workerOptions: { systemRun: quietMac() } }
+      : {}),
     ...options.master,
     masterOptions: {
       remote,
@@ -213,7 +216,12 @@ export async function cluster(
         listen: '127.0.0.1',
         heartbeatMs: 0,
         ...(spec.slots == null ? {} : { slots: spec.slots }),
-        workerOptions: { flushMs: 50, ...spec.workerOptions },
+        // System commands go to a fake Mac unless a test brings its own.
+        workerOptions: {
+          flushMs: 50,
+          systemRun: quietMac(),
+          ...spec.workerOptions,
+        },
       },
       quiet,
     )

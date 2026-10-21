@@ -929,13 +929,19 @@ describe('Configuration-free nodes', function () {
       0,
     )
     assert.match(io.lines[0]!, /Installed app\.mason\.worker for paul/)
+    // A worker's install adds the privileged helper's root service too.
+    assert.match(io.lines[1]!, /Installed app\.mason\.helper/)
     assert.equal(
-      io.lines[1],
+      io.lines[2],
       service.lines.find((line) => line.startsWith('Pairing key: ')),
     )
     const removal = testIO({ system: () => system })
     assert.equal(await nodeMain(['worker', '--uninstall'], removal), 0)
     assert.match(removal.lines[0]!, /Removed app\.mason\.worker/)
+    assert.match(
+      removal.lines[1]!,
+      /Removed app\.mason\.helper .* and its master key/,
+    )
     service.stop()
     await running
     const masterData = path.join(root, 'm')

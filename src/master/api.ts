@@ -24,6 +24,14 @@ export interface ApiContext {
   keys: MasterKeys
   settings: Settings
   registry: NodeRegistry
+  /** What the master knows about a node beyond its record: inventory and update state. */
+  nodeDetails?: (fingerprint: string) => Record<string, unknown>
+  /** The master's Apple ID session for Xcode downloads. */
+  apple?: {
+    status(): unknown
+    signIn(actor: Actor, appleId: unknown, password: unknown): Promise<unknown>
+    code(actor: Actor, code: unknown): Promise<unknown>
+  }
 }
 
 /** The caller of an API request; set by `authenticate`. */
@@ -135,7 +143,10 @@ export function masterApi(context: ApiContext): Router {
     '/api/v2/nodes',
     json((_req, res) => {
       requireRole(actorOf(res), 'manager')
-      return context.registry.list()
+      return context.registry.list().map((node) => ({
+        ...node,
+        ...context.nodeDetails?.(node.fingerprint),
+      }))
     }),
   )
   router.post(
@@ -170,6 +181,39 @@ export function masterApi(context: ApiContext): Router {
       return null
     }),
   )
+  // The Apple ID session: managers and administrators only. The password is
+  // write-only and the session never leaves the master.
+  const apple = context.apple
+  if (apple != null) {
+    router.get(
+      '/api/v2/apple/session',
+      json((_req, res) => {
+        requireRole(actorOf(res), 'manager')
+        return apple.status()
+      }),
+    )
+    router.post(
+      '/api/v2/apple/session',
+      json(async (req, res) => {
+        const body = (req.body ?? {}) as {
+          appleId?: unknown
+          password?: unknown
+        }
+        return await apple.signIn(actorOf(res), body.appleId, body.password)
+      }),
+    )
+    router.post(
+      '/api/v2/apple/session/code',
+      json(
+        async (req, res) =>
+          await apple.code(
+            actorOf(res),
+            (req.body as { code?: unknown } | null)?.code,
+          ),
+      ),
+    )
+  }
+
   router.use('/api/v2', (_req, res) => {
     res.status(404).json({ error: 'Not found' })
   })

@@ -1,4 +1,11 @@
-import { existsSync, readFileSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, rmSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { helperPaths, serveHelper, systemContext } from '../helper/server.js'
+import {
+  runningInstall,
+  serviceProgram,
+  type RunningInstall,
+} from '../release/install.js'
 import path from 'node:path'
 import { parseArgs, parseRoleCommand, single } from './args.js'
 import { controlRequest } from './control.js'
@@ -21,6 +28,8 @@ import {
   installService,
   uninstallService,
   type ServiceSystem,
+  installHelperService,
+  uninstallHelperService,
 } from './service.js'
 
 export interface MainIO {
@@ -38,6 +47,42 @@ export interface MainIO {
   program(): string[]
   /** Called once a node is serving, for tests. */
   started?(node: RunningNode): void
+  /** How this Mason was installed; the running process's install by default. */
+  install?: () => RunningInstall
+  /** Asks a question on the terminal; `hidden` does not echo the answer. */
+  prompt?(question: string, hidden: boolean): Promise<string>
+}
+
+/** Reads one line from the terminal, without echo for a password. */
+export async function terminalPrompt(
+  question: string,
+  hidden: boolean,
+): Promise<string> {
+  const { createInterface } = await import('node:readline')
+  const { openSync, createReadStream, createWriteStream } = await import(
+    'node:fs'
+  )
+  const input = createReadStream('', { fd: openSync('/dev/tty', 'r') })
+  const output = createWriteStream('', { fd: openSync('/dev/tty', 'w') })
+  const rl = createInterface({ input, output, terminal: true })
+  if (hidden)
+    (
+      rl as unknown as { _writeToOutput: (text: string) => void }
+    )._writeToOutput = (text: string): void => {
+      if (text.startsWith(question)) output.write(question)
+    }
+  try {
+    return await new Promise((resolve) => {
+      rl.question(question, (answer) => {
+        if (hidden) output.write('\n')
+        resolve(answer.trim())
+      })
+    })
+  } finally {
+    rl.close()
+    input.destroy()
+    output.end()
+  }
 }
 
 export const processIO: MainIO = {
@@ -54,7 +99,12 @@ export const processIO: MainIO = {
       process.once('SIGTERM', stop)
       process.once('SIGINT', stop)
     }),
-  program: () => [process.execPath, realpathSync(process.argv[1]!)],
+  program: () =>
+    serviceProgram(
+      runningInstall(),
+      process.execPath,
+      realpathSync(process.argv[1]!),
+    ),
 }
 
 const roles: readonly Role[] = ['master', 'worker', 'host']
@@ -71,6 +121,9 @@ const usage = `Usage:
   mason runs list [--project <slug>] [--workflow <w>] [--branch <b>] [--status <s>] [--json]
   mason runs cleanup                       apply retention now (the master does it hourly)
   mason recover                            clear a worker's guardian quarantine after checking it
+  mason releases list | add <dir> | fetch <tag> | current [<version>]
+  mason update [--version <x.y.z>]         install a newer release and restart the services
+  mason apple sign-in [--apple-id <id>] [--password-stdin] | status | sign-out
   mason setup --username <name> --password-stdin [--api-key-out <file>]
   mason import --distribution <db> --builder <db> [--data <dir>]
   mason keys create --role <role> [--name <n>] [--project <slug>]… [--branch <glob>]… [--app <id>]… --out <file>
@@ -119,6 +172,7 @@ function printStatus(status: NodeStatus, io: MainIO): void {
   ]
   for (const [label, value] of lines)
     if (value != null) io.out(`${label}: ${value}`)
+  for (const notice of status.notices ?? []) io.out(`Notice: ${notice}`)
 }
 
 async function roleCommand(
@@ -127,15 +181,37 @@ async function roleCommand(
   io: MainIO,
 ): Promise<number> {
   const command = parseRoleCommand(role, argv)
+  const helped = role === 'worker' || command.options.coWorker === true
+  const system = (): ServiceSystem => io.system()
   if (command.uninstall) {
     const removed = uninstallService(
       { role, ...(command.user == null ? {} : { user: command.user }) },
-      io.system(),
+      system(),
     )
     io.out(
       `Removed ${removed.label} (${removed.file}); the data directory is kept.`,
     )
+    if (helped) {
+      const helper = uninstallHelperService(
+        system(),
+        helperPaths(system().platform).keyFile,
+      )
+      io.out(`Removed ${helper.label} (${helper.file}) and its master key.`)
+    }
     return 0
+  }
+  // As root, --new-key also makes the helper forget the master's key.
+  if (
+    command.options.newKey === true &&
+    helped &&
+    process.geteuid?.() === 0 &&
+    system().euid === 0
+  ) {
+    rmSync(helperPaths(system().platform).keyFile, { force: true })
+    io.out(
+      'The helper forgot the master key; the worker pairs again with a new key.',
+    )
+    if (!command.install) return 0
   }
   if (command.install) {
     const installed = installService(
@@ -152,6 +228,16 @@ async function roleCommand(
     io.out(
       `Installed ${installed.label} for ${installed.user} (${installed.file}); data in ${installed.data}.`,
     )
+    if (helped) {
+      const helper = installHelperService(
+        {
+          ...(command.user == null ? {} : { user: command.user }),
+          program: io.program(),
+        },
+        system(),
+      )
+      io.out(`Installed ${helper.label} (${helper.file}).`)
+    }
     if (role === 'master') {
       const code = path.join(installed.data, 'setup-code')
       await waitForControl(installed.data, 'status')
@@ -343,6 +429,203 @@ async function buildNumbersCommand(
 }
 
 /** `mason nodes …`: the master's nodes, through its control socket. */
+/** `mason helper --user <name>`: the privileged helper, run as root by its service. */
+async function helperCommand(argv: string[], io: MainIO): Promise<number> {
+  const args = parseArgs(argv, ['--user'], [])
+  const name = single(args, '--user')
+  const system = io.system()
+  if (system.euid !== 0)
+    throw new Error('The helper runs as root, from its service')
+  const user = name == null ? undefined : system.user(name)
+  if (user == null) throw new Error('Usage: mason helper --user <name>')
+  const server = await serveHelper(
+    helperPaths(system.platform).socket,
+    systemContext(system.platform, { name: name!, ...user }),
+  )
+  io.out(`Mason helper serving ${name!}`)
+  await io.stopped()
+  server.close()
+  return 0
+}
+
+/**
+ * `mason apple sign-in`: stores the Apple ID and password on the master and
+ * signs in, then reads Apple's two-factor code from the terminal.
+ */
+async function appleCommand(argv: string[], io: MainIO): Promise<number> {
+  const [action, ...rest] = argv
+  const args = parseArgs(
+    rest,
+    ['--data', '--apple-id'],
+    ['--password-stdin', '--json'],
+  )
+  const data = resolveDataDir(single(args, '--data'))
+  const prompt = io.prompt ?? terminalPrompt
+  const show = (status: {
+    appleId?: string
+    state: string
+    notice?: string
+    codeVia?: string
+  }): void => {
+    if (args.flags.has('--json')) {
+      io.out(JSON.stringify(status))
+      return
+    }
+    io.out(`Apple ID: ${status.appleId ?? '(none)'}`)
+    io.out(`State: ${status.state}`)
+    if (status.notice != null) io.out(`Notice: ${status.notice}`)
+  }
+  if (action === 'status') {
+    show((await controlRequest(data, 'apple.status')) as never)
+    return 0
+  }
+  if (action === 'sign-out') {
+    await controlRequest(data, 'apple.signOut')
+    io.out('Signed out; the stored password and session are deleted.')
+    return 0
+  }
+  if (action !== 'sign-in') throw new Error(usage)
+  const current = (await controlRequest(data, 'apple.status')) as {
+    appleId?: string
+  }
+  const appleId =
+    single(args, '--apple-id') ??
+    current.appleId ??
+    (await prompt('Apple ID: ', false))
+  const password = args.flags.has('--password-stdin')
+    ? (await (io.stdin ?? readStdin)()).replace(/\r?\n$/, '')
+    : await prompt(`Password for ${appleId}: `, true)
+  let status = (await controlRequest(data, 'apple.signIn', {
+    appleId,
+    password,
+  })) as {
+    state: string
+    codeVia?: string
+    error?: string
+    appleId?: string
+    notice?: string
+  }
+  for (
+    let attempt = 0;
+    status.state === 'needsCode' && attempt < 3;
+    attempt++
+  ) {
+    const code = await prompt(
+      `Two-factor code (sent to ${status.codeVia ?? 'a trusted device'}): `,
+      false,
+    )
+    try {
+      status = (await controlRequest(data, 'apple.code', {
+        code,
+      })) as typeof status
+    } catch (error) {
+      io.err((error as Error).message)
+    }
+  }
+  show(status)
+  return status.state === 'signedIn' ? 0 : 1
+}
+
+/** `mason releases list | add <dir> | fetch <tag> | current [<version>]`. */
+async function releasesCommand(argv: string[], io: MainIO): Promise<number> {
+  const [action, ...rest] = argv
+  const args = parseArgs(rest, ['--data'], ['--json'])
+  const data = resolveDataDir(single(args, '--data'))
+  if (action === 'list') {
+    const releases = (await controlRequest(data, 'releases.list')) as Array<{
+      version: string
+      platforms: string[]
+      current: boolean
+    }>
+    if (args.flags.has('--json')) io.out(JSON.stringify(releases))
+    else if (releases.length === 0) io.out('No releases are stored.')
+    else
+      for (const release of releases)
+        io.out(
+          `${release.current ? '* ' : '  '}${release.version}  ${release.platforms.join(' ')}`,
+        )
+    return 0
+  }
+  if (action === 'add' && args.positional.length === 1) {
+    const version = await controlRequest(data, 'releases.add', {
+      dir: path.resolve(args.positional[0]!),
+    })
+    io.out(`Stored release ${String(version)}`)
+    return 0
+  }
+  if (action === 'fetch' && args.positional.length === 1) {
+    const version = await controlRequest(data, 'releases.fetch', {
+      tag: args.positional[0],
+    })
+    io.out(`Stored release ${String(version)}`)
+    return 0
+  }
+  if (action === 'current' && args.positional.length <= 1) {
+    const out = (await controlRequest(data, 'releases.current', {
+      ...(args.positional.length === 1 ? { version: args.positional[0] } : {}),
+    })) as { current: string | null }
+    io.out(
+      out.current == null
+        ? 'No current release.'
+        : `Current release: ${out.current}`,
+    )
+    return 0
+  }
+  throw new Error(usage)
+}
+
+/**
+ * `mason update [--version <x.y.z>]`: installs a newer release the way
+ * install.sh does and restarts this user's Mason services. The data
+ * directories stay as they are.
+ */
+async function updateCommand(argv: string[], io: MainIO): Promise<number> {
+  const args = parseArgs(argv, ['--version'], [])
+  const install = io.install?.() ?? runningInstall()
+  if (install.kind === 'checkout')
+    throw new Error(
+      'This Mason runs from a source checkout; update it with git',
+    )
+  const script = path.join(install.appRoot, 'release', 'install.sh')
+  if (!existsSync(script))
+    throw new Error(
+      'This install has no copy of install.sh; run install.sh again',
+    )
+  const version = single(args, '--version')
+  const status = await new Promise<number>((resolve) => {
+    const child = spawn(
+      'bash',
+      [
+        script,
+        ...(install.kind === 'user' ? ['--user'] : []),
+        ...(version == null ? [] : ['--version', version]),
+      ],
+      {
+        stdio: 'inherit',
+        env: { ...process.env, MASON_PREFIX: install.prefix! },
+      },
+    )
+    child.on('close', (code) => {
+      resolve(code ?? 1)
+    })
+  })
+  if (status !== 0) return status
+  const system = io.system()
+  const uid = Number(process.env.SUDO_UID ?? process.getuid?.() ?? 0)
+  for (const role of ['master', 'worker', 'host'])
+    if (system.platform === 'darwin')
+      system.run(
+        'launchctl',
+        ['kickstart', '-k', `gui/${uid}/app.mason.${role}`],
+        true,
+      )
+    else system.run('systemctl', ['try-restart', `mason-${role}`], true)
+  io.out(
+    'Restarted the Mason services of this account into the new release; their data directories are unchanged.',
+  )
+  return 0
+}
+
 async function runsCommand(argv: string[], io: MainIO): Promise<number> {
   const [action, ...rest] = argv
   const args = parseArgs(
@@ -491,6 +774,10 @@ export async function nodeMain(
     if (first === 'projects') return await projectsCommand(rest, io)
     if (first === 'build-numbers') return await buildNumbersCommand(rest, io)
     if (first === 'runs') return await runsCommand(rest, io)
+    if (first === 'helper') return await helperCommand(rest, io)
+    if (first === 'releases') return await releasesCommand(rest, io)
+    if (first === 'update') return await updateCommand(rest, io)
+    if (first === 'apple') return await appleCommand(rest, io)
     if (first === 'recover') {
       const args = parseArgs(rest, ['--data'], [])
       await controlRequest(resolveDataDir(single(args, '--data')), 'recover')

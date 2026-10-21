@@ -761,8 +761,9 @@ tools: { xcode: 'latest-beta' }     // newest beta, when the node type allows be
   launch if needed (installing a newer Xcode's system components can leave an
   older one needing it). The simulator runtimes the stage lists are installed
   for that Xcode with its own `xcodebuild -downloadPlatform`, and a stage that
-  boots simulators gets a device set private to the stage (`simctl
-  --set`), so runtimes from different Xcodes do not collide.
+  lists `simulators` gets a device set private to the stage (`simctl
+  --set`, at `ctx.node.simulatorSet` and in `MASON_SIMULATOR_SET`), removed
+  when the stage ends, so runtimes from different Xcodes do not collide.
 - **macOS compatibility.** Not every Xcode runs on every macOS (an older Xcode
   may refuse to launch on a newer macOS, and a new Xcode needs a minimum
   macOS). Each node reports which installed Xcodes actually launch, and a

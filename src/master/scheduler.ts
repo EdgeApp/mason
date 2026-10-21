@@ -39,6 +39,9 @@ import {
 import type { FullInventory } from '../worker/inventory.js'
 import { missingTools, type InstallRequest } from '../worker/tools/index.js'
 import { selectXcode } from '../worker/tools/versions.js'
+import type { ChecklistItem } from '../worker/system/reconcile.js'
+import type { AppleXcode } from './apple/developerDownloads.js'
+import type { NodeType } from './nodeTypes.js'
 import type { BuildNumbers } from './buildNumbers.js'
 import type { MasterDatabase } from './database.js'
 import { atLeast, Forbidden, requireRole, type Actor } from './roles.js'
@@ -113,6 +116,54 @@ export interface SchedulerOptions {
   graceMs?: number
   /** Whether a node type records an administrator's Android SDK licence acceptance. */
   androidLicencesAccepted?: (nodeType: string) => boolean
+  /** A node type's definition: its Xcode default and whether betas are allowed. */
+  nodeType?: (name: string) => NodeType | undefined
+  /** Xcodes Apple offers to the master's signed-in Apple ID, for on-demand installs. */
+  appleXcodes?: () => AppleXcode[]
+  /** Manual steps on the master that block nodes (the Apple ID code). */
+  masterChecklist?: () => ChecklistItem[]
+}
+
+/** A stage needs an Xcode when it has an `apple` option or asks for macOS. */
+export function needsXcode(stage: GraphStage): boolean {
+  return (
+    stage.tools?.xcode != null ||
+    stage.apple != null ||
+    (typeof stage.on === 'object' && stage.on.os === 'macos')
+  )
+}
+
+/**
+ * The Xcode a stage asks for on a node of this type: its own `xcode` (with
+ * the repository's `.xcode-version` filled in at setup), else the type's
+ * default, else `latest`. `latest-beta` is `latest` unless the type allows
+ * betas.
+ */
+export function xcodeSpec(
+  stage: GraphStage,
+  type: NodeType | undefined,
+): string | undefined {
+  if (!needsXcode(stage)) return undefined
+  const spec = stage.tools?.xcode ?? type?.software.xcodeDefault ?? 'latest'
+  return spec === 'latest-beta' && type?.software.allowBeta !== true
+    ? 'latest'
+    : spec
+}
+
+/** The `.xcode-version` file's version, applied to stages that need Xcode and name none. */
+export function applyXcodeVersion(
+  graph: Graph,
+  file: string | undefined,
+): string | undefined {
+  if (file == null) return undefined
+  const version = file.trim().split('\n')[0]!.trim()
+  if (!/^[\w.<>= -]{1,40}$/.test(version))
+    return `Ignoring .xcode-version: ${JSON.stringify(version.slice(0, 40))} is not an Xcode version`
+  for (const workflow of graph.workflows)
+    for (const stage of workflow.stages)
+      if (needsXcode(stage) && stage.tools?.xcode == null)
+        stage.tools = { ...stage.tools, xcode: version }
+  return undefined
 }
 
 const hash = (value: string): string =>
@@ -135,6 +186,13 @@ interface WorkerSlot {
   developerDir?: string
 }
 
+interface Fit {
+  missing: InstallRequest[]
+  developerDir?: string
+  /** The checklist item that keeps the stage off this node for now. */
+  blocked?: string
+}
+
 const noTools = { node: [], rust: [], java: [], android: [] }
 
 /**
@@ -152,6 +210,8 @@ export class Scheduler {
   private lastSchedule = 0
   private stopped = false
   private readonly waiters = new Set<() => void>()
+  /** System installs preparing stages asked each worker for: `xcode:<version>`, `simulators:<name>`. */
+  private readonly requestedInstalls = new Map<string, Map<string, number>>()
 
   constructor(readonly options: SchedulerOptions) {
     options.registry.on('connected', (fingerprint: string, link: Link) => {
@@ -566,8 +626,20 @@ export class Scheduler {
       this.finishJob(id, 'failed', (error as Error).message)
       return
     }
+    const ignored = applyXcodeVersion(graph, report.xcodeVersion)
+    if (ignored != null) graph.warnings.push(ignored)
     for (const warning of graph.warnings)
       this.appendLog(id, SETUP, `warning: ${warning}\n`)
+    // An Xcode that launches on none of the nodes a stage can use fails the run now.
+    for (const stage of graph.workflows.find(
+      (workflow) => workflow.name === job.workflow,
+    )?.stages ?? []) {
+      const reason = needsXcode(stage) ? this.neverLaunches(stage) : undefined
+      if (reason == null) continue
+      this.appendLog(id, SETUP, `${stage.name}: ${reason}\n`)
+      this.finishJob(id, 'failed', `${stage.name}: ${reason}`)
+      return
+    }
     const key = this.graphKey(job, String(job.commit_sha))
     this.storeGraph(key, job, String(job.commit_sha), graph)
     this.db.prepare('UPDATE jobs SET graph_key=? WHERE id=?').run(key, id)
@@ -878,6 +950,22 @@ export class Scheduler {
 
   // ── Workers ───────────────────────────────────────────────────────────
 
+  /** The inventory a worker last reported. */
+  inventoryOf(fingerprint: string): FullInventory | undefined {
+    return this.inventory(fingerprint)
+  }
+
+  /** Whether a worker has a stage or setup run in progress. */
+  busy(fingerprint: string): boolean {
+    return (
+      this.db
+        .prepare(
+          "SELECT 1 FROM job_stages WHERE worker=? AND status IN ('running','preparing') LIMIT 1",
+        )
+        .get(fingerprint) != null
+    )
+  }
+
   private inventory(fingerprint: string): FullInventory | undefined {
     const row = this.db
       .prepare('SELECT inventory FROM worker_inventory WHERE fingerprint=?')
@@ -907,8 +995,9 @@ export class Scheduler {
       )
       if (load >= Math.min(node.slots, inventory.slots)) continue
       if (stage != null && !this.matches(stage, node, inventory)) continue
-      const fit = stage == null ? { missing: [] } : this.fit(stage, inventory)
-      if (fit == null) continue
+      const fit: Fit | undefined =
+        stage == null ? { missing: [] } : this.fit(stage, node, inventory)
+      if (fit == null || fit.blocked != null) continue
       out.push({ node, inventory, link, load, ...fit })
     }
     // Workers that already have the stage's tools come before ones that must install them.
@@ -921,24 +1010,117 @@ export class Scheduler {
   }
 
   /**
-   * Whether a worker can run a stage's `tools`: the Xcode its range needs must
-   * be installed; node, rust, java and Android packages may be installed first.
+   * Whether a worker can run a stage: the Xcode it asks for must launch on
+   * the node, or be one Apple offers to install; node, rust, java, Android,
+   * simulator runtimes and packages may be installed first. A checklist item
+   * that blocks one of those installs keeps the stage off the node for now.
    */
   private fit(
     stage: GraphStage,
+    node: NodeRecord,
     inventory: FullInventory,
-  ): { missing: InstallRequest[]; developerDir?: string } | undefined {
+  ): Fit | undefined {
     const tools = stage.tools
+    const type = this.options.nodeType?.(node.type)
+    const missing = missingTools(tools, inventory.tools ?? noTools)
+    const needs = new Set<string>()
     let developerDir: string | undefined
-    if (tools?.xcode != null) {
-      const xcode = selectXcode(tools.xcode, inventory.xcodes ?? [])
-      if (xcode == null) return undefined
-      developerDir = path.join(xcode.path, 'Contents', 'Developer')
+    const spec = xcodeSpec(stage, type)
+    if (spec != null) {
+      if (inventory.os !== 'macos') return undefined
+      const launching = (inventory.xcodes ?? []).filter(
+        (install) => install.launches !== false,
+      )
+      const xcode = selectXcode(spec, launching)
+      if (xcode != null)
+        developerDir = path.join(xcode.path, 'Contents', 'Developer')
+      else {
+        const offered = selectXcode(
+          spec,
+          (this.options.appleXcodes?.() ?? []).map((release) => ({
+            version: release.version,
+            build: '',
+            path: release.version,
+            beta: release.beta,
+          })),
+        )
+        // Before the Apple ID signs in, the releases Apple offers are unknown: wait for it.
+        const apple = (this.options.masterChecklist?.() ?? []).find((item) =>
+          item.blocks.includes('apple'),
+        )
+        if (
+          offered == null &&
+          apple != null &&
+          (this.options.appleXcodes?.() ?? []).length === 0
+        )
+          return { missing, blocked: apple.title }
+        if (
+          offered == null ||
+          (inventory.xcodes ?? []).some(
+            (install) =>
+              install.launches === false &&
+              path.basename(install.path) === `Xcode-${offered.version}.app`,
+          )
+        )
+          return undefined
+        missing.push({ tool: 'xcode', version: offered.version })
+        needs.add('system').add('apple')
+      }
     }
+    const system = inventory.system
+    const lacking = (
+      wanted: string[] | undefined,
+      have: string[] | undefined,
+    ): string[] => (wanted ?? []).filter((name) => !(have ?? []).includes(name))
+    if (inventory.os === 'macos') {
+      const runtimes = lacking(
+        tools?.simulators,
+        system?.runtimes.map((runtime) => runtime.name),
+      )
+      if (runtimes.length > 0) {
+        missing.push({ tool: 'simulators', packages: runtimes })
+        needs.add('system')
+      }
+      const brew = lacking(tools?.brew, system?.brew?.formulae)
+      if (brew.length > 0) {
+        missing.push({ tool: 'brew', packages: brew })
+        needs.add('system').add('brew')
+      }
+    } else {
+      for (const manager of ['apt', 'dnf'] as const) {
+        const packages = lacking(tools?.[manager], system?.[manager])
+        if (packages.length === 0) continue
+        if (system != null && system[manager] == null) return undefined
+        missing.push({ tool: manager, packages })
+        needs.add('system')
+      }
+    }
+    const blocked = [
+      ...(inventory.checklist ?? []),
+      ...(this.options.masterChecklist?.() ?? []),
+    ].find((item) => item.blocks.some((tag) => needs.has(tag)))
     return {
-      missing: missingTools(tools, inventory.tools ?? noTools),
+      missing,
       ...(developerDir == null ? {} : { developerDir }),
+      ...(blocked == null ? {} : { blocked: blocked.title }),
     }
+  }
+
+  /** Why an Xcode a stage asks for runs on no connected node, when every match fails to launch. */
+  private neverLaunches(stage: GraphStage): string | undefined {
+    let reason: string | undefined
+    for (const node of this.options.registry.list()) {
+      const inventory = this.inventory(node.fingerprint)
+      if (node.role !== 'worker' || inventory == null) continue
+      if (!this.matches(stage, node, inventory)) continue
+      const spec = xcodeSpec(stage, this.options.nodeType?.(node.type))
+      if (spec == null || inventory.os !== 'macos') return undefined
+      if (selectXcode(spec, inventory.xcodes ?? [])?.launches !== false)
+        return undefined
+      const install = selectXcode(spec, inventory.xcodes ?? [])!
+      reason ??= `Xcode ${install.version} does not launch on ${node.name} (macOS ${inventory.osVersion}): ${install.launchError ?? 'it does not start'}`
+    }
+    return reason
   }
 
   /** Connected workers whose selector and Xcode fit a stage, whatever their load. */
@@ -950,7 +1132,7 @@ export class Scheduler {
         inventory != null &&
         this.options.registry.link(node.fingerprint) != null &&
         this.matches(stage, node, inventory) &&
-        this.fit(stage, inventory) != null
+        this.fit(stage, node, inventory) != null
       )
     }).length
   }
@@ -987,15 +1169,28 @@ export class Scheduler {
       stage.name,
       `── Preparing ${stage.name} on ${worker.node.name}: installing ${worker.missing
         .map((request) =>
-          request.tool === 'android'
-            ? `android ${(request.packages ?? []).join(' ')}`
+          request.packages != null
+            ? `${request.tool} ${request.packages.join(' ')}`
             : `${request.tool} ${request.version ?? ''}`,
         )
         .join(', ')} ──\n`,
     )
     this.options.master.change('job', job)
+    const fingerprint = worker.node.fingerprint
+    const asked = worker.missing.flatMap((request) =>
+      request.tool === 'xcode'
+        ? [`xcode:${request.version ?? ''}`]
+        : request.tool === 'simulators'
+          ? (request.packages ?? []).map((name) => `simulators:${name}`)
+          : [],
+    )
+    const requested = this.requestedInstalls.get(fingerprint) ?? new Map()
+    this.requestedInstalls.set(fingerprint, requested)
+    for (const entry of asked)
+      requested.set(entry, (requested.get(entry) ?? 0) + 1)
     void (async (): Promise<void> => {
       for (const request of worker.missing) {
+        const system = request.tool === 'xcode' || request.tool === 'simulators'
         const answer = (await worker.link.request(
           'tools.install',
           request.tool === 'android'
@@ -1007,7 +1202,7 @@ export class Scheduler {
                   true,
               }
             : request,
-          60 * 60 * 1000,
+          (system ? 6 : 1) * 60 * 60 * 1000,
         )) as {
           ok: boolean
           error?: string
@@ -1054,11 +1249,27 @@ export class Scheduler {
             .run(job, stage.name)
       })
       .finally(() => {
+        for (const entry of asked) {
+          const left = (requested.get(entry) ?? 1) - 1
+          if (left > 0) requested.set(entry, left)
+          else requested.delete(entry)
+        }
         this.poke()
       })
   }
 
-  private storeInventory(fingerprint: string, inventory: FullInventory): void {
+  /** Whether a stage preparing on this worker asked it to install this Xcode or runtime. */
+  requested(
+    fingerprint: string,
+    tool: 'xcode' | 'simulators',
+    name: string,
+  ): boolean {
+    return (
+      this.requestedInstalls.get(fingerprint)?.has(`${tool}:${name}`) ?? false
+    )
+  }
+
+  storeInventory(fingerprint: string, inventory: FullInventory): void {
     this.db
       .prepare(
         'INSERT INTO worker_inventory(fingerprint,inventory,quarantine,updated) VALUES(?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET inventory=excluded.inventory,quarantine=excluded.quarantine,updated=excluded.updated',
@@ -1231,7 +1442,7 @@ export class Scheduler {
     if (worker == null) {
       // Connected workers match the selector but none has an Xcode the range accepts.
       if (
-        stage.tools?.xcode != null &&
+        needsXcode(stage) &&
         this.selectable(stage) > 0 &&
         this.candidatesIgnoringLoad(stage) === 0
       )
@@ -1239,7 +1450,8 @@ export class Scheduler {
           id,
           stage.name,
           'failed',
-          `No connected node for this stage has an Xcode matching ${stage.tools.xcode}`,
+          this.neverLaunches(stage) ??
+            `No connected node for this stage has or can install an Xcode matching ${stage.tools?.xcode ?? 'its node type’s default'}`,
         )
       return
     }
