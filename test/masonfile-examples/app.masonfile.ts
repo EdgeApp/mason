@@ -1,6 +1,6 @@
 import type { Setup, Stage } from '@mason/types'
 
-const APP = 'app.teamstation.app'
+const APP = 'com.example.app'
 
 export function setup(m: Setup) {
   m.apiVersion(1)
@@ -87,8 +87,8 @@ async function archiveIos(ctx: Stage) {
   await ctx.sh('npm ci && npx pod-install ios')
   const build = ctx.getBuildNumber(APP)
   const result = await ctx.apple.archive({
-    workspace: 'ios/TeamStation.xcworkspace',
-    scheme: 'TeamStation',
+    workspace: 'ios/App.xcworkspace',
+    scheme: 'App',
     configuration: 'Release',
     version: '1.4.2',
     buildNumber: build,

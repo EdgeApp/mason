@@ -1,6 +1,6 @@
 import type { Setup, Stage } from '@mason/types'
 
-const APP = 'app.teamstation.app'
+const APP = 'com.example.app'
 
 export function setup(m: Setup) {
   m.apiVersion(1)
@@ -56,8 +56,8 @@ export async function uploadToStore(ctx: Stage) {
   const approval = await ctx.output<{ notes: string }>('ship')
   const build = ctx.getBuildNumber(APP)
   const archived = await ctx.apple.archive({
-    workspace: 'ios/TeamStation.xcworkspace',
-    scheme: 'TeamStation',
+    workspace: 'ios/App.xcworkspace',
+    scheme: 'App',
     version: '1.4.2',
     buildNumber: build,
   })

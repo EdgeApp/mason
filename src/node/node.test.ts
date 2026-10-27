@@ -682,11 +682,11 @@ describe('Configuration-free nodes', function () {
   it('lists reachable addresses without link-local IPv6 ones', () => {
     // A local command reaches a node listening everywhere on loopback.
     assert.equal(
-      localOrigin('https://kefir:9400', 'kefir'),
+      localOrigin('https://buildbox:9400', 'buildbox'),
       'https://127.0.0.1:9400',
     )
     assert.equal(
-      localOrigin('https://10.0.0.5:9400', 'kefir'),
+      localOrigin('https://10.0.0.5:9400', 'buildbox'),
       'https://10.0.0.5:9400',
     )
     assert.deepEqual(reachableAddresses(9311, '10.0.0.5'), ['10.0.0.5:9311'])
@@ -701,8 +701,8 @@ describe('Configuration-free nodes', function () {
 
   it('installs a per-user LaunchAgent on macOS for the sudo user', () => {
     const system = fakeSystem({
-      env: { SUDO_USER: 'paul' },
-      users: { paul: { uid: 501, gid: 20, home: '/Users/paul' } },
+      env: { SUDO_USER: 'builder' },
+      users: { builder: { uid: 501, gid: 20, home: '/Users/builder' } },
     })
     const request = {
       role: 'worker' as const,
@@ -713,21 +713,21 @@ describe('Configuration-free nodes', function () {
     assert.equal(installed.label, 'app.mason.worker')
     assert.equal(
       installed.file,
-      '/Users/paul/Library/LaunchAgents/app.mason.worker.plist',
+      '/Users/builder/Library/LaunchAgents/app.mason.worker.plist',
     )
-    assert.equal(installed.data, '/Users/paul/.mason')
+    assert.equal(installed.data, '/Users/builder/.mason')
     const file = system.files.get(installed.file)!
     assert.equal(file.uid, 501)
     assert.equal(file.mode, 0o644)
     assert.match(
       file.content,
-      /<string>worker<\/string>\s*<string>--data<\/string>\s*<string>\/Users\/paul\/.mason<\/string>\s*<string>--link-port<\/string>\s*<string>9410<\/string>/,
+      /<string>worker<\/string>\s*<string>--data<\/string>\s*<string>\/Users\/builder\/.mason<\/string>\s*<string>--link-port<\/string>\s*<string>9410<\/string>/,
     )
     assert.match(file.content, /<key>RunAtLoad<\/key><true\/>/)
-    assert(system.dirs.includes('/Users/paul/.mason 501 700'))
+    assert(system.dirs.includes('/Users/builder/.mason 501 700'))
     assert.deepEqual(system.commands, [
       'launchctl bootout gui/501/app.mason.worker',
-      'launchctl bootstrap gui/501 /Users/paul/Library/LaunchAgents/app.mason.worker.plist',
+      'launchctl bootstrap gui/501 /Users/builder/Library/LaunchAgents/app.mason.worker.plist',
     ])
     // Installing again rewrites the same file and reloads it.
     installService(request, system)
@@ -737,7 +737,7 @@ describe('Configuration-free nodes', function () {
       {
         role: 'master',
         coWorker: true,
-        data: '/Users/paul/.mason-worker & co',
+        data: '/Users/builder/.mason-worker & co',
         program: ['mason'],
         args: ['--worker', '--port', '9400'],
       },
@@ -894,7 +894,7 @@ describe('Configuration-free nodes', function () {
     const exec = (command: string, args: string[]): string => {
       calls.push([command, ...args].join(' '))
       if (command === 'id') return args[0] === '-u' ? '501\n' : '20\n'
-      if (command === 'dscl') return 'NFSHomeDirectory: /Users/paul\n'
+      if (command === 'dscl') return 'NFSHomeDirectory: /Users/builder\n'
       if (command === 'getent' && args[0] === 'passwd')
         return 'deploy:x:1000:1000::/home/deploy:/bin/bash\n'
       if (command === 'getent' && args[1] === 'docker') return 'docker:x:999:\n'
@@ -902,10 +902,10 @@ describe('Configuration-free nodes', function () {
       return ''
     }
     const mac = hostSystem('darwin', exec)
-    assert.deepEqual(mac.user('paul'), {
+    assert.deepEqual(mac.user('builder'), {
       uid: 501,
       gid: 20,
-      home: '/Users/paul',
+      home: '/Users/builder',
     })
     assert.equal(mac.user('bad name!'), undefined)
     const linux = hostSystem('linux', exec)
@@ -956,8 +956,8 @@ describe('Configuration-free nodes', function () {
 
   it('installs and removes a service from the command line', async () => {
     const system = fakeSystem({
-      env: { SUDO_USER: 'paul' },
-      users: { paul: { uid: 501, gid: 20, home: root } },
+      env: { SUDO_USER: 'builder' },
+      users: { builder: { uid: 501, gid: 20, home: root } },
     })
     const data = path.join(root, '.mason')
     // The fake service is started by hand so the command finds its socket.
@@ -972,7 +972,7 @@ describe('Configuration-free nodes', function () {
       await nodeMain(['worker', '--install', '--link-port', '9410'], io),
       0,
     )
-    assert.match(io.lines[0]!, /Installed app\.mason\.worker for paul/)
+    assert.match(io.lines[0]!, /Installed app\.mason\.worker for builder/)
     // A worker's install adds the privileged helper's root service too.
     assert.match(io.lines[1]!, /Installed app\.mason\.helper/)
     assert.equal(
@@ -1017,8 +1017,8 @@ describe('Configuration-free nodes', function () {
       JSON.stringify({ cert: made.cert, key: made.key, secret }),
     )
     const system = fakeSystem({
-      env: { SUDO_USER: 'paul' },
-      users: { paul: { uid: 501, gid: 20, home: root } },
+      env: { SUDO_USER: 'builder' },
+      users: { builder: { uid: 501, gid: 20, home: root } },
     })
     const io = testIO({ system: () => system })
     assert.equal(

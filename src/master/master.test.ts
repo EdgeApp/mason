@@ -222,7 +222,7 @@ describe('Master database, setup and import', function () {
       [
         [fixture.accounts.admin, 'google', 'admin@example.test'],
         [fixture.accounts.tester, 'google', 'tester@example.test'],
-        [fixture.accounts.tester, 'teamstation', 'tester.ts@example.test'],
+        [fixture.accounts.tester, 'okta', 'tester.okta@example.test'],
         [fixture.accounts.neither, 'google', 'waiting@example.test'],
         [6, 'google', 'invited@example.test'],
       ],
@@ -418,7 +418,7 @@ describe('Master database, setup and import', function () {
     const keys = await api(node, 'GET', '/api/v2/keys', token)
     assert.equal(keys.status, 200)
     assert.equal(keys.json[0].role, 'admin')
-    // The password is stored as TeamStation's two Argon2id hashes.
+    // The password is stored as two Argon2id hashes.
     const db = node.databases.get('master.sqlite')!
     const row = db
       .prepare("SELECT * FROM accounts WHERE username='paul'")

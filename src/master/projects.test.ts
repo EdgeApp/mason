@@ -160,7 +160,7 @@ describe('Projects, branch rules and build numbers', function () {
     const master = database()
     const projects = new Projects(master)
     const made = projects.save(localOperator, 'fixtures', {
-      repository: 'https://github.com/TeamStationApp/Mason-Fixtures',
+      repository: 'https://github.com/Example/Mason-Fixtures',
       webhookSecret: 's'.repeat(32),
     })
     assert.equal(made.created, true)
@@ -173,7 +173,7 @@ describe('Projects, branch rules and build numbers', function () {
         made.project.timeoutSeconds,
       ],
       [
-        'https://github.com/teamstationapp/mason-fixtures.git',
+        'https://github.com/example/mason-fixtures.git',
         'pipeline',
         'master',
         { set: true },
@@ -228,7 +228,7 @@ describe('Projects, branch rules and build numbers', function () {
       /Not allowed/,
     )
     const app = projects.addApp(localOperator, 'fixtures', {
-      bundleId: 'app.teamstation.masonfixture',
+      bundleId: 'com.example.masonfixture',
       name: 'Fixture',
       platforms: ['ios', 'android'],
     })
@@ -249,14 +249,14 @@ describe('Projects, branch rules and build numbers', function () {
     // Changing platforms disables the channel left out and keeps its builds.
     assert.deepEqual(
       projects.addApp(localOperator, 'fixtures', {
-        bundleId: 'app.teamstation.masonfixture',
+        bundleId: 'com.example.masonfixture',
         name: 'Fixture 2',
         platforms: ['ios'],
       }).platforms,
       ['ios'],
     )
     assert.equal(
-      projects.resolve('app.teamstation.masonfixture')!.slug,
+      projects.resolve('com.example.masonfixture')!.slug,
       'fixtures',
     )
     assert.equal(projects.resolve('fixtures')!.slug, 'fixtures')
@@ -267,7 +267,7 @@ describe('Projects, branch rules and build numbers', function () {
     assert.throws(
       () =>
         projects.addApp(localOperator, 'other', {
-          bundleId: 'app.teamstation.masonfixture',
+          bundleId: 'com.example.masonfixture',
           name: 'X',
           platforms: ['ios'],
         }),
@@ -294,24 +294,24 @@ describe('Projects, branch rules and build numbers', function () {
     projects.removeApp(
       localOperator,
       'fixtures',
-      'app.teamstation.masonfixture',
+      'com.example.masonfixture',
     )
     assert.throws(
       () =>
         projects.removeApp(
           localOperator,
           'fixtures',
-          'app.teamstation.masonfixture',
+          'com.example.masonfixture',
         ),
       /No project/,
     )
     assert.equal(
       projects.addApp(localOperator, 'other', {
-        bundleId: 'app.teamstation.masonfixture',
+        bundleId: 'com.example.masonfixture',
         name: 'X',
         platforms: ['ios'],
       }).bundleId,
-      'app.teamstation.masonfixture',
+      'com.example.masonfixture',
     )
     assert.deepEqual(
       projects.list().map((project) => project.slug),
@@ -322,7 +322,7 @@ describe('Projects, branch rules and build numbers', function () {
     assert.equal(
       master.db
         .prepare(
-          "SELECT COUNT(*) n FROM apps WHERE slug='app.teamstation.masonfixture'",
+          "SELECT COUNT(*) n FROM apps WHERE slug='com.example.masonfixture'",
         )
         .get()!.n,
       1,
@@ -618,7 +618,7 @@ describe('Projects, branch rules and build numbers', function () {
       assert.equal(
         (
           await api(node, 'PUT', '/api/v2/projects/fixtures', admin, {
-            repository: 'https://github.com/teamstationapp/mason-fixtures',
+            repository: 'https://github.com/example/mason-fixtures',
           })
         ).status,
         201,
@@ -626,7 +626,7 @@ describe('Projects, branch rules and build numbers', function () {
       assert.equal(
         (
           await api(node, 'POST', '/api/v2/projects/fixtures/apps', admin, {
-            bundleId: 'app.teamstation.masonfixture',
+            bundleId: 'com.example.masonfixture',
             name: 'Fixture',
             platforms: ['ios'],
           })
@@ -663,11 +663,11 @@ describe('Projects, branch rules and build numbers', function () {
         ['fixtures', 'feature/x', 'queued', 0, 1],
       )
       const byApp = await api(node, 'POST', '/api/jobs', admin, {
-        app: 'app.teamstation.masonfixture',
+        app: 'com.example.masonfixture',
       })
       assert.deepEqual(
         [byApp.status, byApp.json.branch, byApp.json.number, byApp.json.app],
-        [202, 'master', 2, 'app.teamstation.masonfixture'],
+        [202, 'master', 2, 'com.example.masonfixture'],
       )
       assert.equal(
         (
@@ -999,7 +999,7 @@ describe('Projects, branch rules and build numbers', function () {
     const { node, admin } = await master()
     try {
       const m = node.master!
-      const project = m.projects.save(localOperator, 'teamstation', {
+      const project = m.projects.save(localOperator, 'acme', {
         repository: 'https://github.com/a/t',
       }).project
       const daily = {
@@ -1011,7 +1011,7 @@ describe('Projects, branch rules and build numbers', function () {
       assert.throws(
         () =>
           m.seed(
-            'teamstation',
+            'acme',
             'app',
             { branch: 'master', last: '26102003' },
             localOperator,
@@ -1020,7 +1020,7 @@ describe('Projects, branch rules and build numbers', function () {
       )
       m.buildNumbers.declare(project.id, 'app', daily)
       m.seed(
-        'teamstation',
+        'acme',
         'app',
         { branch: 'master', last: '26102003' },
         localOperator,
@@ -1031,7 +1031,7 @@ describe('Projects, branch rules and build numbers', function () {
       )
       // An earlier day's number seeds only that day; today starts fresh.
       m.seed(
-        'teamstation',
+        'acme',
         'app',
         { branch: 'feature/x', last: '26101807' },
         localOperator,
@@ -1049,7 +1049,7 @@ describe('Projects, branch rules and build numbers', function () {
       )
       // A lower number leaves the sequence alone.
       m.seed(
-        'teamstation',
+        'acme',
         'app',
         { branch: 'master', last: '26102001' },
         localOperator,
@@ -1065,12 +1065,12 @@ describe('Projects, branch rules and build numbers', function () {
         [{ branch: 'x' }, /An empty value/],
       ] as const)
         assert.throws(
-          () => m.seed('teamstation', 'app', value, localOperator),
+          () => m.seed('acme', 'app', value, localOperator),
           message,
         )
       // A plain count with literals, numbered across branches.
       m.buildNumbers.declare(project.id, 'plain', { format: '1.N' })
-      m.seed('teamstation', 'plain', { last: '1.41' }, localOperator)
+      m.seed('acme', 'plain', { last: '1.41' }, localOperator)
       assert.equal(
         m.buildNumbers.reserve(
           project.id,
@@ -1083,7 +1083,7 @@ describe('Projects, branch rules and build numbers', function () {
         '1.42',
       )
       assert.throws(
-        () => m.seed('teamstation', '', { last: '1' }, localOperator),
+        () => m.seed('acme', '', { last: '1' }, localOperator),
         /key is required/,
       )
       assert.throws(
@@ -1095,7 +1095,7 @@ describe('Projects, branch rules and build numbers', function () {
         role: 'developer',
       }).token
       const body = {
-        project: 'teamstation',
+        project: 'acme',
         key: 'app',
         branch: 'release',
         last: '26102030',
@@ -1382,12 +1382,12 @@ describe('Projects, branch rules and build numbers', function () {
       )
       assert.equal((await put({ kind: 'token' })).status, 400)
       const access = await m.github.gitAccess(
-        'https://github.com/teamstationapp/mason-fixtures.git',
+        'https://github.com/example/mason-fixtures.git',
         root,
       )
       assert.equal(
         access.url,
-        'https://github.com/teamstationapp/mason-fixtures.git',
+        'https://github.com/example/mason-fixtures.git',
       )
       assert.equal(
         access.env.GIT_CONFIG_VALUE_0,

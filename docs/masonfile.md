@@ -108,7 +108,7 @@ Mason installs like Homebrew, with one command and no Node or npm needed
 beforehand:
 
 ```sh
-/bin/bash -c "$(curl -fsSL https://github.com/TeamStationApp/mason-releases/releases/latest/download/install.sh)"
+/bin/bash -c "$(curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh)"
 # or: wget -qO- …/install.sh | bash
 ```
 
@@ -315,8 +315,8 @@ setup (`m.params`) and stages (`ctx.run.params`). Parameters are not secrets.
 const test = m.stage('test', { on: 'linux', run: unitTests })
 
 const builds = m.parallel('build', {
-  ios:     { on: 'mac-xcode', run: buildIos,     publishes: ['app.teamstation.app'] },
-  android: { on: 'linux',     run: buildAndroid, publishes: ['app.teamstation.app'] },
+  ios:     { on: 'mac-xcode', run: buildIos,     publishes: ['com.example.app'] },
+  android: { on: 'linux',     run: buildAndroid, publishes: ['com.example.app'] },
   cli:     { on: 'linux',     run: buildCli },
 })
 
@@ -345,11 +345,11 @@ m.parallel('build', {
   ios: [
     { name: 'compile', on: 'mac-xcode', run: compileIos },
     { name: 'sign',    on: { type: 'mac-xcode', labels: ['apple-signing'] }, secrets: ['MATCH_PASSWORD'], run: signIos },
-    { name: 'upload',  on: 'mac-xcode', publishes: ['app.teamstation.app'], run: publishIos },
+    { name: 'upload',  on: 'mac-xcode', publishes: ['com.example.app'], run: publishIos },
   ],
   android: [
     { name: 'compile', on: 'linux', run: compileAndroid },
-    { name: 'sign',    on: 'linux', secrets: ['ANDROID_KEYSTORE'], publishes: ['app.teamstation.app'], run: signAndroid },
+    { name: 'sign',    on: 'linux', secrets: ['ANDROID_KEYSTORE'], publishes: ['com.example.app'], run: signAndroid },
   ],
   web: { on: 'linux', run: buildWeb },
 })
@@ -414,7 +414,7 @@ other nodes; this keeps every stage able to finish without the master.
 ### Custom workspace paths
 
 ```ts fragment
-workspace: { path: 'teamstation-ios', mode: 'reuse' }
+workspace: { path: 'app-ios', mode: 'reuse' }
 ```
 
 `path` names a directory under the node's workspace root that the checkout
@@ -523,14 +523,14 @@ import type { Stage } from '@mason/types'
 export async function buildIos(ctx: Stage) {
   ctx.log.info(`building ${ctx.run.branch} on ${ctx.node.name}`)
   await ctx.unstash('web-bundle')
-  const build = ctx.getBuildNumber('app.teamstation.app')
+  const build = ctx.getBuildNumber('com.example.app')
   await ctx.sh('scripts/build-ios.sh', {
     env: { BUILD_NUMBER: build, MATCH_PASSWORD: ctx.secret('MATCH_PASSWORD') },
   })
   await ctx.tests('junit', 'fastlane/test_output/*.xml')
-  await ctx.publish({ app: 'app.teamstation.app', platform: 'ios',
-                      path: 'build/TeamStation.ipa', buildNumber: build })
-  return { ipaSize: (await ctx.fs.stat('build/TeamStation.ipa')).size }
+  await ctx.publish({ app: 'com.example.app', platform: 'ios',
+                      path: 'build/App.ipa', buildNumber: build })
+  return { ipaSize: (await ctx.fs.stat('build/App.ipa')).size }
 }
 ```
 
@@ -794,9 +794,9 @@ to its own build script however it likes.
 import type { Setup, Stage } from '@mason/types'
 
 export function setup(m: Setup) {
-  m.buildNumber('app.teamstation.app')                                   // 1, 2, 3, … for the app
+  m.buildNumber('com.example.app')                                   // 1, 2, 3, … for the app
   m.buildNumber('app.edge.eddy', { scope: 'branch' })                    // separate count per branch
-  m.buildNumber('app.teamstation.cameraman', { format: 'YYMMDDCC' })     // 26101701, 26101702, …
+  m.buildNumber('com.example.camera', { format: 'YYMMDDCC' })     // 26101701, 26101702, …
   m.buildNumber('android-version-code', { start: 4000 })                 // any named sequence, not only app IDs
   m.buildNumber('nightly', { format: 'YYYY.MM.DD.CCC', scope: 'branch', timeZone: 'America/Los_Angeles' })
 }
@@ -812,7 +812,7 @@ name. Options:
 | `start` | The lowest number to hand out. Raising it later skips ahead; lowering it never goes backwards. |
 | `timeZone` | Time zone for date tokens. Default UTC. |
 | `check` | `'apple'` (at most three dot-separated integers, as `CFBundleVersion` requires), `'android'` (an integer up to 2,100,000,000, as `versionCode` requires), or none. Setup fails if the format could ever break the rule. |
-| `apps` | App IDs that take their numbers from this sequence instead of their own, so every app of a run publishes with the same number (`m.buildNumber('app', { format: 'YYMMDDCC', apps: ['app.teamstation.app', 'app.teamstation.cameraman'] })`). An app ID belongs to one sequence at most. |
+| `apps` | App IDs that take their numbers from this sequence instead of their own, so every app of a run publishes with the same number (`m.buildNumber('app', { format: 'YYMMDDCC', apps: ['com.example.app', 'com.example.camera'] })`). An app ID belongs to one sequence at most. |
 
 Format tokens:
 
@@ -958,8 +958,8 @@ An administrator gives the master, per Apple team:
   sends a certificate signing request through the API, and stores the result.
   Private keys live only in the master database (and its encrypted backups).
 - per project app ID: its Apple team, the **bundle IDs** it signs (the app and
-  each extension, for example `app.teamstation.app` and
-  `app.teamstation.app.widgets`), and its platform (iOS, macOS, both).
+  each extension, for example `com.example.app` and
+  `com.example.app.widgets`), and its platform (iOS, macOS, both).
 
 ### Profiles are automatic
 
@@ -984,7 +984,7 @@ Apple's API can create, read, download and delete profiles but cannot change
 one, so a profile's device list is fixed when it is created. Mason
 "updates" a profile by creating its replacement first and then deleting the
 old one, so a valid profile always exists. Mason names its profiles
-predictably (`Mason AdHoc app.teamstation.app`) and only ever deletes profiles
+predictably (`Mason AdHoc com.example.app`) and only ever deletes profiles
 it created, recognised by their IDs; profiles made by hand are left alone.
 Every bundle ID — the app and each extension — has its own profile.
 
@@ -1051,8 +1051,8 @@ Mason does the equivalent with one sign-in, on the master:
 ```ts fragment
 m.stage('ios', {
   on: { type: 'mac-xcode', labels: ['apple-signing'] },
-  apple: { distribution: 'appStore', app: 'app.teamstation.app' },
-  publishes: ['app.teamstation.app'],
+  apple: { distribution: 'appStore', app: 'com.example.app' },
+  publishes: ['com.example.app'],
   run: buildIos,
 })
 ```
@@ -1083,16 +1083,16 @@ ever holds, and only for the length of a stage.
 import type { Stage } from '@mason/types'
 
 export async function buildIos(ctx: Stage) {
-  const build = ctx.getBuildNumber('app.teamstation.app')
+  const build = ctx.getBuildNumber('com.example.app')
   const { ipa, dsyms } = await ctx.apple.archive({
-    workspace: 'ios/TeamStation.xcworkspace',
-    scheme: 'TeamStation',
+    workspace: 'ios/App.xcworkspace',
+    scheme: 'App',
     configuration: 'Release',
     version: '1.4.2',
     buildNumber: build,
   })
   if (ipa == null) throw new Error('No IPA was exported')
-  await ctx.publish({ app: 'app.teamstation.app', platform: 'ios', path: ipa, buildNumber: build })
+  await ctx.publish({ app: 'com.example.app', platform: 'ios', path: ipa, buildNumber: build })
   await ctx.artifacts.save('dsyms', dsyms)
   await ctx.apple.testflight({
     path: ipa,
@@ -1154,12 +1154,12 @@ export async function buildIos(ctx: Stage) {
 App Store release submission (`deliver`: metadata, screenshots, submit for
 review) is not in this version.
 
-## 13. Example: TeamStation
+## 13. Example: a complete app
 
 ```ts
 import type { Setup, Stage } from '@mason/types'
 
-const APP = 'app.teamstation.app'
+const APP = 'com.example.app'
 
 export function setup(m: Setup) {
   m.apiVersion(1)
@@ -1246,8 +1246,8 @@ async function archiveIos(ctx: Stage) {
   await ctx.sh('npm ci && npx pod-install ios')
   const build = ctx.getBuildNumber(APP)
   const result = await ctx.apple.archive({
-    workspace: 'ios/TeamStation.xcworkspace',
-    scheme: 'TeamStation',
+    workspace: 'ios/App.xcworkspace',
+    scheme: 'App',
     configuration: 'Release',
     version: '1.4.2',
     buildNumber: build,

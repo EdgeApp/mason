@@ -394,7 +394,7 @@ describe('Design system and views', () => {
       viewer: viewer('developer'),
       now: NOW,
       appVisible: all,
-      nodes: [{ name: 'kefir', status: 'busy', detail: 'mac' }],
+      nodes: [{ name: 'buildbox', status: 'busy', detail: 'mac' }],
       repositories: new Map([
         [1, { repository: 'git@github.com:example/phones.git', webhook: true }],
       ]),
@@ -453,7 +453,7 @@ describe('Design system and views', () => {
     assert.match(html, /href="\/\?platform=macos">macOS \(1\)/)
     assert.doesNotMatch(html, /Windows \(/)
     assert.match(html, /Webhook active/)
-    assert.match(html, /kefir/)
+    assert.match(html, /buildbox/)
     assert.match(html, /role="progressbar"/)
     // A platform filter keeps the projects with an app on it.
     const mac = dashboardData(

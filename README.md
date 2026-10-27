@@ -20,7 +20,7 @@ The Masonfile reference, with every option and the stage API, is
 A release needs no Node.js or npm. On each computer:
 
 ```sh
-/bin/bash -c "$(curl -fsSL https://github.com/TeamStationApp/mason-releases/releases/latest/download/install.sh)"
+/bin/bash -c "$(curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh)"
 # or, once a host serves the current release:
 /bin/bash -c "$(curl -fsSL https://builds.example.test/install.sh)" -- --from https://builds.example.test
 ```

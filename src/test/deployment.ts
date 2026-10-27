@@ -81,10 +81,10 @@ export function deploymentFixture(
   )
   identity.run(
     accounts.tester,
-    'teamstation',
-    'https://auth.teamstation.app',
+    'okta',
+    'https://auth.example.test',
     's3',
-    'tester.ts@example.test',
+    'tester.okta@example.test',
     1,
   )
   identity.run(

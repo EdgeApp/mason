@@ -516,9 +516,9 @@ describe('Master sign-in, setup, people and permissions', function () {
       people.create(admin, {
         name: 'Clash',
         email: 'clash@example.test',
-        addresses: { teamstation: mia.email },
+        addresses: { okta: mia.email },
       }),
-      /Another person has that teamstation address/,
+      /Another person has that okta address/,
     )
     await assert.rejects(
       people.create(admin, {
@@ -556,10 +556,10 @@ describe('Master sign-in, setup, people and permissions', function () {
     const { cookie } = await signIn('mia', 'Mia-Horse-9')
     const changed = await people.update(admin, mia.id, {
       role: 'developer',
-      addresses: { google: null, teamstation: 'mia@team.test' },
+      addresses: { google: null, okta: 'mia@team.test' },
     })
     assert.equal(changed.permissionVersion, mia.permissionVersion + 1)
-    assert.deepEqual(changed.addresses, { teamstation: 'mia@team.test' })
+    assert.deepEqual(changed.addresses, { okta: 'mia@team.test' })
     assert.equal(
       (await request(c.master, 'GET', '/api/v2/session', { cookie })).status,
       401,

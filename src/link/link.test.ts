@@ -160,7 +160,7 @@ describe('Master-dialed links', function () {
     assert.deepEqual(parseAddress('fd00::7'), { host: 'fd00::7', port: 9310 })
     assert.deepEqual(parseAddress('[fd00::7]'), { host: 'fd00::7', port: 9310 })
     assert.deepEqual(parseAddress('[fd00::7]:1'), { host: 'fd00::7', port: 1 })
-    assert.deepEqual(parseAddress(' kefir '), { host: 'kefir', port: 9310 })
+    assert.deepEqual(parseAddress(' buildbox '), { host: 'buildbox', port: 9310 })
     for (const bad of [
       '',
       'http://x',

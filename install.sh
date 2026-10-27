@@ -1,7 +1,7 @@
 #!/bin/bash
 # Installs Mason from a release: no Node.js or npm needed.
 #
-#   /bin/bash -c "$(curl -fsSL https://github.com/TeamStationApp/mason-releases/releases/latest/download/install.sh)"
+#   /bin/bash -c "$(curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh)"
 #
 # Options: --version <x.y.z>   a release other than the latest
 #          --user              install under ~/.mason/app and ~/.local/bin, without sudo
@@ -11,7 +11,7 @@
 # needs a token: GITHUB_TOKEN, or `gh auth token` when the GitHub CLI is signed in.
 set -euo pipefail
 
-repo=${MASON_REPO:-TeamStationApp/mason-releases}
+repo=${MASON_REPO:-EdgeApp/mason}
 api=${MASON_GITHUB_API:-https://api.github.com}
 from=${MASON_FROM:-}
 version=''

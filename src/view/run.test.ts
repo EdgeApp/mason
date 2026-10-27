@@ -152,7 +152,7 @@ describe('Run view', () => {
             status: 'succeeded',
             started: 1000,
             finished: 61_000,
-            worker: 'kefir',
+            worker: 'buildbox',
           },
         ],
         ['android', { status: 'running', started: 1000 }],
@@ -199,7 +199,7 @@ describe('Run view', () => {
       assert.match(svg, new RegExp(`status-${status}`))
     assert.match(svg, /class="ring"/)
     assert.match(svg, /e2e · queued · waiting for android/)
-    assert.match(svg, /ios · succeeded · on kefir · 1m 0s/)
+    assert.match(svg, /ios · succeeded · on buildbox · 1m 0s/)
     assert.match(svg, /android · running · 2m 0s/)
     assert.match(
       svg,
@@ -353,7 +353,7 @@ describe('Run view', () => {
     assert.equal(graphFromJson('{"workflows":[]}', 'build'), undefined)
     const run = runData(db, 'r1', () => graph, {
       repository: () => 'git@github.com:example/phones.git',
-      nodeName: () => 'kefir',
+      nodeName: () => 'buildbox',
     })!
     assert.equal(
       runData(db, 'none', () => undefined),
@@ -381,7 +381,7 @@ describe('Run view', () => {
     assert.match(whole, /build #7/)
     assert.match(whole, /Push by dana/)
     assert.match(whole, /1\.0 \(7\)/)
-    assert.match(whole, /on <span class="mono">kefir<\/span>/)
+    assert.match(whole, /on <span class="mono">buildbox<\/span>/)
     assert.match(
       whole,
       /<span class="mono">seat<\/span> = <span class="mono">&quot;1&quot;<\/span>/,

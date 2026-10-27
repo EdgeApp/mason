@@ -916,7 +916,7 @@ export async function build(ctx: Stage) {
       'nightly',
       'release',
       'matrix',
-      'teamstation',
+      'app',
     ]) {
       const dir = root()
       copyFileSync(
@@ -942,7 +942,7 @@ export async function build(ctx: Stage) {
       nightly: 'build:4+0 nightly:1+2',
       release: 'release:3+0',
       matrix: 'build:11+0',
-      teamstation: 'build:5+1 release:2+0',
+      app: 'build:5+1 release:2+0',
     })
   })
 

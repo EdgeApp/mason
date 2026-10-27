@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/TeamStationApp/mason.git"
+    "url": "https://github.com/EdgeApp/mason.git"
   },
-  "masonReleases": "TeamStationApp/mason-releases",
+  "masonReleases": "EdgeApp/mason",
   "private": true,
   "type": "module",
   "engines": {

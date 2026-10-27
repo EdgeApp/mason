@@ -161,8 +161,8 @@ function serve(
 }
 
 /**
- * GitHub's release API, pretty-printed as GitHub answers, for TeamStationApp/mason-releases (public) and
- * TeamStationApp/mason (private: nothing without a token). A wrong token is
+ * GitHub's release API, pretty-printed as GitHub answers, for EdgeApp/mason (public) and
+ * example/private-mason (private: nothing without a token). A wrong token is
  * refused everywhere, as GitHub does.
  */
 function githubApi(
@@ -176,7 +176,7 @@ function githubApi(
   // GitHub numbers assets; this remembers which file each number is.
   const assets: Array<[string, string]> = []
   return (url, res, req) => {
-    const repo = /^\/repos\/(TeamStationApp\/mason(?:-releases)?)\//.exec(
+    const repo = /^\/repos\/(EdgeApp\/mason|example\/private-mason)\//.exec(
       url.pathname,
     )?.[1]
     if (repo == null) return false
@@ -185,7 +185,7 @@ function githubApi(
       res.writeHead(401).end('{"message":"Bad credentials"}')
       return true
     }
-    if (repo === 'TeamStationApp/mason' && authorization == null) {
+    if (repo === 'example/private-mason' && authorization == null) {
       res.writeHead(404).end('{"message":"Not Found"}')
       return true
     }
@@ -375,7 +375,7 @@ describe('Releases, install.sh and updates', function () {
           ),
         ) as { masonReleases?: string }
       ).masonReleases,
-      'TeamStationApp/mason-releases',
+      'EdgeApp/mason',
     )
     assert(!list.includes('node/include/'))
     assert(!/mason-0\.1\.1\/lib\/[^\n]*\.test\.js\n/.test(list))
@@ -542,13 +542,13 @@ describe('Releases, install.sh and updates', function () {
       assert.match(open.out, /Installed Mason 0\.1\.2/)
       const none = await bash(
         ['--user'],
-        { MASON_REPO: 'TeamStationApp/mason' },
+        { MASON_REPO: 'example/private-mason' },
         home,
       )
       assert.notEqual(none.status, 0)
       assert.match(
         none.out,
-        /TeamStationApp\/mason has no latest release \(a private repository needs GITHUB_TOKEN, or 'gh auth login'\)/,
+        /example\/private-mason has no latest release \(a private repository needs GITHUB_TOKEN, or 'gh auth login'\)/,
       )
       const wrong = await bash(['--user'], { GITHUB_TOKEN: 'other' }, home)
       assert.match(wrong.out, /has no latest release this token can read/)
@@ -732,7 +732,7 @@ describe('Releases, install.sh and updates', function () {
           undefined,
           dir,
           github.base,
-          'TeamStationApp/mason',
+          'example/private-mason',
         ),
         /GitHub answered 404/,
       )
@@ -740,7 +740,7 @@ describe('Releases, install.sh and updates', function () {
         store.fetch('v0.1.2', 'read-token', dir, github.base, 'not a repo'),
         /Name the repository/,
       )
-      assert.equal(repository, 'TeamStationApp/mason-releases')
+      assert.equal(repository, 'EdgeApp/mason')
       assert.equal(
         releasesRepository({ version: '1', repository: 'github:a/b' }),
         'a/b',
@@ -1168,8 +1168,8 @@ describe('Releases, install.sh and updates', function () {
       const system = (platform: 'darwin' | 'linux'): ServiceSystem => ({
         platform,
         euid: 0,
-        env: { SUDO_USER: 'paul' },
-        user: () => ({ uid: 501, gid: 20, home: '/Users/paul' }),
+        env: { SUDO_USER: 'builder' },
+        user: () => ({ uid: 501, gid: 20, home: '/Users/builder' }),
         createSystemUser: () => undefined,
         groupExists: () => false,
         writeFile: (file, content, owner) =>
@@ -1188,7 +1188,7 @@ describe('Releases, install.sh and updates', function () {
       assert.equal(owner, 0)
       assert.match(
         plist,
-        /<string>\/opt\/mason\/current\/mason<\/string>\s*<string>helper<\/string>\s*<string>--user<\/string>\s*<string>paul<\/string>/,
+        /<string>\/opt\/mason\/current\/mason<\/string>\s*<string>helper<\/string>\s*<string>--user<\/string>\s*<string>builder<\/string>/,
       )
       assert.match(plist, /<key>UserName<\/key><string>root<\/string>/)
       assert.deepEqual(ran.at(-1), [
@@ -1204,7 +1204,7 @@ describe('Releases, install.sh and updates', function () {
       assert.equal(linux.file, '/etc/systemd/system/mason-helper.service')
       assert.match(
         writes[1]![1],
-        /ExecStart=\/opt\/mason\/current\/mason helper --user paul/,
+        /ExecStart=\/opt\/mason\/current\/mason helper --user builder/,
       )
       uninstallHelperService(
         system('darwin'),
@@ -1401,7 +1401,7 @@ describe('Releases, install.sh and updates', function () {
         'create',
         'v0.1.8',
         '--repo',
-        'TeamStationApp/mason-releases',
+        'EdgeApp/mason',
       ])
       assert(published[0]!.includes(path.join(out, 'SHA256SUMS')))
       const list = execFileSync(

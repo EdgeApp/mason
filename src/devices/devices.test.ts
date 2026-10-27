@@ -437,17 +437,17 @@ describe('Device registration, account ownership and iOS compatibility', () => {
   it('names known models automatically and rejects unsafe plist structures', () => {
     assert.equal(
       friendlyName('iPhone14,5', {
-        email: 'mark@gmail.com',
+        email: 'robin@example.org',
         name: 'Fixture',
       }),
-      'iPhone13 of mark@gmail',
+      'iPhone13 of robin@example',
     )
     assert.equal(
       friendlyName('iPhone18,3', {
-        email: 'paul@vtex.net',
+        email: 'alex@example.com',
         name: 'Fixture',
       }),
-      'iPhone17 of paul@vtex',
+      'iPhone17 of alex@example',
     )
     assert.throws(() =>
       decodePlist(
