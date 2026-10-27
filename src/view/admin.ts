@@ -105,7 +105,7 @@ export function nodesView(data: {
     data.host != null
       ? `install Mason from the host: ${command(`/bin/bash -c "$(curl -fsSL ${data.host}/install.sh)" -- --from ${data.host}`)}`
       : data.release != null
-        ? `install Mason ${escape(data.release.version)}, the master’s version: ${command(`/bin/bash -c "$(curl -fsSL https://github.com/${data.release.repository}/releases/download/v${data.release.version}/install.sh)" -- --version ${data.release.version}`)}`
+        ? `install Mason ${escape(data.release.version)}, the master’s version: ${command(`/bin/bash -c "$(curl -fsSL https://github.com/${data.release.repository}/releases/latest/download/install.sh)" -- --version ${data.release.version}`)}`
         : 'install Mason from a host: set the host\'s origin in <a href="/settings#host">Settings</a> to see its command.'
   const add = data.canChange
     ? `<section class="panel"><h2>${icon('add')}Add node</h2><ol><li>On the new computer, ${install}</li><li>Start it as a worker: ${command('sudo mason worker --install --link-port 9410')} It prints its pairing key.</li><li>Pair it here:</li></ol>${apiForm('/api/v2/nodes', '<label for="node-address">Address</label><input id="node-address" name="address" placeholder="192.168.1.20:9410" required><label for="node-key">Pairing key</label><input id="node-key" name="key" placeholder="mason1:…" required autocomplete="off">', `${icon('lan')} Pair node`, { fields: ['address', 'key'], then: 'reload' })}</section>`
