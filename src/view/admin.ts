@@ -5,6 +5,10 @@ import { icon } from './icons.js'
 const statusLine =
   '<p class="notice" role="status" data-field="status" hidden></p>'
 
+/** A shell command with a button that copies it. */
+const command = (text: string): string =>
+  `<div class="command"><pre class="mono">${escape(text)}</pre><button type="button" class="secondary copy" data-copy="${escape(text)}">${icon('content_copy')}<span data-copy-label>Copy</span></button></div>`
+
 /**
  * A form the shell's script sends to the API as JSON: `fields` names the
  * inputs, dotted names nest (`addresses.google`), and a field named in
@@ -62,6 +66,8 @@ export function nodesView(data: {
   }>
   budget: { monthly: number; notice?: string }
   host?: string
+  /** The master's own release, installable from GitHub when no host serves one. */
+  release?: { repository: string; version: string }
   canChange: boolean
 }): string {
   const rows = data.nodes
@@ -95,8 +101,14 @@ export function nodesView(data: {
       }</article>`
     })
     .join('')
+  const install =
+    data.host != null
+      ? `install Mason from the host: ${command(`/bin/bash -c "$(curl -fsSL ${data.host}/install.sh)" -- --from ${data.host}`)}`
+      : data.release != null
+        ? `install Mason ${escape(data.release.version)}, the master’s version: ${command(`/bin/bash -c "$(curl -fsSL https://github.com/${data.release.repository}/releases/download/v${data.release.version}/install.sh)" -- --version ${data.release.version}`)}`
+        : 'install Mason from a host: set the host\'s origin in <a href="/settings#host">Settings</a> to see its command.'
   const add = data.canChange
-    ? `<section class="panel"><h2>${icon('add')}Add node</h2><ol><li>On the new computer, install Mason from the host: <pre class="mono">/bin/bash -c "$(curl -fsSL ${escape(data.host ?? 'https://<host>')}/install.sh)" -- --from ${escape(data.host ?? 'https://<host>')}</pre></li><li>Start it as a worker: <pre class="mono">sudo mason worker --install --link-port 9410</pre> It prints its pairing key.</li><li>Pair it here:</li></ol>${apiForm('/api/v2/nodes', '<label for="node-address">Address</label><input id="node-address" name="address" placeholder="192.168.1.20:9410" required><label for="node-key">Pairing key</label><input id="node-key" name="key" placeholder="mason1:…" required autocomplete="off">', `${icon('lan')} Pair node`, { fields: ['address', 'key'], then: 'reload' })}</section>`
+    ? `<section class="panel"><h2>${icon('add')}Add node</h2><ol><li>On the new computer, ${install}</li><li>Start it as a worker: ${command('sudo mason worker --install --link-port 9410')} It prints its pairing key.</li><li>Pair it here:</li></ol>${apiForm('/api/v2/nodes', '<label for="node-address">Address</label><input id="node-address" name="address" placeholder="192.168.1.20:9410" required><label for="node-key">Pairing key</label><input id="node-key" name="key" placeholder="mason1:…" required autocomplete="off">', `${icon('lan')} Pair node`, { fields: ['address', 'key'], then: 'reload' })}</section>`
     : ''
   const types = Object.entries(data.types)
     .map(

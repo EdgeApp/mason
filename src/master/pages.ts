@@ -34,6 +34,7 @@ import { MASTER_SESSION_COOKIE, type MasterSession } from './auth.js'
 import { can } from './permissions.js'
 import { sessionActor } from './auth.js'
 import type { Master } from './runtime.js'
+import { repository, version } from '../version.js'
 
 /** The signed-in person as the views see them. */
 function viewerOf(session: MasterSession): Viewer {
@@ -538,6 +539,7 @@ export function masterPages(
             host: ((master.settings.value('host') ?? {}) as { origin: string })
               .origin,
           }),
+      ...(repository == null ? {} : { release: { repository, version } }),
       canChange: can(sessionActor(current), 'nodes.change'),
     })
   })
