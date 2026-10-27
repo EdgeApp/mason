@@ -8,6 +8,7 @@ import {
 import {
   start,
   workerHash,
+  type CopyButton,
   type Form,
   type Output,
   type PageDeps,
@@ -79,10 +80,12 @@ function page(
               : {}),
           },
     assign: (url) => visits.push(url),
+    copy: async () => undefined,
   }
   start(
     {
-      querySelectorAll: () => forms,
+      querySelectorAll: (selector) =>
+        selector.startsWith('form') ? forms : [],
       querySelector: () => (csrf === '' ? null : { content: csrf }),
     },
     deps,
@@ -288,6 +291,52 @@ describe('Master page script', () => {
     await settle()
     for (const each of [bad, badBackup, badConfirm])
       assert.equal(each.outputs.status!.textContent, 'Request failed (500)')
+  })
+
+  it('copies a command from its button and says whether it worked', async () => {
+    const button = (
+      copy: string,
+    ): CopyButton & { click: () => void; label: Output } => {
+      let listener: (() => void) | undefined
+      const label: Output = { textContent: 'Copy', hidden: false }
+      return {
+        dataset: { copy },
+        addEventListener: (_type, fn): void => {
+          listener = fn
+        },
+        querySelector: (selector) =>
+          selector === '[data-copy-label]' ? label : null,
+        click: (): void => {
+          listener!()
+        },
+        label,
+      }
+    }
+    const good = button('sudo mason worker --install --link-port 9410')
+    const bad = button('refused')
+    const copied: string[] = []
+    start(
+      {
+        querySelectorAll: (selector) =>
+          selector === 'button[data-copy]' ? [good, bad] : [],
+        querySelector: () => null,
+      },
+      {
+        fetch: async () => new Response('{}'),
+        hash: async () => ({ error: 'unused' }),
+        assign: () => undefined,
+        copy: async (text) => {
+          if (text === 'refused') throw new Error('No clipboard')
+          copied.push(text)
+        },
+      },
+    )
+    good.click()
+    bad.click()
+    await settle()
+    assert.deepEqual(copied, ['sudo mason worker --install --link-port 9410'])
+    assert.equal(good.label.textContent, 'Copied')
+    assert.equal(bad.label.textContent, 'Select and copy')
   })
 
   it('passes requests to the password worker one at a time', async () => {

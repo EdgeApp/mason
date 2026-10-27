@@ -24,14 +24,22 @@ export interface Form {
   elements: { namedItem: (name: string) => unknown }
   querySelector: (selector: string) => unknown
 }
+/** A button that copies the command beside it (`data-copy`). */
+export interface CopyButton {
+  dataset: { copy?: string }
+  addEventListener: (type: 'click', listener: () => void) => void
+  querySelector: (selector: string) => unknown
+}
 export interface PageDocument {
-  querySelectorAll: (selector: string) => Iterable<Form>
+  querySelectorAll: (selector: string) => Iterable<unknown>
   querySelector: (selector: string) => unknown
 }
 export interface PageDeps {
   fetch: (url: string, init: RequestInit) => Promise<Response>
   hash: (request: WorkerRequest) => Promise<WorkerResponse>
   assign: (url: string) => void
+  /** Puts text on the clipboard. */
+  copy: (text: string) => Promise<void>
 }
 
 const field = (form: Form, name: string): string =>
@@ -157,7 +165,24 @@ export function start(doc: PageDocument, deps: PageDeps): void {
       deps.assign('/sign-in')
     },
   }
-  for (const form of doc.querySelectorAll('form[data-mason]')) {
+  for (const button of doc.querySelectorAll(
+    'button[data-copy]',
+  ) as Iterable<CopyButton>) {
+    const label = button.querySelector('[data-copy-label]') as Output | null
+    button.addEventListener('click', () => {
+      deps.copy(button.dataset.copy ?? '').then(
+        () => {
+          if (label != null) label.textContent = 'Copied'
+        },
+        () => {
+          if (label != null) label.textContent = 'Select and copy'
+        },
+      )
+    })
+  }
+  for (const form of doc.querySelectorAll(
+    'form[data-mason]',
+  ) as Iterable<Form>) {
     const action = actions[form.dataset.mason ?? '']
     if (action == null) continue
     form.addEventListener('submit', (event) => {
@@ -202,6 +227,7 @@ export function workerHash(worker: {
 
 const page = globalThis as unknown as {
   document?: PageDocument
+  navigator?: { clipboard?: { writeText: (text: string) => Promise<void> } }
   Worker?: new (url: string, options: { type: 'module' }) => never
   location?: { assign: (url: string) => void }
 }
@@ -213,4 +239,9 @@ if (page.document != null && page.Worker != null)
       new page.Worker('/assets/password-worker.js', { type: 'module' }),
     ),
     assign: (url) => page.location!.assign(url),
+    copy: async (text) => {
+      if (page.navigator?.clipboard == null)
+        throw new Error('No clipboard on this page')
+      await page.navigator.clipboard.writeText(text)
+    },
   })

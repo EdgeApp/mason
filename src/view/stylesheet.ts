@@ -17,6 +17,7 @@ p{margin:0 0 12px;color:var(--color-text-muted)}
 a{color:var(--color-primary);text-underline-offset:2px}
 code,kbd,pre,.mono{font-family:var(--font-mono);font-size:12px;letter-spacing:-.005em}
 pre{white-space:pre-wrap;overflow-wrap:anywhere;background:var(--color-panel-low);border:1px solid var(--color-border);border-radius:var(--radius);padding:12px}
+.command{display:flex;align-items:flex-start;gap:8px;margin:8px 0}.command pre{flex:1;min-width:0;margin:0}.panel li .command pre.mono{white-space:pre-wrap;overflow-wrap:anywhere;overflow:visible;text-overflow:clip}.command .copy{flex:none}.panel li:has(>.command){flex-wrap:wrap}.panel li>.command{flex:1 1 360px;min-width:0}
 small{display:block;color:var(--color-text-muted);font-size:12px;line-height:18px;margin:4px 0}
 .icon{font-family:'Material Symbols Outlined';font-weight:400;font-style:normal;font-size:20px;line-height:1;display:inline-block;vertical-align:middle;-webkit-font-smoothing:antialiased;user-select:none}
 .button,button{display:inline-flex;align-items:center;gap:6px;min-height:36px;background:var(--color-primary);color:var(--color-on-primary);border:1px solid var(--color-primary);border-radius:var(--radius);padding:8px 14px;font:500 14px/20px var(--font-sans);cursor:pointer;text-decoration:none;white-space:nowrap}

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, it } from 'mocha'
 import { MasterDatabase } from '../master/database.js'
+import { nodesView } from './admin.js'
 import { artifactsView } from './artifacts.js'
 import {
   bytes,
@@ -689,5 +690,41 @@ describe('Design system and views', () => {
       ],
       ['now', '5m ago', '3h ago', '2d ago'],
     )
+  })
+})
+
+describe('Nodes page', () => {
+  const base = {
+    nodes: [],
+    types: {},
+    pools: [],
+    budget: { monthly: 200 },
+    canChange: true,
+  }
+  it('gives copyable install commands from the host, else the master’s own release', () => {
+    const fromHost = nodesView({
+      ...base,
+      host: 'https://builds.example.test',
+      release: { repository: 'example/mason', version: '1.2.3' },
+    })
+    assert.match(
+      fromHost,
+      /<pre class="mono">\/bin\/bash -c &quot;\$\(curl -fsSL https:\/\/builds\.example\.test\/install\.sh\)&quot; -- --from https:\/\/builds\.example\.test<\/pre><button type="button" class="secondary copy" data-copy="\/bin\/bash -c &quot;/,
+    )
+    assert.match(
+      fromHost,
+      /data-copy="sudo mason worker --install --link-port 9410"/,
+    )
+    const fromGitHub = nodesView({
+      ...base,
+      release: { repository: 'example/mason', version: '1.2.3' },
+    })
+    assert.match(
+      fromGitHub,
+      /install Mason 1\.2\.3, the master’s version: .*https:\/\/github\.com\/example\/mason\/releases\/download\/v1\.2\.3\/install\.sh\)&quot; -- --version 1\.2\.3<\/pre>/,
+    )
+    assert(!fromGitHub.includes('&lt;host&gt;'))
+    assert.match(nodesView(base), /href="\/settings#host"/)
+    assert(!nodesView({ ...base, canChange: false }).includes('Add node'))
   })
 })
