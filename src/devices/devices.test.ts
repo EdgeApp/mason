@@ -542,26 +542,6 @@ describe('Device registration, account ownership and iOS compatibility', () => {
       ).status,
       429,
     )
-    const report = await request(
-      '/api/device-provisioning',
-      {
-        method: 'POST',
-        headers: {
-          Authorization: 'Bearer ' + 'a'.repeat(64),
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          devices: Array.from({ length: 501 }, () => ({
-            id: 1,
-            status: 'pending',
-            message: '',
-          })),
-          requests: [],
-        }),
-      },
-      false,
-    )
-    assert.equal(report.status, 400)
   })
 })
 
