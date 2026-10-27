@@ -721,7 +721,7 @@ describe('Nodes page', () => {
     })
     assert.match(
       fromGitHub,
-      /install Mason 1\.2\.3, the master’s version: .*https:\/\/github\.com\/example\/mason\/releases\/download\/v1\.2\.3\/install\.sh\)&quot; -- --version 1\.2\.3<\/pre>/,
+      /install Mason 1\.2\.3, the master’s version: .*https:\/\/github\.com\/example\/mason\/releases\/latest\/download\/install\.sh\)&quot; -- --version 1\.2\.3<\/pre>/,
     )
     assert(!fromGitHub.includes('&lt;host&gt;'))
     assert.match(nodesView(base), /href="\/settings#host"/)
