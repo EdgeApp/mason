@@ -11,7 +11,8 @@ import path from 'node:path'
 import { asOrigin, integer, object, text } from './validation.js'
 
 export const asDeviceConfig = object({
-  workerTokenFile: text(4096),
+  /** Read by the removed device worker; older configurations may still name it. */
+  workerTokenFile: asOptional(text(4096)),
   trustStoreFile: text(4096),
   openssl: asOptional(text(4096), 'openssl'),
 })
@@ -61,7 +62,14 @@ export function loadConfig(file: string): Config {
         ? undefined
         : {
             ...config.devices,
-            workerTokenFile: path.resolve(base, config.devices.workerTokenFile),
+            ...(config.devices.workerTokenFile == null
+              ? {}
+              : {
+                  workerTokenFile: path.resolve(
+                    base,
+                    config.devices.workerTokenFile,
+                  ),
+                }),
             trustStoreFile: path.resolve(base, config.devices.trustStoreFile),
           },
     database: path.resolve(base, config.database),

@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import path from 'node:path'
+import type { Readable } from 'node:stream'
 import { DatabaseSync } from 'node:sqlite'
 import { type Config, noSymlinks, privateDirectory } from './config.js'
 import { migrate } from './schema.js'
@@ -109,6 +110,8 @@ export class Store {
     this.db.close()
   }
   transaction<T>(body: () => T): T {
+    // An inner call joins the transaction already open.
+    if (this.db.isTransaction) return body()
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const out = body()
@@ -158,6 +161,25 @@ export class Store {
       ),
     )
   }
+  /**
+   * Which apps an account may see: every enabled app here; a host limits
+   * testers to their groups' apps.
+   */
+  scope: (accountId: number) => ReadonlySet<number> | 'all' = () => 'all'
+  /** Where a host keeps build files (disk or S3); a standalone server reads its files directory. */
+  objects:
+    | {
+        head(key: string): Promise<{ size: number } | undefined>
+        get(
+          key: string,
+          range?: { start: number; end: number },
+        ): Promise<{ stream: Readable; size: number } | undefined>
+      }
+    | undefined
+  visible(accountId: number, appId: number): boolean {
+    const scope = this.scope(accountId)
+    return scope === 'all' || scope.has(appId)
+  }
   apps(): Array<ReturnType<typeof asApp>> {
     return this.db
       .prepare('SELECT * FROM apps WHERE enabled=1 ORDER BY position,id')
@@ -192,14 +214,7 @@ export class Store {
       .map((row) => this.cleanBuild(row))
   }
   private cleanBuild(row: unknown): Build {
-    // SQLite NULL is not a missing optional value in cleaners.
-    const raw = asObject({
-      deleted_at: (value: unknown): number | undefined =>
-        value === null ? undefined : integer()(value),
-    })(row)
-    const result = asBuild({ ...Object(row), deleted_at: raw.deleted_at })
-    JSON.parse(result.custom_fields)
-    return result
+    return cleanBuild(row)
   }
   reserve(owner: string, bytes: number): string {
     owner = text(256)(owner)
@@ -271,39 +286,11 @@ export class Store {
       )
       if (input.size > reservation.bytes)
         throw new Error('Package exceeds reservation')
-      const channel = this.channel(input.channelId)
-      if (
-        !asArray(asFormat)(JSON.parse(channel.formats)).includes(input.format)
-      )
-        throw new Error('Format does not match channel')
-      const app = asApp(
-        this.db.prepare('SELECT * FROM apps WHERE id=?').get(channel.app_id),
-      )
-      if (input.bundleId !== app.slug)
-        throw new Error('Package does not match app')
-      const prior = this.db
-        .prepare(
-          'SELECT * FROM builds WHERE channel_id=? AND branch=? AND (digest=? OR build_number=?)',
-        )
-        .all(channel.id, input.branch, input.digest, input.buildNumber)
-        .map((row) => this.cleanBuild(row))
-      if (prior.length !== 0) {
-        const match = prior.find(
-          (row) =>
-            row.digest === input.digest &&
-            row.branch === input.branch &&
-            row.build_number === input.buildNumber,
-        )
-        if (
-          match == null ||
-          prior.length !== 1 ||
-          match.expires_at <= this.now() ||
-          match.state !== 'ready'
-        )
-          throw new Error('Build publication conflict')
+      const prior = checkPublication(this.db, input, this.now())
+      if (prior != null) {
         this.remove(source)
         this.db.prepare('DELETE FROM reservations WHERE id=?').run(id)
-        return match
+        return prior
       }
       // Hash verification occurs while streaming to this owned immutable stage.
       // Publication only checks its descriptor; it never buffers package bytes.
@@ -321,54 +308,13 @@ export class Store {
       if (existsSync(destination)) throw new Error('Artifact already exists')
       renameSync(source, destination)
       chmodSync(destination, 0o400)
-      const now = this.now()
-      const published = this.insert(
-        input,
-        channel.app_id,
-        channel.platform,
-        fileKey,
-        now,
-      )
+      const published = insertBuild(this.db, input, fileKey, {
+        now: this.now(),
+        retentionDays: this.config.retentionDays,
+      })
       this.db.prepare('DELETE FROM reservations WHERE id=?').run(id)
       return published
     })
-  }
-  private insert(
-    input: Publication,
-    appId: number,
-    platform: string,
-    fileKey: string,
-    now: number,
-  ): Build {
-    const result = this.db
-      .prepare(
-        `INSERT INTO builds(app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ready',?,?,?)`,
-      )
-      .run(
-        appId,
-        input.channelId,
-        platform,
-        input.branch,
-        input.commit,
-        input.version,
-        input.buildNumber,
-        input.bundleId,
-        input.format,
-        input.digest,
-        input.size,
-        fileKey,
-        now,
-        now + this.config.retentionDays * DAY,
-        input.changelog,
-        input.source,
-        input.customFields,
-      )
-    return this.cleanBuild(
-      this.db
-        .prepare('SELECT * FROM builds WHERE id=?')
-        .get(result.lastInsertRowid),
-    )
   }
   filePath(key: string): string {
     asFileKey(key)
@@ -470,3 +416,96 @@ export class Store {
 }
 export const digest = (data: string | Buffer): string =>
   createHash('sha256').update(data).digest('hex')
+
+/** A build row as cleaners read it; SQLite NULL is not a missing optional value. */
+export function cleanBuild(row: unknown): Build {
+  const raw = asObject({
+    deleted_at: (value: unknown): number | undefined =>
+      value === null ? undefined : integer()(value),
+  })(row)
+  const result = asBuild({ ...Object(row), deleted_at: raw.deleted_at })
+  JSON.parse(result.custom_fields)
+  return result
+}
+
+/**
+ * Checks a publication against its channel and the branch's builds: the
+ * format must suit the channel and the package its app. An identical earlier
+ * publication is returned; any other build of that number or digest on the
+ * branch conflicts.
+ */
+export function checkPublication(
+  db: DatabaseSync,
+  input: Publication,
+  now: number,
+): Build | undefined {
+  const channel = asChannel(
+    db.prepare('SELECT * FROM channels WHERE id=?').get(input.channelId),
+  )
+  if (!asArray(asFormat)(JSON.parse(channel.formats)).includes(input.format))
+    throw new Error('Format does not match channel')
+  const app = asApp(
+    db.prepare('SELECT * FROM apps WHERE id=?').get(channel.app_id),
+  )
+  if (input.bundleId !== app.slug) throw new Error('Package does not match app')
+  const prior = db
+    .prepare(
+      'SELECT * FROM builds WHERE channel_id=? AND branch=? AND (digest=? OR build_number=?)',
+    )
+    .all(channel.id, input.branch, input.digest, input.buildNumber)
+    .map(cleanBuild)
+  if (prior.length === 0) return undefined
+  const match = prior.find(
+    (row) =>
+      row.digest === input.digest &&
+      row.branch === input.branch &&
+      row.build_number === input.buildNumber,
+  )
+  if (
+    match == null ||
+    prior.length !== 1 ||
+    match.expires_at <= now ||
+    match.state !== 'ready'
+  )
+    throw new Error('Build publication conflict')
+  return match
+}
+
+/** Inserts a `ready` build for a checked publication. */
+export function insertBuild(
+  db: DatabaseSync,
+  input: Publication,
+  fileKey: string,
+  options: { now: number; retentionDays: number },
+): Build {
+  const channel = asChannel(
+    db.prepare('SELECT * FROM channels WHERE id=?').get(input.channelId),
+  )
+  const result = db
+    .prepare(
+      `INSERT INTO builds(app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ready',?,?,?)`,
+    )
+    .run(
+      channel.app_id,
+      input.channelId,
+      channel.platform,
+      input.branch,
+      input.commit,
+      input.version,
+      input.buildNumber,
+      input.bundleId,
+      input.format,
+      input.digest,
+      input.size,
+      fileKey,
+      options.now,
+      options.now + options.retentionDays * DAY,
+      input.changelog,
+      input.source,
+      input.customFields,
+    )
+  return cleanBuild(
+    db.prepare('SELECT * FROM builds WHERE id=?').get(result.lastInsertRowid),
+  )
+}

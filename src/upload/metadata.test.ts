@@ -12,11 +12,7 @@ import {
   plist,
   zip,
 } from './fixtures.test.js'
-import {
-  customFields,
-  packageIdentity,
-  parseInWorker,
-} from './metadata.js'
+import { customFields, packageIdentity, parseInWorker } from './metadata.js'
 import { plistIdentity } from './plist.js'
 let root: string
 function file(bytes: Buffer): string {
@@ -55,10 +51,7 @@ describe('Bounded package identity parsing', () => {
       const name = file(
         zip([['Payload/Example.app/Info.plist', plist(binary)]]),
       )
-      assert.deepEqual(
-        await packageIdentity(name, 'ipa', {}),
-        packageFields,
-      )
+      assert.deepEqual(await packageIdentity(name, 'ipa', {}), packageFields)
       assert.deepEqual(
         await packageIdentity(name, 'ipa', {
           mason: { ...packageFields, buildTime: '2026-01-02T00:00:00Z' },
@@ -95,12 +88,8 @@ describe('Bounded package identity parsing', () => {
       .toString()
       .replace('</dict>', '<key>Other</key><array/></dict>')
     assert.deepEqual(plistIdentity(Buffer.from(extra)), packageFields)
-    await assert.rejects(
-      parseInWorker(Buffer.from('bplist00-invalid'), 'ipa'),
-    )
-    await assert.rejects(
-      parseInWorker(Buffer.alloc(1024 * 1024 + 1), 'ipa'),
-    )
+    await assert.rejects(parseInWorker(Buffer.from('bplist00-invalid'), 'ipa'))
+    await assert.rejects(parseInWorker(Buffer.alloc(1024 * 1024 + 1), 'ipa'))
   })
   it('reads Android UTF8/UTF16 string pools and typed manifest versions', async () => {
     for (const utf16 of [false, true]) {

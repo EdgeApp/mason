@@ -26,11 +26,7 @@ let root: string,
   credential: Credentials,
   app: number
 const boundary = 'mason-upload-fixture'
-function part(
-  name: string,
-  value: string | Buffer,
-  filename?: string,
-): Buffer {
+function part(name: string, value: string | Buffer, filename?: string): Buffer {
   return Buffer.concat([
     Buffer.from(
       `--${boundary}\r\nContent-Disposition: form-data; name="${name}"${filename ? `; filename="${filename}"` : ''}\r\n\r\n`,
@@ -69,8 +65,7 @@ async function post(
 }
 function clean(): void {
   assert.equal(
-    store.db.prepare('SELECT COUNT(*) total FROM reservations').get()
-      ?.total,
+    store.db.prepare('SELECT COUNT(*) total FROM reservations').get()?.total,
     0,
   )
   assert.equal(readdirSync(store.incoming).length, 0)
@@ -122,10 +117,7 @@ describe('Zealot-compatible upload HTTP API', () => {
         ['custom_fields', JSON.stringify(value)],
       ]
       if (kind === 'size')
-        extra.push([
-          'ci_url',
-          'https://ci.example.test/' + 'x'.repeat(1900),
-        ])
+        extra.push(['ci_url', 'https://ci.example.test/' + 'x'.repeat(1900)])
       const reply = await post(body('ipa', extra))
       assert.equal(reply.status, 201, await reply.clone().text())
       const first = await reply.json()
@@ -138,9 +130,7 @@ describe('Zealot-compatible upload HTTP API', () => {
         bundle_id: first.bundle_id,
         git_commit: first.git_commit,
       })
-      const found = await fetch(
-        origin + '/api/apps/version_exist?' + query,
-      )
+      const found = await fetch(origin + '/api/apps/version_exist?' + query)
       assert.equal(found.status, 200)
       assert.deepEqual(await found.json(), first)
       assert.equal(store.builds(app).length, 1)
@@ -180,8 +170,7 @@ describe('Zealot-compatible upload HTTP API', () => {
           appId: app,
           platform,
           key: format,
-          allowedFormats:
-            platform === 'windows' ? ['exe', 'msi'] : [format],
+          allowedFormats: platform === 'windows' ? ['exe', 'msi'] : [format],
         })
     keys = new ApiKeys(store)
     credential = keys.create('Uploader', [app])
@@ -301,11 +290,8 @@ describe('Zealot-compatible upload HTTP API', () => {
       201,
     )
     assert.equal(
-      (
-        await post(
-          body('apk', [], zip([['AndroidManifest.xml', manifest()]])),
-        )
-      ).status,
+      (await post(body('apk', [], zip([['AndroidManifest.xml', manifest()]]))))
+        .status,
       201,
     )
     for (const format of ['dmg', 'exe', 'msi'] as const) {
@@ -388,10 +374,7 @@ describe('Zealot-compatible upload HTTP API', () => {
       (await post(body('apk', [], Buffer.from('invalid')))).status,
       400,
     )
-    assert.equal(
-      (await post(body('ipa', [], Buffer.alloc(8193)))).status,
-      413,
-    )
+    assert.equal((await post(body('ipa', [], Buffer.alloc(8193)))).status, 413)
     clean()
     assert.throws(() =>
       asUploadFields({
@@ -449,11 +432,7 @@ describe('Zealot-compatible upload HTTP API', () => {
     assert.equal(
       (
         await post(
-          body(
-            'other',
-            [],
-            zip([['Payload/Example.app/Info.plist', plist()]]),
-          ),
+          body('other', [], zip([['Payload/Example.app/Info.plist', plist()]])),
         )
       ).status,
       400,
@@ -494,22 +473,14 @@ describe('Zealot-compatible upload HTTP API', () => {
       })
       req.on('error', () => {})
       req.write(Buffer.concat([start, Buffer.from('P')]))
-      for (
-        let n = 0;
-        n < 100 && readdirSync(store.incoming).length === 0;
-        n++
-      )
+      for (let n = 0; n < 100 && readdirSync(store.incoming).length === 0; n++)
         await new Promise((resolve) => setTimeout(resolve, 10))
       assert.equal(readdirSync(store.incoming).length, 1)
       return req
     }
     const aborted = await active()
     aborted.destroy()
-    for (
-      let n = 0;
-      n < 100 && readdirSync(store.incoming).length !== 0;
-      n++
-    )
+    for (let n = 0; n < 100 && readdirSync(store.incoming).length !== 0; n++)
       await new Promise((resolve) => setTimeout(resolve, 10))
     clean()
     const revoked = await active()

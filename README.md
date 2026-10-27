@@ -1,3 +1,134 @@
+# Mason
+
+Mason builds, signs and distributes apps. A cluster has three kinds of node,
+each the same `mason` program:
+
+- the **master** holds the only database: projects, people, keys, settings,
+  runs, build numbers and the Apple and GitHub credentials. It dials every
+  other node over an authenticated WebSocket link and decides what runs where.
+- **workers** run Masonfile stages. They keep no configuration of their own;
+  the master tells each one which tools its node type needs.
+- the **host** serves the catalog, installs, device registration and sign-in
+  from a replicated cache, and keeps serving builds while the master is away.
+  It holds no secrets.
+
+The Masonfile reference, with every option and the stage API, is
+[docs/masonfile.md](docs/masonfile.md).
+
+## Installing
+
+A release needs no Node.js or npm. On each computer:
+
+```sh
+/bin/bash -c "$(curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh)"
+# or, once a host serves the current release:
+/bin/bash -c "$(curl -fsSL https://builds.example.test/install.sh)" -- --from https://builds.example.test
+```
+
+Then start each role as a service (data in `~/.mason` unless `--data` says
+otherwise):
+
+```sh
+sudo mason master --install --port 9400      # with --worker, the master also runs stages
+sudo mason worker --install --link-port 9410
+sudo mason host --install --port 8443 --link-port 9420
+mason status                                  # role, state, version, fingerprint, web address
+```
+
+A host on a public server can leave TLS to a terminator on the same machine,
+such as Caddy with `builds.example.test { reverse_proxy 127.0.0.1:9200 }`:
+its web port then serves plain HTTP on loopback, while the link stays on Mason's
+own TLS for the master to reach:
+
+```sh
+sudo mason host --install --listen 127.0.0.1 --port 9200 --web-plain --link-listen 0.0.0.0 --link-port 9310
+```
+
+On first start the master prints a six-digit setup code. Create the first
+administrator in the browser at the master's address, or from its terminal:
+
+```sh
+mason setup --username ada --password-stdin --api-key-out ~/.mason/admin.key
+```
+
+`mason update` installs a newer release on a node and restarts its services.
+
+## Pairing nodes
+
+A new worker or host prints a pairing key when it first starts. Pair it from
+the master's Nodes page (**Add node**), or from the master's computer:
+
+```sh
+mason nodes add --address 192.168.1.20:9410 --key mason1:…
+mason nodes set second --type mac-xcode --label apple-signing --slots 2
+mason settings set host --file host.json     # {"origin": "https://builds.example.test"}
+```
+
+Node types (`mason settings set nodeTypes`) list the software every node of
+that type keeps: Xcode versions, Node, Java, the Android SDK packages (their
+licences accepted by an administrator per type) and Homebrew or apt packages.
+Each node's page lists what still needs a person, such as a macOS permission.
+
+`mason cluster check` reports every node: linked or not, its Mason version
+against the master's, a worker's last inventory and quarantine, and the
+host's cache revision lag, outbox depth and refused messages. It exits
+non-zero until everything is green.
+
+## Projects
+
+A project is a GitHub repository with a Masonfile, the app IDs it owns, its
+secrets and its branch rules. Add one with **Add project** on the master's
+dashboard: the master reads the repository with its own GitHub credentials,
+reads the Masonfile on the default branch to list the app IDs it publishes,
+records the ones the project owns (with their Apple team), saves the branch
+rules and creates the GitHub webhook. From the terminal:
+
+```sh
+mason projects set phones --file project.json
+mason projects get phones
+```
+
+Branch rules are globs, first match wins: `automatic` builds every new
+commit (at most 20 automatic branches per project), `request` builds only
+when someone asks. Deleted branches stop polling; forks never build.
+
+## Pipelines
+
+A pipeline Masonfile declares workflows of stages, each with the node it
+runs on, the tools it needs, the secrets it may read and the app IDs it
+publishes. `setup` runs on a worker with no secrets; the master checks the
+graph it returns and schedules the stages. Requests come from the dashboard,
+`POST /api/v2/runs`, pushes and schedules:
+
+```sh
+mason api POST /api/v2/runs --file run.json   # {"project": "phones", "branch": "main", "params": {"seat": "1"}}
+mason runs list --project phones
+```
+
+Each run's page draws its stages as a graph, follows the selected stage's
+steps and log live, and offers approve, cancel, restart-from-a-stage and
+request-run. Apple signing, TestFlight and notarization use the master's App
+Store Connect key; a stage receives only the signing material it needs for its
+own duration.
+
+## Migrating from the standalone server and builder
+
+The master imports the existing distribution and builder databases before
+its first setup and the host imports the distribution's build files:
+
+```sh
+mason import --distribution distribution.sqlite --builder builder.sqlite
+mason host import --distribution distribution.sqlite --storage /srv/mason/storage
+```
+
+Where a build-number sequence should continue from numbers issued elsewhere,
+set its last number on the project's page (or `POST /api/v2/build-numbers/seed`).
+
+Existing sessions, devices, keys, builds and upload keys carry over, and the
+Zealot upload API (`version_exist`, `POST /api/apps/upload`) answers as
+before. Script-format Masonfiles keep working; a project moves to a pipeline
+Masonfile when it is ready. The sections below document the standalone
+builder and distribution server, which the cluster replaces.
 
 ## Builder role
 
@@ -230,43 +361,22 @@ Enable registration in the private distribution configuration:
 
 ```json
 "devices": {
-  "workerTokenFile": "/private/mason/device-worker-key.json",
   "trustStoreFile": "/srv/mason/src/devices/apple-roots.pem",
   "openssl": "openssl"
 }
 ```
 
-The owner-only worker key file contains `{"token":"<64 random hex digits>"}`.
-Use a separate random key for this worker, not an upload or builder API key.
-`GET` and `POST /api/device-provisioning` require that Bearer key. They are for
-one trusted provisioning worker, not browser access. The provided Apple root
-certificates are public certificates from Apple's PKI website.
+The provided Apple root certificates are public certificates from Apple's PKI
+website.
 
-On the signing Mac, run `node lib/cli.js devices-worker --config <private file>`.
-Its owner-only configuration contains `origin`, `tokenFile`,
-`builderConfigFile`, `stateDirectory`, `bundle`, `gemfile`, `bundlePath`, optional
-`ruby`, and `apple: {teamId, certificateId, loginFile}`. `apple.apiKeyFile` can
-replace the saved Apple login/session file. These credentials must be permitted
-to register devices and create provisioning profiles. A saved Apple login can
-expire and require renewed authentication; API keys are preferable for long-term
-unattended operation.
-
-The worker polls over HTTPS every 30 seconds. It registers the device, creates
-new ad hoc profiles using the existing distribution certificate and enabled
-Apple devices, and keeps the fresh profiles in a private local cache. It does
-not revoke certificates or commit to application/signing repositories. An
-immutable Mason-owned bundle shim supplies the profiles to the existing build
-adapter after read-only Match imports its certificate. Mason's stored app
-settings are updated; branch origins, secrets and other app settings remain
-intact. Apple processing delays and credential/quota failures remain visible.
-
-A registration queues iOS-only builds of configured default branches even if
-Git has not changed. Preparation jobs pin their commit, persist their batch and
-idempotency keys, and allow at most two retries after the initial attempt. They
-do not consume or reset the source-change automatic-build budget. Multiple
-pending devices are handled together. Existing queued jobs retain their original
-configuration snapshot. Historical packages remain immutable: **Prepare for
-this device** queues a new build of that package's exact branch and commit.
+In a Mason cluster the host serves registration and sends each device to the
+master through its outbox. The master registers the device with Apple through
+its App Store Connect key, replaces the development and ad hoc profiles of
+every iOS app ID with the full list of enabled devices (the new profile is
+made before the old one is deleted), and queues iOS builds of each project's
+automatic branches; no worker and no Apple credential outside the master is
+involved. **Prepare for this device** queues a new build of that package's
+exact branch and commit.
 
 Mason verifies and records device membership and expiry from each uploaded
 IPA's embedded Apple-signed ad hoc profile, including the app identifier.
@@ -274,8 +384,7 @@ Installation grants are bound to the selected account-owned device and checked
 again at manifest/artifact download. Unregistered, incompatible and expired
 profiles are never presented as ready. Android and desktop downloads keep their
 existing behavior. `devices-inspect --config <distribution config>` backfills
-retained IPAs. `devices-bootstrap --config <worker config>` verifies Apple
-credentials and prepares the existing device set before starting the daemon.
+retained IPAs.
 
 Apple's annual device allowance still applies. Removing an account association
 does not disable the device at Apple, recover a device slot, or revoke downloaded

@@ -23,6 +23,8 @@ interface Fixture {
   close: () => Promise<void>
   authorize: (url: string, cookies?: Map<string, string>) => Promise<URL>
   selectSubject: (subject: string) => void
+  /** Overrides the email claims the OIDC providers assert, until reset with `{}`. */
+  setClaims: (claims: { email?: string; email_verified?: boolean }) => void
 }
 /** Real HTTPS authorization, token, JWKS and user-info endpoints; no TLS bypass. */
 export async function fixture(
@@ -75,6 +77,7 @@ export async function fixture(
   }
   const configs: ProviderConfig[] = []
   let selectedSubject = 'fixture-subject'
+  let claimOverrides: { email?: string; email_verified?: boolean } = {}
   const signingKeys = new Map<
     string,
     ReturnType<typeof generateKeyPairSync>['privateKey']
@@ -117,6 +120,7 @@ export async function fixture(
           name: 'Alex Lee',
           email: 'alex@example.test',
           email_verified: true,
+          ...claimOverrides,
         }),
       }),
       interactions: {
@@ -259,6 +263,9 @@ export async function fixture(
     },
     selectSubject: (subject): void => {
       selectedSubject = subject
+    },
+    setClaims: (claims): void => {
+      claimOverrides = claims
     },
     authorize: async (
       url,

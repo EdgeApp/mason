@@ -1,0 +1,16 @@
+{
+  "name": "@mason/types",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TypeScript types for Mason Masonfiles",
+  "license": "UNLICENSED",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts"
+    }
+  },
+  "files": [
+    "index.d.ts"
+  ]
+}

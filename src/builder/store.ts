@@ -1,3 +1,4 @@
+import { asPin } from '../node/pinnedFetch.js'
 import { DatabaseSync } from 'node:sqlite'
 import { isIP } from 'node:net'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
@@ -85,11 +86,7 @@ export class BuilderStore {
   readonly db: DatabaseSync
   constructor(readonly config: BuilderConfig) {
     privateDirectory(config.workspace)
-    for (const directory of [
-      'logs',
-      'files',
-      'executions',
-    ])
+    for (const directory of ['logs', 'files', 'executions'])
       privateDirectory(path.join(config.workspace, directory))
     const marker = path.join(config.workspace, '.mason-builder')
     if (!existsSync(marker))
@@ -338,9 +335,7 @@ export class BuilderStore {
     if (count >= 100) throw new Error('Queue is full')
     const id = randomUUID()
     const address =
-      !automatic && clientIp != null && isIP(clientIp) !== 0
-        ? clientIp
-        : null
+      !automatic && clientIp != null && isIP(clientIp) !== 0 ? clientIp : null
     this.db
       .prepare(
         "INSERT INTO jobs(id,app,branch,status,created,definition,request,token,requested_commit,automatic,client_ip) VALUES(?,?,?,'queued',?,?,?,?,?,?,?)",
@@ -648,4 +643,6 @@ export const asClientConfig = asObject({
   url: text(2048),
   keyFile: text(4096),
   pollMs: asOptional(integer(50, 10000), 1000),
+  /** Public-key pin of a master serving its own self-signed certificate. */
+  pin: asOptional(asPin),
 })

@@ -1,8 +1,4 @@
-import {
-  deviceCallbackRoutes,
-  deviceRoutes,
-  deviceWorkerRoutes,
-} from './devices/routes.js'
+import { deviceCallbackRoutes, deviceRoutes } from './devices/routes.js'
 import express, { type ErrorRequestHandler } from 'express'
 import { adminRoutes } from './admin/routes.js'
 import { Accounts } from './auth/accounts.js'
@@ -11,7 +7,8 @@ import { authRoutes } from './auth/routes.js'
 import { readFileSync } from 'node:fs'
 import { catalogRoutes } from './catalog/routes.js'
 import { installationRoutes } from './catalog/install.js'
-import { page, stylesheet, catalogStyles } from './view.js'
+import { page } from './view/shell.js'
+import { stylesheet } from './view/stylesheet.js'
 import type { Server } from 'node:http'
 import { Store } from './store.js'
 import { uploadRoutes } from './upload/routes.js'
@@ -42,7 +39,7 @@ export function createApp(
     }
   })
   app.get('/assets/style.css', (_req, res) => {
-    res.type('css').send(stylesheet + catalogStyles)
+    res.type('css').send(stylesheet)
   })
   app.get('/assets/catalog.js', (_req, res) => {
     res
@@ -55,7 +52,6 @@ export function createApp(
       )
   })
   app.use(deviceCallbackRoutes(store))
-  app.use(deviceWorkerRoutes(store))
   app.use(uploadRoutes(store))
   app.use(adminRoutes(store))
   app.use(express.urlencoded({ extended: false, limit: '16kb' }))

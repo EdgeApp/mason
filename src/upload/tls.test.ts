@@ -133,9 +133,7 @@ describe('Mason compiled upload service over verified HTTPS', () => {
       ['lib/cli.js', 'keys', 'import', '--file', saved],
       { input: raw, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] },
     )
-    const credential = asCredentials(
-      JSON.parse(readFileSync(saved, 'utf8')),
-    )
+    const credential = asCredentials(JSON.parse(readFileSync(saved, 'utf8')))
     assert.equal(statSync(saved).mode & 0o777, 0o600)
     assert(!imported.includes(credential.token))
     const child = spawn(
@@ -196,11 +194,7 @@ describe('Mason compiled upload service over verified HTTPS', () => {
       }
       assert(ready)
       for (const [format, platform, bytes] of [
-        [
-          'ipa',
-          'ios',
-          zip([['Payload/Example.app/Info.plist', plist(true)]]),
-        ],
+        ['ipa', 'ios', zip([['Payload/Example.app/Info.plist', plist(true)]])],
         ['apk', 'android', zip([['AndroidManifest.xml', manifest()]])],
         ['dmg', 'macos', desktop('dmg')],
         ['exe', 'windows', desktop('exe')],
@@ -209,11 +203,7 @@ describe('Mason compiled upload service over verified HTTPS', () => {
         const form = new FormData()
         form.set('token', credential.token)
         form.set('channel_key', platform)
-        form.set(
-          'file',
-          new Blob([new Uint8Array(bytes)]),
-          'fixture.' + format,
-        )
+        form.set('file', new Blob([new Uint8Array(bytes)]), 'fixture.' + format)
         form.set('branch', 'master')
         form.set(
           'custom_fields',

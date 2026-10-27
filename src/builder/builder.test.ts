@@ -30,7 +30,12 @@ import { BuilderStore, exclusiveLock, publicJob } from './store.js'
 import { executeJob, writeBootstrap } from './guardian.js'
 import { MaskedLog, Execution, processSnapshot } from './execution.js'
 import { Worker, recover } from './worker.js'
-import { builderApp, clientAddress, clientName, serveBuilder } from './server.js'
+import {
+  builderApp,
+  clientAddress,
+  clientName,
+  serveBuilder,
+} from './server.js'
 import { duration } from './status.js'
 import { buildClient } from './client.js'
 import { builderCommand } from './cli.js'
@@ -159,16 +164,25 @@ describe('Mason builder', function () {
     )
     assert.throws(() => asRequest({ ...request, repository: 'no' }))
     assert.equal(baseEnvironment().NODE_OPTIONS, undefined)
+    // A service has no locale: commands still get UTF-8; a set one is kept.
+    const lang = process.env.LANG
+    try {
+      delete process.env.LANG
+      assert.equal(baseEnvironment('darwin').LANG, 'en_US.UTF-8')
+      assert.equal(baseEnvironment('linux').LANG, 'C.UTF-8')
+      process.env.LANG = 'de_DE.UTF-8'
+      assert.equal(baseEnvironment('darwin').LANG, 'de_DE.UTF-8')
+    } finally {
+      if (lang == null) delete process.env.LANG
+      else process.env.LANG = lang
+    }
     const file = path.join(root, 'config.json')
     writeBootstrap(file, { workspace: 'state' })
     assert.equal(loadBuilderConfig(file).workspace, store.config.workspace)
     mkdirSync(path.join(root, 'links'))
     const linked = path.join(root, 'links', 'config')
     symlinkSync(file, linked)
-    assert.equal(
-      loadBuilderConfig(linked).workspace,
-      store.config.workspace,
-    )
+    assert.equal(loadBuilderConfig(linked).workspace, store.config.workspace)
   })
   it('validates and persists canonical per-job environment overrides', () => {
     for (const envVars of [
@@ -230,10 +244,7 @@ describe('Mason builder', function () {
     )
     store.db
       .prepare('UPDATE jobs SET request=? WHERE id=?')
-      .run(
-        JSON.stringify({ ...request, idempotencyKey: 'legacy' }),
-        legacy.id,
-      )
+      .run(JSON.stringify({ ...request, idempotencyKey: 'legacy' }), legacy.id)
     assert.equal(
       store.enqueue(
         { ...request, envVars: [], idempotencyKey: 'legacy' },
@@ -267,9 +278,7 @@ describe('Mason builder', function () {
       }));`)
     store.importApp({
       ...definition,
-      env: [
-        { name: 'APP_SERVER_URL', value: 'https://default.example.test' },
-      ],
+      env: [{ name: 'APP_SERVER_URL', value: 'https://default.example.test' }],
     })
     const resolver = path.join(root, 'resolver.json')
     writeBootstrap(resolver, { [definition.repository]: repo })
@@ -376,9 +385,7 @@ describe('Mason builder', function () {
     assert.throws(() =>
       store.enqueue({ ...request, platforms: ['android'] }, keyId),
     )
-    assert.throws(() =>
-      store.enqueue({ ...request, app: 'unknown' }, keyId),
-    )
+    assert.throws(() => store.enqueue({ ...request, app: 'unknown' }, keyId))
     assert.equal('definition' in publicJob(first), false)
     store.revoke(keyId)
     assert.equal(store.authenticate(key), undefined)
@@ -400,10 +407,7 @@ describe('Mason builder', function () {
     log.write('ret-value suffix')
     log.write('x'.repeat(100), true)
     assert.equal(readFileSync(file).length, 35)
-    assert.match(
-      readFileSync(file, 'utf8'),
-      /prefix \[redacted\] suffix/,
-    )
+    assert.match(readFileSync(file, 'utf8'), /prefix \[redacted\] suffix/)
     assert.equal(
       readFileSync(full, 'utf8'),
       'prefix [redacted] suffix' + 'x'.repeat(100),
@@ -413,17 +417,31 @@ describe('Mason builder', function () {
   it('streams ordinary logs while retaining only possible secret prefixes', () => {
     const file = path.join(root, 'streaming.log')
     const full = path.join(root, 'streaming.full.log')
-    const log = new MaskedLog(file, [
-      JSON.stringify({ privateConfig: 'x'.repeat(20000) }),
-      'fixture-token-long',
-      'fixture-token',
-    ], undefined, full)
+    const log = new MaskedLog(
+      file,
+      [
+        JSON.stringify({ privateConfig: 'x'.repeat(20000) }),
+        'fixture-token-long',
+        'fixture-token',
+      ],
+      undefined,
+      full,
+    )
     log.write('Dependency installation completed\n')
-    assert.equal(readFileSync(file, 'utf8'), 'Dependency installation completed\n')
+    assert.equal(
+      readFileSync(file, 'utf8'),
+      'Dependency installation completed\n',
+    )
     log.write('fixture-token')
-    assert.equal(readFileSync(full, 'utf8'), 'Dependency installation completed\n')
+    assert.equal(
+      readFileSync(full, 'utf8'),
+      'Dependency installation completed\n',
+    )
     log.write('-long\nNext compiler started\n')
-    assert.equal(readFileSync(full, 'utf8'), 'Dependency installation completed\n[redacted]\nNext compiler started\n')
+    assert.equal(
+      readFileSync(full, 'utf8'),
+      'Dependency installation completed\n[redacted]\nNext compiler started\n',
+    )
     log.write('fixture-')
     log.write('', true)
     assert(readFileSync(full, 'utf8').endsWith('fixture-'))
@@ -442,12 +460,7 @@ describe('Mason builder', function () {
     })
     const job = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      job.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, job.id, new AbortController().signal, () => repo)
     assert.equal(store.job(job.id)!.status, 'failed')
     assert.equal(store.job(job.id)!.exit_code, 7)
     const keyFile = path.join(root, 'key')
@@ -462,35 +475,20 @@ describe('Mason builder', function () {
     const url = `http://127.0.0.1:${address.port}/api/jobs/${job.id}`
     try {
       assert.equal((await fetch(url + '/logs')).status, 401)
-      const preview = await (
-        await fetch(url + '/log', { headers })
-      ).text()
+      const preview = await (await fetch(url + '/log', { headers })).text()
       assert.equal(Buffer.byteLength(preview), 4 * 1024 * 1024)
       assert(!preview.includes('late compiler failure'))
       const response = await fetch(url + '/logs', { headers })
       assert.equal(response.status, 200)
-      assert.equal(
-        response.headers.get('X-Mason-Log-Capture'),
-        'full',
-      )
+      assert.equal(response.headers.get('X-Mason-Log-Capture'), 'full')
       assert.equal(response.headers.get('Cache-Control'), 'no-store')
-      assert.match(
-        response.headers.get('Content-Type')!,
-        /text\/plain/,
-      )
-      assert.match(
-        response.headers.get('Content-Disposition')!,
-        /attachment/,
-      )
+      assert.match(response.headers.get('Content-Type')!, /text\/plain/)
+      assert.match(response.headers.get('Content-Disposition')!, /attachment/)
       const full = await response.text()
       assert(Buffer.byteLength(full) > 5 * 1024 * 1024)
       assert(full.includes('late compiler failure'))
       assert(full.includes('[redacted]'))
-      assert(
-        full.endsWith(
-          'Build execution did not complete successfully.\n',
-        ),
-      )
+      assert(full.endsWith('Build execution did not complete successfully.\n'))
       assert(!full.includes('fixture-secret-value'))
       const range = await fetch(url + '/logs', {
         headers: { ...headers, Range: 'bytes=0-15' },
@@ -517,10 +515,7 @@ describe('Mason builder', function () {
         mode: 0o600,
       })
       const legacy = await fetch(queuedUrl, { headers })
-      assert.equal(
-        legacy.headers.get('X-Mason-Log-Capture'),
-        'legacy',
-      )
+      assert.equal(legacy.headers.get('X-Mason-Log-Capture'), 'legacy')
       assert.equal(await legacy.text(), 'legacy diagnostic\n')
       const fullFile = path.join(
         store.config.workspace,
@@ -545,10 +540,8 @@ describe('Mason builder', function () {
       assert.equal(
         (
           await fetch(
-            url.replace(
-              job.id,
-              '00000000-0000-4000-8000-000000000001',
-            ) + '/logs',
+            url.replace(job.id, '00000000-0000-4000-8000-000000000001') +
+              '/logs',
             { headers },
           )
         ).status,
@@ -556,9 +549,7 @@ describe('Mason builder', function () {
       )
     } finally {
       server.closeAllConnections()
-      await new Promise<void>((resolve) =>
-        server.close(() => resolve()),
-      )
+      await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
   it('prunes complete and bounded logs with expired jobs', async () => {
@@ -567,23 +558,10 @@ describe('Mason builder', function () {
     store.db
       .prepare('UPDATE jobs SET finished=? WHERE id=?')
       .run(Date.now() - 15 * 86400000, job.id)
-    const preview = path.join(
-      store.config.workspace,
-      'logs',
-      job.id + '.log',
-    )
-    const full = path.join(
-      store.config.workspace,
-      'logs',
-      job.id + '.full.log',
-    )
-    const keep = path.join(
-      store.config.workspace,
-      'logs',
-      'operator.log',
-    )
-    for (const file of [preview, full, keep])
-      writeFileSync(file, 'diagnostic')
+    const preview = path.join(store.config.workspace, 'logs', job.id + '.log')
+    const full = path.join(store.config.workspace, 'logs', job.id + '.full.log')
+    const keep = path.join(store.config.workspace, 'logs', 'operator.log')
+    for (const file of [preview, full, keep]) writeFileSync(file, 'diagnostic')
     const worker = new Worker(store)
     try {
       assert(!existsSync(preview))
@@ -610,12 +588,7 @@ describe('Mason builder', function () {
     })
     const job = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      job.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, job.id, new AbortController().signal, () => repo)
     assert.equal(store.job(job.id)!.status, 'succeeded')
     const log = readFileSync(
       path.join(store.config.workspace, 'logs', job.id + '.log'),
@@ -645,12 +618,7 @@ describe('Mason builder', function () {
     git(['commit', '-m', 'Update'], repo)
     const next = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      next.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, next.id, new AbortController().signal, () => repo)
     assert.equal(store.job(next.id)!.status, 'succeeded')
     assert.equal(
       store.job(next.id)!.commit_sha,
@@ -673,12 +641,7 @@ describe('Mason builder', function () {
     })
     const job = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      job.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, job.id, new AbortController().signal, () => repo)
     assert.equal(store.job(job.id)!.status, 'succeeded')
     assert.deepEqual(publicJob(store.job(job.id)!).result, {
       '[redacted]': ['[redacted]', { count: 12, ok: true, empty: null }],
@@ -691,12 +654,7 @@ describe('Mason builder', function () {
     store.importApp({ ...definition, env: [{ name: 'TOKEN', value: 'x' }] })
     const job = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      job.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, job.id, new AbortController().signal, () => repo)
     assert.equal(store.job(job.id)!.status, 'failed')
     assert.equal(store.job(job.id)!.quarantine, 0)
     assert.equal(store.job(job.id)!.result, undefined)
@@ -742,10 +700,7 @@ describe('Mason builder', function () {
       else assert(existsSync(path.join(checkout, 'branch-file')))
       if (source === repo && branch === 'next')
         assert.equal(store.job(job.id)!.commit_sha, nextCommit)
-      writeFileSync(
-        path.join(checkout, 'stale-build-output'),
-        'old build',
-      )
+      writeFileSync(path.join(checkout, 'stale-build-output'), 'old build')
       mkdirSync(path.join(checkout, 'node_modules'), { recursive: true })
       writeFileSync(
         path.join(checkout, 'node_modules', 'stale'),
@@ -758,21 +713,14 @@ describe('Mason builder', function () {
       1,
     )
     assert(!existsSync(path.join(store.config.workspace, 'git')))
-    assert(
-      !existsSync(path.join(store.config.workspace, 'git-worktrees')),
-    )
+    assert(!existsSync(path.join(store.config.workspace, 'git-worktrees')))
     // An interrupted initial clone keeps its database reservation but no marker.
     rmSync(checkout, { recursive: true })
     mkdirSync(checkout)
     writeFileSync(path.join(checkout, 'partial'), 'incomplete')
     const retry = store.enqueue({ ...request, branch: 'next' }, 'test')
     store.claim()
-    await executeJob(
-      store,
-      retry.id,
-      new AbortController().signal,
-      () => other,
-    )
+    await executeJob(store, retry.id, new AbortController().signal, () => other)
     assert.equal(store.job(retry.id)!.status, 'succeeded')
     assert(!existsSync(path.join(checkout, 'partial')))
   })
@@ -819,12 +767,7 @@ describe('Mason builder', function () {
     git(['commit', '-am', 'Dependency'], repo)
     const job = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      job.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, job.id, new AbortController().signal, () => repo)
     assert.equal(store.job(job.id)!.status, 'succeeded')
     const checkout = String(
       store.db
@@ -849,12 +792,7 @@ describe('Mason builder', function () {
     git(['fetch', 'origin'], child)
     const next = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      next.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, next.id, new AbortController().signal, () => repo)
     assert.equal(store.job(next.id)!.status, 'succeeded')
     assert.equal(git(['rev-parse', 'HEAD'], child), wanted)
     assert.equal(readFileSync(path.join(child, 'value'), 'utf8'), 'second')
@@ -864,12 +802,7 @@ describe('Mason builder', function () {
     const repo = fixture()
     const job = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      job.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, job.id, new AbortController().signal, () => repo)
     const checkout = String(
       store.db
         .prepare(
@@ -884,12 +817,7 @@ describe('Mason builder', function () {
     assert(!existsSync(checkout))
     const next = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      next.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, next.id, new AbortController().signal, () => repo)
     assert.equal(store.job(next.id)!.status, 'succeeded')
   })
   it('retains timeout status when result writing was interrupted', async () => {
@@ -899,21 +827,12 @@ describe('Mason builder', function () {
     store.importApp({ ...definition, timeoutSeconds: 2 })
     const job = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      job.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, job.id, new AbortController().signal, () => repo)
     assert.equal(store.job(job.id)!.status, 'timed_out')
     assert.equal(store.job(job.id)!.quarantine, 0)
   })
   it('releases the worker lock after a failed guardian launch', async () => {
-    const worker = new Worker(
-      store,
-      undefined,
-      path.join(root, 'missing-node'),
-    )
+    const worker = new Worker(store, undefined, path.join(root, 'missing-node'))
     const job = store.enqueue(request, 'test')
     await completed(worker, job.id)
     await worker.close()
@@ -949,25 +868,16 @@ describe('Mason builder', function () {
     process.env.PATH = bin + ':' + oldPath
     const worker = new Worker(store, resolver)
     try {
-      assert.equal(
-        (await completed(worker, next.id))!.status,
-        'succeeded',
-      )
+      assert.equal((await completed(worker, next.id))!.status, 'succeeded')
       const failed = store.job(first.id)!
       assert.equal(failed.status, 'failed')
       assert.equal(failed.exit_code, 7)
       assert.equal(failed.quarantine, 0)
       const log = readFileSync(
-        path.join(
-          store.config.workspace,
-          'logs',
-          first.id + '.full.log',
-        ),
+        path.join(store.config.workspace, 'logs', first.id + '.full.log'),
         'utf8',
       )
-      assert(
-        log.includes('Process inspection temporarily unavailable'),
-      )
+      assert(log.includes('Process inspection temporarily unavailable'))
       assert(log.includes('Process inspection recovered'))
     } finally {
       await worker.close()
@@ -1004,10 +914,7 @@ describe('Mason builder', function () {
     const next = store.enqueue({ ...request, branch: 'next' }, 'test')
     const worker = new Worker(store, resolver)
     try {
-      assert.equal(
-        (await completed(worker, next.id))!.status,
-        'succeeded',
-      )
+      assert.equal((await completed(worker, next.id))!.status, 'succeeded')
       const failed = store.job(first.id)!
       assert.equal(failed.status, 'failed')
       assert.equal(failed.exit_code, 3)
@@ -1052,24 +959,15 @@ describe('Mason builder', function () {
     const next = store.enqueue(request, 'test')
     const worker = new Worker(store, resolver)
     try {
-      assert.equal(
-        (await completed(worker, next.id))!.status,
-        'succeeded',
-      )
+      assert.equal((await completed(worker, next.id))!.status, 'succeeded')
       assert.equal(store.job(first.id)!.status, 'failed')
       assert.equal(store.job(first.id)!.quarantine, 0)
       assert.equal(store.job(first.id)!.cleanup_error, undefined)
       const log = readFileSync(
-        path.join(
-          store.config.workspace,
-          'logs',
-          first.id + '.full.log',
-        ),
+        path.join(store.config.workspace, 'logs', first.id + '.full.log'),
         'utf8',
       )
-      assert(
-        log.includes('Owned checkout discarded; cleanup completed.'),
-      )
+      assert(log.includes('Owned checkout discarded; cleanup completed.'))
     } finally {
       await worker.close()
     }
@@ -1080,8 +978,7 @@ describe('Mason builder', function () {
     const execution = new Execution(
       log,
       () => {
-        if (unavailable)
-          throw new Error('synthetic inspection failure')
+        if (unavailable) throw new Error('synthetic inspection failure')
         return processSnapshot()
       },
       100,
@@ -1133,55 +1030,95 @@ describe('Mason builder', function () {
   it('holds an unverified live process group and releases it after termination', async () => {
     const pidFile = path.join(root, 'untracked-child.pid')
     const log = new MaskedLog(path.join(root, 'process-groups.log'), [])
-    const execution = new Execution(log, () => {
-      const rows = processSnapshot()
-      const parent = rows.find(row => row.parent === process.pid && row.group === row.pid && !row.state?.startsWith('Z'))
-      // Model a monitoring gap that misses the child before its parent exits.
-      return parent == null ? rows : rows.filter(row => row.group !== parent.group || row.pid === parent.pid)
-    }, 0, 500)
+    const execution = new Execution(
+      log,
+      () => {
+        const rows = processSnapshot()
+        const parent = rows.find(
+          (row) =>
+            row.parent === process.pid &&
+            row.group === row.pid &&
+            !row.state?.startsWith('Z'),
+        )
+        // Model a monitoring gap that misses the child before its parent exits.
+        return parent == null
+          ? rows
+          : rows.filter(
+              (row) => row.group !== parent.group || row.pid === parent.pid,
+            )
+      },
+      0,
+      500,
+    )
     let child: number | undefined
     try {
-      await execution.run(process.execPath, ['-e', `
+      await execution.run(
+        process.execPath,
+        [
+          '-e',
+          `
         const {spawn}=require('node:child_process'); const fs=require('node:fs');
         const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
         child.unref(); fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid));
-      `], root)
+      `,
+        ],
+        root,
+      )
       child = Number(readFileSync(pidFile, 'utf8'))
       assert.equal(await execution.stop(), false)
       assert.match(execution.quarantineReason!, /process groups remain/)
       process.kill(child, 'SIGKILL')
-      await new Promise(resolve => setTimeout(resolve, 100))
+      await new Promise((resolve) => setTimeout(resolve, 100))
       assert.equal(await execution.stop(), true)
       assert.equal(execution.quarantineReason, undefined)
     } finally {
       if (child != null) {
-        try { process.kill(child, 'SIGKILL') } catch { /* Already stopped. */ }
+        try {
+          process.kill(child, 'SIGKILL')
+        } catch {
+          /* Already stopped. */
+        }
       }
       await execution.stop()
     }
   })
   it('removes process inventory padding from start-time identities', () => {
-    for (const row of processSnapshot())
-      assert.match(row.start, /\S$/)
+    for (const row of processSnapshot()) assert.match(row.start, /\S$/)
   })
   it('releases an unrelated process group after its leader PID is reused', async () => {
     const log = new MaskedLog(path.join(root, 'reused-process-group.log'), [])
     let leader: ReturnType<typeof processSnapshot>[number] | undefined
     let reused = false
-    const execution = new Execution(log, () => {
-      if (reused) {
-        assert(leader)
-        return [
-          { ...leader, parent: 1, start: 'unrelated replacement' },
-          { ...leader, pid: leader.pid + 1, parent: leader.pid, start: 'unrelated child' },
-        ]
-      }
-      const rows = processSnapshot()
-      leader ??= rows.find(row => row.parent === process.pid && row.group === row.pid)
-      return rows
-    }, 0, 500)
+    const execution = new Execution(
+      log,
+      () => {
+        if (reused) {
+          assert(leader)
+          return [
+            { ...leader, parent: 1, start: 'unrelated replacement' },
+            {
+              ...leader,
+              pid: leader.pid + 1,
+              parent: leader.pid,
+              start: 'unrelated child',
+            },
+          ]
+        }
+        const rows = processSnapshot()
+        leader ??= rows.find(
+          (row) => row.parent === process.pid && row.group === row.pid,
+        )
+        return rows
+      },
+      0,
+      500,
+    )
     try {
-      await execution.run(process.execPath, ['-e', 'setTimeout(() => {}, 150)'], root)
+      await execution.run(
+        process.execPath,
+        ['-e', 'setTimeout(() => {}, 150)'],
+        root,
+      )
       assert(leader)
       reused = true
       assert.equal(await execution.stop(), true)
@@ -1194,20 +1131,42 @@ describe('Mason builder', function () {
     const log = new MaskedLog(path.join(root, 'reused-checker.log'), [])
     let leader: ReturnType<typeof processSnapshot>[number] | undefined
     let checking = false
-    const execution = new Execution(log, () => {
-      if (checking) {
-        assert(leader)
-        return [
-          { ...leader, pid: process.pid, parent: 1, group: process.pid, start: 'guardian' },
-          { ...leader, parent: process.pid, group: process.pid, start: 'process checker' },
-        ]
-      }
-      const rows = processSnapshot()
-      leader ??= rows.find(row => row.parent === process.pid && row.group === row.pid)
-      return rows
-    }, 0, 500)
+    const execution = new Execution(
+      log,
+      () => {
+        if (checking) {
+          assert(leader)
+          return [
+            {
+              ...leader,
+              pid: process.pid,
+              parent: 1,
+              group: process.pid,
+              start: 'guardian',
+            },
+            {
+              ...leader,
+              parent: process.pid,
+              group: process.pid,
+              start: 'process checker',
+            },
+          ]
+        }
+        const rows = processSnapshot()
+        leader ??= rows.find(
+          (row) => row.parent === process.pid && row.group === row.pid,
+        )
+        return rows
+      },
+      0,
+      500,
+    )
     try {
-      await execution.run(process.execPath, ['-e', 'setTimeout(() => {}, 150)'], root)
+      await execution.run(
+        process.execPath,
+        ['-e', 'setTimeout(() => {}, 150)'],
+        root,
+      )
       assert(leader)
       checking = true
       assert.equal(await execution.stop(), true)
@@ -1218,13 +1177,7 @@ describe('Mason builder', function () {
   })
   it('upgrades legacy job storage without losing completed build evidence', () => {
     const job = store.enqueue(request, 'test')
-    store.finish(
-      job.id,
-      'failed',
-      7,
-      { compiler: 'synthetic failure' },
-      true,
-    )
+    store.finish(job.id, 'failed', 7, { compiler: 'synthetic failure' }, true)
     const before = store.job(job.id)!
     store.db.exec(
       'ALTER TABLE jobs DROP COLUMN cleanup_error; ALTER TABLE jobs DROP COLUMN quarantine_reason',
@@ -1251,7 +1204,10 @@ describe('Mason builder', function () {
     assert.equal(clientAddress(undefined), undefined)
     assert.equal(await clientName('192.0.2.15', async () => []), undefined)
     assert.equal(
-      await clientName('192.0.2.15', async () => ['192.0.2.15', 'bench.example.test']),
+      await clientName('192.0.2.15', async () => [
+        '192.0.2.15',
+        'bench.example.test',
+      ]),
       'bench.example.test',
     )
     assert.equal(
@@ -1292,7 +1248,10 @@ describe('Mason builder', function () {
         }),
       })
       assert.equal(submitted.status, 202)
-      const posted = (await submitted.json()) as { id: string; client_ip: string }
+      const posted = (await submitted.json()) as {
+        id: string
+        client_ip: string
+      }
       assert.equal(posted.client_ip, '127.0.0.1')
       const replay = await fetch(url + '/api/jobs', {
         method: 'POST',
@@ -1347,15 +1306,9 @@ describe('Mason builder', function () {
         'test',
         'b'.repeat(40),
       )
-      const done = store.enqueue(
-        { ...request, branch: 'done' },
-        'test',
-      )
+      const done = store.enqueue({ ...request, branch: 'done' }, 'test')
       store.finish(done.id, 'succeeded', 0, { ok: true })
-      const held = store.enqueue(
-        { ...request, branch: 'held' },
-        'test',
-      )
+      const held = store.enqueue({ ...request, branch: 'held' }, 'test')
       store.finish(held.id, 'failed', 1, { ok: false }, true, {
         quarantineReason: 'Synthetic hold',
       })
@@ -1407,7 +1360,10 @@ describe('Mason builder', function () {
       assert.equal(byBranch.get('release')!.requested_commit, 'a'.repeat(40))
       assert.equal(byBranch.get('release')!.commit_sha, null)
       assert.equal(byBranch.get('provisioning')!.trigger, 'api')
-      assert.equal(byBranch.get('provisioning')!.requested_commit, 'b'.repeat(40))
+      assert.equal(
+        byBranch.get('provisioning')!.requested_commit,
+        'b'.repeat(40),
+      )
       assert.equal(byBranch.get('held')!.status, 'failed')
       assert.equal(byBranch.get('held')!.quarantine_reason, 'Synthetic hold')
       assert.equal(byBranch.get('done'), undefined)
@@ -1460,19 +1416,13 @@ describe('Mason builder', function () {
       assert.deepEqual(lookups, [])
       for (const branch of ['first', 'second'])
         store.enqueue({ ...request, branch }, 'test', '192.0.2.15')
-      store.enqueue(
-        { ...request, branch: 'ipv6' },
-        'test',
-        '2001:db8::1',
-      )
+      store.enqueue({ ...request, branch: 'ipv6' }, 'test', '2001:db8::1')
       const response = await fetch(url, {
         headers,
         signal: AbortSignal.timeout(2000),
       })
       assert.equal(response.status, 200)
-      const jobs = (await response.json()) as Array<
-        Record<string, unknown>
-      >
+      const jobs = (await response.json()) as Array<Record<string, unknown>>
       assert.equal(jobs.length, 3)
       assert.ok(jobs.every((job) => job.client_name === null))
       assert.deepEqual(lookups.sort(), ['192.0.2.15', '2001:db8::1'])
@@ -1493,9 +1443,7 @@ describe('Mason builder', function () {
       assert.equal(lookups.length, 2)
     } finally {
       server.closeAllConnections()
-      await new Promise<void>((resolve) =>
-        server.close(() => resolve()),
-      )
+      await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
   it('serves the status page at the root without a key', async () => {
@@ -1575,7 +1523,10 @@ describe('Mason builder', function () {
           .run(Date.now() - 3000 + i * 1000, job.id),
       )
       const html = await (await fetch(url + '/')).text()
-      const building = html.slice(html.indexOf('<h1>Building'), html.indexOf('<h1>Queued'))
+      const building = html.slice(
+        html.indexOf('<h1>Building'),
+        html.indexOf('<h1>Queued'),
+      )
       const queued = html.slice(
         html.indexOf('<h1>Queued'),
         html.indexOf('<h1>Recent Builds'),
@@ -1601,7 +1552,9 @@ describe('Mason builder', function () {
       assert.ok(building.includes('<dt>Started</dt>'))
       assert.ok(building.includes('<dt>Running for</dt>'))
       assert.ok(building.includes('1 h 02 min'))
-      assert.ok(building.includes('192.0.2.15 <small>bench.example.test</small>'))
+      assert.ok(
+        building.includes('192.0.2.15 <small>bench.example.test</small>'),
+      )
       assert.ok(building.includes('Fixture <small>app.example.fixture</small>'))
       assert.ok(queued.includes('<span class="branch">3</span>'))
       assert.equal(queued.includes('<dt>Started</dt>'), false)
@@ -1672,12 +1625,7 @@ describe('Mason builder', function () {
     })
     const job = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      job.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, job.id, new AbortController().signal, () => repo)
     assert.equal(store.job(job.id)!.status, 'failed')
     const row = store.db
       .prepare(
@@ -1698,22 +1646,12 @@ describe('Mason builder', function () {
     })
     let job = store.enqueue(request, 'test')
     store.claim()
-    await executeJob(
-      store,
-      job.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, job.id, new AbortController().signal, () => repo)
     assert.equal(store.job(job.id)!.status, 'timed_out')
     job = store.enqueue(request, 'test')
     store.claim()
     store.cancel(job.id)
-    await executeJob(
-      store,
-      job.id,
-      new AbortController().signal,
-      () => repo,
-    )
+    await executeJob(store, job.id, new AbortController().signal, () => repo)
     assert.equal(store.job(job.id)!.status, 'cancelled')
     job = store.enqueue(request, 'test')
     store.claim()
@@ -1913,9 +1851,7 @@ describe('Mason builder', function () {
   it('rejects symlink state paths and insecure private client configuration', async () => {
     const link = path.join(root, 'link')
     symlinkSync(store.config.workspace, link)
-    assert.throws(
-      () => new BuilderStore({ ...store.config, workspace: link }),
-    )
+    assert.throws(() => new BuilderStore({ ...store.config, workspace: link }))
     const file = path.join(root, 'config')
     writeBootstrap(file, {
       url: 'https://example.test',
@@ -1935,9 +1871,7 @@ describe('Mason builder', function () {
       ['app-import', '--config', config, '--file', app],
       (s) => output.push(s),
     )
-    await builderCommand(['apps', '--config', config], (s) =>
-      output.push(s),
-    )
+    await builderCommand(['apps', '--config', config], (s) => output.push(s))
     await builderCommand(
       ['key-create', '--config', config, '--output', key],
       (s) => output.push(s),
@@ -1980,9 +1914,7 @@ describe('Mason builder', function () {
     await new Promise((resolve) => setTimeout(resolve, 150))
     assert.equal(await execution.stop(), true)
     await run
-    assert.throws(() =>
-      process.kill(Number(readFileSync(pidFile, 'utf8')), 0),
-    )
+    assert.throws(() => process.kill(Number(readFileSync(pidFile, 'utf8')), 0))
   })
   it('bounds API requests, accepts cancellation and shuts down its explicit role', async () => {
     const service = serveBuilder(store)

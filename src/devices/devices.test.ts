@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { once } from 'node:events'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import type { Server } from 'node:http'
@@ -16,6 +16,7 @@ import { Devices, friendlyName, DEVICE_COOKIE } from './store.js'
 import { decodePlist } from './plist.js'
 import { verifyCms } from './cms.js'
 import { inspectProvisioning, saveProvisioning } from './provisioning.js'
+import { backfillDevices } from './backfill.js'
 import { branchKey } from '../catalog/platform.js'
 import { zip, plist } from '../upload/fixtures.test.js'
 
@@ -277,7 +278,7 @@ describe('Device registration, account ownership and iOS compatibility', () => {
       devices.receive(t, decodePlist(Buffer.from(payload(t)))),
     )
   })
-  it('enforces account ownership, CSRF and private worker authentication', async () => {
+  it('enforces account ownership and CSRF', async () => {
     assert.equal((await request('/devices', {}, false)).status, 303)
     assert.equal((await post('/devices/profile', { csrf: 'bad' })).status, 400)
     const t = devices.challenge(user.session),
@@ -300,16 +301,6 @@ describe('Device registration, account ownership and iOS compatibility', () => {
       devices.list(user.account.id)[0]!.name,
       'iPhone13 of mark@example',
     )
-    assert.equal(
-      (await request('/api/device-provisioning', {}, false)).status,
-      401,
-    )
-    const authorized = await request(
-      '/api/device-provisioning',
-      { headers: { Authorization: 'Bearer ' + 'a'.repeat(64) } },
-      false,
-    )
-    assert.equal(authorized.status, 200)
     assert.equal(
       (await post(`/devices/${device.id}/rename`, { name: 'My iPhone' }))
         .status,
@@ -377,83 +368,43 @@ describe('Device registration, account ownership and iOS compatibility', () => {
       (await post(`/builds/${build.id}/install`, {}, cookie)).status,
       409,
     )
-    const configFile = path.join(root, 'backfill.json')
-    writeFileSync(configFile, JSON.stringify(store.config), {
-      mode: 0o600,
-    })
-    const inspect = spawnSync(
-      process.execPath,
-      ['lib/cli.js', 'devices-inspect', '--config', configFile],
-      { encoding: 'utf8' },
+    // devices-inspect records retained IPAs' profiles.
+    const config = path.join(root, 'distribution.json')
+    writeFileSync(
+      config,
+      JSON.stringify({
+        origin: store.config.origin,
+        database: path.join(root, 'state.sqlite'),
+        storage: path.join(root, 'packages'),
+        freeSpaceBytes: 0,
+        devices: { trustStoreFile: path.join(root, 'ca.pem') },
+      }),
+      { mode: 0o600 },
     )
-    assert.equal(inspect.status, 0, inspect.stderr)
-    assert.deepEqual(JSON.parse(inspect.stdout), {
-      verified: 1,
-      unavailable: 0,
-    })
-    assert.equal((await post(`/builds/${build.id}/prepare`, {})).status, 303)
+    await backfillDevices(config)
     assert.equal(
-      (await post(`/builds/${build.id}/prepare`, {}, cookie)).status,
-      200,
+      JSON.parse(
+        String(
+          store.db
+            .prepare('SELECT devices FROM build_provisioning WHERE build_id=?')
+            .get(build.id)!.devices,
+        ),
+      )[0],
+      fakeUdid,
     )
-    assert.equal(
-      (await post(`/builds/${build.id}/prepare`, {}, cookie)).status,
-      200,
+    const bare = path.join(root, 'bare.json')
+    writeFileSync(
+      bare,
+      JSON.stringify({
+        origin: store.config.origin,
+        database: path.join(root, 'state.sqlite'),
+        storage: path.join(root, 'packages'),
+        freeSpaceBytes: 0,
+      }),
+      { mode: 0o600 },
     )
-    assert.equal(
-      store.db.prepare('SELECT count(*) n FROM device_build_requests').get()?.n,
-      1,
-    )
-    const workerHeaders = { Authorization: 'Bearer ' + 'a'.repeat(64) }
-    const pending = await (
-      await request(
-        '/api/device-provisioning',
-        { headers: workerHeaders },
-        false,
-      )
-    ).json()
-    assert.equal(pending.requests.length, 1)
-    assert.equal(pending.requests[0].commit_hash, 'a'.repeat(40))
-    const reported = await request(
-      '/api/device-provisioning',
-      {
-        method: 'POST',
-        headers: { ...workerHeaders, 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          devices: [{ id: device.id, status: 'registered', message: 'Ready' }],
-          requests: [
-            {
-              id: pending.requests[0].id,
-              status: 'queued',
-              message: 'Queued',
-            },
-          ],
-        }),
-      },
-      false,
-    )
-    assert.equal(reported.status, 200)
-    assert.equal(devices.list(user.account.id)[0]!.message, 'Ready')
-    assert.equal(
-      store.db.prepare('SELECT status FROM device_build_requests').get()
-        ?.status,
-      'queued',
-    )
-    assert.throws(
-      () => devices.requestBuild(user.account.id, device.id + 1, build.id),
-      /unavailable/,
-    )
-    for (let i = 0; i < 19; i++) {
-      store.db
-        .prepare(
-          "INSERT INTO device_build_requests(account_id,device_id,build_id,created_at,status) VALUES(?,?,?,?,'queued')",
-        )
-        .run(user.account.id, device.id, build.id, store.now())
-    }
-    assert.throws(
-      () => devices.requestBuild(user.account.id, device.id, build.id),
-      /Too many/,
-    )
+    await assert.rejects(backfillDevices(bare), /must be configured/)
+    saveProvisioning(store, build.id, profile)
     assert.match(
       await (await request(catalog, selectedCookie)).text(),
       /data-install[^>]*href="itms-services:/,
@@ -486,17 +437,17 @@ describe('Device registration, account ownership and iOS compatibility', () => {
   it('names known models automatically and rejects unsafe plist structures', () => {
     assert.equal(
       friendlyName('iPhone14,5', {
-        email: 'mark@gmail.com',
+        email: 'robin@example.org',
         name: 'Fixture',
       }),
-      'iPhone13 of mark@gmail',
+      'iPhone13 of robin@example',
     )
     assert.equal(
       friendlyName('iPhone18,3', {
-        email: 'paul@vtex.net',
+        email: 'alex@example.com',
         name: 'Fixture',
       }),
-      'iPhone17 of paul@vtex',
+      'iPhone17 of alex@example',
     )
     assert.throws(() =>
       decodePlist(
@@ -591,26 +542,6 @@ describe('Device registration, account ownership and iOS compatibility', () => {
       ).status,
       429,
     )
-    const report = await request(
-      '/api/device-provisioning',
-      {
-        method: 'POST',
-        headers: {
-          Authorization: 'Bearer ' + 'a'.repeat(64),
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          devices: Array.from({ length: 501 }, () => ({
-            id: 1,
-            status: 'pending',
-            message: '',
-          })),
-          requests: [],
-        }),
-      },
-      false,
-    )
-    assert.equal(report.status, 400)
   })
 })
 

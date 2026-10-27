@@ -4,7 +4,8 @@ import { Accounts } from '../auth/accounts.js'
 import { navigation, sessionContext } from '../auth/routes.js'
 import { Store } from '../store.js'
 import { asId, type Build, type Platform } from '../validation.js'
-import { escape, page } from '../view.js'
+import { escape } from '../view/html.js'
+import { page } from '../view/shell.js'
 import { branchKey, branchName, labels, platform } from './platform.js'
 import { Installations } from './install.js'
 
@@ -61,7 +62,7 @@ export function catalogRoutes(
   const router = Router(),
     installations = new Installations(store)
   router.get(
-    ['/', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
+    ['/', '/apps', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
     (req, res) => {
       const context = sessionContext(req, accounts)
       if (context == null) {
@@ -85,7 +86,7 @@ export function catalogRoutes(
         return
       }
       const chosen = selected(req),
-        apps = store.apps()
+        apps = store.apps().filter((app) => store.visible(account.id, app.id))
       const nav = pill(req.path, chosen) + navigation(session, account)
       const query = `?platform=${chosen}`
       if (req.params.appId == null) {
@@ -147,7 +148,11 @@ export function catalogRoutes(
           if (eligible && build.format === 'ipa') {
             // The tap itself must open the native installer. A page-load
             // redirect loses Safari's user gesture and adds an app-open prompt.
-            const grant = installations.create(build.id, session, selectedDevice)
+            const grant = installations.create(
+              build.id,
+              session,
+              selectedDevice,
+            )
             return `<a id="build-${build.id}" class="list-row build-row" data-install aria-label="${escape(label)}" href="${escape(installations.iosUrl(grant.token))}">${content}</a>`
           }
           return `<form id="build-${build.id}" method="post" action="/builds/${build.id}/install"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><button class="list-row build-row" aria-label="${escape(label)}">${content}</button></form>`

@@ -1,13 +1,15 @@
 import { asObject, asOptional, asString } from 'cleaners'
-import {
+import express, {
   Router,
   type Request,
   type Response,
   type RequestHandler,
 } from 'express'
+import { masterContentSecurityPolicy } from '../node/webApp.js'
 import { Store, digest } from '../store.js'
 import { asId, integer, object, text } from '../validation.js'
-import { escape, page } from '../view.js'
+import { escape } from '../view/html.js'
+import { page, shell } from '../view/shell.js'
 import {
   Accounts,
   randomToken,
@@ -16,11 +18,11 @@ import {
   type Session,
 } from './accounts.js'
 import { Providers } from './providers.js'
-import { asProviderId } from './providerConfig.js'
+import { asProviderId, type Identity } from './providerConfig.js'
 
 export const SESSION_COOKIE = '__Host-mason-session'
 const FLOW_COOKIE = '__Host-mason-oauth'
-const cookieOptions = {
+export const cookieOptions = {
   httpOnly: true,
   secure: true,
   sameSite: 'lax' as const,
@@ -68,8 +70,9 @@ export function sessionContext(
 }
 const hidden = (session: Session): string =>
   `<input type="hidden" name="csrf" value="${escape(session.csrf)}">`
-export function navigation(session: Session, account: Account): string {
-  return `${account.is_admin ? '<a href="/people">People</a>' : ''}<a class="button register-device" href="/devices">Register Device</a><form method="post" action="/auth/logout">${hidden(session)}<button class="secondary">Sign out</button></form>`
+/** The tester pages' top-bar controls; administration is never offered here. */
+export function navigation(session: Session, _account: Account): string {
+  return `<a class="button register-device" href="/devices">Register Device</a><form method="post" action="/auth/logout">${hidden(session)}<button class="secondary">Sign out</button></form>`
 }
 export function authLimiter(now: () => number): RequestHandler {
   const clients = new Map<string, { count: number; until: number }>()
@@ -100,12 +103,41 @@ export function authLimiter(now: () => number): RequestHandler {
     next()
   }
 }
+export interface AuthOptions {
+  /** Who an identity signs in as; the legacy server creates accounts, a host only matches its cache. */
+  login?: (
+    identity: Identity,
+    previousToken: string | undefined,
+  ) => { token: string; session: Session; account: Account }
+  /** Whether the People pages are served (not on a host: accounts are managed on the master). */
+  people?: boolean
+  /** Username and password sign-in, checked by the master (a host). */
+  password?: {
+    parameters: (username: unknown) => Promise<unknown>
+    signIn: (
+      value: { username?: unknown; clientHash?: unknown },
+      address: string,
+      previousToken: string | undefined,
+    ) => Promise<{ token: string; session: Session }>
+  }
+}
+
 export function authRoutes(
   store: Store,
-  providers: Providers,
+  providersOrCurrent: Providers | (() => Providers),
   accounts = new Accounts(store),
+  options: AuthOptions = {},
 ): Router {
   const router = Router()
+  const current = (): Providers =>
+    typeof providersOrCurrent === 'function'
+      ? providersOrCurrent()
+      : providersOrCurrent
+  // The legacy server lists its configuration's providers; a host lists its cached ones.
+  const configured = (): Providers['providers'] =>
+    typeof providersOrCurrent === 'function'
+      ? providersOrCurrent().providers
+      : store.config.providers
   router.use(
     '/auth',
     authLimiter(() => store.now()),
@@ -113,36 +145,99 @@ export function authRoutes(
   router.get('/auth/login', (req, res) => {
     const destination = returnPath(req.query.return)
     if (
-      store.config.providers.length === 1 &&
+      configured().length === 1 &&
+      options.password == null &&
       req.query.signed_out !== '1' &&
       sessionContext(req, accounts) == null
     ) {
       res.redirect(
         303,
-        `/auth/start/${store.config.providers[0]!.id}?return=${encodeURIComponent(destination)}`,
+        `/auth/start/${configured()[0]!.id}?return=${encodeURIComponent(destination)}`,
       )
       return
     }
-    const links = store.config.providers
+    const links = configured()
       .map(
         (provider) =>
           `<a class="button" href="/auth/start/${escape(provider.id)}?return=${encodeURIComponent(destination)}">Sign in with ${escape(provider.name)}</a>`,
       )
       .join('')
+    if (options.password == null) {
+      res.send(
+        page(
+          'Sign in',
+          `<section class="card"><p>Sign in to request access to app builds. Access is managed by this Mason server.</p><div class="stack">${links || '<p>No sign-in provider is configured.</p>'}</div></section>`,
+        ),
+      )
+      return
+    }
+    // The browser hashes the password (Argon2id in WebAssembly) before it leaves.
+    res.set('Content-Security-Policy', masterContentSecurityPolicy)
     res.send(
-      page(
-        'Sign in',
-        `<section class="card"><p>Sign in to request access to app builds. Access is managed by this Mason server.</p><div class="stack">${links || '<p>No sign-in provider is configured.</p>'}</div></section>`,
-      ),
+      shell({
+        title: 'Sign in',
+        body: `<h1>Sign in</h1><section class="card"><p>Sign in to app builds and run logs with your Mason account.</p>${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username and password:</p>`}<form data-mason="sign-in" data-parameters="/auth/password/parameters" data-session="/auth/password" data-return="${escape(destination)}"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><button>Sign in</button><p data-field="status" hidden></p></form></section>`,
+        phone: true,
+        scripts: ['/assets/master.js'],
+      }),
     )
   })
+  if (options.password != null) {
+    const password = options.password
+    const json = express.json({ limit: '4kb' })
+    const refused = (res: Response, error: unknown): void => {
+      const detail = error as Error & { code?: string; retryAt?: number }
+      if (detail.code === 'closed' || detail.code === 'timeout') {
+        res.status(503).json({
+          error: 'Password sign-in needs the master; try again shortly',
+        })
+        return
+      }
+      let body: { error: string; retryAt?: number } = {
+        error: detail.message,
+      }
+      try {
+        body = JSON.parse(detail.message) as typeof body
+      } catch {
+        // A plain message.
+      }
+      res.status(401).json(body)
+    }
+    router.post('/auth/password/parameters', json, async (req, res) => {
+      try {
+        res.json(
+          await password.parameters(
+            (req.body as { username?: unknown } | null)?.username,
+          ),
+        )
+      } catch (error) {
+        refused(res, error)
+      }
+    })
+    router.post('/auth/password', json, async (req, res) => {
+      try {
+        const result = await password.signIn(
+          (req.body ?? {}) as { username?: unknown; clientHash?: unknown },
+          req.ip ?? '',
+          cookie(req, SESSION_COOKIE),
+        )
+        res.cookie(SESSION_COOKIE, result.token, {
+          ...cookieOptions,
+          maxAge: result.session.expires_at - store.now(),
+        })
+        res.json({ signedIn: true })
+      } catch (error) {
+        refused(res, error)
+      }
+    })
+  }
   const start = async (
     req: Request,
     res: Response,
     confirmed: boolean,
   ): Promise<void> => {
     const id = asProviderId(req.params.provider)
-    const provider = providers.provider(id)
+    const provider = current().provider(id)
     const context = sessionContext(req, accounts)
     const destination = returnPath(
       confirmed ? req.body.return : req.query.return,
@@ -175,7 +270,7 @@ export function authRoutes(
       verifier = randomToken(),
       nonce = randomToken(),
       browser = randomToken()
-    const target = await providers.authorize(
+    const target = await current().authorize(
       id,
       { state, verifier, nonce },
       confirmed,
@@ -219,7 +314,7 @@ export function authRoutes(
   })
   router.get('/auth/callback/:provider', async (req, res) => {
     const id = asProviderId(req.params.provider)
-    const provider = providers.provider(id)
+    const provider = current().provider(id)
     const state = text(128)(req.query.state)
     const browser = cookie(req, FLOW_COOKIE)
     if (browser == null) throw new Error('Missing browser transaction')
@@ -259,16 +354,22 @@ export function authRoutes(
       return row
     })
     res.clearCookie(FLOW_COOKIE, cookieOptions)
-    const callback = new URL(providers.redirectUri(id))
+    const callback = new URL(current().redirectUri(id))
     for (const [key, value] of new URL(req.originalUrl, store.config.origin)
       .searchParams)
       callback.searchParams.append(key, value)
-    const identity = await providers.identity(id, callback, {
+    const identity = await current().identity(id, callback, {
       state,
       verifier: transaction.verifier,
       nonce: transaction.nonce,
     })
-    const result = accounts.login(identity, cookie(req, SESSION_COOKIE))
+    const login =
+      options.login ??
+      ((
+        found: Identity,
+        token: string | undefined,
+      ): ReturnType<Accounts['login']> => accounts.login(found, token))
+    const result = login(identity, cookie(req, SESSION_COOKIE))
     res.cookie(SESSION_COOKIE, result.token, {
       ...cookieOptions,
       maxAge: result.session.expires_at - store.now(),
@@ -283,6 +384,7 @@ export function authRoutes(
     res.clearCookie(SESSION_COOKIE, cookieOptions)
     res.redirect(303, '/auth/login?signed_out=1')
   })
+  if (options.people === false) return router
   router.get('/people', (req, res) => {
     const context = sessionContext(req, accounts)
     if (context == null || !context.account.is_admin) {

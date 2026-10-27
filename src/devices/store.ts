@@ -9,7 +9,7 @@ import { Store, digest } from '../store.js'
 import { asId, integer, oneOf, text, type Build } from '../validation.js'
 import { randomUUID } from 'node:crypto'
 import { models } from './models.js'
-import { escape } from '../view.js'
+import { escape } from '../view/html.js'
 
 const states = ['pending', 'processing', 'registered', 'error'] as const
 export const asDevice = asObject({
@@ -47,8 +47,46 @@ export function friendlyName(
     120,
   )
 }
+/**
+ * On a host, registrations and changes go to the master through the
+ * outbox; the device rows come back through replication.
+ */
+export interface DeviceRelay {
+  enqueue(kind: 'device' | 'prepare', payload: Record<string, unknown>): void
+}
 export class Devices {
-  constructor(readonly store: Store) {}
+  constructor(
+    readonly store: Store,
+    readonly relay?: DeviceRelay,
+  ) {
+    if (relay != null)
+      store.db.exec(
+        'CREATE TABLE IF NOT EXISTS host_device_registrations(hash TEXT PRIMARY KEY, account_id INTEGER NOT NULL, udid TEXT NOT NULL, created_at INTEGER NOT NULL) STRICT',
+      )
+  }
+  /** Testers and every role above them may register devices. */
+  allowed(account: Account): boolean {
+    if (account.is_admin || account.is_tester) return true
+    try {
+      const row = this.store.db
+        .prepare('SELECT role FROM accounts WHERE id=?')
+        .get(account.id) as { role?: unknown } | undefined
+      return typeof row?.role === 'string'
+    } catch {
+      // A distribution database without roles.
+      return false
+    }
+  }
+  /** On a host: the device a registration link sent to the master, until it comes back. */
+  registration(token: string, accountId: number): string | undefined {
+    if (this.relay == null) return undefined
+    const row = this.store.db
+      .prepare(
+        'SELECT udid FROM host_device_registrations WHERE hash=? AND account_id=?',
+      )
+      .get(digest(token), accountId) as { udid: string } | undefined
+    return row?.udid
+  }
   list(accountId: number): Array<Device & { name: string }> {
     return this.store.db
       .prepare(
@@ -111,13 +149,42 @@ export class Devices {
       const context = new Accounts(this.store).sessionHash(
         asString(row.session_hash),
       )
-      if (!context || !(context.account.is_admin || context.account.is_tester))
+      if (!context || !this.allowed(context.account))
         throw new Error('Tester access required')
       if (
         this.list(context.account.id).length >= 20 &&
         !this.list(context.account.id).some((d) => d.udid === identifier)
       )
         throw new Error('Device limit reached')
+      if (this.relay != null) {
+        // The master owns the device rows: the registration goes to it.
+        if (this.registration(token, context.account.id) != null)
+          throw new Error('Expired or used registration')
+        this.store.db
+          .prepare(
+            'INSERT INTO host_device_registrations(hash,account_id,udid,created_at) VALUES(?,?,?,?)',
+          )
+          .run(digest(token), context.account.id, identifier, this.store.now())
+        this.relay.enqueue('device', {
+          udid: identifier,
+          product,
+          model: models[product] ?? product,
+          osVersion: version,
+          accountId: context.account.id,
+          name: friendlyName(product, context.account),
+        })
+        return {
+          id: 0,
+          udid: identifier,
+          product,
+          model: models[product] ?? product,
+          os_version: version,
+          status: 'pending',
+          message: '',
+          created_at: this.store.now(),
+          updated_at: this.store.now(),
+        }
+      }
       this.store.db
         .prepare(
           `INSERT INTO devices(udid,product,model,os_version,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(udid) DO UPDATE SET product=excluded.product,model=excluded.model,os_version=excluded.os_version,updated_at=excluded.updated_at`,
@@ -180,16 +247,57 @@ export class Devices {
     const recent = Number(
       this.store.db
         .prepare(
-          'SELECT count(*) n FROM device_build_requests WHERE account_id=? AND created_at>?',
+          this.relay == null
+            ? 'SELECT count(*) n FROM device_build_requests WHERE account_id=? AND created_at>?'
+            : "SELECT count(*) n FROM host_outbox WHERE kind='prepare' AND json_extract(payload,'$.accountId')=? AND created_at>?",
         )
         .get(accountId, this.store.now() - 3600000)?.n,
     )
     if (recent >= 20)
       throw new Error('Too many build preparation requests; try again later')
+    if (this.relay != null) {
+      this.relay.enqueue('prepare', { accountId, deviceId, buildId })
+      return
+    }
     this.store.db
       .prepare(
         `INSERT OR IGNORE INTO device_build_requests(account_id,device_id,build_id,created_at) VALUES(?,?,?,?)`,
       )
       .run(accountId, deviceId, buildId, this.store.now())
+  }
+  /** Renames, retries or removes one of an account's devices; on a host, through the master. */
+  act(
+    accountId: number,
+    device: Device,
+    action: 'rename' | 'retry' | 'remove',
+    name?: string,
+  ): void {
+    if (this.relay != null) {
+      this.relay.enqueue('device', {
+        action,
+        udid: device.udid,
+        accountId,
+        ...(name == null ? {} : { name }),
+      })
+      return
+    }
+    if (action === 'rename')
+      this.store.db
+        .prepare(
+          'UPDATE account_devices SET name=? WHERE account_id=? AND device_id=?',
+        )
+        .run(text(120)(name), accountId, device.id)
+    else if (action === 'retry')
+      this.store.db
+        .prepare(
+          "UPDATE devices SET status='pending',message='',updated_at=? WHERE id=? AND status='error'",
+        )
+        .run(this.store.now(), device.id)
+    else
+      this.store.db
+        .prepare(
+          'DELETE FROM account_devices WHERE account_id=? AND device_id=?',
+        )
+        .run(accountId, device.id)
   }
 }

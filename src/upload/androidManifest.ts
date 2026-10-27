@@ -40,8 +40,7 @@ export function androidManifest(data: Buffer): {
     if (header < 8 || size < header) throw new Error('Invalid XML chunk')
     need(offset, size)
     if (kind === 1) {
-      if (strings != null || header < 28)
-        throw new Error('Invalid string pool')
+      if (strings != null || header < 28) throw new Error('Invalid string pool')
       const count = data.readUInt32LE(offset + 8),
         styles = data.readUInt32LE(offset + 12),
         flags = data.readUInt32LE(offset + 16),
@@ -56,12 +55,10 @@ export function androidManifest(data: Buffer): {
       need(offset + start, 0, end)
       strings = []
       for (let i = 0; i < count; i++) {
-        let cursor =
-          offset + start + data.readUInt32LE(offset + header + i * 4)
+        let cursor = offset + start + data.readUInt32LE(offset + header + i * 4)
         function length(bytes: number): number {
           need(cursor, bytes, end)
-          let value =
-            bytes === 1 ? data[cursor]! : data.readUInt16LE(cursor)
+          let value = bytes === 1 ? data[cursor]! : data.readUInt16LE(cursor)
           cursor += bytes
           const high = bytes === 1 ? 0x80 : 0x8000
           if (value & high) {
@@ -78,8 +75,7 @@ export function androidManifest(data: Buffer): {
           length(1)
           const bytes = length(1)
           need(cursor, bytes + 1, end)
-          if (data[cursor + bytes] !== 0)
-            throw new Error('Unterminated string')
+          if (data[cursor + bytes] !== 0) throw new Error('Unterminated string')
           value = utf8.decode(data.subarray(cursor, cursor + bytes))
         } else {
           const chars = length(2)
@@ -137,9 +133,7 @@ export function androidManifest(data: Buffer): {
                   ? String(value)
                   : undefined
           if (parsed == null)
-            throw new Error(
-              'Resource-based manifest versions are unsupported',
-            )
+            throw new Error('Resource-based manifest versions are unsupported')
           fields.set(key, parsed)
         }
         const bundleId = text(256)(fields.get('package')),

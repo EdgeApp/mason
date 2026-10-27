@@ -1,28 +1,39 @@
 {
   "name": "mason-distribution",
   "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EdgeApp/mason.git"
+  },
+  "masonReleases": "EdgeApp/mason",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=24.14.0 <25"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/bundle-browser.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck:masonfiles": "tsc -p tsconfig.examples.json",
+    "check:doc-examples": "node scripts/check-doc-examples.ts",
     "lint": "eslint src",
-    "test": "tsc && mocha --require=./lib/test/fixtureRoots.test.js --import=tsx --timeout 10000 'src/**/*.test.ts'",
-    "coverage": "tsc && NODE_DISABLE_COMPILE_CACHE=1 c8 --all --include 'src/**/*.ts' --include 'lib/**/*.js' --exclude 'src/**/*.test.ts' --exclude 'lib/**/*.test.js' --exclude-after-remap --reporter text --reporter json --reporter lcov --check-coverage --per-file --lines 90 mocha --require=./lib/test/fixtureRoots.test.js --timeout 10000 'lib/**/*.test.js'",
+    "test": "tsc && node scripts/bundle-browser.mjs && mocha --require=./lib/test/fixtureRoots.test.js --import=tsx --timeout 10000 'src/**/*.test.ts'",
+    "coverage": "tsc && node scripts/bundle-browser.mjs && NODE_DISABLE_COMPILE_CACHE=1 c8 --all --include 'src/**/*.ts' --include 'lib/**/*.js' --exclude 'src/**/*.test.ts' --exclude 'lib/**/*.test.js' --exclude 'lib/browser/bundles/**' --exclude-after-remap --reporter text --reporter json --reporter lcov --check-coverage --per-file --lines 90 mocha --require=./lib/test/fixtureRoots.test.js --timeout 10000 'lib/**/*.test.js'",
     "start": "node lib/cli.js serve",
     "mason": "node lib/cli.js"
   },
   "dependencies": {
+    "argon2": "0.45.1",
     "bplist-parser": "0.5.0",
     "busboy": "1.6.0",
     "cleaners": "0.3.17",
     "express": "5.2.1",
     "fast-xml-parser": "5.11.2",
+    "hash-wasm": "4.12.0",
     "openid-client": "6.8.8",
     "qrcode": "1.5.4",
+    "undici": "7.29.1",
+    "ws": "8.22.0",
     "yauzl": "3.4.0"
   },
   "devDependencies": {
@@ -32,15 +43,16 @@
     "@types/node": "24.10.1",
     "@types/oidc-provider": "9.12.1",
     "@types/qrcode": "1.5.6",
+    "@types/ws": "8.18.1",
     "@types/yauzl": "3.4.0",
     "c8": "12.0.0",
+    "esbuild": "0.28.2",
     "eslint": "9.39.1",
     "mocha": "12.0.3",
     "oidc-provider": "9.12.2",
     "prettier": "3.6.2",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
-    "typescript-eslint": "8.48.1",
-    "undici": "7.29.1"
+    "typescript-eslint": "8.48.1"
   }
 }
