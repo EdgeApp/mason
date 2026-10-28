@@ -19,6 +19,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { promisify } from 'node:util'
 import { privateDirectory } from '../config.js'
+import { restoreIdentity } from './identity.js'
 import type { MasterDatabase } from './database.js'
 import { generateSshKey } from './github.js'
 import { MASTER_SCHEMA } from './schema.js'
@@ -644,6 +645,12 @@ export function applyPendingRestore(
         renameSync(current + suffix, aside + suffix)
   }
   renameSync(pending, current)
-  log('Started from the restored backup')
+  // Nodes accept only the master they paired with: take the backup's identity.
+  const restored = restoreIdentity(dir)
+  log(
+    restored == null
+      ? 'Started from the restored backup; it holds no master identity, so nodes pair again'
+      : `Started from the restored backup as master ${restored}`,
+  )
   return true
 }

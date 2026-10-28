@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { asObject, asOptional, asString } from 'cleaners'
 import { hostApp } from '../host/web.js'
 import { HostRuntime, type HostOptions } from '../host/runtime.js'
+import { recordIdentity } from '../master/identity.js'
 import { masterApp } from '../master/web.js'
 import {
   applyPendingRestore,
@@ -297,9 +298,10 @@ export async function startNode(
     const pairingFile = path.join(dir, PAIRING_FILE)
     if (options.role === 'worker' && existsSync(pairingFile))
       applyPairingFile(dir, pairingFile)
-    const identity = loadIdentity(dir, { renew: options.newKey === true })
-    // A restore made on the first-run page takes effect on this start.
+    // A restore made on the first-run page takes effect on this start, with
+    // the restored master's identity.
     if (options.role === 'master') applyPendingRestore(dir, log)
+    const identity = loadIdentity(dir, { renew: options.newKey === true })
     const databases = new Map<string, DatabaseSync>()
     for (const name of databaseFiles(options.role, options.coWorker)) {
       // The host's cache is opened by its runtime, through the distribution store.
@@ -341,6 +343,10 @@ export async function startNode(
             scratch: privateScratch(dir),
             dir,
           })
+    // The identity is kept in the database, so a restored master is the same
+    // master; a database holding another master's identity is refused.
+    if (masterDb != null)
+      recordIdentity(masterDb, identity, { replace: options.newKey === true })
     const configured = (): boolean => master?.configured() ?? false
     let hostLink: () => Link | undefined = () => undefined
     const hostRuntime =
