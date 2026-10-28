@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import type { ControlHandler } from '../node/control.js'
 import type { Identity } from '../node/identity.js'
@@ -467,8 +468,15 @@ export class Master {
       scheduler: this.scheduler,
       log: (line): void => (this.options.log ?? console.log)(line),
     })
+    // Names this master's cloud resources, so a shared provider account's
+    // other masters are left alone; a restored master keeps it.
+    const masterId = createHash('sha256')
+      .update(identity.fingerprint)
+      .digest('hex')
+      .slice(0, 10)
     this.pools = new Pools({
       master: this.database,
+      masterId,
       registry: this.registry,
       setting: (): CloudSetting | undefined =>
         this.settings.value('cloud') as CloudSetting | undefined,
@@ -498,6 +506,7 @@ export class Master {
     })
     this.cloudHosts = new CloudHosts({
       master: this.database,
+      masterId,
       registry: this.registry,
       account: (id): CloudAccount | undefined => this.cloudAccounts.get(id),
       github: (): { repository: string; version: string } | undefined =>

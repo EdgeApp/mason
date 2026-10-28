@@ -81,7 +81,9 @@ export interface CloudHostsOptions {
   }
   /** The master's public address, for the link port's firewall rule. */
   publicAddress?: () => Promise<string | undefined>
-  /** A DNS step for hosts with a DNS name (M5); none by default. */
+  /** This master's short id, in its hosts' tags and firewall names. */
+  masterId: string
+  /** A DNS step for hosts with a DNS name; none by default. */
   dns?: CloudHostDns
   linkPort?: number
   tickMs?: number
@@ -226,6 +228,11 @@ export class CloudHosts {
     this.options.log?.(line)
   }
 
+  /** The tag and firewall name of one of this master's hosts. */
+  private tag(name: string): string {
+    return `${TAG}-${this.options.masterId}-${name}`
+  }
+
   provider(account: string): CloudProvider | undefined {
     const key = this.options.account(account)?.key
     if (key == null) return undefined
@@ -361,10 +368,10 @@ export class CloudHosts {
       let created = false
       if (row.provider_id != null) machine = await provider.get(row.provider_id)
       if (machine == null) {
-        const tagged = await provider.list(`${TAG}-${name}`)
+        const tagged = await provider.list(this.tag(name))
         if (tagged.length > 1)
           throw new HostError(
-            `${tagged.length} droplets are tagged ${TAG}-${name}; remove the extra ones by hand`,
+            `${tagged.length} droplets are tagged ${this.tag(name)}; remove the extra ones by hand`,
           )
         machine = tagged[0]
       }
@@ -430,7 +437,7 @@ export class CloudHosts {
       region: row.region,
       size: row.size,
       image: row.image,
-      tags: [TAG, `${TAG}-${row.name}`],
+      tags: [TAG, this.tag(row.name)],
       userData: hostUserData({
         repository: github.repository,
         version: github.version,
@@ -462,7 +469,7 @@ export class CloudHosts {
     const key = `${name}:${master ?? ''}`
     if (this.firewallFor.get(name) === key) return
     await provider.firewall(
-      `${TAG}-${name}`,
+      this.tag(name),
       [
         { port: 80, sources: ['0.0.0.0/0', '::/0'] },
         { port: 443, sources: ['0.0.0.0/0', '::/0'] },
@@ -470,7 +477,7 @@ export class CloudHosts {
           ? []
           : [{ port: this.options.linkPort ?? 9310, sources: [master] }]),
       ],
-      `${TAG}-${name}`,
+      this.tag(name),
     )
     this.firewallFor.set(name, key)
   }
@@ -549,9 +556,9 @@ export class CloudHosts {
     const provider = this.provider(row.account)
     if (provider != null) {
       if (row.provider_id != null) await provider.destroy(row.provider_id)
-      for (const machine of await provider.list(`${TAG}-${name}`))
+      for (const machine of await provider.list(this.tag(name)))
         await provider.destroy(machine.id)
-      await provider.deleteFirewall?.(`${TAG}-${name}`)
+      await provider.deleteFirewall?.(this.tag(name))
       if (this.options.dns != null) await this.options.dns.remove(row, provider)
     }
     if (

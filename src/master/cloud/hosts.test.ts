@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { after, before, describe, it } from 'mocha'
@@ -13,6 +14,9 @@ import type { CloudHostRow } from './hosts.js'
 type Json = any
 
 const KEY = 'dop_v1_' + 'd'.repeat(64)
+/** A master's short id, as it names its cloud resources. */
+const idOf = (fingerprint: string): string =>
+  createHash('sha256').update(fingerprint).digest('hex').slice(0, 10)
 const host = {
   name: 'e2e',
   account: 'do',
@@ -127,7 +131,8 @@ describe('Mason hosts on DigitalOcean', function () {
     assert.equal(cloud.created.length, 1)
     const spec = cloud.created[0]!
     assert.equal(spec.name, 'mason-host-e2e')
-    assert.deepEqual(spec.tags, ['mason-host', 'mason-host-e2e'])
+    const tag = `mason-host-${idOf(c.master.identity.fingerprint)}-e2e`
+    assert.deepEqual(spec.tags, ['mason-host', tag])
     assert.match(
       spec.userData,
       /bash "\$root\/root\/mason-install.sh" --version /,
@@ -135,7 +140,7 @@ describe('Mason hosts on DigitalOcean', function () {
     assert.match(spec.userData, /mason host --install --pairing-file/)
     assert.deepEqual(
       cloud.firewalls
-        .filter((rule) => rule.name === 'mason-host-e2e')
+        .filter((rule) => rule.name === tag)
         .map((rule) => [rule.port, rule.sources]),
       [
         [80, ['0.0.0.0/0', '::/0']],
@@ -184,6 +189,15 @@ describe('Mason hosts on DigitalOcean', function () {
     assert.equal((await reconcile()).state, 'ready')
     assert.equal(cloud.created.length, 1, 'no create for a tagged droplet')
     assert.equal(row().provider_id, '1')
+    // Another master's host of the same name in the account is never adopted.
+    await cloud.create({
+      ...cloud.created[0]!,
+      name: 'theirs',
+      tags: ['mason-host', 'mason-host-0123456789-e2e'],
+    })
+    db.prepare("UPDATE cloud_hosts SET provider_id=NULL WHERE name='e2e'").run()
+    assert.equal((await reconcile()).state, 'ready')
+    assert.equal(row().provider_id, '1')
     // A second droplet with the host's tag.
     const extra = await cloud.create({ ...cloud.created[0]!, name: 'stray' })
     db.prepare("UPDATE cloud_hosts SET provider_id=NULL WHERE name='e2e'").run()
@@ -191,9 +205,9 @@ describe('Mason hosts on DigitalOcean', function () {
     assert.equal(refused.state, 'error')
     assert.equal(
       refused.error,
-      '2 droplets are tagged mason-host-e2e; remove the extra ones by hand',
+      `2 droplets are tagged mason-host-${idOf(c.master.identity.fingerprint)}-e2e; remove the extra ones by hand`,
     )
-    assert.equal(cloud.created.length, 2)
+    assert.equal(cloud.created.length, 3)
     await cloud.destroy(extra.id)
     assert.equal((await reconcile()).state, 'ready')
   })
@@ -253,7 +267,7 @@ describe('Mason hosts on DigitalOcean', function () {
     const stuck = await reconcile()
     assert.equal(stuck.state, 'error')
     assert.equal(stuck.error, 'The host is not answering on its link')
-    assert.equal(cloud.created.length, 2)
+    assert.equal(cloud.created.length, 3)
     const failed = io()
     assert.equal(
       await nodeMain(
@@ -281,7 +295,11 @@ describe('Mason hosts on DigitalOcean', function () {
     })
     assert.equal(removed.status, 200, removed.text)
     assert(cloud.deleted.includes(before.provider_id!))
-    assert(cloud.deletedFirewalls.includes('mason-host-e2e'))
+    assert(
+      cloud.deletedFirewalls.includes(
+        `mason-host-${idOf(c.master.identity.fingerprint)}-e2e`,
+      ),
+    )
     assert.equal(c.master.master!.registry.get(before.fingerprint!), undefined)
     assert.equal(c.master.master!.settings.value('host'), undefined)
     assert.equal(c.master.master!.cloudHosts.get('e2e'), undefined)

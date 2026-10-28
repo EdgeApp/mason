@@ -30,6 +30,9 @@ const root = (): string =>
 const admin = { role: 'admin' as const, label: 'paul' }
 const TOKEN = 'dop_v1_' + 'f'.repeat(40)
 const MINUTE = 60_000
+/** A master's short id, as it names its cloud resources. */
+const idOf = (fingerprint: string): string =>
+  createHash('sha256').update(fingerprint).digest('hex').slice(0, 10)
 
 describe('Cloud node pools', function () {
   this.timeout(120_000)
@@ -254,7 +257,12 @@ export async function work(ctx: Stage) {
       },
     )
     const spec = cloud.created[0]!
-    assert.deepEqual(spec.tags, ['mason-pool', 'mason-pool-linux-cloud'])
+    const id = idOf(c.master.identity.fingerprint)
+    assert.deepEqual(spec.tags, [
+      'mason-pool',
+      `mason-pool-${id}`,
+      `mason-pool-${id}-linux-cloud`,
+    ])
     assert.equal(spec.image, 'ubuntu-24-04-x64')
     assert.match(
       spec.userData,
@@ -360,11 +368,12 @@ export async function work(ctx: Stage) {
 
   it('U11.4 retires an idle machine: scrubbed, powered off, snapshotted, destroyed; the firewall follows the master', async () => {
     await wait(() => cloud.firewalls.length > 0, 5_000, 'the firewall')
+    const id = idOf(c.master.identity.fingerprint)
     assert.deepEqual(cloud.firewalls.at(-1), {
-      name: 'mason-pools',
+      name: `mason-pools-${id}`,
       port: 9310,
       sources: ['203.0.113.7'],
-      tag: 'mason-pool',
+      tag: `mason-pool-${id}`,
     })
     address = '198.51.100.9'
     await wait(
@@ -482,18 +491,30 @@ export async function work(ctx: Stage) {
     await wait(() => machines().length === 0, 15_000, 'retired')
   })
 
-  it('U11.5 deletes tagged machines and snapshots the master has no record of, keeping its own', async () => {
+  it('U11.5 deletes its own tagged machines and snapshots it has no record of, keeping its own and other masters’', async () => {
+    const id = idOf(c.master.identity.fingerprint)
     const stray = await cloud
       .create({
         name: 'stray',
         region: 'nyc3',
         size: 's',
         image: 'x',
-        tags: ['mason-pool'],
+        tags: ['mason-pool', `mason-pool-${id}`],
         userData: "<<'MASON_PAIRING'\n{}\nMASON_PAIRING",
       })
       .catch(() => undefined)
     void stray
+    // Another master's pool machine in the same account.
+    const theirs = await cloud
+      .create({
+        name: 'theirs',
+        region: 'nyc3',
+        size: 's',
+        image: 'x',
+        tags: ['mason-pool', 'mason-pool-0123456789'],
+        userData: "<<'MASON_PAIRING'\n{}\nMASON_PAIRING",
+      })
+      .catch(() => undefined)
     const other = await cloud
       .create({
         name: 'mine',
@@ -506,7 +527,7 @@ export async function work(ctx: Stage) {
       .catch(() => undefined)
     cloud.snapshotList.set('snap-stray', {
       id: 'snap-stray',
-      name: 'mason-pool-old',
+      name: `mason-pool-${id}-old`,
       sizeGb: 10,
       createdAt: 0,
       from: 'x',
@@ -518,6 +539,18 @@ export async function work(ctx: Stage) {
       createdAt: 0,
       from: 'x',
     })
+    // Another master's snapshot, and one from before snapshots named their master.
+    for (const [key, name] of [
+      ['snap-theirs', 'mason-pool-0123456789-android-2026'],
+      ['snap-legacy', 'mason-pool-android-2026'],
+    ] as const)
+      cloud.snapshotList.set(key, {
+        id: key,
+        name,
+        sizeGb: 10,
+        createdAt: 0,
+        from: 'x',
+      })
     const own = (c.master.master!.pools.view().snapshots as Json[])[0]
     const result = await c.master.master!.pools.reconcile()
     assert.deepEqual(result, { machines: 1, snapshots: 1 })
@@ -525,6 +558,9 @@ export async function work(ctx: Stage) {
     assert(cloud.snapshotList.has('snap-user'))
     assert(cloud.snapshotList.has(own.provider_id))
     assert(other == null || cloud.machines.has(other.id))
+    assert(theirs == null || cloud.machines.has(theirs.id))
+    assert(cloud.snapshotList.has('snap-theirs'))
+    assert(cloud.snapshotList.has('snap-legacy'))
   })
 
   it('U11.6 a provider failure fails only the placement, with the reason, and retries later', async () => {

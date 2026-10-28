@@ -179,6 +179,12 @@ export interface PoolsOptions {
   releaseAssets?: (repository: string, version: string) => Promise<string[]>
   /** The master's public address, for the firewall rule. */
   publicAddress?: () => Promise<string | undefined>
+  /**
+   * This master's short id, in its machines' tags, firewall and snapshot
+   * names: a provider account can hold other masters' pools, and only this
+   * master's are ever cleaned up.
+   */
+  masterId: string
   /** The link port machines listen on. */
   linkPort?: number
   tickMs?: number
@@ -212,7 +218,6 @@ async function gitHubReleaseAssets(
 const TAG = 'mason-pool'
 /** Cloud machines are x86-64 Linux droplets. */
 const machinePlatform = 'linux-x64'
-const SNAPSHOT_PREFIX = 'mason-pool-'
 
 const monthStart = (now: number): number => {
   const date = new Date(now)
@@ -258,6 +263,11 @@ export class Pools {
   }
   private log(line: string): void {
     this.options.log?.(line)
+  }
+
+  /** The tag on this master's pool machines, and its snapshots' name prefix. */
+  private tag(): string {
+    return `${TAG}-${this.options.masterId}`
   }
 
   /** The provider of a cloud account, while the account has a key. */
@@ -604,7 +614,7 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
         region: pool.region,
         size: pool.size,
         image: snapshot?.provider_id ?? pool.image,
-        tags: [TAG, `${TAG}-${pool.name}`],
+        tags: [TAG, this.tag(), `${this.tag()}-${pool.name}`],
         userData: this.userData(installer, pairing, pool.slots),
       })
       this.db
@@ -763,7 +773,7 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
         try {
           const snapshot = await provider.snapshot(
             row.provider_id,
-            `${SNAPSHOT_PREFIX}${row.pool}-${new Date(this.now()).toISOString().replace(/[:.]/g, '-')}`,
+            `${this.tag()}-${row.pool}-${new Date(this.now()).toISOString().replace(/[:.]/g, '-')}`,
           )
           const previous = this.db
             .prepare(
@@ -865,9 +875,9 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
     const address = await this.options.publicAddress().catch(() => undefined)
     if (address == null || address === this.firewallFor.get(account)) return
     await provider.firewall(
-      'mason-pools',
+      `mason-pools-${this.options.masterId}`,
       [{ port: this.options.linkPort ?? 9310, sources: [address] }],
-      TAG,
+      this.tag(),
     )
     this.firewallFor.set(account, address)
     this.log(
@@ -890,7 +900,7 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
         (row) => this.accountOf(row) === account,
       )
       const known = new Map(rows.map((row) => [row.provider_id, row]))
-      for (const machine of await provider.list(TAG)) {
+      for (const machine of await provider.list(this.tag())) {
         if (known.get(machine.id) == null) {
           await provider.destroy(machine.id)
           machines++
@@ -926,7 +936,7 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
       )
       for (const snapshot of await provider.snapshots())
         if (
-          snapshot.name.startsWith(SNAPSHOT_PREFIX) &&
+          snapshot.name.startsWith(`${this.tag()}-`) &&
           !recorded.has(snapshot.id)
         ) {
           await provider.deleteSnapshot(snapshot.id)
