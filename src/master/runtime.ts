@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto'
+import type { Duplex } from 'node:stream'
+import ssh2 from 'ssh2'
 import type { DatabaseSync } from 'node:sqlite'
 import type { ControlHandler } from '../node/control.js'
 import type { Identity } from '../node/identity.js'
@@ -77,6 +79,8 @@ import {
 import { Artifacts } from './artifacts.js'
 import type { Graph } from '../pipeline/graph.js'
 
+const sshUtils = ssh2.utils
+
 export { nodeTypesSetting }
 
 export interface MasterOptions {
@@ -127,6 +131,7 @@ export interface MasterOptions {
     | 'log'
     | 'github'
     | 'releaseAssets'
+    | 'nomac'
   >
   /** Cloud host internals for tests: the provider, the master's address, timings. */
   cloudHosts?: Pick<
@@ -150,6 +155,29 @@ export interface MasterOptions {
     CloudAccountsOptions,
     'fetch' | 'endpoints' | 'timeoutMs'
   >
+}
+
+/**
+ * The master's SSH key for NoMac Macs, made once and kept in its database,
+ * so a restored master reaches the same Macs' gateway as before.
+ */
+function nomacKey(database: MasterDatabase): {
+  privateKey: string
+  publicKey: string
+} {
+  const row = database.db
+    .prepare("SELECT value FROM meta WHERE key='nomac_ssh_key'")
+    .get() as { value: string } | undefined
+  if (row != null)
+    return JSON.parse(row.value) as { privateKey: string; publicKey: string }
+  const pair = sshUtils.generateKeyPairSync('ed25519', {
+    comment: 'mason-master',
+  })
+  const key = { privateKey: pair.private, publicKey: pair.public }
+  database.db
+    .prepare("INSERT INTO meta(key,value) VALUES('nomac_ssh_key',?)")
+    .run(JSON.stringify(key))
+  return key
 }
 
 /** Merges two method tables; the first wins on a clash. */
@@ -216,6 +244,11 @@ export class Master {
     this.people = new People(this.database)
     this.settings = new Settings(this.database)
     this.registry = new NodeRegistry(db, identity, {
+      // A NoMac Mac is reached through NoMac's SSH gateway.
+      transport: (host, port): (() => Promise<Duplex>) | undefined =>
+        host.startsWith('nomac:')
+          ? async (): Promise<Duplex> => await this.pools.tunnel(host, port)
+          : undefined,
       methods: (role): MethodTable =>
         mergeMethods(
           role === 'worker'
@@ -496,6 +529,8 @@ export class Master {
         this.settings.value('cloud') as CloudSetting | undefined,
       accountKey: (account): string | undefined =>
         this.cloudAccounts.get(account)?.key,
+      accountProvider: (account): 'digitalocean' | 'nomac' | undefined =>
+        this.cloudAccounts.get(account)?.provider,
       busy: (fingerprint): boolean => this.scheduler.busy(fingerprint),
       release: (): string | undefined => this.releases.current(),
       releasePlatforms: (version: string): string[] =>
@@ -517,6 +552,12 @@ export class Master {
       },
       log: (line): void => console.log(line),
       ...options.cloud,
+      // A test's NoMac API and gateway, always with the master's own SSH key.
+      nomac: {
+        ...options.cloud?.nomac,
+        sshKey: (): { privateKey: string; publicKey: string } =>
+          nomacKey(this.database),
+      },
     })
     this.cloudHosts = new CloudHosts({
       master: this.database,

@@ -43,6 +43,11 @@ if [[ $user == 1 ]]; then
   prefix=${MASON_PREFIX:-$HOME/.mason/app}
   bindir=${MASON_BIN:-$HOME/.local/bin}
   as_root=()
+  # ~/.mason is also the node's data directory, which must be private.
+  if [[ -z ${MASON_PREFIX:-} ]]; then
+    mkdir -p "$HOME/.mason"
+    chmod 700 "$HOME/.mason"
+  fi
 else
   prefix=${MASON_PREFIX:-/opt/mason}
   bindir=${MASON_BIN:-/usr/local/bin}

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { Duplex } from 'node:stream'
 import type { Server } from 'node:https'
 import { isIP } from 'node:net'
 import { connect, type TLSSocket } from 'node:tls'
@@ -22,6 +23,13 @@ export function parseAddress(
 ): Address {
   value = value.trim()
   if (value === '') throw new Error('Address is empty')
+  // A NoMac Mac, reached through its SSH gateway rather than by address.
+  const nomac = /^(nomac:[A-Za-z0-9_-]{1,80})(?::(\d+))?$/.exec(value)
+  if (nomac != null)
+    return {
+      host: nomac[1]!,
+      port: nomac[2] == null ? defaultPort : Number(nomac[2]),
+    }
   if (/^[a-z]+:\/\//i.test(value)) {
     const url = new URL(value)
     if (
@@ -78,12 +86,21 @@ export async function dialWire(
   address: Address,
   certificateHash: string,
   timeoutMs = 10000,
+  /**
+   * The stream TLS runs over instead of a TCP connection to the address (a
+   * tunnel); the node's certificate pin and key exchange are checked alike.
+   */
+  transport?: () => Promise<Duplex>,
 ): Promise<{ wire: WebSocketWire; exporter: Buffer }> {
+  const tunnel = transport == null ? undefined : await transport()
   const socket = await new Promise<TLSSocket>((resolve, reject) => {
     const tls = connect({
-      host: address.host,
-      port: address.port,
-      ...(isIP(address.host) === 0 ? { servername: address.host } : {}),
+      ...(tunnel == null
+        ? { host: address.host, port: address.port }
+        : { socket: tunnel }),
+      ...(tunnel == null && isIP(address.host) === 0
+        ? { servername: address.host }
+        : {}),
       minVersion: 'TLSv1.3',
       ecdhCurve: LINK_GROUP,
       rejectUnauthorized: false,
@@ -113,12 +130,22 @@ export async function dialWire(
       reject(error)
     })
   })
-  const host = address.host.includes(':') ? `[${address.host}]` : address.host
+  // Over a tunnel the URL only names the link; the socket is the tunnel's.
+  const host =
+    tunnel != null
+      ? '127.0.0.1'
+      : address.host.includes(':')
+        ? `[${address.host}]`
+        : address.host
   const ws = new WebSocket(`wss://${host}:${address.port}/link`, {
     createConnection: (): TLSSocket => socket,
     maxPayload: MAX_MESSAGE + MAX_CHUNK,
     perMessageDeflate: false,
   })
+  // The wire listens from the start: the node's hello can arrive in the same
+  // read as the upgrade's answer (it does through a tunnel), and ws emits it
+  // right after 'open'.
+  const wire = new WebSocketWire(ws)
   await new Promise<void>((resolve, reject) => {
     ws.once('open', () => resolve())
     ws.once('error', reject)
@@ -126,7 +153,7 @@ export async function dialWire(
       reject(new Error('The node refused the link')),
     )
   })
-  return { wire: new WebSocketWire(ws), exporter: exporter(socket) }
+  return { wire, exporter: exporter(socket) }
 }
 
 /**

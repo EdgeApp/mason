@@ -12,6 +12,8 @@ export interface MachineSpec {
   tags: string[]
   /** First-boot data: the installer and the pairing file. */
   userData: string
+  /** Limits a provider enforces itself (NoMac): longest life and idle time. */
+  limits?: { maxSeconds?: number; idleSeconds?: number }
 }
 
 export interface ProviderMachine {
@@ -41,6 +43,8 @@ export class ProviderError extends Error {
       | 'unavailable'
       | 'auth'
       | 'missing'
+      /** The machine started, and its first-boot setup failed. */
+      | 'setup'
       | 'other',
   ) {
     super(message)
@@ -61,6 +65,8 @@ export interface Catalog {
 }
 
 export interface CloudProvider {
+  /** False for a provider that keeps no snapshots; machines are then simply destroyed. */
+  readonly supportsSnapshots?: boolean
   /** Regions, sizes and base images a pool may use. */
   catalog?(): Promise<Catalog>
   create(spec: MachineSpec): Promise<ProviderMachine>

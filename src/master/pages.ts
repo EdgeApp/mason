@@ -560,31 +560,36 @@ export function masterPages(
           : { driver: 'disk' }
       })(),
       poolAccounts: await Promise.all(
-        master.cloudAccounts
-          .all()
-          .filter((account) => account.provider === 'digitalocean')
-          .map(async (account) => {
-            try {
-              const catalog = await master.pools.catalog(account.id)
-              // A DNS listing that fails leaves the form without domains.
-              const domains = await (
-                master.cloudHosts.provider(account.id)?.domains?.() ??
-                Promise.resolve([])
-              ).catch((): string[] => [])
-              return {
-                id: account.id,
-                name: account.name,
-                ...(catalog == null ? {} : { catalog }),
-                domains,
-              }
-            } catch (error) {
-              return {
-                id: account.id,
-                name: account.name,
-                error: `Could not list ${account.name}'s regions and sizes: ${(error as Error).message}`,
-              }
+        master.cloudAccounts.all().map(async (account) => {
+          // NoMac has no catalog or DNS: its pools take no region or size.
+          if (account.provider === 'nomac')
+            return {
+              id: account.id,
+              name: account.name,
+              provider: 'nomac' as const,
             }
-          }),
+          try {
+            const catalog = await master.pools.catalog(account.id)
+            // A DNS listing that fails leaves the form without domains.
+            const domains = await (
+              master.cloudHosts.provider(account.id)?.domains?.() ??
+              Promise.resolve([])
+            ).catch((): string[] => [])
+            return {
+              id: account.id,
+              name: account.name,
+              provider: 'digitalocean' as const,
+              ...(catalog == null ? {} : { catalog }),
+              domains,
+            }
+          } catch (error) {
+            return {
+              id: account.id,
+              name: account.name,
+              error: `Could not list ${account.name}'s regions and sizes: ${(error as Error).message}`,
+            }
+          }
+        }),
       ),
       budget: {
         monthly: Number(

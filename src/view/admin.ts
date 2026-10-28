@@ -73,6 +73,8 @@ export interface PoolRow {
 export interface PoolAccount {
   id: string
   name: string
+  /** NoMac pools run one Mac with Xcode; DigitalOcean ones pick region, size and image. */
+  provider?: 'digitalocean' | 'nomac'
   catalog?: {
     regions: Array<{ slug: string; name: string }>
     sizes: Array<{ slug: string; description: string; priceMonthly: number }>
@@ -108,6 +110,8 @@ function poolFields(
     return `<select id="${prefix}-${name}" name="${name}">${all.map((option) => `<option value="${escape(option.value)}"${option.value === value ? ' selected' : ''}>${escape(option.label)}</option>`).join('')}</select>`
   }
   const catalog = account?.catalog
+  // NoMac picks the Mac itself, one at a time for up to eight hours.
+  const mac = account?.provider === 'nomac'
   const number = (
     name: string,
     value: number,
@@ -141,48 +145,61 @@ function poolFields(
         ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux"',
       ),
     ),
-    field(
-      'region',
-      'Region',
-      catalog == null
-        ? text('region', pool.region ?? '', ' required placeholder="sfo3"')
-        : select(
-            'region',
-            pool.region ?? 'sfo3',
-            catalog.regions.map((region) => ({
-              value: region.slug,
-              label: `${region.name} (${region.slug})`,
-            })),
-          ),
-    ),
-    field(
-      'size',
-      'Size',
-      catalog == null
-        ? text('size', pool.size ?? '', ' required placeholder="s-2vcpu-4gb"')
-        : select(
-            'size',
-            pool.size ?? 's-2vcpu-4gb',
-            catalog.sizes.map((size) => ({
-              value: size.slug,
-              label: `${size.slug} · ${size.description} · $${size.priceMonthly}/month`,
-            })),
-          ),
-    ),
-    field(
-      'image',
-      'Base image',
-      catalog == null
-        ? text('image', pool.image ?? 'ubuntu-24-04-x64', ' required')
-        : select(
-            'image',
-            pool.image ?? 'ubuntu-24-04-x64',
-            catalog.images.map((image) => ({
-              value: image.slug,
-              label: image.name,
-            })),
-          ),
-    ),
+    mac
+      ? '<p><small>NoMac runs one Apple silicon Mac with Xcode at a time, for up to eight hours.</small></p>'
+      : '',
+    mac
+      ? ''
+      : field(
+          'region',
+          'Region',
+          catalog == null
+            ? text('region', pool.region ?? '', ' required placeholder="sfo3"')
+            : select(
+                'region',
+                pool.region ?? 'sfo3',
+                catalog.regions.map((region) => ({
+                  value: region.slug,
+                  label: `${region.name} (${region.slug})`,
+                })),
+              ),
+        ),
+    mac
+      ? ''
+      : field(
+          'size',
+          'Size',
+          catalog == null
+            ? text(
+                'size',
+                pool.size ?? '',
+                ' required placeholder="s-2vcpu-4gb"',
+              )
+            : select(
+                'size',
+                pool.size ?? 's-2vcpu-4gb',
+                catalog.sizes.map((size) => ({
+                  value: size.slug,
+                  label: `${size.slug} · ${size.description} · $${size.priceMonthly}/month`,
+                })),
+              ),
+        ),
+    mac
+      ? ''
+      : field(
+          'image',
+          'Base image',
+          catalog == null
+            ? text('image', pool.image ?? 'ubuntu-24-04-x64', ' required')
+            : select(
+                'image',
+                pool.image ?? 'ubuntu-24-04-x64',
+                catalog.images.map((image) => ({
+                  value: image.slug,
+                  label: image.name,
+                })),
+              ),
+        ),
     field(
       'labels',
       'Labels (comma-separated)',
@@ -191,7 +208,7 @@ function poolFields(
     field(
       'maxNodes',
       'Machines at most',
-      number('maxNodes', pool.maxNodes ?? 1, 1, 50),
+      number('maxNodes', pool.maxNodes ?? 1, 1, mac ? 1 : 50),
     ),
     field(
       'slots',
@@ -206,7 +223,12 @@ function poolFields(
     field(
       'maxHoursPerNode',
       'Retire after hours up',
-      number('maxHoursPerNode', pool.maxHoursPerNode ?? 24, 1, 720),
+      number(
+        'maxHoursPerNode',
+        pool.maxHoursPerNode ?? (mac ? 8 : 24),
+        1,
+        mac ? 8 : 720,
+      ),
     ),
   ].join('')
 }
@@ -382,7 +404,9 @@ export function nodesView(data: {
     )
     .join('')
   const hostCommands = `<p>On the host’s computer, ${install}</p><p>Start it as the host: ${command('sudo mason host --install')} It prints its pairing key; pair it in Add node.</p>`
+  // Hosts run on DigitalOcean; a NoMac account makes only pool Macs.
   const hostAccounts = (data.poolAccounts ?? [])
+    .filter((account) => account.provider !== 'nomac')
     .map(
       (account) =>
         `<details class="add-host" id="add-host-${escape(account.id)}"><summary>On ${escape(account.name)}</summary>${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/hosts', hostFields(account), `${icon('add')} Create host`, { fields: ['account', 'name', 'region', 'size', 'image', 'dns.domain', 'dns.name', 'space.bucket', 'space.region'] })}</details>`,
@@ -435,7 +459,7 @@ export function nodesView(data: {
   const addPool = !data.canChange
     ? ''
     : accounts.length === 0
-      ? '<p>Add a DigitalOcean account on the <a href="/cloud">Cloud</a> page to make pools.</p>'
+      ? '<p>Add a DigitalOcean or NoMac account on the <a href="/cloud">Cloud</a> page to make pools.</p>'
       : accounts
           .map(
             (account) =>

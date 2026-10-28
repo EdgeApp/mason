@@ -203,9 +203,18 @@ export async function work(ctx: Stage) {
       settings.set(admin, 'cloud', { pools: [pool({ account: undefined })] }),
       /pool.account names a cloud account/,
     )
-    await assert.rejects(
-      settings.set(admin, 'cloud', { pools: [pool({ account: 'mac' })] }),
-      /not a DigitalOcean account/,
+    // A NoMac account's pool takes NoMac's one profile, whatever it is given.
+    const mac = await settings.set(admin, 'cloud', {
+      pools: [pool({ account: 'mac', region: 'x', size: 'y' })],
+    })
+    assert.deepEqual(
+      (mac.pools as Json[]).map((entry) => [
+        entry.provider,
+        entry.region,
+        entry.size,
+        entry.image,
+      ]),
+      [['nomac', 'nomac', 'standard', 'macos']],
     )
     await assert.rejects(
       settings.set(admin, 'cloud', { pools: [pool({ maxNodes: 0 })] }),
@@ -623,10 +632,20 @@ export async function work(ctx: Stage) {
     assert.equal(waiting.status, 'queued')
     assert.match(waiting.reason, /mason releases fetch v0\.3\.1/)
     assert.equal(cloud.created.length, created)
-    // The whole release current again: the stage gets its machine.
-    releases.setCurrent('0.3.0')
+    // The master's own release on GitHub has the platform: machines install from there.
+    assets = async (): Promise<string[]> => [
+      `mason-${version}-linux-x64.tar.gz`,
+      'install.sh',
+    ]
+    offset += 11 * MINUTE
     assert.equal((await finish(id)).status, 'succeeded')
     assert.equal(cloud.created.length, created + 1)
+    assert.match(
+      cloud.created.at(-1)!.userData,
+      /releases\/latest\/download\/install\.sh/,
+    )
+    assets = async (): Promise<string[]> => []
+    releases.setCurrent('0.3.0')
     offset += 6 * MINUTE
     await wait(() => machines().length === 0, 15_000, 'retired')
   })
@@ -975,7 +994,7 @@ export async function work(ctx: Stage) {
         budget: { monthly: 1 },
         canChange: true,
       }),
-      /Add a DigitalOcean account on the <a href="\/cloud">Cloud<\/a> page/,
+      /Add a DigitalOcean or NoMac account on the <a href="\/cloud">Cloud<\/a> page/,
     )
   })
 })

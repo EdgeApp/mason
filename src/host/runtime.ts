@@ -377,9 +377,15 @@ export class HostRuntime {
           rmSync(path.join(root, name), { recursive: true, force: true })
       if (row == null) return
       const dir = path.join(root, row.version)
-      if (existsSync(path.join(dir, '.complete'))) return
+      // `.complete` names the files it completed; the same version stored
+      // again with more platforms fetches what it lacks, and a new SHA256SUMS.
+      const complete = path.join(dir, '.complete')
+      if (existsSync(complete) && readFileSync(complete, 'utf8') === row.files)
+        return
       const link = this.options.link()
       if (link == null || link.closed) return
+      rmSync(complete, { force: true })
+      rmSync(path.join(dir, 'SHA256SUMS'), { force: true })
       mkdirSync(dir, { recursive: true, mode: 0o700 })
       const files = JSON.parse(row.files) as Record<string, string>
       for (const [name, digest] of [
@@ -412,7 +418,7 @@ export class HostRuntime {
         }
         renameSync(partial, target)
       }
-      writeFileSync(path.join(dir, '.complete'), '')
+      writeFileSync(complete, row.files)
       this.options.log?.(`Serving Mason ${row.version} at /install.sh`)
     })()
       .catch((error: unknown) => {

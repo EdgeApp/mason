@@ -241,6 +241,12 @@ until it has been idle for an hour:
   running stages finish, idle machines retire, and stages that need a cloud
   type wait with the reason "monthly cloud budget reached" until the next
   month or a raised cap.
+- A pool can also run on **NoMac** (Apple silicon Macs with Xcode, by the
+  minute): the master starts a NoMac Mac, installs Mason on it for the user,
+  runs the worker as a NoMac service, and reaches it through NoMac's SSH
+  gateway, so the Mac accepts no inbound connection. NoMac runs one Mac at a
+  time per account for up to eight hours; its Macs are never snapshotted, and
+  a retired one is stopped.
 - DigitalOcean (Linux) is the first provider. A provider's API key is a cloud
   account on the master: an administrator or manager adds it on the Cloud page
   (or with `mason cloud accounts add --key-stdin`), where Mason checks it and

@@ -1007,12 +1007,17 @@ describe('Host cache, sign-in and offline serving', function () {
   it('U10.14 serves exactly the current release at /install.sh and switches with it', async () => {
     const b = browser()
     assert.equal((await b.get('/install.sh')).status, 404)
-    const release = (version: string): string => {
+    const release = (version: string, platforms = ['linux-x64']): string => {
       const dir = path.join(root(), version)
       mkdirSync(dir)
       const files: Record<string, string> = {
         'install.sh': `#!/bin/bash\necho ${version}\n`,
-        [`mason-${version}-linux-x64.tar.gz`]: `tarball ${version}`,
+        ...Object.fromEntries(
+          platforms.map((platform) => [
+            `mason-${version}-${platform}.tar.gz`,
+            `tarball ${version}`,
+          ]),
+        ),
       }
       for (const [name, text] of Object.entries(files))
         writeFileSync(path.join(dir, name), text)
@@ -1050,6 +1055,22 @@ describe('Host cache, sign-in and offline serving', function () {
       /mason-0\.2\.0-linux-x64/,
     )
     assert.equal((await b.get('/releases/current/other.txt')).status, 404)
+    // The same release stored again with every platform (mason releases
+    // fetch): the host adds the new tarballs and their SHA256SUMS.
+    await master.releases.add(release('0.2.0', ['linux-x64', 'darwin-arm64']))
+    for (let i = 0; ; i++) {
+      const added = await b.get(
+        '/releases/current/mason-0.2.0-darwin-arm64.tar.gz',
+      )
+      await added.arrayBuffer()
+      if (added.status === 200) break
+      assert(i < 50, 'the added platform on the host')
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    assert.match(
+      await (await b.get('/releases/current/SHA256SUMS')).text(),
+      /mason-0\.2\.0-darwin-arm64/,
+    )
     await master.releases.add(release('0.2.1'))
     master.releases.setCurrent('0.2.1')
     await c.until(

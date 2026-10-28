@@ -3,13 +3,16 @@ import { createCertificate, certificateHash } from '../../node/certificate.js'
 import type { MasterDatabase } from '../database.js'
 import type { NodeRegistry } from '../nodes.js'
 import type { SettingsArea, SettingValue } from '../settings.js'
+import type { Duplex } from 'node:stream'
 import type { CloudAccount } from './accounts.js'
+import { NoMac, type NoMacOptions } from './nomac.js'
 import {
   DigitalOcean,
   ProviderError,
   SNAPSHOT_GB_MONTH,
   type Catalog,
   type CloudProvider,
+  type ProviderMachine,
 } from './digitalocean.js'
 
 /** One pool: machines of one node type, made on demand and reused like in-house computers. */
@@ -19,7 +22,7 @@ export interface PoolSetting {
   type: string
   /** The cloud account its machines are made in. */
   account: string
-  provider: 'digitalocean'
+  provider: 'digitalocean' | 'nomac'
   region: string
   size: string
   /** The base image a machine starts from when the pool has no snapshot. */
@@ -66,8 +69,12 @@ function asPool(value: unknown, accounts: CloudAccount[]): PoolSetting {
       throw new Error(`pool.${field} is a whole number from ${min} to ${max}`)
     return out
   }
-  if ((input.provider ?? 'digitalocean') !== 'digitalocean')
-    throw new Error('pool.provider is digitalocean')
+  if (
+    input.provider != null &&
+    input.provider !== 'digitalocean' &&
+    input.provider !== 'nomac'
+  )
+    throw new Error('pool.provider is digitalocean or nomac')
   const account = accounts.find((entry) => entry.id === input.account)
   if (account == null)
     throw new Error(
@@ -75,8 +82,8 @@ function asPool(value: unknown, accounts: CloudAccount[]): PoolSetting {
         ? `pool.account: no cloud account named ${input.account}`
         : 'pool.account names a cloud account',
     )
-  if (account.provider !== 'digitalocean')
-    throw new Error(`pool.account ${account.id} is not a DigitalOcean account`)
+  // NoMac runs one Mac at a time for up to eight hours, in its one profile.
+  const nomac = account.provider === 'nomac'
   const labels = input.labels ?? []
   if (
     !Array.isArray(labels) ||
@@ -87,15 +94,20 @@ function asPool(value: unknown, accounts: CloudAccount[]): PoolSetting {
     name: text('name', slug),
     type: text('type', slug),
     account: account.id,
-    provider: 'digitalocean',
-    region: text('region', /^[a-z0-9-]{2,20}$/),
-    size: text('size', /^[a-z0-9-]{2,40}$/),
-    image: text('image'),
+    provider: account.provider,
+    region: nomac ? 'nomac' : text('region', /^[a-z0-9-]{2,20}$/),
+    size: nomac ? 'standard' : text('size', /^[a-z0-9-]{2,40}$/),
+    image: nomac ? 'macos' : text('image'),
     labels: labels as string[],
-    maxNodes: count('maxNodes', 1, 1, 50),
+    maxNodes: count('maxNodes', 1, 1, nomac ? 1 : 50),
     slots: count('slots', 1, 1, 64),
     ttlMinutes: count('ttlMinutes', 60, 1, 24 * 60),
-    maxHoursPerNode: count('maxHoursPerNode', 24, 1, 24 * 30),
+    maxHoursPerNode: count(
+      'maxHoursPerNode',
+      nomac ? 8 : 24,
+      1,
+      nomac ? 8 : 24 * 30,
+    ),
   }
 }
 
@@ -163,6 +175,12 @@ export interface PoolsOptions {
   setting: () => CloudSetting | undefined
   /** A cloud account's key, by its ID. */
   accountKey: (account: string) => string | undefined
+  /** A cloud account's provider, by its ID. */
+  accountProvider?: (account: string) => 'digitalocean' | 'nomac' | undefined
+  /** The master's NoMac SSH key, and NoMac's API and gateway for tests. */
+  nomac?: Omit<NoMacOptions, 'sshKey'> & {
+    sshKey?: NoMacOptions['sshKey']
+  }
   /** A provider for a key; DigitalOcean by default. */
   provider?: (token: string) => CloudProvider
   /** Whether a worker is running or preparing a stage. */
@@ -279,10 +297,15 @@ export class Pools {
     if (token == null) return undefined
     let provider = this.providers.get(token)
     if (provider == null) {
-      provider = (
-        this.options.provider ??
-        ((value: string): CloudProvider => new DigitalOcean(value))
-      )(token)
+      const nomac = this.options.nomac
+      provider =
+        this.options.accountProvider?.(account) === 'nomac' &&
+        nomac?.sshKey != null
+          ? new NoMac(token, { ...nomac, sshKey: nomac.sshKey })
+          : (
+              this.options.provider ??
+              ((value: string): CloudProvider => new DigitalOcean(value))
+            )(token)
       this.providers.set(token, provider)
     }
     return provider
@@ -462,8 +485,26 @@ export class Pools {
    * cloud machines starts one from its first pool to run it.
    */
   setupDemand(): string | undefined {
-    const pool = this.pools()[0]
+    // A DigitalOcean pool's machine is cheaper and quicker for a setup than a Mac.
+    const pool =
+      this.pools().find((entry) => entry.provider !== 'nomac') ??
+      this.pools()[0]
     return pool == null ? undefined : this.demand(pool.type)
+  }
+
+  /** A stream to a NoMac machine's link port, by its `nomac:<session>` host. */
+  async tunnel(host: string, port: number): Promise<Duplex> {
+    const session = host.replace(/^nomac:/, '')
+    const row = this.db
+      .prepare(
+        'SELECT * FROM cloud_machines WHERE provider_id=? ORDER BY id DESC',
+      )
+      .get(session) as MachineRow | undefined
+    const provider =
+      row == null ? undefined : this.provider(this.accountOf(row))
+    if (!(provider instanceof NoMac))
+      throw new Error(`No NoMac machine for ${host}`)
+    return await provider.tunnel(session, port)
   }
 
   /** GitHub release assets by `repository@version`, refreshed every ten minutes. */
@@ -475,19 +516,32 @@ export class Pools {
 
   /** Where a new machine installs Mason from, or why it cannot yet. */
   private installer(pool: PoolSetting): Installer | string {
+    // A NoMac Mac is Apple silicon; every other machine is x86-64 Linux.
+    const platform =
+      pool.provider === 'nomac' ? 'darwin-arm64' : machinePlatform
     const origin = this.options.hostOrigin()
     if (origin != null) {
       const release = this.options.release()
       if (release == null)
         return 'The release store is empty: add the release machines install with mason releases add'
-      // The copy beside a master's own install holds only its platform.
+      // The copy beside a master's own install holds only its platform; the
+      // master's release on GitHub has every platform.
       if (
         this.options.releasePlatforms != null &&
-        !this.options.releasePlatforms(release).includes(machinePlatform)
-      )
-        return `Release ${release} has no ${machinePlatform} tarball for ${pool.name} machines: store the whole release with mason releases fetch v${release}`
+        !this.options.releasePlatforms(release).includes(platform)
+      ) {
+        const github = this.fromGitHub(pool, platform)
+        return typeof github !== 'string'
+          ? github
+          : `Release ${release} has no ${platform} tarball for ${pool.name} machines: store the whole release with mason releases fetch v${release}`
+      }
       return { origin, version: release }
     }
+    return this.fromGitHub(pool, platform)
+  }
+
+  /** The master's own release on GitHub, once its assets list the platform's tarball. */
+  private fromGitHub(pool: PoolSetting, platform: string): Installer | string {
     const github = this.options.github?.()
     if (github == null)
       return 'Cloud machines install from the host or from the master’s GitHub release: set the host setting first'
@@ -516,10 +570,8 @@ export class Pools {
       return `Checking release v${github.version} on GitHub for ${pool.name} machines`
     if (known.names == null)
       return `Cannot read release v${github.version} of ${github.repository} on GitHub: ${known.error}`
-    if (
-      !known.names.includes(`mason-${github.version}-${machinePlatform}.tar.gz`)
-    )
-      return `Release v${github.version} of ${github.repository} has no ${machinePlatform} tarball for ${pool.name} machines`
+    if (!known.names.includes(`mason-${github.version}-${platform}.tar.gz`))
+      return `Release v${github.version} of ${github.repository} has no ${platform} tarball for ${pool.name} machines`
     return github
   }
 
@@ -565,6 +617,36 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
 `
   }
 
+  /**
+   * A NoMac Mac's first boot, run as a NoMac job once the Mac is ready:
+   * Mason installed for the user from the host or GitHub, and the worker run
+   * as a NoMac service that keeps it going between commands. Tool caches sit
+   * on the account's drive, which NoMac keeps between sessions.
+   */
+  nomacUserData(installer: Installer, pairing: string, slots: number): string {
+    const install =
+      'origin' in installer
+        ? `curl -fsSL ${installer.origin}/install.sh -o ~/mason-install.sh
+bash ~/mason-install.sh --user --from ${installer.origin}`
+        : `curl -fsSL https://github.com/${installer.repository}/releases/latest/download/install.sh -o ~/mason-install.sh
+bash ~/mason-install.sh --user --version ${installer.version}`
+    // The release's install.sh may predate making ~/.mason, the worker's
+    // data directory, private.
+    return `set -euo pipefail
+mkdir -p ~/.mason
+chmod 700 ~/.mason
+${install}
+rm -f ~/mason-install.sh
+mkdir -p ~/drive/mason-cache
+umask 077
+cat > ~/mason-pairing.json <<'MASON_PAIRING'
+${pairing}
+MASON_PAIRING
+nomac-service start mason-worker -- ~/.local/bin/mason worker --pairing-file ~/mason-pairing.json --listen 127.0.0.1 --link-port 9310 --slots ${slots}
+# Mason ${installer.version}
+`
+  }
+
   private async create(pool: PoolSetting, installer: Installer): Promise<void> {
     const provider = this.provider(pool.account)
     if (provider == null) return
@@ -576,7 +658,11 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
         )
         .run(pool.name, pool.account, pool.size, now).lastInsertRowid,
     )
-    const name = `mason-${pool.name}-${id}`
+    // A NoMac session's idempotency key is its name: this master's own.
+    const name =
+      pool.provider === 'nomac'
+        ? `${this.tag()}-${pool.name}-${id}`
+        : `mason-${pool.name}-${id}`
     const certificate = createCertificate([name])
     const secret = randomBytes(32).toString('base64url')
     this.pending.set(id, {
@@ -615,7 +701,18 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
         size: pool.size,
         image: snapshot?.provider_id ?? pool.image,
         tags: [TAG, this.tag(), `${this.tag()}-${pool.name}`],
-        userData: this.userData(installer, pairing, pool.slots),
+        userData:
+          pool.provider === 'nomac'
+            ? this.nomacUserData(installer, pairing, pool.slots)
+            : this.userData(installer, pairing, pool.slots),
+        ...(pool.provider === 'nomac'
+          ? {
+              limits: {
+                maxSeconds: Math.min(pool.maxHoursPerNode, 8) * 3600,
+                idleSeconds: (pool.ttlMinutes + 10) * 60,
+              },
+            }
+          : {}),
       })
       this.db
         .prepare(
@@ -672,7 +769,20 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
       await this.discard(row, provider, 'It did not pair in time')
       return
     }
-    const machine = await provider.get(row.provider_id)
+    let machine: ProviderMachine | undefined
+    try {
+      machine = await provider.get(row.provider_id)
+    } catch (error) {
+      if (!(error instanceof ProviderError && error.kind === 'setup'))
+        throw error
+      // The same setup would fail again on a new machine: wait before the next.
+      await this.discard(row, provider, error.message)
+      this.backoff.set(row.pool, {
+        until: this.now() + 10 * 60_000,
+        reason: `The last ${row.pool} machine failed its setup, so the next starts in 10 minutes: ${error.message}`,
+      })
+      return
+    }
     if (machine == null) {
       await this.discard(row, provider, 'The provider no longer has it')
       return
@@ -766,7 +876,8 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
         }
       if (row.fingerprint != null) this.options.registry.remove(row.fingerprint)
       await provider.powerOff(row.provider_id).catch(() => undefined)
-      if (clean) {
+      // A provider without snapshots (NoMac) just stops the machine.
+      if (clean && provider.supportsSnapshots !== false) {
         this.db
           .prepare("UPDATE cloud_machines SET state='snapshotting' WHERE id=?")
           .run(row.id)

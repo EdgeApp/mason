@@ -495,6 +495,8 @@ describe('Releases, install.sh and updates', function () {
         first.out,
         /Installed Mason 0\.1\.1 in .*\.mason\/app\/0\.1\.1/,
       )
+      // ~/.mason doubles as the node's data directory: private.
+      assert.equal(statSync(path.join(home, '.mason')).mode & 0o777, 0o700)
       const link = path.join(home, '.local', 'bin', 'mason')
       assert.equal(
         readlinkSync(link),
