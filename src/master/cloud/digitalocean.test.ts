@@ -21,6 +21,7 @@ class FakeApi {
   droplets = new Map<number, Json>()
   snapshots = new Map<string, Json>()
   firewalls: Json[] = []
+  records: Json[] = []
   tags = new Set<string>()
   actions = new Map<number, { polls: number; error?: boolean }>()
   /** The next response's status and message, once. */
@@ -221,6 +222,43 @@ class FakeApi {
         ) {
           this.firewalls = [{ id: match[1], ...body }]
           send(200, { firewall: this.firewalls[0] })
+        } else if (route === 'GET /v2/domains') {
+          send(200, { domains: [{ name: 'example.com' }], links: {} })
+        } else if (route === 'GET /v2/domains/example.com/records') {
+          send(200, {
+            domain_records: this.records.filter(
+              (record) =>
+                `${record.name}.example.com` === url.searchParams.get('name'),
+            ),
+          })
+        } else if (route === 'POST /v2/domains/example.com/records') {
+          const record = { id: this.next++, ...body }
+          this.records.push(record)
+          send(201, { domain_record: record })
+        } else if (
+          (match =
+            /^(PUT|DELETE) \/v2\/domains\/example\.com\/records\/(\d+)$/.exec(
+              route,
+            )) != null
+        ) {
+          const record = this.records.find(
+            (entry) => entry.id === Number(match![2]),
+          )
+          if (record == null) send(404, { message: 'no record' })
+          else if (match[1] === 'PUT') {
+            Object.assign(record, body)
+            send(200, { domain_record: record })
+          } else {
+            this.records = this.records.filter((entry) => entry !== record)
+            send(204)
+          }
+        } else if (
+          (match = /^DELETE \/v2\/firewalls\/(.+)$/.exec(route)) != null
+        ) {
+          this.firewalls = this.firewalls.filter(
+            (firewall) => firewall.id !== match![1],
+          )
+          send(204)
         } else send(404, { message: `no route ${route}` })
       })
     })
@@ -406,6 +444,49 @@ describe('DigitalOcean provider', () => {
         (request) =>
           request.path === '/v2/images?type=distribution&per_page=200&page=1',
       ),
+    )
+  })
+
+  it('U5.1 lists domains and makes, changes and deletes A records; deletes a firewall by name', async () => {
+    assert.deepEqual(await provider.domains(), ['example.com'])
+    const made = await provider.createDnsRecord(
+      'example.com',
+      'builds',
+      '203.0.113.5',
+    )
+    assert.equal(made.data, '203.0.113.5')
+    assert.deepEqual(
+      await provider.dnsRecords('example.com', 'builds.example.com'),
+      [made],
+    )
+    await provider.updateDnsRecord('example.com', made.id, '203.0.113.6')
+    assert.equal(
+      (await provider.dnsRecords('example.com', 'builds.example.com'))[0]!.data,
+      '203.0.113.6',
+    )
+    await provider.deleteDnsRecord('example.com', made.id)
+    // A record already gone is not an error.
+    await provider.deleteDnsRecord('example.com', made.id)
+    assert.deepEqual(
+      await provider.dnsRecords('example.com', 'builds.example.com'),
+      [],
+    )
+    await provider.firewall(
+      'mason-host-x',
+      [
+        { port: 80, sources: ['0.0.0.0/0'] },
+        { port: 9310, sources: ['203.0.113.7'] },
+      ],
+      'mason-host-x',
+    )
+    assert(api.firewalls.some((firewall) => firewall.name === 'mason-host-x'))
+    await provider.deleteFirewall('mason-host-x')
+    assert(!api.firewalls.some((firewall) => firewall.name === 'mason-host-x'))
+    api.fail = { status: 500, message: 'down' }
+    await assert.rejects(
+      provider.deleteDnsRecord('example.com', '1'),
+      (error: unknown) =>
+        error instanceof ProviderError && error.kind === 'unavailable',
     )
   })
 })

@@ -53,8 +53,9 @@ describe('Mason hosts on DigitalOcean', function () {
         cloudHosts: {
           provider: () => cloud,
           publicAddress: async () => '203.0.113.7',
-          // Reconciled by hand here.
+          // Reconciled by hand here, besides a host settling on its own.
           tickMs: 3_600_000,
+          settleMs: 50,
         },
       },
     })
@@ -127,6 +128,13 @@ describe('Mason hosts on DigitalOcean', function () {
   })
 
   it('U4.1/U4.6 reconcile makes the droplet, opens its firewall, pairs the host and points the host setting at it', async () => {
+    // One reconcile; the host then settles by itself while it is being made.
+    await reconcile()
+    await c.until(
+      () => (row().state === 'ready' ? true : undefined),
+      30_000,
+      'the host settling by itself',
+    )
     const ready = await until('ready')
     assert.equal(cloud.created.length, 1)
     const spec = cloud.created[0]!

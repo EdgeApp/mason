@@ -80,6 +80,23 @@ export interface CloudProvider {
   firewall(name: string, rules: FirewallRule[], tag: string): Promise<void>
   /** Deletes a firewall by name; a missing one is not an error. */
   deleteFirewall?(name: string): Promise<void>
+  /** The domains the account's DNS holds. */
+  domains?(): Promise<string[]>
+  /** A records for a full name in one of those domains. */
+  dnsRecords?(domain: string, fqdn: string): Promise<DnsRecord[]>
+  createDnsRecord?(
+    domain: string,
+    name: string,
+    address: string,
+  ): Promise<DnsRecord>
+  updateDnsRecord?(domain: string, id: string, address: string): Promise<void>
+  deleteDnsRecord?(domain: string, id: string): Promise<void>
+}
+
+/** An A record: its id and the address it holds. */
+export interface DnsRecord {
+  id: string
+  data: string
 }
 
 /** One inbound TCP port and the addresses it admits. */
@@ -419,6 +436,71 @@ export class DigitalOcean implements CloudProvider {
     const existing = firewalls.find((firewall) => firewall.name === name)
     if (existing == null) await this.call('POST', '/firewalls', body)
     else await this.call('PUT', `/firewalls/${existing.id}`, body)
+  }
+
+  async domains(): Promise<string[]> {
+    const out: string[] = []
+    for (let page = 1; ; page++) {
+      const { domains, links } = await this.call<{
+        domains: Array<{ name: string }>
+        links?: { pages?: { next?: string } }
+      }>('GET', `/domains?per_page=200&page=${page}`)
+      out.push(...domains.map((domain) => domain.name))
+      if (links?.pages?.next == null) return out
+    }
+  }
+
+  async dnsRecords(domain: string, fqdn: string): Promise<DnsRecord[]> {
+    const { domain_records } = await this.call<{
+      domain_records: Array<{ id: number; data: string }>
+    }>(
+      'GET',
+      `/domains/${encodeURIComponent(domain)}/records?type=A&name=${encodeURIComponent(fqdn)}&per_page=200`,
+    )
+    return domain_records.map((record) => ({
+      id: String(record.id),
+      data: record.data,
+    }))
+  }
+
+  async createDnsRecord(
+    domain: string,
+    name: string,
+    address: string,
+  ): Promise<DnsRecord> {
+    const { domain_record } = await this.call<{
+      domain_record: { id: number; data: string }
+    }>('POST', `/domains/${encodeURIComponent(domain)}/records`, {
+      type: 'A',
+      name,
+      data: address,
+      ttl: 300,
+    })
+    return { id: String(domain_record.id), data: domain_record.data }
+  }
+
+  async updateDnsRecord(
+    domain: string,
+    id: string,
+    address: string,
+  ): Promise<void> {
+    await this.call(
+      'PUT',
+      `/domains/${encodeURIComponent(domain)}/records/${id}`,
+      { data: address },
+    )
+  }
+
+  async deleteDnsRecord(domain: string, id: string): Promise<void> {
+    try {
+      await this.call(
+        'DELETE',
+        `/domains/${encodeURIComponent(domain)}/records/${id}`,
+      )
+    } catch (error) {
+      if (!(error instanceof ProviderError && error.kind === 'missing'))
+        throw error
+    }
   }
 
   async deleteFirewall(name: string): Promise<void> {

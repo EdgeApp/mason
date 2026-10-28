@@ -78,6 +78,8 @@ export interface PoolAccount {
     sizes: Array<{ slug: string; description: string; priceMonthly: number }>
     images: Array<{ slug: string; name: string }>
   }
+  /** Domains the account's DNS holds, for a host's name. */
+  domains?: string[]
   /** Why the catalog could not be read. */
   error?: string
 }
@@ -219,6 +221,8 @@ export interface CloudHostView {
   address: string | null
   origin: string | null
   dnsName?: string
+  /** A DNS name's certificate: waiting until it first answers trusted. */
+  certificate?: 'waiting' | 'trusted'
   error: string | null
 }
 
@@ -231,9 +235,9 @@ function hostFields(account: PoolAccount): string {
     value: string,
     options: Array<{ value: string; label: string }>,
   ): string =>
-    `<select id="${prefix}-${name}" name="${name}">${options.map((option) => `<option value="${escape(option.value)}"${option.value === value ? ' selected' : ''}>${escape(option.label)}</option>`).join('')}</select>`
+    `<select id="${prefix}-${name.replace('dns.', '') === 'domain' ? 'domain' : name}" name="${name}">${options.map((option) => `<option value="${escape(option.value)}"${option.value === value ? ' selected' : ''}>${escape(option.label)}</option>`).join('')}</select>`
   const text = (name: string, value: string, extra = ''): string =>
-    `<input id="${prefix}-${name}" name="${name}" value="${escape(value)}"${extra}>`
+    `<input id="${prefix}-${name === 'dns.name' ? 'record' : name}" name="${name}" value="${escape(value)}"${extra}>`
   return [
     `<input type="hidden" name="account" value="${escape(account.id)}">`,
     `<label for="${prefix}-name">Name</label>${text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="builds"')}`,
@@ -273,6 +277,8 @@ function hostFields(account: PoolAccount): string {
             })),
           )
     }`,
+    `<label for="${prefix}-domain">DNS domain</label>${select('dns.domain', '', [{ value: '', label: 'No DNS: serve the droplet’s address' }, ...(account.domains ?? []).map((domain) => ({ value: domain, label: domain }))])}`,
+    `<label for="${prefix}-record">Record name in the domain (or @)</label>${text('dns.name', '', ' placeholder="builds" pattern="@|[a-z0-9.-]{1,200}"')}`,
   ].join('')
 }
 
@@ -345,7 +351,7 @@ export function nodesView(data: {
   const cloudHosts = (data.cloudHosts ?? [])
     .map(
       (host) =>
-        `<section class="panel cloud-host" id="host-${escape(host.name)}" data-state="${escape(host.state)}"><h3>${icon('cloud')}<span class="mono">${escape(host.name)}</span> <small>${escape(host.state)}</small></h3><p>${escape(host.region)} · ${escape(host.size)}${host.address == null ? '' : ` · <span class="mono">${escape(host.address)}</span>`}${host.dnsName == null ? '' : ` · <span class="mono">${escape(host.dnsName)}</span>`}</p>${host.origin == null ? '' : `<p>Serves <a href="${escape(host.origin)}">${escape(host.origin)}</a></p>`}${host.error == null ? '' : `<p class="state-failed">${escape(host.error)}</p>`}${
+        `<section class="panel cloud-host" id="host-${escape(host.name)}" data-state="${escape(host.state)}"><h3>${icon('cloud')}<span class="mono">${escape(host.name)}</span> <small>${escape(host.state)}</small></h3><p>${escape(host.region)} · ${escape(host.size)}${host.address == null ? '' : ` · <span class="mono">${escape(host.address)}</span>`}${host.dnsName == null ? '' : ` · <span class="mono">${escape(host.dnsName)}</span>`}</p>${host.origin == null ? '' : `<p>Serves <a href="${escape(host.origin)}">${escape(host.origin)}</a></p>`}${host.certificate === 'waiting' ? '<p class="notice">Waiting for its certificate: Caddy asks Let’s Encrypt once the DNS name resolves.</p>' : ''}${host.error == null ? '' : `<p class="state-failed">${escape(host.error)}</p>`}${
           data.canChange
             ? `<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div><details><summary>Remove</summary>${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: ['confirm'], className: 'secondary' })}</details>`
             : ''
@@ -356,7 +362,7 @@ export function nodesView(data: {
   const hostAccounts = (data.poolAccounts ?? [])
     .map(
       (account) =>
-        `<details class="add-host" id="add-host-${escape(account.id)}"><summary>On ${escape(account.name)}</summary>${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/hosts', hostFields(account), `${icon('add')} Create host`, { fields: ['account', 'name', 'region', 'size', 'image'] })}</details>`,
+        `<details class="add-host" id="add-host-${escape(account.id)}"><summary>On ${escape(account.name)}</summary>${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/hosts', hostFields(account), `${icon('add')} Create host`, { fields: ['account', 'name', 'region', 'size', 'image', 'dns.domain', 'dns.name'] })}</details>`,
     )
     .join('')
   const hostPanel =

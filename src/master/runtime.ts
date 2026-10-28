@@ -62,6 +62,7 @@ import {
   type CloudAccount,
   type CloudAccountsOptions,
 } from './cloud/accounts.js'
+import { HostDns } from './cloud/dns.js'
 import { CloudHosts, type CloudHostsOptions } from './cloud/hosts.js'
 import { hostView } from './cloudHostsApi.js'
 import { Changes } from './changes.js'
@@ -129,7 +130,13 @@ export interface MasterOptions {
   /** Cloud host internals for tests: the provider, the master's address, timings. */
   cloudHosts?: Pick<
     CloudHostsOptions,
-    'provider' | 'publicAddress' | 'tickMs' | 'linkPort' | 'log'
+    | 'provider'
+    | 'publicAddress'
+    | 'tickMs'
+    | 'settleMs'
+    | 'linkPort'
+    | 'log'
+    | 'trusted'
   >
   /** How the master checks cloud accounts: a fake provider API in tests. */
   cloudAccounts?: Pick<
@@ -529,6 +536,7 @@ export class Master {
         })
         return response.ok ? (await response.text()).trim() : undefined
       },
+      dns: new HostDns(this.database),
       log: (line): void => console.log(line),
       ...options.cloudHosts,
     })

@@ -529,7 +529,15 @@ export function masterPages(
         size: row.size,
         address: row.address,
         origin: row.origin,
-        ...(fqdn(row) == null ? {} : { dnsName: fqdn(row)! }),
+        ...(fqdn(row) == null
+          ? {}
+          : {
+              dnsName: fqdn(row)!,
+              certificate:
+                row.certificate_at == null
+                  ? ('waiting' as const)
+                  : ('trusted' as const),
+            }),
         error: row.error,
       })),
       poolAccounts: await Promise.all(
@@ -539,10 +547,16 @@ export function masterPages(
           .map(async (account) => {
             try {
               const catalog = await master.pools.catalog(account.id)
+              // A DNS listing that fails leaves the form without domains.
+              const domains = await (
+                master.cloudHosts.provider(account.id)?.domains?.() ??
+                Promise.resolve([])
+              ).catch((): string[] => [])
               return {
                 id: account.id,
                 name: account.name,
                 ...(catalog == null ? {} : { catalog }),
+                domains,
               }
             } catch (error) {
               return {

@@ -52,6 +52,8 @@ export interface CloudHostRow {
   state: HostState
   error: string | null
   version: string | null
+  /** When its DNS name first answered with a trusted certificate. */
+  certificate_at: number | null
   created_at: number
   updated_at: number
 }
@@ -85,8 +87,12 @@ export interface CloudHostsOptions {
   masterId: string
   /** A DNS step for hosts with a DNS name; none by default. */
   dns?: CloudHostDns
+  /** Whether an origin answers with a certificate this computer trusts. */
+  trusted?: (origin: string) => Promise<boolean>
   linkPort?: number
   tickMs?: number
+  /** How soon a host still being made is reconciled again. */
+  settleMs?: number
   log?: (line: string) => void
 }
 
@@ -107,6 +113,8 @@ export class MissingHost extends Error {
 }
 
 const slug = /^[a-z0-9][a-z0-9-]{0,39}$/
+/** States a host passes through while it is made. */
+const settlingStates: HostState[] = ['creating', 'installing', 'pairing']
 const TAG = 'mason-host'
 /** Hosts are x86-64 Linux droplets. */
 const hostPlatform = 'linux-x64'
@@ -168,7 +176,13 @@ export function asHostInput(value: unknown): HostInput {
       throw new Error(`host.${field} is invalid`)
     return out
   }
-  const dns = input.dns as Record<string, unknown> | undefined
+  // A form's "No DNS" sends no domain.
+  const dns =
+    input.dns == null ||
+    (input.dns as { domain?: unknown }).domain == null ||
+    (input.dns as { domain?: unknown }).domain === ''
+      ? undefined
+      : (input.dns as Record<string, unknown>)
   if (dns != null) {
     if (
       typeof dns.domain !== 'string' ||
@@ -208,6 +222,16 @@ export function fqdn(
   return row.dns_name === '@'
     ? row.dns_domain
     : `${row.dns_name}.${row.dns_domain}`
+}
+
+/** Whether an HTTPS origin answers with a certificate this computer's CAs trust. */
+async function trustedOrigin(origin: string): Promise<boolean> {
+  try {
+    await fetch(origin, { method: 'HEAD', signal: AbortSignal.timeout(10_000) })
+    return true
+  } catch {
+    return false
+  }
 }
 
 export class CloudHosts {
@@ -294,6 +318,11 @@ export class CloudHosts {
       throw new Error(
         'A cloud host installs the master’s release from GitHub, and this master has none',
       )
+    if (input.dns != null) {
+      const domains = (await this.provider(input.account)?.domains?.()) ?? []
+      if (!domains.includes(input.dns.domain))
+        throw new Error(`The account's DNS holds no domain ${input.dns.domain}`)
+    }
     const now = this.now()
     this.db
       .prepare("DELETE FROM cloud_hosts WHERE name=? AND state='removed'")
@@ -329,6 +358,7 @@ export class CloudHosts {
   async stop(): Promise<void> {
     this.stopped = true
     clearInterval(this.timer)
+    for (const timer of this.settling.values()) clearTimeout(timer)
     await Promise.allSettled([...this.running.values()])
   }
 
@@ -348,8 +378,22 @@ export class CloudHosts {
     if (running != null) return running
     const work = this.pass(name).finally(() => this.running.delete(name))
     this.running.set(name, work)
+    // A host still being made is checked again soon, not at the next tick.
+    void work.then(
+      (row) => {
+        clearTimeout(this.settling.get(name))
+        if (this.stopped || !settlingStates.includes(row.state)) return
+        const timer = setTimeout(() => {
+          void this.reconcile(name).catch(() => undefined)
+        }, this.options.settleMs ?? 20_000)
+        timer.unref()
+        this.settling.set(name, timer)
+      },
+      () => undefined,
+    )
     return work
   }
+  private readonly settling = new Map<string, NodeJS.Timeout>()
 
   private async pass(name: string): Promise<CloudHostRow> {
     const row = this.get(name)
@@ -407,7 +451,10 @@ export class CloudHosts {
       await this.host(this.get(name)!)
       // 5. The master's host settings point at it, unless an administrator chose otherwise.
       const ready = this.get(name)!
-      if (ready.state === 'ready') await this.settings(ready)
+      if (ready.state === 'ready') {
+        await this.settings(ready)
+        await this.certificate(ready)
+      }
       return this.get(name)!
     } catch (error) {
       const message =
@@ -527,6 +574,16 @@ export class CloudHosts {
         `Host ${row.name} is not paired yet: ${(error as Error).message}`,
       )
     }
+  }
+
+  /** Notes when the host's DNS name first answers with a trusted certificate. */
+  private async certificate(row: CloudHostRow): Promise<void> {
+    const name = fqdn(row)
+    if (name == null || row.certificate_at != null) return
+    const trusted = await (this.options.trusted ?? trustedOrigin)(
+      `https://${name}`,
+    )
+    if (trusted) this.update(row.name, { certificate_at: this.now() })
   }
 
   /** The origin this host serves: its DNS name, or its address. */

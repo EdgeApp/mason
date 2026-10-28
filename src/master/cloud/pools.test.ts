@@ -65,6 +65,7 @@ describe('Cloud node pools', function () {
       coWorker: true,
       masterOptions: {
         now: () => Date.now() + offset,
+        cloudHosts: { provider: () => cloud },
         cloud: {
           provider: () => cloud,
           publicAddress: async () => address,

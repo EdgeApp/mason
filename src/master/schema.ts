@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 12
+export const MASTER_SCHEMA = 13
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -367,6 +367,10 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       error TEXT, version TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     ) STRICT;
     CREATE UNIQUE INDEX cloud_hosts_name ON cloud_hosts(name) WHERE state<>'removed';`)
+  },
+  // 13: when a host's DNS name first answered with a trusted certificate.
+  (db): void => {
+    db.exec('ALTER TABLE cloud_hosts ADD COLUMN certificate_at INTEGER;')
   },
 ]
 

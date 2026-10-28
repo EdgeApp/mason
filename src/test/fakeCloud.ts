@@ -219,6 +219,72 @@ export class FakeCloud implements CloudProvider {
     this.deletedFirewalls.push(name)
   }
 
+  /** The domains the fake account's DNS holds. */
+  readonly domains_ = new Set<string>()
+  /** A records by domain: id, record name and address. */
+  private readonly dns = new Map<
+    string,
+    Array<{ id: string; name: string; data: string }>
+  >()
+  private nextRecord = 1
+  /** Changing DNS calls, in order. */
+  readonly dnsCalls: string[] = []
+  async domains(): Promise<string[]> {
+    return [...this.domains_]
+  }
+  /** Records for a full name, as the provider lists them. */
+  records(domain: string, fqdn: string): Array<{ id: string; data: string }> {
+    return (this.dns.get(domain) ?? [])
+      .filter(
+        (record) =>
+          (record.name === '@' ? domain : `${record.name}.${domain}`) === fqdn,
+      )
+      .map((record) => ({ id: record.id, data: record.data }))
+  }
+  async dnsRecords(
+    domain: string,
+    fqdn: string,
+  ): Promise<Array<{ id: string; data: string }>> {
+    this.dnsCalls.push('list')
+    return this.records(domain, fqdn)
+  }
+  /** Adds a record as a person would, outside Mason. */
+  addRecord(domain: string, name: string, data: string): string {
+    const id = String(this.nextRecord++)
+    this.dns.set(domain, [...(this.dns.get(domain) ?? []), { id, name, data }])
+    return id
+  }
+  setRecord(domain: string, id: string, data: string): void {
+    for (const record of this.dns.get(domain) ?? [])
+      if (record.id === id) record.data = data
+  }
+  removeRecord(domain: string, id: string): void {
+    this.dns.set(
+      domain,
+      (this.dns.get(domain) ?? []).filter((record) => record.id !== id),
+    )
+  }
+  async createDnsRecord(
+    domain: string,
+    name: string,
+    data: string,
+  ): Promise<{ id: string; data: string }> {
+    this.dnsCalls.push(`create ${name} ${data}`)
+    return { id: this.addRecord(domain, name, data), data }
+  }
+  async updateDnsRecord(
+    domain: string,
+    id: string,
+    data: string,
+  ): Promise<void> {
+    this.dnsCalls.push(`update ${id} ${data}`)
+    this.setRecord(domain, id, data)
+  }
+  async deleteDnsRecord(domain: string, id: string): Promise<void> {
+    this.dnsCalls.push(`delete ${id}`)
+    this.removeRecord(domain, id)
+  }
+
   /** Stops every machine still running. */
   async close(): Promise<void> {
     for (const machine of this.machines.values()) await machine.node?.close()

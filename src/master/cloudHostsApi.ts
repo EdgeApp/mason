@@ -9,6 +9,13 @@ export function hostView(row: CloudHostRow): Record<string, unknown> {
   const out: Record<string, unknown> = {
     ...row,
     pairing: row.pairing_secret != null,
+    // A host with a DNS name waits for Caddy's Let's Encrypt certificate.
+    certificate:
+      row.dns_domain == null
+        ? 'internal'
+        : row.certificate_at == null
+          ? 'waiting'
+          : 'trusted',
   }
   delete out.pairing_hash
   delete out.pairing_secret
