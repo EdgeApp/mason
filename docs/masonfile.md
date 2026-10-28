@@ -178,13 +178,15 @@ selector.
 ### Cloud node types
 
 A node type can also be backed by a **cloud pool** an administrator configures
-on the master. When a stage needs that type and no node of it is free, the
-master starts a cloud machine, which then behaves like an in-house computer
+on the master. Each pool names a **cloud account** added on the master's Cloud
+page. When a stage needs that type and no node of it is free, the master starts
+a cloud machine in that account, which then behaves like an in-house computer
 until it has been idle for an hour:
 
 ```json
 {
   "type": "linux-cloud",
+  "account": "digitalocean",
   "provider": "digitalocean",
   "region": "sfo3",
   "size": "s-4vcpu-8gb",
@@ -234,8 +236,12 @@ until it has been idle for an hour:
   running stages finish, idle machines retire, and stages that need a cloud
   type wait with the reason "monthly cloud budget reached" until the next
   month or a raised cap.
-- DigitalOcean (Linux) is the first provider. The provider credential lives
-  only in the master's settings.
+- DigitalOcean (Linux) is the first provider. A provider's API key is a cloud
+  account on the master: an administrator or manager adds it on the Cloud page
+  (or with `mason cloud accounts add --key-stdin`), where Mason checks it and
+  shows the account's state. The key is kept only in the master's database and
+  its encrypted backups, and is never shown again; an account a pool uses
+  cannot be removed.
 
 ## 3. Workflows
 

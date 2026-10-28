@@ -3,6 +3,7 @@ import { createCertificate, certificateHash } from '../../node/certificate.js'
 import type { MasterDatabase } from '../database.js'
 import type { NodeRegistry } from '../nodes.js'
 import type { SettingsArea, SettingValue } from '../settings.js'
+import type { CloudAccount } from './accounts.js'
 import {
   DigitalOcean,
   ProviderError,
@@ -15,6 +16,8 @@ export interface PoolSetting {
   name: string
   /** The node type its machines serve. */
   type: string
+  /** The cloud account its machines are made in. */
+  account: string
   provider: 'digitalocean'
   region: string
   size: string
@@ -28,7 +31,6 @@ export interface PoolSetting {
 }
 
 export interface CloudSetting {
-  token?: string
   /** Dollars per calendar month across all pools. */
   monthlyBudget: number
   pools: PoolSetting[]
@@ -36,7 +38,7 @@ export interface CloudSetting {
 
 const slug = /^[a-z0-9][a-z0-9-]{0,39}$/
 
-function asPool(value: unknown): PoolSetting {
+function asPool(value: unknown, accounts: CloudAccount[]): PoolSetting {
   const input = (value ?? {}) as Record<string, unknown>
   const text = (
     field: string,
@@ -65,6 +67,15 @@ function asPool(value: unknown): PoolSetting {
   }
   if ((input.provider ?? 'digitalocean') !== 'digitalocean')
     throw new Error('pool.provider is digitalocean')
+  const account = accounts.find((entry) => entry.id === input.account)
+  if (account == null)
+    throw new Error(
+      typeof input.account === 'string'
+        ? `pool.account: no cloud account named ${input.account}`
+        : 'pool.account names a cloud account',
+    )
+  if (account.provider !== 'digitalocean')
+    throw new Error(`pool.account ${account.id} is not a DigitalOcean account`)
   const labels = input.labels ?? []
   if (
     !Array.isArray(labels) ||
@@ -74,6 +85,7 @@ function asPool(value: unknown): PoolSetting {
   return {
     name: text('name', slug),
     type: text('type', slug),
+    account: account.id,
     provider: 'digitalocean',
     region: text('region', /^[a-z0-9-]{2,20}$/),
     size: text('size', /^[a-z0-9-]{2,40}$/),
@@ -86,46 +98,43 @@ function asPool(value: unknown): PoolSetting {
   }
 }
 
-/** The `cloud` settings area: the provider token (write-only), the monthly budget and the pools. */
-export const cloudArea: SettingsArea = {
-  validate: (input, previous): SettingValue => {
-    const value = (input ?? {}) as Record<string, unknown>
-    let token: unknown = value.token
-    if (
-      token != null &&
-      typeof token === 'object' &&
-      (token as { keep?: unknown }).keep === true
-    ) {
-      token = previous?.token
-      if (token == null) throw new Error('No stored token to keep')
-    }
-    if (
-      token != null &&
-      (typeof token !== 'string' || !/^[A-Za-z0-9_-]{20,200}$/.test(token))
-    )
-      throw new Error('token is a DigitalOcean API token')
-    const budget = value.monthlyBudget ?? 200
-    if (typeof budget !== 'number' || !Number.isFinite(budget) || budget < 0)
-      throw new Error('monthlyBudget is a number of dollars')
-    if (value.pools != null && !Array.isArray(value.pools))
-      throw new Error('pools is a list')
-    const pools = ((value.pools ?? []) as unknown[]).map(asPool)
-    const names = new Set<string>()
-    for (const pool of pools) {
-      if (names.has(pool.name))
-        throw new Error(`Pool ${pool.name} is listed twice`)
-      names.add(pool.name)
-    }
-    if (pools.length > 0 && token == null)
-      throw new Error('Pools need a provider token')
-    return { ...(token == null ? {} : { token }), monthlyBudget: budget, pools }
-  },
-  secrets: ['token'],
+/**
+ * The `cloud` settings area: the monthly budget and the pools, each naming
+ * one of `accounts`. Provider keys live in cloud accounts, not here.
+ */
+export function cloudArea(accounts: () => CloudAccount[]): SettingsArea {
+  return {
+    validate: (input): SettingValue => {
+      const value = (input ?? {}) as Record<string, unknown>
+      if (value.token != null)
+        throw new Error(
+          'Provider keys are cloud accounts now: add the token on the Cloud page and name its account in each pool',
+        )
+      const budget = value.monthlyBudget ?? 200
+      if (typeof budget !== 'number' || !Number.isFinite(budget) || budget < 0)
+        throw new Error('monthlyBudget is a number of dollars')
+      if (value.pools != null && !Array.isArray(value.pools))
+        throw new Error('pools is a list')
+      const known = accounts()
+      const pools = ((value.pools ?? []) as unknown[]).map((pool) =>
+        asPool(pool, known),
+      )
+      const names = new Set<string>()
+      for (const pool of pools) {
+        if (names.has(pool.name))
+          throw new Error(`Pool ${pool.name} is listed twice`)
+        names.add(pool.name)
+      }
+      return { monthlyBudget: budget, pools }
+    },
+  }
 }
 
 interface MachineRow {
   id: number
   pool: string
+  /** The cloud account it was made in. */
+  account: string | null
   provider_id: string | null
   address: string | null
   port: number | null
@@ -151,7 +160,9 @@ export interface PoolsOptions {
   registry: NodeRegistry
   /** The `cloud` setting. */
   setting: () => CloudSetting | undefined
-  /** A provider for a token; DigitalOcean by default. */
+  /** A cloud account's key, by its ID. */
+  accountKey: (account: string) => string | undefined
+  /** A provider for a key; DigitalOcean by default. */
   provider?: (token: string) => CloudProvider
   /** Whether a worker is running or preparing a stage. */
   busy: (fingerprint: string) => boolean
@@ -206,7 +217,8 @@ export class Pools {
     { until: number; reason: string }
   >()
   private readonly retiring = new Set<number>()
-  private firewallFor: string | undefined
+  /** The address each account's firewall admits, by account. */
+  private readonly firewallFor = new Map<string, string>()
   private providers = new Map<string, CloudProvider>()
 
   constructor(private readonly options: PoolsOptions) {}
@@ -221,8 +233,12 @@ export class Pools {
     this.options.log?.(line)
   }
 
-  private provider(): CloudProvider | undefined {
-    const token = this.options.setting()?.token
+  /** The provider of a cloud account, while the account has a key. */
+  private provider(
+    account: string | null | undefined,
+  ): CloudProvider | undefined {
+    if (account == null) return undefined
+    const token = this.options.accountKey(account)
     if (token == null) return undefined
     let provider = this.providers.get(token)
     if (provider == null) {
@@ -233,6 +249,23 @@ export class Pools {
       this.providers.set(token, provider)
     }
     return provider
+  }
+
+  /** The account a machine belongs to: its own, or its pool's for rows made before accounts. */
+  private accountOf(row: MachineRow): string | undefined {
+    return row.account ?? this.pool(row.pool)?.account
+  }
+  /** Accounts that pools or remaining machines use. */
+  private accounts(): string[] {
+    return [
+      ...new Set([
+        ...this.pools().map((pool) => pool.account),
+        ...this.machines().flatMap((row) => {
+          const account = this.accountOf(row)
+          return account == null ? [] : [account]
+        }),
+      ]),
+    ]
   }
 
   pools(): PoolSetting[] {
@@ -292,20 +325,25 @@ export class Pools {
 
   /** This month's spend: machine time at each size's price, plus snapshot storage. */
   async spend(now = this.now()): Promise<number> {
-    const provider = this.provider()
-    if (provider == null) return 0
     const start = monthStart(now)
     const end = Math.min(now, monthEnd(now))
     let total = 0
     for (const row of this.db
       .prepare(
-        'SELECT size,created_at,destroyed_at FROM cloud_machines WHERE created_at<? AND (destroyed_at IS NULL OR destroyed_at>?)',
+        'SELECT pool,account,size,created_at,destroyed_at FROM cloud_machines WHERE created_at<? AND (destroyed_at IS NULL OR destroyed_at>?)',
       )
       .all(end, start) as Array<{
+      pool: string
+      account: string | null
       size: string
       created_at: number
       destroyed_at: number | null
     }>) {
+      // A machine whose account is gone is priced as nothing: its key cannot be asked.
+      const provider = this.provider(
+        row.account ?? this.pool(row.pool)?.account,
+      )
+      if (provider == null) continue
       const hours =
         (Math.min(row.destroyed_at ?? end, end) -
           Math.max(row.created_at, start)) /
@@ -359,6 +397,8 @@ export class Pools {
     if (backoff != null && backoff.until > this.now()) return backoff.reason
     const budget = this.budgetReason()
     if (budget != null) return budget
+    if (this.provider(pool.account) == null)
+      return `The ${pool.name} pool's cloud account ${pool.account} is gone: add it on the Cloud page`
     const release = this.options.release()
     if (release == null)
       return 'The release store is empty: add the release machines install with mason releases add'
@@ -412,15 +452,15 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
   }
 
   private async create(pool: PoolSetting): Promise<void> {
-    const provider = this.provider()
+    const provider = this.provider(pool.account)
     if (provider == null) return
     const now = this.now()
     const id = Number(
       this.db
         .prepare(
-          "INSERT INTO cloud_machines(pool,state,size,created_at) VALUES(?,'creating',?,?)",
+          "INSERT INTO cloud_machines(pool,account,state,size,created_at) VALUES(?,?,'creating',?,?)",
         )
-        .run(pool.name, pool.size, now).lastInsertRowid,
+        .run(pool.name, pool.account, pool.size, now).lastInsertRowid,
     )
     const name = `mason-${pool.name}-${id}`
     const certificate = createCertificate([name])
@@ -438,9 +478,11 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
       // The pool's snapshot when the provider still has it; the base image otherwise.
       let snapshot = this.db
         .prepare(
-          'SELECT id,provider_id FROM cloud_snapshots WHERE pool=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1',
+          'SELECT id,provider_id FROM cloud_snapshots WHERE pool=? AND (account IS NULL OR account=?) AND deleted_at IS NULL ORDER BY id DESC LIMIT 1',
         )
-        .get(pool.name) as { id: number; provider_id: string } | undefined
+        .get(pool.name, pool.account) as
+        | { id: number; provider_id: string }
+        | undefined
       if (
         snapshot != null &&
         !(await provider.hasSnapshot(snapshot.provider_id))
@@ -580,7 +622,7 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
    * previous snapshot.
    */
   async retire(row: MachineRow, why: string): Promise<void> {
-    const provider = this.provider()
+    const provider = this.provider(this.accountOf(row))
     if (
       provider == null ||
       row.provider_id == null ||
@@ -631,10 +673,11 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
             .all(row.pool) as Array<{ id: number; provider_id: string }>
           this.db
             .prepare(
-              'INSERT INTO cloud_snapshots(pool,provider_id,source_machine,size_gb,version,created_at) VALUES(?,?,?,?,?,?)',
+              'INSERT INTO cloud_snapshots(pool,account,provider_id,source_machine,size_gb,version,created_at) VALUES(?,?,?,?,?,?,?)',
             )
             .run(
               row.pool,
+              this.accountOf(row) ?? null,
               snapshot.id,
               row.id,
               snapshot.sizeGb,
@@ -678,14 +721,18 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
   }
 
   private async pass(): Promise<void> {
-    const provider = this.provider()
-    if (provider == null || this.stopped) return
+    if (this.stopped || this.accounts().length === 0) return
     this.spent = { at: this.now(), dollars: await this.spend() }
     const overBudget = this.budgetReason() != null
-    await this.firewall(provider)
+    for (const account of new Set(this.pools().map((pool) => pool.account))) {
+      const provider = this.provider(account)
+      if (provider != null) await this.firewall(account, provider)
+    }
     for (const row of this.machines()) {
       if (this.stopped) return
       if (row.state === 'creating') continue
+      const provider = this.provider(this.accountOf(row))
+      if (provider == null) continue
       if (row.state === 'pairing') {
         await this.pair(row, provider)
         continue
@@ -711,18 +758,23 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
   }
 
   /** The link port admits only the master's current public address. */
-  private async firewall(provider: CloudProvider): Promise<void> {
-    if (this.options.publicAddress == null || this.pools().length === 0) return
+  private async firewall(
+    account: string,
+    provider: CloudProvider,
+  ): Promise<void> {
+    if (this.options.publicAddress == null) return
     const address = await this.options.publicAddress().catch(() => undefined)
-    if (address == null || address === this.firewallFor) return
+    if (address == null || address === this.firewallFor.get(account)) return
     await provider.firewall(
       'mason-pools',
       this.options.linkPort ?? 9310,
       [address],
       TAG,
     )
-    this.firewallFor = address
-    this.log(`Cloud firewall admits the link port from ${address}`)
+    this.firewallFor.set(account, address)
+    this.log(
+      `Cloud firewall of account ${account} admits the link port from ${address}`,
+    )
   }
 
   /**
@@ -731,57 +783,61 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
    * pairing material was never stored).
    */
   async reconcile(): Promise<{ machines: number; snapshots: number }> {
-    const provider = this.provider()
-    if (provider == null) return { machines: 0, snapshots: 0 }
     let machines = 0
     let snapshots = 0
-    const known = new Map(this.machines().map((row) => [row.provider_id, row]))
-    for (const machine of await provider.list(TAG)) {
-      const row = known.get(machine.id)
-      if (row == null) {
-        await provider.destroy(machine.id)
-        machines++
-        this.log(`Destroyed ${machine.name}: the master has no record of it`)
+    for (const account of this.accounts()) {
+      const provider = this.provider(account)
+      if (provider == null) continue
+      const rows = this.machines().filter(
+        (row) => this.accountOf(row) === account,
+      )
+      const known = new Map(rows.map((row) => [row.provider_id, row]))
+      for (const machine of await provider.list(TAG)) {
+        if (known.get(machine.id) == null) {
+          await provider.destroy(machine.id)
+          machines++
+          this.log(`Destroyed ${machine.name}: the master has no record of it`)
+        }
       }
+      for (const row of rows)
+        if (row.state === 'creating' || row.state === 'pairing') {
+          await this.discard(
+            row,
+            provider,
+            'The master restarted while it booted',
+          )
+          machines++
+        } else if (
+          row.provider_id != null &&
+          (await provider.get(row.provider_id)) == null
+        ) {
+          this.db
+            .prepare(
+              "UPDATE cloud_machines SET state='destroyed',destroyed_at=? WHERE id=?",
+            )
+            .run(this.now(), row.id)
+        }
+      const recorded = new Set(
+        (
+          this.db
+            .prepare(
+              'SELECT provider_id FROM cloud_snapshots WHERE deleted_at IS NULL',
+            )
+            .all() as Array<{ provider_id: string }>
+        ).map((row) => row.provider_id),
+      )
+      for (const snapshot of await provider.snapshots())
+        if (
+          snapshot.name.startsWith(SNAPSHOT_PREFIX) &&
+          !recorded.has(snapshot.id)
+        ) {
+          await provider.deleteSnapshot(snapshot.id)
+          snapshots++
+          this.log(
+            `Deleted snapshot ${snapshot.name}: the master has no record of it`,
+          )
+        }
     }
-    for (const row of this.machines())
-      if (row.state === 'creating' || row.state === 'pairing') {
-        await this.discard(
-          row,
-          provider,
-          'The master restarted while it booted',
-        )
-        machines++
-      } else if (
-        row.provider_id != null &&
-        (await provider.get(row.provider_id)) == null
-      ) {
-        this.db
-          .prepare(
-            "UPDATE cloud_machines SET state='destroyed',destroyed_at=? WHERE id=?",
-          )
-          .run(this.now(), row.id)
-      }
-    const recorded = new Set(
-      (
-        this.db
-          .prepare(
-            'SELECT provider_id FROM cloud_snapshots WHERE deleted_at IS NULL',
-          )
-          .all() as Array<{ provider_id: string }>
-      ).map((row) => row.provider_id),
-    )
-    for (const snapshot of await provider.snapshots())
-      if (
-        snapshot.name.startsWith(SNAPSHOT_PREFIX) &&
-        !recorded.has(snapshot.id)
-      ) {
-        await provider.deleteSnapshot(snapshot.id)
-        snapshots++
-        this.log(
-          `Deleted snapshot ${snapshot.name}: the master has no record of it`,
-        )
-      }
     return { machines, snapshots }
   }
 

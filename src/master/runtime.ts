@@ -55,6 +55,11 @@ import {
   type CloudSetting,
   type PoolsOptions,
 } from './cloud/pools.js'
+import {
+  cloudAccountsArea,
+  CloudAccounts,
+  type CloudAccountsOptions,
+} from './cloud/accounts.js'
 import { Changes } from './changes.js'
 import { HostLinks } from './hosts.js'
 import {
@@ -115,6 +120,11 @@ export interface MasterOptions {
     | 'linkPort'
     | 'log'
   >
+  /** How the master checks cloud accounts: a fake provider API in tests. */
+  cloudAccounts?: Pick<
+    CloudAccountsOptions,
+    'fetch' | 'endpoints' | 'timeoutMs'
+  >
 }
 
 /** Merges two method tables; the first wins on a clash. */
@@ -159,6 +169,7 @@ export class Master {
   readonly changes: Changes
   readonly hosts: HostLinks
   readonly pools: Pools
+  readonly cloudAccounts: CloudAccounts
   readonly artifacts: Artifacts
   readonly backups: Backups
   private expiry: NodeJS.Timeout | undefined
@@ -358,7 +369,24 @@ export class Master {
       },
     })
     this.settings.register('host', hostArea)
-    this.settings.register('cloud', cloudArea)
+    this.cloudAccounts = new CloudAccounts({
+      settings: this.settings,
+      now: this.database.now,
+      ...options.cloudAccounts,
+    })
+    this.settings.register(
+      'cloudAccounts',
+      cloudAccountsArea((id) =>
+        this.pools
+          .pools()
+          .filter((pool) => pool.account === id)
+          .map((pool) => `pool ${pool.name}`),
+      ),
+    )
+    this.settings.register(
+      'cloud',
+      cloudArea(() => this.cloudAccounts.all()),
+    )
     this.settings.register('storage', storageArea)
     this.settings.register('signIn', signInArea)
     this.backups = new Backups({
@@ -431,6 +459,8 @@ export class Master {
       registry: this.registry,
       setting: (): CloudSetting | undefined =>
         this.settings.value('cloud') as CloudSetting | undefined,
+      accountKey: (account): string | undefined =>
+        this.cloudAccounts.get(account)?.key,
       busy: (fingerprint): boolean => this.scheduler.busy(fingerprint),
       release: (): string | undefined => this.releases.current(),
       releasePlatforms: (version: string): string[] =>
@@ -854,6 +884,15 @@ export class Master {
       },
       'runtimes.list': () => this.runtimes.list(),
       'cloud.status': () => this.pools.view(),
+      'cloud.accounts.list': () => this.cloudAccounts.list(actor),
+      'cloud.accounts.add': async (args) =>
+        await this.cloudAccounts.add(actor, args),
+      'cloud.accounts.check': async (args) =>
+        await this.cloudAccounts.check(actor, String(args.id ?? '')),
+      'cloud.accounts.remove': async (args): Promise<null> => {
+        await this.cloudAccounts.remove(actor, String(args.id ?? ''))
+        return null
+      },
       'nodes.remove': (args): null => {
         this.registry.remove(String(args.fingerprint ?? ''))
         return null

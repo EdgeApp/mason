@@ -38,6 +38,7 @@ describe('Cloud node pools', function () {
   ): Record<string, unknown> => ({
     name: 'linux-cloud',
     type: 'linux-cloud',
+    account: 'do',
     region: 'nyc3',
     size: 's-1vcpu-1gb',
     image: 'ubuntu-24-04-x64',
@@ -166,58 +167,78 @@ export async function work(ctx: Stage) {
       )
     })
 
-  it('U11.1 validates pools and keeps the provider token on the master', async () => {
+  it('U11.1 validates pools against cloud accounts and keeps the provider key on the master', async () => {
     const settings = c.master.master!.settings
     await assert.rejects(
       settings.set(admin, 'cloud', { pools: [pool()] }),
-      /provider token/,
+      /no cloud account named do/,
+    )
+    await settings.set(admin, 'cloudAccounts', {
+      accounts: [
+        {
+          id: 'do',
+          name: 'DigitalOcean',
+          provider: 'digitalocean',
+          key: TOKEN,
+        },
+        {
+          id: 'mac',
+          name: 'NoMac',
+          provider: 'nomac',
+          key: 'nmk_' + 'a'.repeat(40),
+        },
+      ],
+    })
+    await assert.rejects(
+      settings.set(admin, 'cloud', { pools: [pool({ account: undefined })] }),
+      /pool.account names a cloud account/,
     )
     await assert.rejects(
-      settings.set(admin, 'cloud', {
-        token: TOKEN,
-        pools: [pool({ maxNodes: 0 })],
-      }),
+      settings.set(admin, 'cloud', { pools: [pool({ account: 'mac' })] }),
+      /not a DigitalOcean account/,
+    )
+    await assert.rejects(
+      settings.set(admin, 'cloud', { pools: [pool({ maxNodes: 0 })] }),
       /maxNodes/,
     )
     await assert.rejects(
-      settings.set(admin, 'cloud', {
-        token: TOKEN,
-        pools: [pool({ provider: 'aws' })],
-      }),
+      settings.set(admin, 'cloud', { pools: [pool({ provider: 'aws' })] }),
       /digitalocean/,
     )
     await assert.rejects(
-      settings.set(admin, 'cloud', { token: TOKEN, pools: [pool(), pool()] }),
+      settings.set(admin, 'cloud', { pools: [pool(), pool()] }),
       /twice/,
     )
     await assert.rejects(
-      settings.set(admin, 'cloud', { token: 'short', pools: [] }),
-      /token/,
+      settings.set(admin, 'cloud', { token: TOKEN, pools: [] }),
+      /cloud accounts now/,
     )
-    await assert.rejects(
-      settings.set(admin, 'cloud', { token: { keep: true }, pools: [] }),
-      /No stored token/,
-    )
-    await settings.set(admin, 'cloud', {
-      token: TOKEN,
-      monthlyBudget: 200,
-      pools: [pool()],
-    })
+    await settings.set(admin, 'cloud', { monthlyBudget: 200, pools: [pool()] })
     const shown = settings.get(admin, 'cloud') as Json
-    assert.deepEqual(shown.token, { set: true })
-    await settings.set(admin, 'cloud', {
-      token: { keep: true },
-      monthlyBudget: 200,
-      pools: [pool()],
-    })
+    assert.equal(shown.token, undefined)
+    assert.equal(shown.pools[0].account, 'do')
+    // The account a pool uses cannot be removed.
+    await assert.rejects(
+      settings.set(admin, 'cloudAccounts', {
+        accounts: [
+          { id: 'mac', name: 'NoMac', provider: 'nomac', key: { keep: true } },
+        ],
+      }),
+      /Account do is used by pool linux-cloud/,
+    )
     const db = c.master.master!.database.db
     const logged = JSON.stringify(db.prepare('SELECT * FROM change_log').all())
     assert(!logged.includes(TOKEN))
     assert(!JSON.stringify(c.master.master!.changes.snapshot()).includes(TOKEN))
+    assert(
+      !JSON.stringify(settings.get(admin, 'cloudAccounts')).includes(TOKEN),
+    )
   })
 
   it('U11.2/U11.3 makes one machine per demand up to maxNodes and pairs it by the master’s certificate and secret', async () => {
-    // Two branches, so the runs do not queue behind each other.
+    // Two branches, so the runs do not queue behind each other; a slow boot
+    // keeps the first machine pairing while the second stage asks for one.
+    cloud.bootDelayMs = 3000
     const [first, second] = [await run(), await run('other')]
     await wait(() => machines().length === 1, 10_000, 'a machine').catch(
       (error: Error) => {
@@ -252,6 +273,7 @@ export async function work(ctx: Stage) {
       waiting.reason,
       /Waiting for a linux-cloud machine to start|at its 1-machine limit/,
     )
+    cloud.bootDelayMs = 0
     const done = await finish(first)
     assert.equal(
       done.status,
@@ -581,7 +603,6 @@ export async function work(ctx: Stage) {
     const spend = await pools.spend(now)
     assert(spend >= 0.1, String(spend))
     await c.master.master!.settings.set(admin, 'cloud', {
-      token: { keep: true },
       monthlyBudget: spend / 0.85,
       pools: [pool()],
     })
@@ -592,7 +613,6 @@ export async function work(ctx: Stage) {
       'the warning',
     )
     await c.master.master!.settings.set(admin, 'cloud', {
-      token: { keep: true },
       monthlyBudget: 0.05,
       pools: [pool()],
     })
@@ -614,7 +634,6 @@ export async function work(ctx: Stage) {
     )
     // Raising the cap resumes creation for the waiting stage.
     await c.master.master!.settings.set(admin, 'cloud', {
-      token: { keep: true },
       monthlyBudget: 200,
       pools: [pool()],
     })

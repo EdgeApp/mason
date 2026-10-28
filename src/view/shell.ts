@@ -84,6 +84,14 @@ const rail: RailItem[] = [
     node: 'master',
   },
   {
+    key: 'cloud',
+    href: '/cloud',
+    label: 'Cloud',
+    icon: 'cloud',
+    role: 'manager',
+    node: 'master',
+  },
+  {
     key: 'people',
     href: '/people',
     label: 'People',

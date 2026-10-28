@@ -11,6 +11,7 @@ import {
   nodesView,
   peopleView,
   projectView,
+  cloudView,
   settingsView,
   wizardView,
   type NodeRow,
@@ -541,6 +542,14 @@ export function masterPages(
           }),
       ...(repository == null ? {} : { release: { repository, version } }),
       canChange: can(sessionActor(current), 'nodes.change'),
+    })
+  })
+  guarded('/cloud', 'settings.read', 'Cloud', 'cloud', async (current) => {
+    const actor = sessionActor(current)
+    return cloudView({
+      accounts: await master.cloudAccounts.checked(actor),
+      canChange: can(actor, 'settings.change'),
+      now: master.database.now(),
     })
   })
   guarded('/settings', 'settings.read', 'Settings', 'settings', (current) => {

@@ -110,6 +110,8 @@ const components = `.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,
 .project header h2{margin:0;font-size:18px;overflow-wrap:anywhere}
 .project header h2 a{color:var(--color-text);text-decoration:none}
 .project .meta{display:flex;gap:16px;flex-wrap:wrap;margin-top:6px;color:var(--color-text-muted);font-size:12px}
+.panel .actions>form+form{margin-top:0}
+.facts{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 16px;margin:8px 0}.facts dt{color:var(--color-text-muted)}.facts dd{margin:0;overflow-wrap:anywhere}
 .project .meta .mono{color:var(--color-text)}
 .project .apps{padding:8px 16px 16px}
 .project .apps h3{font:500 11px/14px var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--color-text-muted);margin:8px 0}
