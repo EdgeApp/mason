@@ -520,6 +520,8 @@ export class Projects {
         .run(app, ...input.platforms)
       this.master.audit(actor, 'project.app', `${slug}:${input.bundleId}`)
       this.master.change('app', app)
+      // The host learns an app's project from the project's project_apps.
+      this.master.change('project', slug)
       return this.get(slug).apps.find((item) => item.id === app)!
     })
   }
