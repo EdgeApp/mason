@@ -162,7 +162,8 @@ pre.log.wrap{white-space:pre-wrap}pre.log .line{display:block;padding:0 12px 0 6
 .stage-list input,.stage-list select{max-width:none;margin-bottom:8px}.stage-list .tree{list-style:none;margin:0;padding:0}.stage-list .tree a{display:flex;gap:8px;align-items:center;padding:6px;border-radius:var(--radius);color:var(--color-text);text-decoration:none}.stage-list .tree a[aria-current=true]{background:var(--color-panel-low);box-shadow:inset 3px 0 0 var(--color-accent)}.stage-list .tree small{margin:0 0 0 auto}
 .history tr.current td{background:var(--color-panel-low)}.chips-cell span{margin-right:3px}
 ul.plain{list-style:none;padding:0;margin:0 0 12px}ul.checklist li{display:flex;align-items:center;justify-content:flex-start;gap:8px;padding:4px 0}.panel form+h3,.panel form+form,.panel form+.actions{margin-top:20px}.approval{border:1px solid var(--color-border);border-radius:var(--radius);padding:12px;margin-bottom:12px;background:var(--color-warning-soft)}.approval form{display:inline-block;margin-right:8px}
-details.request{position:relative}details.request>summary{list-style:none}details.request>.panel{position:absolute;right:0;top:44px;width:340px;z-index:5}`
+details.request{position:relative}details.request>summary{list-style:none}
+details.reveal>summary{list-style:none;display:inline-flex}details.reveal>summary::-webkit-details-marker{display:none}details.reveal[open]>summary{display:none}details.request>.panel{position:absolute;right:0;top:44px;width:340px;z-index:5}`
 
 /** The tester catalog, install and device pages: phone-first lists. */
 const catalog = `.platforms{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--color-border-strong);border-radius:var(--radius);background:var(--color-panel)}

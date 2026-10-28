@@ -7,11 +7,13 @@ import {
   X509Certificate,
 } from 'node:crypto'
 import {
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -84,6 +86,28 @@ export const runTool: Tool = async (file, args, options = {}) =>
     )
     child.stdin?.end(options.input ?? '')
   })
+
+/**
+ * Runs a tool whose arguments name `/dev/stdin` with its input in a private
+ * file instead: Node hands a child its stdin as a socket on Linux, which
+ * `/dev/stdin` cannot open. The file is removed when the tool ends.
+ */
+export async function fileInput(
+  args: string[],
+  input: Buffer | string,
+  scratch: string,
+  run: (args: string[]) => Promise<Buffer>,
+): Promise<Buffer> {
+  mkdirSync(scratch, { recursive: true, mode: 0o700 })
+  const dir = mkdtempSync(path.join(scratch, 'input-'))
+  try {
+    const file = path.join(dir, 'input')
+    writeFileSync(file, input, { mode: 0o600 })
+    return await run(args.map((arg) => (arg === '/dev/stdin' ? file : arg)))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
 
 /** The kind a certificate's common name says it is. */
 export function kindOf(commonName: string): CertificateKind {
@@ -197,11 +221,26 @@ export class Certificates {
     input?: Buffer | string,
     env?: NodeJS.ProcessEnv,
   ): Promise<Buffer> {
-    return await (this.options.tool ?? runTool)(
-      this.options.openssl ?? 'openssl',
-      args,
-      { ...(input == null ? {} : { input }), ...(env == null ? {} : { env }) },
-    )
+    const run = async (
+      list: string[],
+      stdin: Buffer | string | undefined,
+    ): Promise<Buffer> =>
+      await (this.options.tool ?? runTool)(
+        this.options.openssl ?? 'openssl',
+        list,
+        {
+          ...(stdin == null ? {} : { input: stdin }),
+          ...(env == null ? {} : { env }),
+        },
+      )
+    return input != null && args.includes('/dev/stdin')
+      ? await fileInput(
+          args,
+          input,
+          this.options.scratch ?? tmpdir(),
+          async (list) => await run(list, undefined),
+        )
+      : await run(args, input)
   }
 
   list(): CertificateView[] {

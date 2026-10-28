@@ -619,39 +619,87 @@ export function masterPages(
       now: master.database.now(),
     })
   })
-  guarded('/settings', 'settings.read', 'Settings', 'settings', (current) => {
-    const actor = sessionActor(current)
-    const apple = master.apple.status()
-    return settingsView({
-      areas: master.settings
-        .names()
-        .filter((name) => name !== 'backup')
-        .map((name) => {
-          try {
-            return { name, value: master.settings.get(actor, name) }
-          } catch (error) {
-            return { name, value: undefined, error: (error as Error).message }
-          }
-        }),
-      apple: {
-        signedIn: apple.state === 'signedIn',
-        needsCode: apple.state === 'needsCode',
-        ...(apple.appleId == null ? {} : { appleId: apple.appleId }),
-        ...(apple.notice == null ? {} : { notice: apple.notice }),
-      },
-      keys: can(actor, 'keys.read')
-        ? master.keys.list().map((key) => ({
-            id: key.id,
-            name: key.name,
-            role: key.role,
-            createdAt: key.createdAt,
-            revoked: key.revoked,
-          }))
-        : [],
-      canChange: can(actor, 'settings.change'),
-      canRevoke: can(actor, 'keys.revoke'),
-    })
-  })
+  guarded(
+    '/settings',
+    'settings.read',
+    'Settings',
+    'settings',
+    async (current) => {
+      const actor = sessionActor(current)
+      const apple = master.apple.status()
+      // With the Apple ID signed in, the teams it can set up signing for.
+      const stored = (
+        (master.settings.value('apple') ?? {}) as {
+          teams?: Record<string, { keyId: string; name?: string }>
+        }
+      ).teams
+      const configured = Object.entries(stored ?? {}).map(([id, key]) => {
+        const certificate = master.appleSigning.certificates.current(
+          id,
+          'distribution',
+        )
+        return {
+          id,
+          name: key.name ?? id,
+          keyId: key.keyId,
+          ...(certificate == null
+            ? {}
+            : {
+                certificate: {
+                  name: certificate.name,
+                  expiresAt: certificate.expiresAt,
+                },
+              }),
+        }
+      })
+      const setup =
+        apple.state !== 'signedIn'
+          ? undefined
+          : await master.appleSetup.teams().then(
+              (teams) => ({
+                keyName: master.appleSetup.keyName,
+                teams,
+                configured,
+              }),
+              (error: unknown) => ({
+                keyName: master.appleSetup.keyName,
+                teams: [],
+                configured,
+                error: (error as Error).message,
+              }),
+            )
+      return settingsView({
+        areas: master.settings
+          .names()
+          .filter((name) => name !== 'backup')
+          .map((name) => {
+            try {
+              return { name, value: master.settings.get(actor, name) }
+            } catch (error) {
+              return { name, value: undefined, error: (error as Error).message }
+            }
+          }),
+        apple: {
+          signedIn: apple.state === 'signedIn',
+          needsCode: apple.state === 'needsCode',
+          ...(apple.appleId == null ? {} : { appleId: apple.appleId }),
+          ...(apple.notice == null ? {} : { notice: apple.notice }),
+          ...(setup == null ? {} : { setup }),
+        },
+        keys: can(actor, 'keys.read')
+          ? master.keys.list().map((key) => ({
+              id: key.id,
+              name: key.name,
+              role: key.role,
+              createdAt: key.createdAt,
+              revoked: key.revoked,
+            }))
+          : [],
+        canChange: can(actor, 'settings.change'),
+        canRevoke: can(actor, 'keys.revoke'),
+      })
+    },
+  )
   guarded('/people', 'people.read', 'People', 'people', (current) => {
     const actor = sessionActor(current)
     return peopleView({

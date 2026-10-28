@@ -9,10 +9,12 @@ import {
   X509Certificate,
 } from 'node:crypto'
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import path from 'node:path'
@@ -32,7 +34,7 @@ import {
   testflight,
   type DistributeContext,
 } from '../worker/apple/distribute.js'
-import { matchDecrypt, kindOf } from './certificates.js'
+import { fileInput, matchDecrypt, kindOf } from './certificates.js'
 import {
   AppStoreConnect,
   AppleApiError,
@@ -953,5 +955,40 @@ describe('Apple on the master', function () {
       }),
       /endpoints\.api is a URL/,
     )
+  })
+})
+
+describe('OpenSSL input', () => {
+  it('U14.2 an argument naming /dev/stdin reads the input from a private file, removed afterwards', async () => {
+    const scratch = path.join(root('openssl-'), 'scratch')
+    let seen: { file: string; text: string; mode: number } | undefined
+    const out = await fileInput(
+      ['req', '-new', '-key', '/dev/stdin', '-subj', '/CN=x'],
+      'PRIVATE KEY TEXT',
+      scratch,
+      async (args) => {
+        const file = args[3]!
+        assert.notEqual(file, '/dev/stdin')
+        assert.deepEqual(args.slice(0, 3), ['req', '-new', '-key'])
+        seen = {
+          file,
+          text: readFileSync(file, 'utf8'),
+          mode: statSync(path.dirname(file)).mode & 0o777,
+        }
+        return Buffer.from('csr')
+      },
+    )
+    assert.equal(out.toString(), 'csr')
+    assert.equal(seen!.text, 'PRIVATE KEY TEXT')
+    assert.equal(seen!.mode, 0o700)
+    assert(!existsSync(seen!.file))
+    await assert.rejects(
+      fileInput(['x', '/dev/stdin'], 'k', scratch, async (args) => {
+        seen = { file: args[1]!, text: '', mode: 0 }
+        throw new Error('tool failed')
+      }),
+      /tool failed/,
+    )
+    assert(!existsSync(seen!.file), 'removed after a failure too')
   })
 })

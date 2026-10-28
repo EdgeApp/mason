@@ -471,6 +471,29 @@ export function nodesView(data: {
 }
 
 /** Settings: every area the master keeps, edited as JSON with secrets write-only, plus the Apple ID session. */
+/** The teams signing is set up for, and the form for the others (or to check again). */
+function signing(
+  setup: NonNullable<Parameters<typeof settingsView>[0]['apple']['setup']>,
+): string {
+  if (setup.error != null)
+    return `<p class="state-failed">${escape(setup.error)}</p>`
+  const done = new Set(setup.configured.map((team) => team.id))
+  const status = setup.configured
+    .map(
+      (team) =>
+        `<p class="state-succeeded">${icon('check')} Signing is set up for ${escape(team.name)} (<span class="mono">${escape(team.id)}</span>): App Store Connect API key <span class="mono">${escape(setup.keyName)}</span> (<span class="mono">${escape(team.keyId)}</span>), ${team.certificate == null ? 'no distribution certificate yet' : `${escape(team.certificate.name)}, expires ${new Date(team.certificate.expiresAt).toISOString().slice(0, 10)}`}.</p>`,
+    )
+    .join('')
+  const options = (teams: Array<{ id: string; name: string }>): string =>
+    `<label for="apple-team">Team</label><select id="apple-team" name="team">${teams.map((team) => `<option value="${escape(team.id)}">${escape(team.name)} (${escape(team.id)})</option>`).join('')}</select>`
+  const open = setup.teams.filter((team) => !done.has(team.id))
+  const intro = `<p>Mason makes the team’s App Store Connect API key <span class="mono">${escape(setup.keyName)}</span> and its distribution certificate, and keeps them.${setup.configured.length === 0 ? ' No team is set up yet.' : ''}</p>`
+  if (open.length > 0)
+    return `${status}${intro}${apiForm('/api/v2/apple/setup', options(open), `${icon('key')} Set up signing`, { fields: ['team'], then: 'reload' })}`
+  // Every team is set up: checking again keeps what works and replaces what is gone.
+  return `${status}<p>Checking again asks Apple about the team’s key and certificate and replaces only one that is gone; nothing that still works is revoked.</p>${apiForm('/api/v2/apple/setup', options(setup.teams), `${icon('refresh')} Check signing again`, { fields: ['team'], then: 'reload', className: 'secondary' })}`
+}
+
 export function settingsView(data: {
   areas: Array<{ name: string; value: unknown; error?: string }>
   apple: {
@@ -478,6 +501,19 @@ export function settingsView(data: {
     appleId?: string
     needsCode: boolean
     notice?: string
+    /** Setup from the signed-in Apple ID: its teams, or why they could not be read. */
+    setup?: {
+      keyName: string
+      teams: Array<{ id: string; name: string }>
+      /** Teams with a stored key: the key, and the distribution certificate held. */
+      configured: Array<{
+        id: string
+        name: string
+        keyId: string
+        certificate?: { name: string; expiresAt: number }
+      }>
+      error?: string
+    }
   }
   keys: Array<{
     id: string
@@ -506,6 +542,16 @@ export function settingsView(data: {
         }</section>`,
     )
     .join('')
+  // Signed in, the form waits behind "Sign in again", the Apple ID filled in.
+  const signInForm = apiForm(
+    '/api/v2/apple/session',
+    `<label for="apple-id">Apple ID</label><input id="apple-id" name="appleId" type="email" autocomplete="username" required value="${escape(data.apple.appleId ?? '')}"><label for="apple-password">Password</label><input id="apple-password" name="password" type="password" autocomplete="current-password" required>`,
+    `${icon('login')} Sign in`,
+    { fields: ['appleId', 'password'], then: 'reload' },
+  )
+  const signIn = data.apple.signedIn
+    ? `<details class="reveal"><summary class="button secondary">${icon('login')} Sign in again</summary>${signInForm}</details>`
+    : signInForm
   const apple = `<section class="panel" id="apple-session"><h2>${icon('key')}Apple ID for Xcode downloads</h2><p>${data.apple.signedIn ? `Signed in as ${escape(data.apple.appleId ?? 'the Apple ID')}.` : 'Not signed in.'}</p>${data.apple.notice == null ? '' : `<p class="notice">${escape(data.apple.notice)}</p>`}${
     data.canChange
       ? data.apple.needsCode
@@ -515,12 +561,11 @@ export function settingsView(data: {
             `${icon('lock')} Send code to the master`,
             { fields: ['code'], then: 'reload' },
           )
-        : apiForm(
-            '/api/v2/apple/session',
-            '<label for="apple-id">Apple ID</label><input id="apple-id" name="appleId" type="email" autocomplete="username" required><label for="apple-password">Password</label><input id="apple-password" name="password" type="password" autocomplete="current-password" required>',
-            `${icon('login')} Sign in`,
-            { fields: ['appleId', 'password'], then: 'reload' },
-          )
+        : signIn
+      : ''
+  }${
+    data.canChange && data.apple.signedIn && data.apple.setup != null
+      ? `<h3>${icon('key')}Signing for a team</h3>${signing(data.apple.setup)}`
       : ''
   }</section>`
   const keys = `<section class="panel" id="keys"><h2>${icon('key')}API keys</h2><table class="list"><thead><tr><th>Name</th><th>Role</th><th>Created</th><th>State</th><th></th></tr></thead><tbody>${

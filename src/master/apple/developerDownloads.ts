@@ -747,6 +747,36 @@ export class AppleDownloads {
     return this.setState(stored, 'signedIn')
   }
 
+  /**
+   * A request with the signed-in Apple ID's session, for App Store Connect's
+   * website (Apple setup); the session's cookies are kept as they change.
+   */
+  async webRequest(
+    url: string,
+    init: {
+      method?: string
+      headers?: Record<string, string>
+      body?: unknown
+    } = {},
+  ): Promise<Response> {
+    return await this.serial(async () => {
+      const stored = this.load()
+      if (stored?.state !== 'signedIn')
+        throw new AppleError('Sign in with the Apple ID first')
+      const response = await this.request(stored, url, init)
+      const body = await response.text()
+      this.save(stored)
+      // A 204 or 304 takes no body, even an empty one.
+      return new Response(
+        [204, 205, 304].includes(response.status) ? null : body,
+        {
+          status: response.status,
+          headers: response.headers,
+        },
+      )
+    })
+  }
+
   async signOut(): Promise<void> {
     await this.serial(async () => {
       this.releases = undefined

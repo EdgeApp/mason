@@ -863,6 +863,8 @@ describe('Master sign-in, setup, people and permissions', function () {
       'GET /api/v2/apple/session': 'apple.change',
       'POST /api/v2/apple/session': 'apple.change',
       'POST /api/v2/apple/session/code': 'apple.change',
+      'GET /api/v2/apple/setup': 'apple.change',
+      'POST /api/v2/apple/setup': 'apple.change',
     }
     const registered = routes().map((route) => `${route.method} ${route.path}`)
     assert.deepEqual(

@@ -39,6 +39,7 @@ import { runningInstall } from '../release/install.js'
 import { repository, version } from '../version.js'
 import {
   AppleDownloads,
+  appleEndpoints,
   type AppleEndpoints,
   type AppleStatus,
   type AppleXcode,
@@ -68,6 +69,12 @@ import { HostDns } from './cloud/dns.js'
 import { HostSpace, type SpaceStorage } from './cloud/hostSpace.js'
 import { CloudHosts, type CloudHostsOptions } from './cloud/hosts.js'
 import { hostView } from './cloudHostsApi.js'
+import {
+  AppleSetup,
+  AppStoreConnectWeb,
+  type AppleWeb,
+} from './apple/accountSetup.js'
+import type { CertificateView } from '../apple/certificates.js'
 import { Changes } from './changes.js'
 import { HostLinks } from './hosts.js'
 import {
@@ -224,6 +231,7 @@ export class Master {
   readonly pools: Pools
   readonly cloudAccounts: CloudAccounts
   readonly cloudHosts: CloudHosts
+  readonly appleSetup: AppleSetup
   readonly artifacts: Artifacts
   readonly backups: Backups
   private expiry: NodeJS.Timeout | undefined
@@ -558,6 +566,49 @@ export class Master {
         sshKey: (): { privateKey: string; publicKey: string } =>
           nomacKey(this.database),
       },
+    })
+    this.appleSetup = new AppleSetup({
+      web: (): AppleWeb | undefined =>
+        this.apple.ready()
+          ? new AppStoreConnectWeb(
+              async (url, init) => await this.apple.webRequest(url, init),
+              (options.appleEndpoints ?? appleEndpoints).olympus,
+              (options.appleEndpoints ?? appleEndpoints).developer,
+            )
+          : undefined,
+      teamKey: (team): { keyId: string } | undefined =>
+        (
+          this.settings.value('apple') as
+            | { teams?: Record<string, { keyId: string }> }
+            | undefined
+        )?.teams?.[team],
+      saveTeamKey: async (team, key): Promise<void> => {
+        const stored = (this.settings.value('apple') ?? {}) as {
+          teams?: Record<string, unknown>
+        }
+        await this.settings.set(localOperator, 'apple', {
+          teams: { ...stored.teams, [team]: key },
+        })
+      },
+      certificate: (team, kind): CertificateView | undefined =>
+        this.appleSigning.certificates.current(team, kind),
+      createCertificate: async (team, kind): Promise<CertificateView> =>
+        await this.appleSigning.certificates.create(team, kind),
+      appleCertificates: async (team): Promise<string[]> => {
+        const connect = this.appleSigning.connect(team)
+        if (connect == null) return []
+        return (
+          await connect.all(
+            '/v1/certificates?filter[certificateType]=DISTRIBUTION&limit=200',
+          )
+        ).map((item) => {
+          const attributes = (
+            item as { attributes?: { name?: string; expirationDate?: string } }
+          ).attributes
+          return `${attributes?.name ?? item.id}${attributes?.expirationDate == null ? '' : ` (expires ${attributes.expirationDate.slice(0, 10)})`}`
+        })
+      },
+      fingerprint: identity.fingerprint,
     })
     this.cloudHosts = new CloudHosts({
       master: this.database,

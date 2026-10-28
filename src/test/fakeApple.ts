@@ -16,6 +16,7 @@ import {
   toBytes,
   type AppleEndpoints,
 } from '../master/apple/developerDownloads.js'
+import type { FakeAppleWebSession } from './fakeAppleWebSession.js'
 
 /**
  * Apple's sign-in, two-factor and download services as the master uses
@@ -40,6 +41,8 @@ export class FakeApple {
   widgetKeyFrom: 'signout' | 'config' | 'empty' | 'gone' = 'signout'
   /** Cookie headers the sign-out request arrived with. */
   readonly signoutCookies: string[] = []
+  /** App Store Connect's website, as a signed-in session sees it. */
+  web: FakeAppleWebSession | undefined
   private salt = randomBytes(16)
   private verifier: bigint
   private pending = new Map<string, { b: bigint; B: bigint; A: bigint }>()
@@ -117,6 +120,22 @@ export class FakeApple {
     const body = (text === '' ? {} : JSON.parse(text)) as Record<string, never>
     const session = this.cookie(req, 'myacinfo')
     const signedIn = session != null && this.sessions.has(session)
+    if (
+      this.web != null &&
+      signedIn &&
+      /^\/(iris\/|olympus\/v1\/session$|services-account\/QH65B2\/account\/listTeams\.action$)/.test(
+        url.pathname,
+      )
+    ) {
+      const response = await this.web.request(`http://apple${req.url}`, {
+        method: req.method ?? 'GET',
+        ...(req.headers['content-type'] == null
+          ? {}
+          : { headers: { 'Content-Type': req.headers['content-type'] } }),
+        ...(text === '' ? {} : { body: text }),
+      })
+      return { status: response.status, body: await response.text() }
+    }
     switch (url.pathname) {
       case '/logout':
         this.signoutCookies.push(req.headers.cookie ?? '')
