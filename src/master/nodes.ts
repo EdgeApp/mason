@@ -169,13 +169,14 @@ export class NodeRegistry extends EventEmitter {
     addressText: string,
     certificateHash: string,
     secret: string,
+    role: 'worker' | 'host' = 'worker',
   ): Promise<NodeRecord> {
     return await this.pair(
       addressText,
       certificateHash,
       secret,
       undefined,
-      'worker',
+      role,
     )
   }
 

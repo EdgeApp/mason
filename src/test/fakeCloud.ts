@@ -7,6 +7,7 @@ import {
   type ProviderMachine,
   type ProviderSnapshot,
   type Catalog,
+  type FirewallRule,
 } from '../master/cloud/digitalocean.js'
 import { PAIRING_FILE } from '../node/identity.js'
 import { startNode, type RunningNode } from '../node/serve.js'
@@ -89,15 +90,26 @@ export class FakeCloud implements CloudProvider {
         JSON.stringify(FakeCloud.pairing(machine.spec.userData)),
         { mode: 0o600 },
       )
+    // A droplet tagged as a Mason host boots a host; any other, a worker.
+    const host = machine.spec.tags.includes('mason-host')
     machine.node = await startNode(
-      {
-        role: 'worker',
-        data,
-        linkPort: 0,
-        listen: '127.0.0.1',
-        heartbeatMs: 0,
-        workerOptions: { flushMs: 50, systemRun: quietMac() },
-      },
+      host
+        ? {
+            role: 'host',
+            data,
+            port: 0,
+            linkPort: 0,
+            listen: '127.0.0.1',
+            heartbeatMs: 0,
+          }
+        : {
+            role: 'worker',
+            data,
+            linkPort: 0,
+            listen: '127.0.0.1',
+            heartbeatMs: 0,
+            workerOptions: { flushMs: 50, systemRun: quietMac() },
+          },
       () => undefined,
     )
     if (this.bootDelayMs > 0)
@@ -196,11 +208,15 @@ export class FakeCloud implements CloudProvider {
   }
   async firewall(
     name: string,
-    port: number,
-    sources: string[],
+    rules: FirewallRule[],
     tag: string,
   ): Promise<void> {
-    this.firewalls.push({ name, port, sources, tag })
+    for (const rule of rules)
+      this.firewalls.push({ name, port: rule.port, sources: rule.sources, tag })
+  }
+  readonly deletedFirewalls: string[] = []
+  async deleteFirewall(name: string): Promise<void> {
+    this.deletedFirewalls.push(name)
   }
 
   /** Stops every machine still running. */

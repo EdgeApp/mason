@@ -251,6 +251,7 @@ describe('Cloud accounts', function () {
       // Back to schema 10 as a master upgraded from 0.1.8 has it.
       db.exec(`ALTER TABLE cloud_machines DROP COLUMN account;
         ALTER TABLE cloud_snapshots DROP COLUMN account;
+        DROP TABLE cloud_hosts;
         UPDATE meta SET value='10' WHERE key='master_schema';`)
       if (cloud != null)
         db.prepare(

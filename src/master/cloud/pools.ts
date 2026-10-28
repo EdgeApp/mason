@@ -866,8 +866,7 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
     if (address == null || address === this.firewallFor.get(account)) return
     await provider.firewall(
       'mason-pools',
-      this.options.linkPort ?? 9310,
-      [address],
+      [{ port: this.options.linkPort ?? 9310, sources: [address] }],
       TAG,
     )
     this.firewallFor.set(account, address)

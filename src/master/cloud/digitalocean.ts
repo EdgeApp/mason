@@ -76,13 +76,16 @@ export interface CloudProvider {
   deleteSnapshot(id: string): Promise<void>
   /** A size's price in dollars per hour. */
   priceHourly(size: string): Promise<number>
-  /** Ensures a firewall that admits `port` only from `sources` to machines tagged `tag`. */
-  firewall(
-    name: string,
-    port: number,
-    sources: string[],
-    tag: string,
-  ): Promise<void>
+  /** Ensures a firewall that admits each rule's TCP port only from its sources, to machines tagged `tag`. */
+  firewall(name: string, rules: FirewallRule[], tag: string): Promise<void>
+  /** Deletes a firewall by name; a missing one is not an error. */
+  deleteFirewall?(name: string): Promise<void>
+}
+
+/** One inbound TCP port and the addresses it admits. */
+export interface FirewallRule {
+  port: number
+  sources: string[]
 }
 
 /** Snapshot storage, dollars per GB per month. */
@@ -379,19 +382,16 @@ export class DigitalOcean implements CloudProvider {
 
   async firewall(
     name: string,
-    port: number,
-    sources: string[],
+    rules: FirewallRule[],
     tag: string,
   ): Promise<void> {
     const body = {
       name,
-      inbound_rules: [
-        {
-          protocol: 'tcp',
-          ports: String(port),
-          sources: { addresses: sources },
-        },
-      ],
+      inbound_rules: rules.map((rule) => ({
+        protocol: 'tcp',
+        ports: String(rule.port),
+        sources: { addresses: rule.sources },
+      })),
       outbound_rules: [
         {
           protocol: 'tcp',
@@ -419,5 +419,13 @@ export class DigitalOcean implements CloudProvider {
     const existing = firewalls.find((firewall) => firewall.name === name)
     if (existing == null) await this.call('POST', '/firewalls', body)
     else await this.call('PUT', `/firewalls/${existing.id}`, body)
+  }
+
+  async deleteFirewall(name: string): Promise<void> {
+    const { firewalls } = await this.call<{
+      firewalls: Array<{ id: string; name: string }>
+    }>('GET', '/firewalls?per_page=200')
+    for (const firewall of firewalls.filter((entry) => entry.name === name))
+      await this.call('DELETE', `/firewalls/${firewall.id}`)
   }
 }

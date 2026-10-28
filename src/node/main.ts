@@ -144,6 +144,7 @@ const usage = `Usage:
   mason keys list | mason keys revoke <id>
   mason settings get <area> | mason settings set <area> --file <json>
   mason cloud accounts list [--json] | add --provider <digitalocean|nomac> --name <n> [--id <id>] --key-stdin | check <id> | remove <id>
+  mason cloud hosts list [--json] | add --file <json> | reconcile <name> | remove <name>
   mason projects list | get <slug> | set <slug> --file <json> | remove <slug>
 Options: --data <dir> --port <n> --link-port <n> --listen <address> --link-listen <address>
   --web-cert <file> --web-key <file> --web-plain --new-key --test-endpoints --slots <n>
@@ -372,15 +373,55 @@ async function keysCommand(argv: string[], io: MainIO): Promise<number> {
   throw new Error(usage)
 }
 
+/** `mason cloud hosts …`: the Mason hosts the master makes on a cloud provider. */
+async function hostsCommand(
+  action: string | undefined,
+  args: ReturnType<typeof parseArgs>,
+  data: string,
+  io: MainIO,
+): Promise<number> {
+  const describe = (host: Record<string, unknown>): string =>
+    `${String(host.name)}  ${String(host.state)}  ${String(host.region)} ${String(host.size)}  ${String(host.address ?? '-')}${host.error == null ? '' : `  ${String(host.error)}`}`
+  if (action === 'list' && args.positional.length === 0) {
+    const hosts = (await controlRequest(data, 'cloud.hosts.list')) as Array<
+      Record<string, unknown>
+    >
+    if (args.flags.has('--json')) io.out(JSON.stringify(hosts))
+    else for (const host of hosts) io.out(describe(host))
+    return 0
+  }
+  const file = single(args, '--file')
+  if (action === 'add' && file != null && args.positional.length === 0) {
+    const host = (await controlRequest(data, 'cloud.hosts.add', {
+      value: JSON.parse(readFileSync(file, 'utf8')) as unknown,
+    })) as Record<string, unknown>
+    io.out(`Making host ${String(host.name)}: ${describe(host)}`)
+    return 0
+  }
+  if (
+    (action === 'reconcile' || action === 'remove') &&
+    args.positional.length === 1
+  ) {
+    const name = args.positional[0]
+    const host = (await controlRequest(data, `cloud.hosts.${action}`, {
+      name,
+    })) as Record<string, unknown> | null
+    io.out(host == null ? `Removed host ${name}` : describe(host))
+    return host == null || host.state !== 'error' ? 0 : 1
+  }
+  throw new Error(usage)
+}
+
 /** `mason cloud accounts …`, through the master's control socket; a key comes only on stdin. */
 async function cloudCommand(argv: string[], io: MainIO): Promise<number> {
   const [group, action, ...rest] = argv
   const args = parseArgs(
     rest,
-    ['--data', '--provider', '--name', '--id'],
+    ['--data', '--provider', '--name', '--id', '--file'],
     ['--json', '--key-stdin'],
   )
   const data = resolveDataDir(single(args, '--data'))
+  if (group === 'hosts') return await hostsCommand(action, args, data, io)
   if (group !== 'accounts') throw new Error(usage)
   const describe = (account: AccountView): string => {
     const check = account.check

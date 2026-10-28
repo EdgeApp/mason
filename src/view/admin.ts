@@ -209,6 +209,73 @@ function poolFields(
   ].join('')
 }
 
+/** A Mason host the master made on a cloud provider. */
+export interface CloudHostView {
+  name: string
+  state: string
+  account: string
+  region: string
+  size: string
+  address: string | null
+  origin: string | null
+  dnsName?: string
+  error: string | null
+}
+
+/** The Create host form's fields for one account. */
+function hostFields(account: PoolAccount): string {
+  const prefix = `host-${account.id}`
+  const catalog = account.catalog
+  const select = (
+    name: string,
+    value: string,
+    options: Array<{ value: string; label: string }>,
+  ): string =>
+    `<select id="${prefix}-${name}" name="${name}">${options.map((option) => `<option value="${escape(option.value)}"${option.value === value ? ' selected' : ''}>${escape(option.label)}</option>`).join('')}</select>`
+  const text = (name: string, value: string, extra = ''): string =>
+    `<input id="${prefix}-${name}" name="${name}" value="${escape(value)}"${extra}>`
+  return [
+    `<input type="hidden" name="account" value="${escape(account.id)}">`,
+    `<label for="${prefix}-name">Name</label>${text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="builds"')}`,
+    `<label for="${prefix}-region">Region</label>${
+      catalog == null
+        ? text('region', 'sfo3', ' required')
+        : select(
+            'region',
+            'sfo3',
+            catalog.regions.map((region) => ({
+              value: region.slug,
+              label: `${region.name} (${region.slug})`,
+            })),
+          )
+    }`,
+    `<label for="${prefix}-size">Size</label>${
+      catalog == null
+        ? text('size', 's-1vcpu-1gb', ' required')
+        : select(
+            'size',
+            's-1vcpu-1gb',
+            catalog.sizes.map((size) => ({
+              value: size.slug,
+              label: `${size.slug} · ${size.description} · $${size.priceMonthly}/month`,
+            })),
+          )
+    }`,
+    `<label for="${prefix}-image">Image</label>${
+      catalog == null
+        ? text('image', 'ubuntu-24-04-x64', ' required')
+        : select(
+            'image',
+            'ubuntu-24-04-x64',
+            catalog.images.map((image) => ({
+              value: image.slug,
+              label: image.name,
+            })),
+          )
+    }`,
+  ].join('')
+}
+
 const poolFieldNames = [
   'account',
   'name',
@@ -228,8 +295,10 @@ export function nodesView(data: {
   nodes: NodeRow[]
   types: Record<string, unknown>
   pools: PoolRow[]
-  /** Accounts pools may be made in. */
+  /** Accounts pools and hosts may be made in. */
   poolAccounts?: PoolAccount[]
+  /** Hosts the master made on a cloud provider. */
+  cloudHosts?: CloudHostView[]
   budget: { monthly: number; notice?: string }
   host?: string
   /** The master's own release, installable from GitHub when no host serves one. */
@@ -273,6 +342,31 @@ export function nodesView(data: {
       : data.release != null
         ? `install Mason ${escape(data.release.version)}, the master’s version: ${command(`/bin/bash -c "$(curl -fsSL https://github.com/${data.release.repository}/releases/latest/download/install.sh)" -- --version ${data.release.version}`)}`
         : 'install Mason from a host: set the host\'s origin in <a href="/settings#host">Settings</a> to see its command.'
+  const cloudHosts = (data.cloudHosts ?? [])
+    .map(
+      (host) =>
+        `<section class="panel cloud-host" id="host-${escape(host.name)}" data-state="${escape(host.state)}"><h3>${icon('cloud')}<span class="mono">${escape(host.name)}</span> <small>${escape(host.state)}</small></h3><p>${escape(host.region)} · ${escape(host.size)}${host.address == null ? '' : ` · <span class="mono">${escape(host.address)}</span>`}${host.dnsName == null ? '' : ` · <span class="mono">${escape(host.dnsName)}</span>`}</p>${host.origin == null ? '' : `<p>Serves <a href="${escape(host.origin)}">${escape(host.origin)}</a></p>`}${host.error == null ? '' : `<p class="state-failed">${escape(host.error)}</p>`}${
+          data.canChange
+            ? `<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div><details><summary>Remove</summary>${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: ['confirm'], className: 'secondary' })}</details>`
+            : ''
+        }</section>`,
+    )
+    .join('')
+  const hostCommands = `<p>On the host’s computer, ${install}</p><p>Start it as the host: ${command('sudo mason host --install')} It prints its pairing key; pair it in Add node.</p>`
+  const hostAccounts = (data.poolAccounts ?? [])
+    .map(
+      (account) =>
+        `<details class="add-host" id="add-host-${escape(account.id)}"><summary>On ${escape(account.name)}</summary>${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/hosts', hostFields(account), `${icon('add')} Create host`, { fields: ['account', 'name', 'region', 'size', 'image'] })}</details>`,
+    )
+    .join('')
+  const hostPanel =
+    !data.canChange && cloudHosts === ''
+      ? ''
+      : `<section class="panel" id="hosts"><h2>${icon('cloud')}Host</h2>${cloudHosts}${
+          data.canChange && cloudHosts === '' && data.host == null
+            ? `<details class="add-host" open><summary>With a command</summary>${hostCommands}</details>${hostAccounts || '<p>Or add a DigitalOcean account on the <a href="/cloud">Cloud</a> page to make one there.</p>'}`
+            : ''
+        }</section>`
   const add = data.canChange
     ? `<section class="panel"><h2>${icon('add')}Add node</h2><ol><li>On the new computer, ${install}</li><li>Start it as a worker: ${command('sudo mason worker --install --link-port 9410')} It prints its pairing key.</li><li>Pair it here:</li></ol>${apiForm('/api/v2/nodes', '<label for="node-address">Address</label><input id="node-address" name="address" placeholder="192.168.1.20:9410" required><label for="node-key">Pairing key</label><input id="node-key" name="key" placeholder="mason1:…" required autocomplete="off">', `${icon('lan')} Pair node`, { fields: ['address', 'key'], then: 'reload' })}</section>`
     : ''
@@ -310,7 +404,7 @@ export function nodesView(data: {
           )
           .join('')
   const poolsPanel = `<section class="panel" id="pools"><h2>${icon('cloud')}Cloud pools</h2><p>Machines made on demand for a node type, reused like your own computers and retired when idle. Monthly budget: $${data.budget.monthly}.</p>${data.budget.notice == null ? '' : `<p class="notice">${escape(data.budget.notice)}</p>`}${pools || '<p>None yet.</p>'}${addPool}</section>`
-  return `${head('Nodes', 'Workers and the host, their software, and what each still needs from a person.', ['Nodes'])}${rows || '<p class="empty-state">No nodes are paired.</p>'}<div class="columns"><div>${add}${poolsPanel}</div><aside><section class="panel"><h2>${icon('tune')}Node types</h2><ul class="plain">${types || '<li>None yet.</li>'}</ul><p><a href="/settings#nodeTypes">Edit in Settings</a></p></section></aside></div>`
+  return `${head('Nodes', 'Workers and the host, their software, and what each still needs from a person.', ['Nodes'])}${rows || '<p class="empty-state">No nodes are paired.</p>'}<div class="columns"><div>${hostPanel}${add}${poolsPanel}</div><aside><section class="panel"><h2>${icon('tune')}Node types</h2><ul class="plain">${types || '<li>None yet.</li>'}</ul><p><a href="/settings#nodeTypes">Edit in Settings</a></p></section></aside></div>`
 }
 
 /** Settings: every area the master keeps, edited as JSON with secrets write-only, plus the Apple ID session. */

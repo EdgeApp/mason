@@ -17,6 +17,7 @@ import {
   type NodeRow,
 } from '../view/admin.js'
 import { artifactsView } from '../view/artifacts.js'
+import { fqdn } from './cloud/hosts.js'
 import {
   dashboardData,
   dashboardView,
@@ -519,6 +520,17 @@ export function masterPages(
           state: row.state,
           address: row.address,
         })),
+      })),
+      cloudHosts: master.cloudHosts.list().map((row) => ({
+        name: row.name,
+        state: row.state,
+        account: row.account,
+        region: row.region,
+        size: row.size,
+        address: row.address,
+        origin: row.origin,
+        ...(fqdn(row) == null ? {} : { dnsName: fqdn(row)! }),
+        error: row.error,
       })),
       poolAccounts: await Promise.all(
         master.cloudAccounts

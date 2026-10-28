@@ -92,6 +92,7 @@ export interface NodeOptions {
     | 'appleSleep'
     | 'cloud'
     | 'cloudAccounts'
+    | 'cloudHosts'
     | 'now'
   >
   pollMs?: number
@@ -296,7 +297,10 @@ export async function startNode(
     claimRole(dir, options.role)
     // A cloud machine's first start takes the pairing material its master made.
     const pairingFile = path.join(dir, PAIRING_FILE)
-    if (options.role === 'worker' && existsSync(pairingFile))
+    if (
+      (options.role === 'worker' || options.role === 'host') &&
+      existsSync(pairingFile)
+    )
       applyPairingFile(dir, pairingFile)
     // A restore made on the first-run page takes effect on this start, with
     // the restored master's identity.

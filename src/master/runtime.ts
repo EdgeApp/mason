@@ -17,7 +17,7 @@ import { backupArea, Backups, type BackupSetting } from './backup.js'
 import { NodeRegistry } from './nodes.js'
 import { allow } from './permissions.js'
 import { localOperator, type Actor } from './roles.js'
-import { Settings, type SettingValue } from './settings.js'
+import { clearSetting, Settings, type SettingValue } from './settings.js'
 import { BuildNumbers } from './buildNumbers.js'
 import { GitHub, storedConnection, type GitHubOptions } from './github.js'
 import { Jobs } from './jobs.js'
@@ -58,8 +58,11 @@ import {
 import {
   cloudAccountsArea,
   CloudAccounts,
+  type CloudAccount,
   type CloudAccountsOptions,
 } from './cloud/accounts.js'
+import { CloudHosts, type CloudHostsOptions } from './cloud/hosts.js'
+import { hostView } from './cloudHostsApi.js'
 import { Changes } from './changes.js'
 import { HostLinks } from './hosts.js'
 import {
@@ -122,6 +125,11 @@ export interface MasterOptions {
     | 'github'
     | 'releaseAssets'
   >
+  /** Cloud host internals for tests: the provider, the master's address, timings. */
+  cloudHosts?: Pick<
+    CloudHostsOptions,
+    'provider' | 'publicAddress' | 'tickMs' | 'linkPort' | 'log'
+  >
   /** How the master checks cloud accounts: a fake provider API in tests. */
   cloudAccounts?: Pick<
     CloudAccountsOptions,
@@ -172,6 +180,7 @@ export class Master {
   readonly hosts: HostLinks
   readonly pools: Pools
   readonly cloudAccounts: CloudAccounts
+  readonly cloudHosts: CloudHosts
   readonly artifacts: Artifacts
   readonly backups: Backups
   private expiry: NodeJS.Timeout | undefined
@@ -379,12 +388,13 @@ export class Master {
     })
     this.settings.register(
       'cloudAccounts',
-      cloudAccountsArea((id) =>
-        this.pools
+      cloudAccountsArea((id) => [
+        ...this.pools
           .pools()
           .filter((pool) => pool.account === id)
           .map((pool) => `pool ${pool.name}`),
-      ),
+        ...this.cloudHosts.usedBy(id),
+      ]),
     )
     this.settings.register(
       'cloud',
@@ -486,6 +496,33 @@ export class Master {
       log: (line): void => console.log(line),
       ...options.cloud,
     })
+    this.cloudHosts = new CloudHosts({
+      master: this.database,
+      registry: this.registry,
+      account: (id): CloudAccount | undefined => this.cloudAccounts.get(id),
+      github: (): { repository: string; version: string } | undefined =>
+        repository == null ? undefined : { repository, version },
+      hostSettings: {
+        get: (): { origin?: string } | undefined =>
+          this.settings.value('host') as { origin?: string } | undefined,
+        set: async (origin): Promise<void> => {
+          if (origin == null) clearSetting(this.settings, localOperator, 'host')
+          else
+            await this.settings.set(localOperator, 'host', {
+              ...(this.settings.value('host') ?? {}),
+              origin,
+            })
+        },
+      },
+      publicAddress: async (): Promise<string | undefined> => {
+        const response = await fetch('https://api.ipify.org', {
+          signal: AbortSignal.timeout(10_000),
+        })
+        return response.ok ? (await response.text()).trim() : undefined
+      },
+      log: (line): void => console.log(line),
+      ...options.cloudHosts,
+    })
     this.updates = new Updates(
       this.registry,
       this.releases,
@@ -526,6 +563,7 @@ export class Master {
     this.updates.start()
     this.hosts.start()
     this.pools.start()
+    this.cloudHosts.start()
     // Expired builds and saved artifacts become deleting; the host removes the files.
     this.expiry = setInterval(
       () => {
@@ -599,6 +637,7 @@ export class Master {
     this.hosts.stop()
     clearInterval(this.expiry)
     await this.pools.stop()
+    await this.cloudHosts.stop()
     clearInterval(this.compaction)
     clearInterval(this.backupTimer)
     this.provisioning.stop()
@@ -896,6 +935,15 @@ export class Master {
         await this.cloudAccounts.check(actor, String(args.id ?? '')),
       'cloud.accounts.remove': async (args): Promise<null> => {
         await this.cloudAccounts.remove(actor, String(args.id ?? ''))
+        return null
+      },
+      'cloud.hosts.list': () => this.cloudHosts.list().map(hostView),
+      'cloud.hosts.add': async (args) =>
+        hostView(await this.cloudHosts.create(args.value)),
+      'cloud.hosts.reconcile': async (args) =>
+        hostView(await this.cloudHosts.reconcile(String(args.name ?? ''))),
+      'cloud.hosts.remove': async (args): Promise<null> => {
+        await this.cloudHosts.remove(String(args.name ?? ''), args.name)
         return null
       },
       'nodes.remove': (args): null => {

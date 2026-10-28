@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 11
+export const MASTER_SCHEMA = 12
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -353,6 +353,20 @@ const migrations: Array<(db: DatabaseSync) => void> = [
         })),
       }),
     )
+  },
+  // 12: Mason hosts the master made on a cloud provider, reconciled from these rows.
+  (db): void => {
+    db.exec(`
+    CREATE TABLE cloud_hosts (
+      name TEXT NOT NULL, account TEXT NOT NULL, provider TEXT NOT NULL,
+      region TEXT NOT NULL, size TEXT NOT NULL, image TEXT NOT NULL,
+      dns_domain TEXT, dns_name TEXT, provider_id TEXT, address TEXT, port INTEGER,
+      dns_record_id TEXT, dns_owned INTEGER NOT NULL DEFAULT 0 CHECK(dns_owned IN (0,1)),
+      fingerprint TEXT, pairing_hash TEXT, pairing_secret TEXT, origin TEXT,
+      state TEXT NOT NULL CHECK(state IN ('creating','installing','pairing','ready','error','removing','removed')),
+      error TEXT, version TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE UNIQUE INDEX cloud_hosts_name ON cloud_hosts(name) WHERE state<>'removed';`)
   },
 ]
 

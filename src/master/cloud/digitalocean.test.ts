@@ -328,7 +328,11 @@ describe('DigitalOcean provider', () => {
   it('U11.7 prices sizes and keeps one firewall for the link port', async () => {
     assert.equal(await provider.priceHourly('s-1vcpu-1gb'), 0.00893)
     await assert.rejects(provider.priceHourly('huge'), /no size huge/)
-    await provider.firewall('mason-pools', 9310, ['203.0.113.7'], 'mason-pool')
+    await provider.firewall(
+      'mason-pools',
+      [{ port: 9310, sources: ['203.0.113.7'] }],
+      'mason-pool',
+    )
     assert.equal(api.firewalls.length, 1)
     assert.deepEqual(api.firewalls[0].inbound_rules, [
       {
@@ -337,7 +341,11 @@ describe('DigitalOcean provider', () => {
         sources: { addresses: ['203.0.113.7'] },
       },
     ])
-    await provider.firewall('mason-pools', 9310, ['198.51.100.9'], 'mason-pool')
+    await provider.firewall(
+      'mason-pools',
+      [{ port: 9310, sources: ['198.51.100.9'] }],
+      'mason-pool',
+    )
     assert.equal(api.firewalls.length, 1)
     assert.deepEqual(api.firewalls[0].inbound_rules[0].sources, {
       addresses: ['198.51.100.9'],

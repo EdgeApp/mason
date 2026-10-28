@@ -94,6 +94,25 @@ export class Settings {
   }
 }
 
+/**
+ * Removes an area's value, for code on the master that owns it (a cloud host
+ * that set the `host` area and is removed): reads fall back to nothing set.
+ */
+export function clearSetting(
+  settings: Settings,
+  actor: Actor,
+  name: string,
+): void {
+  allow(actor, 'settings.change')
+  const master = settings.master
+  master.transaction(() => {
+    master.db.prepare('DELETE FROM settings WHERE area=?').run(name)
+    master.audit(actor, 'settings.clear', name)
+    if ((publishedSettings as readonly string[]).includes(name))
+      master.change('setting', name, 'delete')
+  })
+}
+
 /** For a write-only field: `{ keep: true }` reuses the stored value. */
 export function keepSecret(
   input: unknown,

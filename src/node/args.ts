@@ -150,8 +150,8 @@ export function parseRoleCommand(role: Role, argv: string[]): RoleCommand {
   const user = single(args, '--user')
   const dataFlag = single(args, '--data')
   const pairingFile = single(args, '--pairing-file')
-  if (pairingFile != null && role !== 'worker')
-    throw new Error('--pairing-file is for a worker')
+  if (pairingFile != null && role !== 'worker' && role !== 'host')
+    throw new Error('--pairing-file is for a worker or a host')
   return {
     ...(pairingFile == null ? {} : { pairingFile }),
     options,
