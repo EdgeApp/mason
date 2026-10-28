@@ -94,12 +94,17 @@ function masterPage(
   session?: MasterSession,
   active?: string,
 ): string {
-  // The backup reminder is for those who may configure backups.
+  // The backup reminder is for those who may configure backups; an
+  // administrator who skipped confirming the key is reminded of it too.
   const notice =
     master.configured() &&
     session != null &&
     can(sessionActor(session), 'settings.read')
-      ? master.backups.notice()
+      ? (master.backups.notice() ??
+        (can(sessionActor(session), 'backups.key') &&
+        master.backups.needsConfirmation(session.accountId)
+          ? 'The backup key is not confirmed as stored'
+          : undefined))
       : undefined
   const banner =
     notice == null
@@ -176,7 +181,7 @@ function backupsPage(master: Master, session: MasterSession): string {
             : '<p>You confirmed you stored this key.</p>'
         }</section>`
       : ''
-  return `<section class="card"><p>Every hour the master encrypts a snapshot of its database and pushes it to a git repository. Add the deploy key below to that repository with write access.</p>${state}<form data-mason="backup"><label for="repository">Repository</label><input id="repository" name="repository" value="${escape(value.repository ?? '')}" placeholder="git@github.com:owner/mason-backup.git" required><label for="branch">Branch</label><input id="branch" name="branch" value="${escape(value.branch ?? 'master')}" required><p><button>Save</button></p><p>Deploy key</p><pre data-field="deployKey"${value.deployKey == null ? ' hidden' : ''}>${escape(value.deployKey?.publicKey ?? '')}</pre><pre data-field="backupKey" hidden></pre>${status}</form><p><a href="/">Skip for now</a></p></section>${key}`
+  return `<section class="card"><p>Every hour the master encrypts a snapshot of its database and pushes it to a git repository. Add the deploy key below to that repository with write access.</p>${state}<form data-mason="backup"><label for="repository">Repository</label><input id="repository" name="repository" value="${escape(value.repository ?? '')}" placeholder="git@github.com:owner/mason-backup.git" required><label for="branch">Branch</label><input id="branch" name="branch" value="${escape(value.branch ?? 'master')}" required><p><button>Save</button></p><p>Deploy key</p><pre data-field="deployKey"${value.deployKey == null ? ' hidden' : ''}>${escape(value.deployKey?.publicKey ?? '')}</pre><pre data-field="backupKey" hidden></pre>${status}</form><p><a href="/?later=backups">Skip for now</a></p></section>${key}`
 }
 
 /** A tester's apps on the master: installs happen on the host. */
@@ -200,6 +205,9 @@ function testerApps(master: Master, session: MasterSession): string {
       .join('') || '<p class="empty-state">No apps are shared with you yet.</p>'
   }</div>`
 }
+
+/** Set by "Skip for now": the dashboard stops sending an administrator to Backups for this browser session. */
+const BACKUP_LATER_COOKIE = 'mason-backups-later'
 
 /** The master's pages: setup until the first account exists, then sign-in, home and backups. */
 export function masterPages(
@@ -236,10 +244,25 @@ export function masterPages(
       res.redirect(303, '/sign-in')
       return
     }
-    // An administrator sees the Backups page until they confirm the key.
+    // An administrator sees the Backups page until they confirm the key, or
+    // skip it for this browser session ("Skip for now").
+    if (req.query.later === 'backups') {
+      res.cookie(BACKUP_LATER_COOKIE, '1', {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        secure: req.secure,
+      })
+      res.redirect(303, '/')
+      return
+    }
     if (
       can(sessionActor(current), 'backups.key') &&
-      master.backups.needsConfirmation(current.accountId)
+      master.backups.needsConfirmation(current.accountId) &&
+      // The session-token reader takes only tokens; this cookie holds a flag.
+      !new RegExp(`(?:^|;\\s*)${BACKUP_LATER_COOKIE}=1(?:;|$)`).test(
+        req.headers.cookie ?? '',
+      )
     ) {
       res.redirect(303, '/backups')
       return

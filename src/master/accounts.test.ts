@@ -1279,6 +1279,15 @@ export async function one(ctx: Stage) { return 1 }
     )
     const home = await request(c.master, 'GET', '/', { cookie })
     assert.equal(home.headers.get('location'), '/backups')
+    // "Skip for now" lets the dashboard through for this browser session, with a reminder.
+    const later = await request(c.master, 'GET', '/?later=backups', { cookie })
+    assert.equal(later.headers.get('location'), '/')
+    const skip = later.headers.get('set-cookie')!.split(';')[0]!
+    const through = await request(c.master, 'GET', '/', {
+      cookie: `${cookie}; ${skip}`,
+    })
+    assert.equal(through.status, 200)
+    assert.match(through.text, /This master is not backed up/)
     let page = await request(c.master, 'GET', '/backups', { cookie })
     assert.match(page.text, /No backup has run yet/)
     assert.match(page.text, /data-mason="backup-confirm"/)
@@ -1288,6 +1297,12 @@ export async function one(ctx: Stage) { return 1 }
     )
     page = await request(c.master, 'GET', '/backups', { cookie })
     assert.match(page.text, /Last backup /)
+    // Backed up, the reminder is the key still to confirm.
+    assert.match(
+      (await request(c.master, 'GET', '/', { cookie: `${cookie}; ${skip}` }))
+        .text,
+      /The backup key is not confirmed as stored/,
+    )
     assert.equal(
       (await c.api('POST', '/api/v2/settings/backup/confirm', {})).status,
       200,
