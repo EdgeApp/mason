@@ -335,6 +335,7 @@ describe('Design system and views', () => {
       'dashboard',
       'artifacts',
       'nodes',
+      'cloud',
       'people',
       'settings',
       'backups',
@@ -348,7 +349,10 @@ describe('Design system and views', () => {
       viewer: viewer('admin', 'host'),
       active: 'artifacts',
     })
-    assert.doesNotMatch(host, /\/backups|\/people|\/settings|data-mason="/)
+    assert.doesNotMatch(
+      host,
+      /\/backups|\/cloud|\/people|\/settings|data-mason="/,
+    )
     assert.match(host, /<a href="\/artifacts" aria-current="page"/)
     // Testers' pages are phone-first, without the rail.
     const tester = shell({

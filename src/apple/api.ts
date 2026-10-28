@@ -24,9 +24,37 @@ const asTeam = (value: unknown): string => {
 export function appleApi(master: Master): Router {
   const router = Router()
   router.use(
-    ['/api/v2/apple/certificates', '/api/v2/apple/profiles'],
+    [
+      '/api/v2/apple/certificates',
+      '/api/v2/apple/profiles',
+      '/api/v2/apple/setup',
+    ],
     express.json({ limit: '2mb' }),
     authenticate(master),
+  )
+  // Apple setup from the signed-in Apple ID: the teams, then one set up.
+  router.get(
+    '/api/v2/apple/setup',
+    json(async (_req, res) => {
+      allow(actorOf(res), 'apple.change')
+      return {
+        keyName: master.appleSetup.keyName,
+        teams: await master.appleSetup.teams(),
+      }
+    }),
+  )
+  router.post(
+    '/api/v2/apple/setup',
+    json(async (req, res) => {
+      const actor = actorOf(res)
+      allow(actor, 'apple.change')
+      const team = (req.body as { team?: unknown } | undefined)?.team
+      const result = await master.appleSetup.setup(
+        typeof team === 'string' && team !== '' ? team : undefined,
+      )
+      master.database.audit(actor, 'apple.setup', result.team.id)
+      return result
+    }),
   )
   const service = master.appleSigning
   router.get(
@@ -112,7 +140,11 @@ export function appleApi(master: Master): Router {
     }),
   )
   router.use(
-    ['/api/v2/apple/certificates', '/api/v2/apple/profiles'],
+    [
+      '/api/v2/apple/certificates',
+      '/api/v2/apple/profiles',
+      '/api/v2/apple/setup',
+    ],
     apiErrors,
   )
   return router

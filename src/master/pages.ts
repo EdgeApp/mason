@@ -11,11 +11,13 @@ import {
   nodesView,
   peopleView,
   projectView,
+  cloudView,
   settingsView,
   wizardView,
   type NodeRow,
 } from '../view/admin.js'
 import { artifactsView } from '../view/artifacts.js'
+import { fqdn } from './cloud/hosts.js'
 import {
   dashboardData,
   dashboardView,
@@ -92,12 +94,17 @@ function masterPage(
   session?: MasterSession,
   active?: string,
 ): string {
-  // The backup reminder is for those who may configure backups.
+  // The backup reminder is for those who may configure backups; an
+  // administrator who skipped confirming the key is reminded of it too.
   const notice =
     master.configured() &&
     session != null &&
     can(sessionActor(session), 'settings.read')
-      ? master.backups.notice()
+      ? (master.backups.notice() ??
+        (can(sessionActor(session), 'backups.key') &&
+        master.backups.needsConfirmation(session.accountId)
+          ? 'The backup key is not confirmed as stored'
+          : undefined))
       : undefined
   const banner =
     notice == null
@@ -149,7 +156,7 @@ function appVisible(
 
 const status = '<p class="notice" role="status" data-field="status" hidden></p>'
 
-const setupPage = `<section class="card"><h2>Create the first account</h2><p>Enter the six-digit setup code this master printed in its terminal when it started. The first account is an administrator.</p><form data-mason="setup"><label for="code">Setup code</label><input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password" minlength="12" required><p><button>Create account</button></p>${status}</form></section><section class="card"><h2>Restore from a backup</h2><p>Rebuild this master from its encrypted git backup instead.</p><form data-mason="restore"><label for="restore-code">Setup code</label><input id="restore-code" name="code" inputmode="numeric" pattern="[0-9]{6}" required><label for="repository">Backup repository</label><input id="repository" name="repository" placeholder="git@github.com:owner/mason-backup.git" required><label for="key">Backup key file</label><input id="key" name="key" type="file" required><label for="date">Date (optional, YYYY-MM-DD)</label><input id="date" name="date" pattern="\\d{4}-\\d{2}-\\d{2}"><p><button class="secondary">Restore</button></p>${status}</form></section>`
+const setupPage = `<section class="card"><h2>Create the first account</h2><p>Enter the six-digit setup code this master printed in its terminal when it started. The first account is an administrator.</p><form data-mason="setup"><label for="code">Setup code</label><input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password" minlength="12" required><p><button>Create account</button></p>${status}</form></section><section class="card"><h2>Restore from a backup</h2><p>Rebuild this master from its encrypted git backup instead. It comes back as the same master, so its nodes reconnect: stop the master the backup came from first.</p><form data-mason="restore"><label for="restore-code">Setup code</label><input id="restore-code" name="code" inputmode="numeric" pattern="[0-9]{6}" required><label for="repository">Backup repository</label><input id="repository" name="repository" placeholder="git@github.com:owner/mason-backup.git" required><label for="key">Backup key file</label><input id="key" name="key" type="file" required><label for="date">Date (optional, YYYY-MM-DD)</label><input id="date" name="date" pattern="\\d{4}-\\d{2}-\\d{2}"><p><button class="secondary">Restore</button></p>${status}</form></section>`
 
 const signInPage = `<section class="card"><form data-mason="sign-in"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><p><button>Sign in</button></p>${status}</form></section>`
 
@@ -174,7 +181,7 @@ function backupsPage(master: Master, session: MasterSession): string {
             : '<p>You confirmed you stored this key.</p>'
         }</section>`
       : ''
-  return `<section class="card"><p>Every hour the master encrypts a snapshot of its database and pushes it to a git repository. Add the deploy key below to that repository with write access.</p>${state}<form data-mason="backup"><label for="repository">Repository</label><input id="repository" name="repository" value="${escape(value.repository ?? '')}" placeholder="git@github.com:owner/mason-backup.git" required><label for="branch">Branch</label><input id="branch" name="branch" value="${escape(value.branch ?? 'master')}" required><p><button>Save</button></p><p>Deploy key</p><pre data-field="deployKey"${value.deployKey == null ? ' hidden' : ''}>${escape(value.deployKey?.publicKey ?? '')}</pre><pre data-field="backupKey" hidden></pre>${status}</form><p><a href="/">Skip for now</a></p></section>${key}`
+  return `<section class="card"><p>Every hour the master encrypts a snapshot of its database and pushes it to a git repository. Add the deploy key below to that repository with write access.</p>${state}<form data-mason="backup"><label for="repository">Repository</label><input id="repository" name="repository" value="${escape(value.repository ?? '')}" placeholder="git@github.com:owner/mason-backup.git" required><label for="branch">Branch</label><input id="branch" name="branch" value="${escape(value.branch ?? 'master')}" required><p><button>Save</button></p><p>Deploy key</p><pre data-field="deployKey"${value.deployKey == null ? ' hidden' : ''}>${escape(value.deployKey?.publicKey ?? '')}</pre><pre data-field="backupKey" hidden></pre>${status}</form><p><a href="/?later=backups">Skip for now</a></p></section>${key}`
 }
 
 /** A tester's apps on the master: installs happen on the host. */
@@ -198,6 +205,9 @@ function testerApps(master: Master, session: MasterSession): string {
       .join('') || '<p class="empty-state">No apps are shared with you yet.</p>'
   }</div>`
 }
+
+/** Set by "Skip for now": the dashboard stops sending an administrator to Backups for this browser session. */
+const BACKUP_LATER_COOKIE = 'mason-backups-later'
 
 /** The master's pages: setup until the first account exists, then sign-in, home and backups. */
 export function masterPages(
@@ -234,10 +244,25 @@ export function masterPages(
       res.redirect(303, '/sign-in')
       return
     }
-    // An administrator sees the Backups page until they confirm the key.
+    // An administrator sees the Backups page until they confirm the key, or
+    // skip it for this browser session ("Skip for now").
+    if (req.query.later === 'backups') {
+      res.cookie(BACKUP_LATER_COOKIE, '1', {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        secure: req.secure,
+      })
+      res.redirect(303, '/')
+      return
+    }
     if (
       can(sessionActor(current), 'backups.key') &&
-      master.backups.needsConfirmation(current.accountId)
+      master.backups.needsConfirmation(current.accountId) &&
+      // The session-token reader takes only tokens; this cookie holds a flag.
+      !new RegExp(`(?:^|;\\s*)${BACKUP_LATER_COOKIE}=1(?:;|$)`).test(
+        req.headers.cookie ?? '',
+      )
     ) {
       res.redirect(303, '/backups')
       return
@@ -472,7 +497,7 @@ export function masterPages(
       )
     })
   }
-  guarded('/nodes', 'nodes.read', 'Nodes', 'nodes', (current) => {
+  guarded('/nodes', 'nodes.read', 'Nodes', 'nodes', async (current) => {
     const busy = cluster(master).nodes
     return nodesView({
       nodes: master.registry.list().map((node) => {
@@ -512,17 +537,83 @@ export function masterPages(
         unknown
       >,
       pools: master.pools.pools().map((pool) => ({
-        name: pool.name,
-        type: pool.type,
-        size: pool.size,
-        maxNodes: pool.maxNodes,
-        machines: master.pools
-          .machines(pool.name)
-          .filter(
-            (row) =>
-              (row as { destroyed_at?: number | null }).destroyed_at == null,
-          ).length,
+        ...pool,
+        machines: master.pools.machines(pool.name).map((row) => ({
+          id: row.id,
+          state: row.state,
+          address: row.address,
+        })),
       })),
+      cloudHosts: master.cloudHosts.list().map((row) => ({
+        name: row.name,
+        state: row.state,
+        account: row.account,
+        region: row.region,
+        size: row.size,
+        address: row.address,
+        origin: row.origin,
+        ...(fqdn(row) == null
+          ? {}
+          : {
+              dnsName: fqdn(row)!,
+              certificate:
+                row.certificate_at == null
+                  ? ('waiting' as const)
+                  : ('trusted' as const),
+            }),
+        error: row.error,
+        ...(row.space_bucket == null || row.space_region == null
+          ? {}
+          : { space: { bucket: row.space_bucket, region: row.space_region } }),
+      })),
+      storage: ((): {
+        driver: 'disk' | 's3'
+        bucket?: string
+        endpoint?: string
+      } => {
+        const value = master.settings.value('storage') as
+          | { driver?: string; s3?: { bucket: string; endpoint: string } }
+          | undefined
+        return value?.driver === 's3' && value.s3 != null
+          ? {
+              driver: 's3',
+              bucket: value.s3.bucket,
+              endpoint: value.s3.endpoint,
+            }
+          : { driver: 'disk' }
+      })(),
+      poolAccounts: await Promise.all(
+        master.cloudAccounts.all().map(async (account) => {
+          // NoMac has no catalog or DNS: its pools take no region or size.
+          if (account.provider === 'nomac')
+            return {
+              id: account.id,
+              name: account.name,
+              provider: 'nomac' as const,
+            }
+          try {
+            const catalog = await master.pools.catalog(account.id)
+            // A DNS listing that fails leaves the form without domains.
+            const domains = await (
+              master.cloudHosts.provider(account.id)?.domains?.() ??
+              Promise.resolve([])
+            ).catch((): string[] => [])
+            return {
+              id: account.id,
+              name: account.name,
+              provider: 'digitalocean' as const,
+              ...(catalog == null ? {} : { catalog }),
+              domains,
+            }
+          } catch (error) {
+            return {
+              id: account.id,
+              name: account.name,
+              error: `Could not list ${account.name}'s regions and sizes: ${(error as Error).message}`,
+            }
+          }
+        }),
+      ),
       budget: {
         monthly: Number(
           ((master.settings.value('cloud') ?? {}) as { monthlyBudget?: number })
@@ -543,39 +634,95 @@ export function masterPages(
       canChange: can(sessionActor(current), 'nodes.change'),
     })
   })
-  guarded('/settings', 'settings.read', 'Settings', 'settings', (current) => {
+  guarded('/cloud', 'settings.read', 'Cloud', 'cloud', async (current) => {
     const actor = sessionActor(current)
-    const apple = master.apple.status()
-    return settingsView({
-      areas: master.settings
-        .names()
-        .filter((name) => name !== 'backup')
-        .map((name) => {
-          try {
-            return { name, value: master.settings.get(actor, name) }
-          } catch (error) {
-            return { name, value: undefined, error: (error as Error).message }
-          }
-        }),
-      apple: {
-        signedIn: apple.state === 'signedIn',
-        needsCode: apple.state === 'needsCode',
-        ...(apple.appleId == null ? {} : { appleId: apple.appleId }),
-        ...(apple.notice == null ? {} : { notice: apple.notice }),
-      },
-      keys: can(actor, 'keys.read')
-        ? master.keys.list().map((key) => ({
-            id: key.id,
-            name: key.name,
-            role: key.role,
-            createdAt: key.createdAt,
-            revoked: key.revoked,
-          }))
-        : [],
+    return cloudView({
+      accounts: await master.cloudAccounts.checked(actor),
       canChange: can(actor, 'settings.change'),
-      canRevoke: can(actor, 'keys.revoke'),
+      now: master.database.now(),
     })
   })
+  guarded(
+    '/settings',
+    'settings.read',
+    'Settings',
+    'settings',
+    async (current) => {
+      const actor = sessionActor(current)
+      const apple = master.apple.status()
+      // With the Apple ID signed in, the teams it can set up signing for.
+      const stored = (
+        (master.settings.value('apple') ?? {}) as {
+          teams?: Record<string, { keyId: string; name?: string }>
+        }
+      ).teams
+      const configured = Object.entries(stored ?? {}).map(([id, key]) => {
+        const certificate = master.appleSigning.certificates.current(
+          id,
+          'distribution',
+        )
+        return {
+          id,
+          name: key.name ?? id,
+          keyId: key.keyId,
+          ...(certificate == null
+            ? {}
+            : {
+                certificate: {
+                  name: certificate.name,
+                  expiresAt: certificate.expiresAt,
+                },
+              }),
+        }
+      })
+      const setup =
+        apple.state !== 'signedIn'
+          ? undefined
+          : await master.appleSetup.teams().then(
+              (teams) => ({
+                keyName: master.appleSetup.keyName,
+                teams,
+                configured,
+              }),
+              (error: unknown) => ({
+                keyName: master.appleSetup.keyName,
+                teams: [],
+                configured,
+                error: (error as Error).message,
+              }),
+            )
+      return settingsView({
+        areas: master.settings
+          .names()
+          .filter((name) => name !== 'backup')
+          .map((name) => {
+            try {
+              return { name, value: master.settings.get(actor, name) }
+            } catch (error) {
+              return { name, value: undefined, error: (error as Error).message }
+            }
+          }),
+        apple: {
+          signedIn: apple.state === 'signedIn',
+          needsCode: apple.state === 'needsCode',
+          ...(apple.appleId == null ? {} : { appleId: apple.appleId }),
+          ...(apple.notice == null ? {} : { notice: apple.notice }),
+          ...(setup == null ? {} : { setup }),
+        },
+        keys: can(actor, 'keys.read')
+          ? master.keys.list().map((key) => ({
+              id: key.id,
+              name: key.name,
+              role: key.role,
+              createdAt: key.createdAt,
+              revoked: key.revoked,
+            }))
+          : [],
+        canChange: can(actor, 'settings.change'),
+        canRevoke: can(actor, 'keys.revoke'),
+      })
+    },
+  )
   guarded('/people', 'people.read', 'People', 'people', (current) => {
     const actor = sessionActor(current)
     return peopleView({

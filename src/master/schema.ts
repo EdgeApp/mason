@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 10
+export const MASTER_SCHEMA = 14
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -309,6 +309,78 @@ const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void => {
     db.exec(`ALTER TABLE job_steps ADD COLUMN log_start INTEGER;
     ALTER TABLE job_steps ADD COLUMN log_end INTEGER;`)
+  },
+  // 11: cloud accounts. The `cloud` area's token becomes the `digitalocean`
+  // account, every pool names it, and machines and snapshots record theirs.
+  (db): void => {
+    db.exec(`ALTER TABLE cloud_machines ADD COLUMN account TEXT;
+    ALTER TABLE cloud_snapshots ADD COLUMN account TEXT;`)
+    const row = db
+      .prepare("SELECT value FROM settings WHERE area='cloud'")
+      .get() as { value: string } | undefined
+    if (row == null) return
+    const cloud = JSON.parse(row.value) as {
+      token?: string
+      pools?: Array<Record<string, unknown>>
+    }
+    const { token, ...rest } = cloud
+    if (token != null) {
+      db.prepare(
+        "INSERT INTO settings(area,value,updated_at,updated_by) VALUES('cloudAccounts',?,?,'migration') ON CONFLICT(area) DO NOTHING",
+      ).run(
+        JSON.stringify({
+          accounts: [
+            {
+              id: 'digitalocean',
+              name: 'DigitalOcean',
+              provider: 'digitalocean',
+              key: token,
+            },
+          ],
+        }),
+        Date.now(),
+      )
+      db.exec(
+        "UPDATE cloud_machines SET account='digitalocean'; UPDATE cloud_snapshots SET account='digitalocean';",
+      )
+    }
+    db.prepare("UPDATE settings SET value=? WHERE area='cloud'").run(
+      JSON.stringify({
+        ...rest,
+        pools: (rest.pools ?? []).map((pool) => ({
+          ...pool,
+          account: pool.account ?? 'digitalocean',
+        })),
+      }),
+    )
+  },
+  // 12: Mason hosts the master made on a cloud provider, reconciled from these rows.
+  (db): void => {
+    db.exec(`
+    CREATE TABLE cloud_hosts (
+      name TEXT NOT NULL, account TEXT NOT NULL, provider TEXT NOT NULL,
+      region TEXT NOT NULL, size TEXT NOT NULL, image TEXT NOT NULL,
+      dns_domain TEXT, dns_name TEXT, provider_id TEXT, address TEXT, port INTEGER,
+      dns_record_id TEXT, dns_owned INTEGER NOT NULL DEFAULT 0 CHECK(dns_owned IN (0,1)),
+      fingerprint TEXT, pairing_hash TEXT, pairing_secret TEXT, origin TEXT,
+      state TEXT NOT NULL CHECK(state IN ('creating','installing','pairing','ready','error','removing','removed')),
+      error TEXT, version TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE UNIQUE INDEX cloud_hosts_name ON cloud_hosts(name) WHERE state<>'removed';`)
+  },
+  // 13: when a host's DNS name first answered with a trusted certificate.
+  (db): void => {
+    db.exec('ALTER TABLE cloud_hosts ADD COLUMN certificate_at INTEGER;')
+  },
+  // 14: a cloud host's DigitalOcean Space for its builds, and the key limited to it.
+  (db): void => {
+    db.exec(`ALTER TABLE cloud_hosts ADD COLUMN space_bucket TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_region TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_key_id TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_secret TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_owned INTEGER NOT NULL DEFAULT 0 CHECK(space_owned IN (0,1));
+    ALTER TABLE cloud_hosts ADD COLUMN space_key_owned INTEGER NOT NULL DEFAULT 0 CHECK(space_key_owned IN (0,1));
+    ALTER TABLE cloud_hosts ADD COLUMN space_pending INTEGER NOT NULL DEFAULT 0 CHECK(space_pending IN (0,1));`)
   },
 ]
 

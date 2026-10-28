@@ -21,6 +21,8 @@ class FakeApi {
   droplets = new Map<number, Json>()
   snapshots = new Map<string, Json>()
   firewalls: Json[] = []
+  records: Json[] = []
+  spacesKeys: Json[] = []
   tags = new Set<string>()
   actions = new Map<number, { polls: number; error?: boolean }>()
   /** The next response's status and message, once. */
@@ -159,7 +161,50 @@ class FakeApi {
             send(404, { message: 'not found' })
           else send(204)
         } else if (route === 'GET /v2/sizes') {
-          send(200, { sizes: [{ slug: 's-1vcpu-1gb', price_hourly: 0.00893 }] })
+          send(200, {
+            sizes: [
+              {
+                slug: 's-1vcpu-1gb',
+                price_hourly: 0.00893,
+                price_monthly: 6,
+                description: 'Basic',
+                regions: ['sfo3'],
+                available: true,
+              },
+              {
+                slug: 's-old',
+                price_hourly: 1,
+                price_monthly: 1,
+                regions: [],
+                available: false,
+              },
+            ],
+          })
+        } else if (route === 'GET /v2/regions') {
+          // Two pages, as DigitalOcean pages long lists.
+          if (url.searchParams.get('page') === '1')
+            send(200, {
+              regions: [
+                { slug: 'sfo3', name: 'San Francisco 3', available: true },
+              ],
+              links: { pages: { next: `${this.base}/regions?page=2` } },
+            })
+          else
+            send(200, {
+              regions: [{ slug: 'old1', name: 'Retired', available: false }],
+              links: {},
+            })
+        } else if (route === 'GET /v2/images') {
+          send(200, {
+            images: [
+              {
+                slug: 'ubuntu-24-04-x64',
+                name: '24.04 (LTS) x64',
+                distribution: 'Ubuntu',
+              },
+              { slug: null, name: 'private', distribution: 'Ubuntu' },
+            ],
+          })
         } else if (route === 'GET /v2/firewalls') {
           send(200, { firewalls: this.firewalls })
         } else if (route === 'POST /v2/tags') {
@@ -178,6 +223,64 @@ class FakeApi {
         ) {
           this.firewalls = [{ id: match[1], ...body }]
           send(200, { firewall: this.firewalls[0] })
+        } else if (route === 'GET /v2/domains') {
+          send(200, { domains: [{ name: 'example.com' }], links: {} })
+        } else if (route === 'GET /v2/domains/example.com/records') {
+          send(200, {
+            domain_records: this.records.filter(
+              (record) =>
+                `${record.name}.example.com` === url.searchParams.get('name'),
+            ),
+          })
+        } else if (route === 'POST /v2/domains/example.com/records') {
+          const record = { id: this.next++, ...body }
+          this.records.push(record)
+          send(201, { domain_record: record })
+        } else if (
+          (match =
+            /^(PUT|DELETE) \/v2\/domains\/example\.com\/records\/(\d+)$/.exec(
+              route,
+            )) != null
+        ) {
+          const record = this.records.find(
+            (entry) => entry.id === Number(match![2]),
+          )
+          if (record == null) send(404, { message: 'no record' })
+          else if (match[1] === 'PUT') {
+            Object.assign(record, body)
+            send(200, { domain_record: record })
+          } else {
+            this.records = this.records.filter((entry) => entry !== record)
+            send(204)
+          }
+        } else if (
+          (match = /^DELETE \/v2\/firewalls\/(.+)$/.exec(route)) != null
+        ) {
+          this.firewalls = this.firewalls.filter(
+            (firewall) => firewall.id !== match![1],
+          )
+          send(204)
+        } else if (route === 'GET /v2/spaces/keys') {
+          send(200, { keys: this.spacesKeys, links: {} })
+        } else if (route === 'POST /v2/spaces/keys') {
+          const key = {
+            name: body.name,
+            access_key: `DO${this.next++}`,
+            secret_key: 'secret',
+            grants: body.grants,
+          }
+          this.spacesKeys.push(key)
+          send(201, { key })
+        } else if (
+          (match = /^DELETE \/v2\/spaces\/keys\/(.+)$/.exec(route)) != null
+        ) {
+          const before = this.spacesKeys.length
+          this.spacesKeys = this.spacesKeys.filter(
+            (key) => key.access_key !== match![1],
+          )
+          if (this.spacesKeys.length === before)
+            send(404, { message: 'no key' })
+          else send(204)
         } else send(404, { message: `no route ${route}` })
       })
     })
@@ -285,7 +388,11 @@ describe('DigitalOcean provider', () => {
   it('U11.7 prices sizes and keeps one firewall for the link port', async () => {
     assert.equal(await provider.priceHourly('s-1vcpu-1gb'), 0.00893)
     await assert.rejects(provider.priceHourly('huge'), /no size huge/)
-    await provider.firewall('mason-pools', 9310, ['203.0.113.7'], 'mason-pool')
+    await provider.firewall(
+      'mason-pools',
+      [{ port: 9310, sources: ['203.0.113.7'] }],
+      'mason-pool',
+    )
     assert.equal(api.firewalls.length, 1)
     assert.deepEqual(api.firewalls[0].inbound_rules, [
       {
@@ -294,7 +401,11 @@ describe('DigitalOcean provider', () => {
         sources: { addresses: ['203.0.113.7'] },
       },
     ])
-    await provider.firewall('mason-pools', 9310, ['198.51.100.9'], 'mason-pool')
+    await provider.firewall(
+      'mason-pools',
+      [{ port: 9310, sources: ['198.51.100.9'] }],
+      'mason-pool',
+    )
     assert.equal(api.firewalls.length, 1)
     assert.deepEqual(api.firewalls[0].inbound_rules[0].sources, {
       addresses: ['198.51.100.9'],
@@ -334,6 +445,97 @@ describe('DigitalOcean provider', () => {
       offline.priceHourly('x'),
       (error: unknown) =>
         error instanceof ProviderError && error.kind === 'unavailable',
+    )
+  })
+
+  it('U3.4 lists the regions, sizes and images a pool may use', async () => {
+    assert.deepEqual(await provider.catalog(), {
+      regions: [{ slug: 'sfo3', name: 'San Francisco 3' }],
+      sizes: [
+        {
+          slug: 's-1vcpu-1gb',
+          description: 'Basic',
+          priceMonthly: 6,
+          regions: ['sfo3'],
+        },
+      ],
+      images: [{ slug: 'ubuntu-24-04-x64', name: 'Ubuntu 24.04 (LTS) x64' }],
+    })
+    assert(
+      api.requests.some(
+        (request) =>
+          request.path === '/v2/images?type=distribution&per_page=200&page=1',
+      ),
+    )
+  })
+
+  it('U5.1 lists domains and makes, changes and deletes A records; deletes a firewall by name', async () => {
+    assert.deepEqual(await provider.domains(), ['example.com'])
+    const made = await provider.createDnsRecord(
+      'example.com',
+      'builds',
+      '203.0.113.5',
+    )
+    assert.equal(made.data, '203.0.113.5')
+    assert.deepEqual(
+      await provider.dnsRecords('example.com', 'builds.example.com'),
+      [made],
+    )
+    await provider.updateDnsRecord('example.com', made.id, '203.0.113.6')
+    assert.equal(
+      (await provider.dnsRecords('example.com', 'builds.example.com'))[0]!.data,
+      '203.0.113.6',
+    )
+    await provider.deleteDnsRecord('example.com', made.id)
+    // A record already gone is not an error.
+    await provider.deleteDnsRecord('example.com', made.id)
+    assert.deepEqual(
+      await provider.dnsRecords('example.com', 'builds.example.com'),
+      [],
+    )
+    await provider.firewall(
+      'mason-host-x',
+      [
+        { port: 80, sources: ['0.0.0.0/0'] },
+        { port: 9310, sources: ['203.0.113.7'] },
+      ],
+      'mason-host-x',
+    )
+    assert(api.firewalls.some((firewall) => firewall.name === 'mason-host-x'))
+    await provider.deleteFirewall('mason-host-x')
+    assert(!api.firewalls.some((firewall) => firewall.name === 'mason-host-x'))
+    api.fail = { status: 500, message: 'down' }
+    await assert.rejects(
+      provider.deleteDnsRecord('example.com', '1'),
+      (error: unknown) =>
+        error instanceof ProviderError && error.kind === 'unavailable',
+    )
+  })
+
+  it('U6.3 makes, lists and deletes Spaces keys', async () => {
+    const made = await provider.createSpacesKey('mason-host-x', [
+      { bucket: 'mason-x', permission: 'readwrite' },
+    ])
+    assert.equal(made.secret, 'secret')
+    assert.deepEqual(await provider.spacesKeys(), [
+      { id: made.id, name: 'mason-host-x' },
+    ])
+    assert.deepEqual(
+      api.requests.find((request) => request.path === '/v2/spaces/keys')?.body,
+      {
+        name: 'mason-host-x',
+        grants: [{ bucket: 'mason-x', permission: 'readwrite' }],
+      },
+    )
+    await provider.deleteSpacesKey(made.id)
+    // A key already gone is not an error.
+    await provider.deleteSpacesKey(made.id)
+    assert.deepEqual(await provider.spacesKeys(), [])
+    api.fail = { status: 401, message: 'Unable to authenticate you' }
+    await assert.rejects(
+      provider.deleteSpacesKey('x'),
+      (error: unknown) =>
+        error instanceof ProviderError && error.kind === 'auth',
     )
   })
 })

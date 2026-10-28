@@ -112,7 +112,7 @@ export function privateDirectory(directory: string): void {
               (uid != null && stat.uid !== uid)))
         )
           throw new Error(
-            'State directories require private ownership and safe ancestors',
+            `State directories require private ownership and safe ancestors: ${current} is ${stat.isDirectory() ? `mode ${(stat.mode & 0o777).toString(8)}, owner ${stat.uid}` : 'not a directory'}`,
           )
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error

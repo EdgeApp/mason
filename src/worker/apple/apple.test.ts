@@ -119,6 +119,12 @@ function fakeSecurity(sha1: () => string): {
     if (args[0] === 'find-identity')
       return `  1) ${sha1()} "Apple Distribution: Mason Test"\n     1 identities found\n`
     if (args[0] === 'create-keychain') writeFileSync(args.at(-1)!, 'keychain')
+    // The .p12 brought the first intermediate along, as Apple's exports do.
+    if (
+      args[0] === 'add-certificates' &&
+      args.at(-1)!.endsWith(`.${appleIntermediates[0]!.name}.pem`)
+    )
+      throw new Error(`security: ${args.at(-1)!}: already in ${args[2]!}`)
     return ''
   }
   return {
@@ -286,10 +292,12 @@ describe('Apple signing on a worker', function () {
       /did not import/,
     )
     assert(wrong.calls.some((call) => call[1] === 'delete-keychain'))
-    const added = wrong.calls.find((call) => call[1] === 'add-certificates')!
-    assert.equal(added.length, 4 + appleIntermediates.length)
+    // Each intermediate on its own, one already in the keychain from the .p12.
+    const added = wrong.calls.filter((call) => call[1] === 'add-certificates')
+    assert.equal(added.length, appleIntermediates.length)
+    assert(added.every((call) => call.length === 5))
     // The authorities' files are gone with the keychain.
-    assert(added.slice(4).every((file) => !existsSync(file)))
+    assert(added.every((call) => !existsSync(call[4]!)))
     assert(!wrong.list.includes(keychain))
   })
 

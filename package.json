@@ -32,6 +32,7 @@
     "hash-wasm": "4.12.0",
     "openid-client": "6.8.8",
     "qrcode": "1.5.4",
+    "ssh2": "1.17.0",
     "undici": "7.29.1",
     "ws": "8.22.0",
     "yauzl": "3.4.0"
@@ -43,6 +44,7 @@
     "@types/node": "24.10.1",
     "@types/oidc-provider": "9.12.1",
     "@types/qrcode": "1.5.6",
+    "@types/ssh2": "1.15.6",
     "@types/ws": "8.18.1",
     "@types/yauzl": "3.4.0",
     "c8": "12.0.0",

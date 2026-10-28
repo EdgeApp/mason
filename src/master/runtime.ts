@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto'
+import type { Duplex } from 'node:stream'
+import ssh2 from 'ssh2'
 import type { DatabaseSync } from 'node:sqlite'
 import type { ControlHandler } from '../node/control.js'
 import type { Identity } from '../node/identity.js'
@@ -17,7 +20,7 @@ import { backupArea, Backups, type BackupSetting } from './backup.js'
 import { NodeRegistry } from './nodes.js'
 import { allow } from './permissions.js'
 import { localOperator, type Actor } from './roles.js'
-import { Settings, type SettingValue } from './settings.js'
+import { clearSetting, Settings, type SettingValue } from './settings.js'
 import { BuildNumbers } from './buildNumbers.js'
 import { GitHub, storedConnection, type GitHubOptions } from './github.js'
 import { Jobs } from './jobs.js'
@@ -33,9 +36,10 @@ import { Stashes } from './stash.js'
 import { Releases } from './releases.js'
 import { Updates } from './updates.js'
 import { runningInstall } from '../release/install.js'
-import { version } from '../version.js'
+import { repository, version } from '../version.js'
 import {
   AppleDownloads,
+  appleEndpoints,
   type AppleEndpoints,
   type AppleStatus,
   type AppleXcode,
@@ -55,6 +59,22 @@ import {
   type CloudSetting,
   type PoolsOptions,
 } from './cloud/pools.js'
+import {
+  cloudAccountsArea,
+  CloudAccounts,
+  type CloudAccount,
+  type CloudAccountsOptions,
+} from './cloud/accounts.js'
+import { HostDns } from './cloud/dns.js'
+import { HostSpace, type SpaceStorage } from './cloud/hostSpace.js'
+import { CloudHosts, type CloudHostsOptions } from './cloud/hosts.js'
+import { hostView } from './cloudHostsApi.js'
+import {
+  AppleSetup,
+  AppStoreConnectWeb,
+  type AppleWeb,
+} from './apple/accountSetup.js'
+import type { CertificateView } from '../apple/certificates.js'
 import { Changes } from './changes.js'
 import { HostLinks } from './hosts.js'
 import {
@@ -65,6 +85,8 @@ import {
 } from './hostSettings.js'
 import { Artifacts } from './artifacts.js'
 import type { Graph } from '../pipeline/graph.js'
+
+const sshUtils = ssh2.utils
 
 export { nodeTypesSetting }
 
@@ -114,7 +136,55 @@ export interface MasterOptions {
     | 'pairTimeoutMs'
     | 'linkPort'
     | 'log'
+    | 'github'
+    | 'releaseAssets'
+    | 'nomac'
   >
+  /** Cloud host internals for tests: the provider, the master's address, timings. */
+  cloudHosts?: Pick<
+    CloudHostsOptions,
+    | 'provider'
+    | 'publicAddress'
+    | 'tickMs'
+    | 'settleMs'
+    | 'linkPort'
+    | 'log'
+    | 'trusted'
+  >
+  /** How the master reaches DigitalOcean Spaces: a fake S3 endpoint in tests. */
+  spaces?: {
+    endpoint?: (region: string) => string
+    fetch?: typeof fetch
+    wait?: (ms: number) => Promise<void>
+  }
+  /** How the master checks cloud accounts: a fake provider API in tests. */
+  cloudAccounts?: Pick<
+    CloudAccountsOptions,
+    'fetch' | 'endpoints' | 'timeoutMs'
+  >
+}
+
+/**
+ * The master's SSH key for NoMac Macs, made once and kept in its database,
+ * so a restored master reaches the same Macs' gateway as before.
+ */
+function nomacKey(database: MasterDatabase): {
+  privateKey: string
+  publicKey: string
+} {
+  const row = database.db
+    .prepare("SELECT value FROM meta WHERE key='nomac_ssh_key'")
+    .get() as { value: string } | undefined
+  if (row != null)
+    return JSON.parse(row.value) as { privateKey: string; publicKey: string }
+  const pair = sshUtils.generateKeyPairSync('ed25519', {
+    comment: 'mason-master',
+  })
+  const key = { privateKey: pair.private, publicKey: pair.public }
+  database.db
+    .prepare("INSERT INTO meta(key,value) VALUES('nomac_ssh_key',?)")
+    .run(JSON.stringify(key))
+  return key
 }
 
 /** Merges two method tables; the first wins on a clash. */
@@ -159,6 +229,9 @@ export class Master {
   readonly changes: Changes
   readonly hosts: HostLinks
   readonly pools: Pools
+  readonly cloudAccounts: CloudAccounts
+  readonly cloudHosts: CloudHosts
+  readonly appleSetup: AppleSetup
   readonly artifacts: Artifacts
   readonly backups: Backups
   private expiry: NodeJS.Timeout | undefined
@@ -179,6 +252,11 @@ export class Master {
     this.people = new People(this.database)
     this.settings = new Settings(this.database)
     this.registry = new NodeRegistry(db, identity, {
+      // A NoMac Mac is reached through NoMac's SSH gateway.
+      transport: (host, port): (() => Promise<Duplex>) | undefined =>
+        host.startsWith('nomac:')
+          ? async (): Promise<Duplex> => await this.pools.tunnel(host, port)
+          : undefined,
       methods: (role): MethodTable =>
         mergeMethods(
           role === 'worker'
@@ -321,6 +399,7 @@ export class Master {
       cloud: {
         demand: (type): string | undefined => this.pools.demand(type),
         draining: (fingerprint): boolean => this.pools.draining(fingerprint),
+        setupDemand: (): string | undefined => this.pools.setupDemand(),
       },
     })
     this.nodeStates = new NodeStates({
@@ -358,7 +437,25 @@ export class Master {
       },
     })
     this.settings.register('host', hostArea)
-    this.settings.register('cloud', cloudArea)
+    this.cloudAccounts = new CloudAccounts({
+      settings: this.settings,
+      now: this.database.now,
+      ...options.cloudAccounts,
+    })
+    this.settings.register(
+      'cloudAccounts',
+      cloudAccountsArea((id) => [
+        ...this.pools
+          .pools()
+          .filter((pool) => pool.account === id)
+          .map((pool) => `pool ${pool.name}`),
+        ...this.cloudHosts.usedBy(id),
+      ]),
+    )
+    this.settings.register(
+      'cloud',
+      cloudArea(() => this.cloudAccounts.all()),
+    )
     this.settings.register('storage', storageArea)
     this.settings.register('signIn', signInArea)
     this.backups = new Backups({
@@ -426,11 +523,22 @@ export class Master {
       scheduler: this.scheduler,
       log: (line): void => (this.options.log ?? console.log)(line),
     })
+    // Names this master's cloud resources, so a shared provider account's
+    // other masters are left alone; a restored master keeps it.
+    const masterId = createHash('sha256')
+      .update(identity.fingerprint)
+      .digest('hex')
+      .slice(0, 10)
     this.pools = new Pools({
       master: this.database,
+      masterId,
       registry: this.registry,
       setting: (): CloudSetting | undefined =>
         this.settings.value('cloud') as CloudSetting | undefined,
+      accountKey: (account): string | undefined =>
+        this.cloudAccounts.get(account)?.key,
+      accountProvider: (account): 'digitalocean' | 'nomac' | undefined =>
+        this.cloudAccounts.get(account)?.provider,
       busy: (fingerprint): boolean => this.scheduler.busy(fingerprint),
       release: (): string | undefined => this.releases.current(),
       releasePlatforms: (version: string): string[] =>
@@ -442,6 +550,8 @@ export class Master {
         }
         return host.workerOrigin ?? host.origin
       },
+      github: (): { repository: string; version: string } | undefined =>
+        repository == null ? undefined : { repository, version },
       publicAddress: async (): Promise<string | undefined> => {
         const response = await fetch('https://api.ipify.org', {
           signal: AbortSignal.timeout(10_000),
@@ -450,6 +560,113 @@ export class Master {
       },
       log: (line): void => console.log(line),
       ...options.cloud,
+      // A test's NoMac API and gateway, always with the master's own SSH key.
+      nomac: {
+        ...options.cloud?.nomac,
+        sshKey: (): { privateKey: string; publicKey: string } =>
+          nomacKey(this.database),
+      },
+    })
+    this.appleSetup = new AppleSetup({
+      web: (): AppleWeb | undefined =>
+        this.apple.ready()
+          ? new AppStoreConnectWeb(
+              async (url, init) => await this.apple.webRequest(url, init),
+              (options.appleEndpoints ?? appleEndpoints).olympus,
+              (options.appleEndpoints ?? appleEndpoints).developer,
+            )
+          : undefined,
+      teamKey: (team): { keyId: string } | undefined =>
+        (
+          this.settings.value('apple') as
+            | { teams?: Record<string, { keyId: string }> }
+            | undefined
+        )?.teams?.[team],
+      saveTeamKey: async (team, key): Promise<void> => {
+        const stored = (this.settings.value('apple') ?? {}) as {
+          teams?: Record<string, unknown>
+        }
+        await this.settings.set(localOperator, 'apple', {
+          teams: { ...stored.teams, [team]: key },
+        })
+      },
+      certificate: (team, kind): CertificateView | undefined =>
+        this.appleSigning.certificates.current(team, kind),
+      createCertificate: async (team, kind): Promise<CertificateView> =>
+        await this.appleSigning.certificates.create(team, kind),
+      appleCertificates: async (team): Promise<string[]> => {
+        const connect = this.appleSigning.connect(team)
+        if (connect == null) return []
+        return (
+          await connect.all(
+            '/v1/certificates?filter[certificateType]=DISTRIBUTION&limit=200',
+          )
+        ).map((item) => {
+          const attributes = (
+            item as { attributes?: { name?: string; expirationDate?: string } }
+          ).attributes
+          return `${attributes?.name ?? item.id}${attributes?.expirationDate == null ? '' : ` (expires ${attributes.expirationDate.slice(0, 10)})`}`
+        })
+      },
+      fingerprint: identity.fingerprint,
+    })
+    this.cloudHosts = new CloudHosts({
+      master: this.database,
+      masterId,
+      registry: this.registry,
+      account: (id): CloudAccount | undefined => this.cloudAccounts.get(id),
+      github: (): { repository: string; version: string } | undefined =>
+        repository == null ? undefined : { repository, version },
+      hostSettings: {
+        get: (): { origin?: string } | undefined =>
+          this.settings.value('host') as { origin?: string } | undefined,
+        set: async (origin): Promise<void> => {
+          if (origin == null) clearSetting(this.settings, localOperator, 'host')
+          else
+            await this.settings.set(localOperator, 'host', {
+              ...(this.settings.value('host') ?? {}),
+              origin,
+            })
+        },
+      },
+      publicAddress: async (): Promise<string | undefined> => {
+        const response = await fetch('https://api.ipify.org', {
+          signal: AbortSignal.timeout(10_000),
+        })
+        return response.ok ? (await response.text()).trim() : undefined
+      },
+      dns: new HostDns(this.database),
+      space: new HostSpace({
+        master: this.database,
+        storage: {
+          get: (): SpaceStorage | undefined => {
+            const value = this.settings.value('storage') as
+              | { driver?: string; s3?: SpaceStorage }
+              | undefined
+            return value?.driver === 's3' ? value.s3 : undefined
+          },
+          set: async (s3): Promise<void> => {
+            await this.settings.set(localOperator, 'storage', {
+              driver: 's3',
+              s3,
+            })
+          },
+          clear: async (): Promise<void> => {
+            await this.settings.set(localOperator, 'storage', {
+              driver: 'disk',
+            })
+          },
+        },
+        ...(options.spaces?.endpoint == null
+          ? {}
+          : { endpoint: options.spaces.endpoint }),
+        ...(options.spaces?.fetch == null
+          ? {}
+          : { fetch: options.spaces.fetch }),
+        ...(options.spaces?.wait == null ? {} : { wait: options.spaces.wait }),
+      }),
+      log: (line): void => console.log(line),
+      ...options.cloudHosts,
     })
     this.updates = new Updates(
       this.registry,
@@ -491,6 +708,7 @@ export class Master {
     this.updates.start()
     this.hosts.start()
     this.pools.start()
+    this.cloudHosts.start()
     // Expired builds and saved artifacts become deleting; the host removes the files.
     this.expiry = setInterval(
       () => {
@@ -564,6 +782,7 @@ export class Master {
     this.hosts.stop()
     clearInterval(this.expiry)
     await this.pools.stop()
+    await this.cloudHosts.stop()
     clearInterval(this.compaction)
     clearInterval(this.backupTimer)
     this.provisioning.stop()
@@ -773,6 +992,11 @@ export class Master {
     })
   }
 
+  /** How this master reaches DigitalOcean Spaces (a fake in tests). */
+  get spacesOptions(): NonNullable<MasterOptions['spaces']> {
+    return this.options.spaces ?? {}
+  }
+
   /** Operator commands; the control socket proves ownership of the data directory. */
   controlHandlers(): Record<string, ControlHandler> {
     const actor = localOperator
@@ -854,6 +1078,24 @@ export class Master {
       },
       'runtimes.list': () => this.runtimes.list(),
       'cloud.status': () => this.pools.view(),
+      'cloud.accounts.list': () => this.cloudAccounts.list(actor),
+      'cloud.accounts.add': async (args) =>
+        await this.cloudAccounts.add(actor, args),
+      'cloud.accounts.check': async (args) =>
+        await this.cloudAccounts.check(actor, String(args.id ?? '')),
+      'cloud.accounts.remove': async (args): Promise<null> => {
+        await this.cloudAccounts.remove(actor, String(args.id ?? ''))
+        return null
+      },
+      'cloud.hosts.list': () => this.cloudHosts.list().map(hostView),
+      'cloud.hosts.add': async (args) =>
+        hostView(await this.cloudHosts.create(args.value)),
+      'cloud.hosts.reconcile': async (args) =>
+        hostView(await this.cloudHosts.reconcile(String(args.name ?? ''))),
+      'cloud.hosts.remove': async (args): Promise<null> => {
+        await this.cloudHosts.remove(String(args.name ?? ''), args.name)
+        return null
+      },
       'nodes.remove': (args): null => {
         this.registry.remove(String(args.fingerprint ?? ''))
         return null

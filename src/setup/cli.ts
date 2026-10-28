@@ -178,7 +178,10 @@ async function restoreCommand(
       target: path.join(dir, PENDING_RESTORE),
       scratch: path.join(dir, 'scratch'),
     })
-    applyPendingRestore(dir, () => undefined)
+    let started = ''
+    applyPendingRestore(dir, (line) => {
+      started = line
+    })
     clearSetupCode(dir)
     io.out(
       `Restored the master from ${date == null ? 'its latest backup' : `the backup of ${date}`}: ${Object.entries(
@@ -186,6 +189,12 @@ async function restoreCommand(
       )
         .map(([table, count]) => `${count} ${table}`)
         .join(', ')}.`,
+    )
+    const identity = /as master (\S+)$/.exec(started)?.[1]
+    io.out(
+      identity == null
+        ? 'The backup holds no master identity: nodes pair with this master again.'
+        : `This master is ${identity} again, so its nodes reconnect without pairing. Stop the master the backup came from before starting this one: two masters with one identity take turns with the same nodes.`,
     )
     return 0
   } finally {

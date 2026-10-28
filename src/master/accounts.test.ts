@@ -788,6 +788,23 @@ describe('Master sign-in, setup, people and permissions', function () {
       'POST /api/v2/settings/backup/confirm': 'backups.key',
       'GET /api/v2/backups': 'backups.run',
       'POST /api/v2/backups': 'backups.run',
+      'GET /api/v2/cloud/accounts': 'settings.read',
+      'POST /api/v2/cloud/accounts': 'settings.change',
+      'POST /api/v2/cloud/accounts/:id/check': 'settings.read',
+      'DELETE /api/v2/cloud/accounts/:id': 'settings.change',
+      'GET /api/v2/cloud/accounts/:id/catalog': 'settings.read',
+      'GET /api/v2/cloud/pools': 'settings.read',
+      'POST /api/v2/cloud/pools': 'settings.change',
+      'PUT /api/v2/cloud/pools/:name': 'settings.change',
+      'DELETE /api/v2/cloud/pools/:name': 'settings.change',
+      'GET /api/v2/cloud/hosts': 'settings.read',
+      'POST /api/v2/cloud/hosts': 'settings.change',
+      'POST /api/v2/cloud/hosts/:name/reconcile': 'settings.change',
+      'DELETE /api/v2/cloud/hosts/:name': 'settings.change',
+      'POST /api/v2/cloud/hosts/:name/space': 'settings.change',
+      'GET /api/v2/storage': 'settings.read',
+      'POST /api/v2/storage/space': 'settings.change',
+      'POST /api/v2/storage/disk': 'settings.change',
       'GET /api/v2/people': 'people.read',
       'POST /api/v2/people': 'people.change',
       'GET /api/v2/people/:id': 'people.read',
@@ -846,6 +863,8 @@ describe('Master sign-in, setup, people and permissions', function () {
       'GET /api/v2/apple/session': 'apple.change',
       'POST /api/v2/apple/session': 'apple.change',
       'POST /api/v2/apple/session/code': 'apple.change',
+      'GET /api/v2/apple/setup': 'apple.change',
+      'POST /api/v2/apple/setup': 'apple.change',
     }
     const registered = routes().map((route) => `${route.method} ${route.path}`)
     assert.deepEqual(
@@ -865,6 +884,7 @@ describe('Master sign-in, setup, people and permissions', function () {
         .replace(':area', 'no-such-area')
         .replace(':fingerprint', 'no-such-node')
         .replace(':id', '424242')
+        .replace(':name', 'no-such-pool')
     const failures: string[] = []
     for (const [route, action] of Object.entries(table)) {
       const [method, pathname] = route.split(' ') as [string, string]
@@ -1259,6 +1279,15 @@ export async function one(ctx: Stage) { return 1 }
     )
     const home = await request(c.master, 'GET', '/', { cookie })
     assert.equal(home.headers.get('location'), '/backups')
+    // "Skip for now" lets the dashboard through for this browser session, with a reminder.
+    const later = await request(c.master, 'GET', '/?later=backups', { cookie })
+    assert.equal(later.headers.get('location'), '/')
+    const skip = later.headers.get('set-cookie')!.split(';')[0]!
+    const through = await request(c.master, 'GET', '/', {
+      cookie: `${cookie}; ${skip}`,
+    })
+    assert.equal(through.status, 200)
+    assert.match(through.text, /This master is not backed up/)
     let page = await request(c.master, 'GET', '/backups', { cookie })
     assert.match(page.text, /No backup has run yet/)
     assert.match(page.text, /data-mason="backup-confirm"/)
@@ -1268,6 +1297,12 @@ export async function one(ctx: Stage) { return 1 }
     )
     page = await request(c.master, 'GET', '/backups', { cookie })
     assert.match(page.text, /Last backup /)
+    // Backed up, the reminder is the key still to confirm.
+    assert.match(
+      (await request(c.master, 'GET', '/', { cookie: `${cookie}; ${skip}` }))
+        .text,
+      /The backup key is not confirmed as stored/,
+    )
     assert.equal(
       (await c.api('POST', '/api/v2/settings/backup/confirm', {})).status,
       200,

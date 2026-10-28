@@ -2,12 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { generateKeyPairSync, verify } from 'node:crypto'
 import { once } from 'node:events'
-import {
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import path from 'node:path'
@@ -227,11 +222,29 @@ describe('Projects, branch rules and build numbers', function () {
         projects.save(developer, 'y', { repository: 'https://github.com/a/b' }),
       /Not allowed/,
     )
+    const before = Number(
+      master.db
+        .prepare(
+          "SELECT COUNT(*) n FROM change_log WHERE entity='project' AND key='fixtures'",
+        )
+        .get()!.n,
+    )
     const app = projects.addApp(localOperator, 'fixtures', {
       bundleId: 'com.example.masonfixture',
       name: 'Fixture',
       platforms: ['ios', 'android'],
     })
+    // The host reads which apps a project owns from the project: it changes too.
+    assert.equal(
+      Number(
+        master.db
+          .prepare(
+            "SELECT COUNT(*) n FROM change_log WHERE entity='project' AND key='fixtures'",
+          )
+          .get()!.n,
+      ),
+      before + 1,
+    )
     assert.deepEqual(app.platforms, ['android', 'ios'])
     const channels = master.db
       .prepare(
@@ -255,10 +268,7 @@ describe('Projects, branch rules and build numbers', function () {
       }).platforms,
       ['ios'],
     )
-    assert.equal(
-      projects.resolve('com.example.masonfixture')!.slug,
-      'fixtures',
-    )
+    assert.equal(projects.resolve('com.example.masonfixture')!.slug, 'fixtures')
     assert.equal(projects.resolve('fixtures')!.slug, 'fixtures')
     assert.equal(projects.resolve('nothing'), undefined)
     projects.save(localOperator, 'other', {
@@ -291,11 +301,7 @@ describe('Projects, branch rules and build numbers', function () {
         }),
       /each platform once/,
     )
-    projects.removeApp(
-      localOperator,
-      'fixtures',
-      'com.example.masonfixture',
-    )
+    projects.removeApp(localOperator, 'fixtures', 'com.example.masonfixture')
     assert.throws(
       () =>
         projects.removeApp(
@@ -1385,10 +1391,7 @@ describe('Projects, branch rules and build numbers', function () {
         'https://github.com/example/mason-fixtures.git',
         root,
       )
-      assert.equal(
-        access.url,
-        'https://github.com/example/mason-fixtures.git',
-      )
+      assert.equal(access.url, 'https://github.com/example/mason-fixtures.git')
       assert.equal(
         access.env.GIT_CONFIG_VALUE_0,
         `AUTHORIZATION: basic ${Buffer.from('x-access-token:good').toString('base64')}`,

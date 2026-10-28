@@ -183,7 +183,14 @@ export async function createStageKeychain(
       return file
     })
     try {
-      await run(SECURITY, ['add-certificates', '-k', keychain, ...authorities])
+      // One at a time: one the .p12 brought along is already in the keychain,
+      // which `security` refuses as a whole otherwise.
+      for (const file of authorities)
+        await run(SECURITY, ['add-certificates', '-k', keychain, file]).catch(
+          (error: unknown) => {
+            if (!/already in/.test((error as Error).message)) throw error
+          },
+        )
     } finally {
       for (const file of authorities) rmSync(file, { force: true })
     }

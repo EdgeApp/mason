@@ -178,13 +178,15 @@ selector.
 ### Cloud node types
 
 A node type can also be backed by a **cloud pool** an administrator configures
-on the master. When a stage needs that type and no node of it is free, the
-master starts a cloud machine, which then behaves like an in-house computer
+on the master. Each pool names a **cloud account** added on the master's Cloud
+page. When a stage needs that type and no node of it is free, the master starts
+a cloud machine in that account, which then behaves like an in-house computer
 until it has been idle for an hour:
 
 ```json
 {
   "type": "linux-cloud",
+  "account": "digitalocean",
   "provider": "digitalocean",
   "region": "sfo3",
   "size": "s-4vcpu-8gb",
@@ -216,6 +218,11 @@ until it has been idle for an hour:
   cannot use it), the master starts from the plain `image` instead, installs
   Mason and the node type's software, and snapshots that machine when it
   retires, so the following start is fast again.
+- A new machine installs Mason from the host, or, while the master has no
+  host, the master's own release from GitHub. Pools are added and edited on
+  the Nodes page, where the region, size and image lists come from the
+  provider. A master with no worker connected starts a machine from its first
+  pool to run a run's setup, so a cluster can be cloud machines alone.
 - The machine's first-boot data carries the one-time pairing secret; the
   master dials it, checks the secret, pins its key, and assigns stages. The
   provider's firewall admits the link port only from the master's public
@@ -234,8 +241,18 @@ until it has been idle for an hour:
   running stages finish, idle machines retire, and stages that need a cloud
   type wait with the reason "monthly cloud budget reached" until the next
   month or a raised cap.
-- DigitalOcean (Linux) is the first provider. The provider credential lives
-  only in the master's settings.
+- A pool can also run on **NoMac** (Apple silicon Macs with Xcode, by the
+  minute): the master starts a NoMac Mac, installs Mason on it for the user,
+  runs the worker as a NoMac service, and reaches it through NoMac's SSH
+  gateway, so the Mac accepts no inbound connection. NoMac runs one Mac at a
+  time per account for up to eight hours; its Macs are never snapshotted, and
+  a retired one is stopped.
+- DigitalOcean (Linux) is the first provider. A provider's API key is a cloud
+  account on the master: an administrator or manager adds it on the Cloud page
+  (or with `mason cloud accounts add --key-stdin`), where Mason checks it and
+  shows the account's state. The key is kept only in the master's database and
+  its encrypted backups, and is never shown again; an account a pool uses
+  cannot be removed.
 
 ## 3. Workflows
 

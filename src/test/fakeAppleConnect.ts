@@ -147,6 +147,8 @@ export class FakeAppleConnect {
   rejectUpload: string | undefined
   /** The export-compliance answer the next build's Info.plist gives, which Apple then refuses to change. */
   declaredEncryption: boolean | undefined
+  /** Apple's reason for refusing new certificates, as at a team's certificate limit. */
+  refuseCertificates: string | undefined
   processingPolls = 1
   profileDays = 365
   readonly team: string
@@ -309,6 +311,18 @@ export class FakeAppleConnect {
       return { status: 200, json: this.page(url, items) }
     }
     if (p === '/v1/certificates' && method === 'POST') {
+      if (this.refuseCertificates != null)
+        return {
+          status: 409,
+          json: {
+            errors: [
+              {
+                title: 'There is a problem with the request entity',
+                detail: this.refuseCertificates,
+              },
+            ],
+          },
+        }
       const kind = data!.attributes.certificateType as string
       const name =
         kind === 'DEVELOPMENT'

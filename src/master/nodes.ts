@@ -1,3 +1,4 @@
+import type { Duplex } from 'node:stream'
 import { createPublicKey } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import type { DatabaseSync } from 'node:sqlite'
@@ -60,6 +61,14 @@ export interface NodeRegistryOptions {
   redialBaseMs?: number
   redialMaxMs?: number
   dialTimeoutMs?: number
+  /**
+   * The stream to a node that is not reached by address (a NoMac Mac, behind
+   * its SSH gateway), by its recorded host; plain TCP otherwise.
+   */
+  transport?: (
+    host: string,
+    port: number,
+  ) => (() => Promise<Duplex>) | undefined
   now?: () => number
 }
 
@@ -169,13 +178,14 @@ export class NodeRegistry extends EventEmitter {
     addressText: string,
     certificateHash: string,
     secret: string,
+    role: 'worker' | 'host' = 'worker',
   ): Promise<NodeRecord> {
     return await this.pair(
       addressText,
       certificateHash,
       secret,
       undefined,
-      'worker',
+      role,
     )
   }
 
@@ -191,6 +201,7 @@ export class NodeRegistry extends EventEmitter {
       address,
       certificateHash,
       this.options.dialTimeoutMs,
+      this.options.transport?.(address.host, address.port),
     )
     let role: 'worker' | 'host' = 'worker'
     try {
@@ -417,6 +428,7 @@ export class NodeRegistry extends EventEmitter {
         address,
         row.certificate_hash,
         this.options.dialTimeoutMs,
+        this.options.transport?.(address.host, address.port),
       )
       try {
         const stored = createPublicKey({

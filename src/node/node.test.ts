@@ -1100,7 +1100,53 @@ describe('Configuration-free nodes', function () {
       1,
     )
     assert.match(refused.errors.join('\n'), /does not match its key/)
-    assert.equal(await nodeMain(['host', '--pairing-file', file], testIO()), 1)
+    // U4.5 a host takes a pairing file too; other roles still refuse one.
+    const host = testIO()
+    assert.equal(
+      await nodeMain(
+        ['host', '--data', path.join(root, 'host'), '--pairing-file', file],
+        host,
+      ),
+      1,
+    )
+    assert.match(host.errors.join('\n'), /does not match its key/)
+    const master = testIO()
+    assert.equal(await nodeMain(['master', '--pairing-file', file], master), 1)
+    assert.match(
+      master.errors.join('\n'),
+      /--pairing-file is for a worker or a host/,
+    )
+    writeFileSync(
+      file,
+      JSON.stringify({ cert: made.cert, key: made.key, secret }),
+    )
+    const hostData = path.join(root, 'paired-host')
+    const served = testIO()
+    const runningHost = nodeMain(
+      [
+        'host',
+        '--data',
+        hostData,
+        '--port',
+        '0',
+        '--link-port',
+        '0',
+        '--listen',
+        '127.0.0.1',
+        '--pairing-file',
+        file,
+      ],
+      served,
+    )
+    const hostNode = await served.node
+    assert(!existsSync(file))
+    assert.equal(
+      hostNode.identity.certificateHash,
+      (await import('./certificate.js')).certificateHash(made.cert),
+    )
+    assert.equal(hostNode.pairing!.key(), undefined)
+    served.stop()
+    await runningHost
   })
 
   it('trusts a server by public-key pin and sends nothing to the wrong one', async () => {

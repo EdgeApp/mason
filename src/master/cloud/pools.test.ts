@@ -16,6 +16,10 @@ import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeCloud } from '../../test/fakeCloud.js'
 import { quietMac } from '../../test/fakeMac.js'
 import { ProviderError } from './digitalocean.js'
+import { pinnedFetch } from '../../node/pinnedFetch.js'
+import { MASTER_SESSION_COOKIE } from '../auth.js'
+import { poolInput } from '../cloudApi.js'
+import { version } from '../../version.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -26,6 +30,9 @@ const root = (): string =>
 const admin = { role: 'admin' as const, label: 'paul' }
 const TOKEN = 'dop_v1_' + 'f'.repeat(40)
 const MINUTE = 60_000
+/** A master's short id, as it names its cloud resources. */
+const idOf = (fingerprint: string): string =>
+  createHash('sha256').update(fingerprint).digest('hex').slice(0, 10)
 
 describe('Cloud node pools', function () {
   this.timeout(120_000)
@@ -33,11 +40,13 @@ describe('Cloud node pools', function () {
   let cloud: FakeCloud
   let offset = 0
   let address = '203.0.113.7'
+  let assets: () => Promise<string[]> = async () => []
   const pool = (
     extra: Record<string, unknown> = {},
   ): Record<string, unknown> => ({
     name: 'linux-cloud',
     type: 'linux-cloud',
+    account: 'do',
     region: 'nyc3',
     size: 's-1vcpu-1gb',
     image: 'ubuntu-24-04-x64',
@@ -56,9 +65,11 @@ describe('Cloud node pools', function () {
       coWorker: true,
       masterOptions: {
         now: () => Date.now() + offset,
+        cloudHosts: { provider: () => cloud },
         cloud: {
           provider: () => cloud,
           publicAddress: async () => address,
+          releaseAssets: async () => await assets(),
           tickMs: 200,
           pairTimeoutMs: 20_000,
           log: (line: string) => {
@@ -166,58 +177,87 @@ export async function work(ctx: Stage) {
       )
     })
 
-  it('U11.1 validates pools and keeps the provider token on the master', async () => {
+  it('U11.1/U3.1 validates pools against cloud accounts and keeps the provider key on the master', async () => {
     const settings = c.master.master!.settings
     await assert.rejects(
       settings.set(admin, 'cloud', { pools: [pool()] }),
-      /provider token/,
+      /no cloud account named do/,
+    )
+    await settings.set(admin, 'cloudAccounts', {
+      accounts: [
+        {
+          id: 'do',
+          name: 'DigitalOcean',
+          provider: 'digitalocean',
+          key: TOKEN,
+        },
+        {
+          id: 'mac',
+          name: 'NoMac',
+          provider: 'nomac',
+          key: 'nmk_' + 'a'.repeat(40),
+        },
+      ],
+    })
+    await assert.rejects(
+      settings.set(admin, 'cloud', { pools: [pool({ account: undefined })] }),
+      /pool.account names a cloud account/,
+    )
+    // A NoMac account's pool takes NoMac's one profile, whatever it is given.
+    const mac = await settings.set(admin, 'cloud', {
+      pools: [pool({ account: 'mac', region: 'x', size: 'y' })],
+    })
+    assert.deepEqual(
+      (mac.pools as Json[]).map((entry) => [
+        entry.provider,
+        entry.region,
+        entry.size,
+        entry.image,
+      ]),
+      [['nomac', 'nomac', 'standard', 'macos']],
     )
     await assert.rejects(
-      settings.set(admin, 'cloud', {
-        token: TOKEN,
-        pools: [pool({ maxNodes: 0 })],
-      }),
+      settings.set(admin, 'cloud', { pools: [pool({ maxNodes: 0 })] }),
       /maxNodes/,
     )
     await assert.rejects(
-      settings.set(admin, 'cloud', {
-        token: TOKEN,
-        pools: [pool({ provider: 'aws' })],
-      }),
+      settings.set(admin, 'cloud', { pools: [pool({ provider: 'aws' })] }),
       /digitalocean/,
     )
     await assert.rejects(
-      settings.set(admin, 'cloud', { token: TOKEN, pools: [pool(), pool()] }),
+      settings.set(admin, 'cloud', { pools: [pool(), pool()] }),
       /twice/,
     )
     await assert.rejects(
-      settings.set(admin, 'cloud', { token: 'short', pools: [] }),
-      /token/,
+      settings.set(admin, 'cloud', { token: TOKEN, pools: [] }),
+      /cloud accounts now/,
     )
-    await assert.rejects(
-      settings.set(admin, 'cloud', { token: { keep: true }, pools: [] }),
-      /No stored token/,
-    )
-    await settings.set(admin, 'cloud', {
-      token: TOKEN,
-      monthlyBudget: 200,
-      pools: [pool()],
-    })
+    await settings.set(admin, 'cloud', { monthlyBudget: 200, pools: [pool()] })
     const shown = settings.get(admin, 'cloud') as Json
-    assert.deepEqual(shown.token, { set: true })
-    await settings.set(admin, 'cloud', {
-      token: { keep: true },
-      monthlyBudget: 200,
-      pools: [pool()],
-    })
+    assert.equal(shown.token, undefined)
+    assert.equal(shown.pools[0].account, 'do')
+    // The account a pool uses cannot be removed.
+    await assert.rejects(
+      settings.set(admin, 'cloudAccounts', {
+        accounts: [
+          { id: 'mac', name: 'NoMac', provider: 'nomac', key: { keep: true } },
+        ],
+      }),
+      /Account do is used by pool linux-cloud/,
+    )
     const db = c.master.master!.database.db
     const logged = JSON.stringify(db.prepare('SELECT * FROM change_log').all())
     assert(!logged.includes(TOKEN))
     assert(!JSON.stringify(c.master.master!.changes.snapshot()).includes(TOKEN))
+    assert(
+      !JSON.stringify(settings.get(admin, 'cloudAccounts')).includes(TOKEN),
+    )
   })
 
   it('U11.2/U11.3 makes one machine per demand up to maxNodes and pairs it by the master’s certificate and secret', async () => {
-    // Two branches, so the runs do not queue behind each other.
+    // Two branches, so the runs do not queue behind each other; a slow boot
+    // keeps the first machine pairing while the second stage asks for one.
+    cloud.bootDelayMs = 3000
     const [first, second] = [await run(), await run('other')]
     await wait(() => machines().length === 1, 10_000, 'a machine').catch(
       (error: Error) => {
@@ -227,7 +267,12 @@ export async function work(ctx: Stage) {
       },
     )
     const spec = cloud.created[0]!
-    assert.deepEqual(spec.tags, ['mason-pool', 'mason-pool-linux-cloud'])
+    const id = idOf(c.master.identity.fingerprint)
+    assert.deepEqual(spec.tags, [
+      'mason-pool',
+      `mason-pool-${id}`,
+      `mason-pool-${id}-linux-cloud`,
+    ])
     assert.equal(spec.image, 'ubuntu-24-04-x64')
     assert.match(
       spec.userData,
@@ -252,6 +297,7 @@ export async function work(ctx: Stage) {
       waiting.reason,
       /Waiting for a linux-cloud machine to start|at its 1-machine limit/,
     )
+    cloud.bootDelayMs = 0
     const done = await finish(first)
     assert.equal(
       done.status,
@@ -332,11 +378,12 @@ export async function work(ctx: Stage) {
 
   it('U11.4 retires an idle machine: scrubbed, powered off, snapshotted, destroyed; the firewall follows the master', async () => {
     await wait(() => cloud.firewalls.length > 0, 5_000, 'the firewall')
+    const id = idOf(c.master.identity.fingerprint)
     assert.deepEqual(cloud.firewalls.at(-1), {
-      name: 'mason-pools',
+      name: `mason-pools-${id}`,
       port: 9310,
       sources: ['203.0.113.7'],
-      tag: 'mason-pool',
+      tag: `mason-pool-${id}`,
     })
     address = '198.51.100.9'
     await wait(
@@ -454,18 +501,30 @@ export async function work(ctx: Stage) {
     await wait(() => machines().length === 0, 15_000, 'retired')
   })
 
-  it('U11.5 deletes tagged machines and snapshots the master has no record of, keeping its own', async () => {
+  it('U11.5 deletes its own tagged machines and snapshots it has no record of, keeping its own and other masters’', async () => {
+    const id = idOf(c.master.identity.fingerprint)
     const stray = await cloud
       .create({
         name: 'stray',
         region: 'nyc3',
         size: 's',
         image: 'x',
-        tags: ['mason-pool'],
+        tags: ['mason-pool', `mason-pool-${id}`],
         userData: "<<'MASON_PAIRING'\n{}\nMASON_PAIRING",
       })
       .catch(() => undefined)
     void stray
+    // Another master's pool machine in the same account.
+    const theirs = await cloud
+      .create({
+        name: 'theirs',
+        region: 'nyc3',
+        size: 's',
+        image: 'x',
+        tags: ['mason-pool', 'mason-pool-0123456789'],
+        userData: "<<'MASON_PAIRING'\n{}\nMASON_PAIRING",
+      })
+      .catch(() => undefined)
     const other = await cloud
       .create({
         name: 'mine',
@@ -478,7 +537,7 @@ export async function work(ctx: Stage) {
       .catch(() => undefined)
     cloud.snapshotList.set('snap-stray', {
       id: 'snap-stray',
-      name: 'mason-pool-old',
+      name: `mason-pool-${id}-old`,
       sizeGb: 10,
       createdAt: 0,
       from: 'x',
@@ -490,6 +549,18 @@ export async function work(ctx: Stage) {
       createdAt: 0,
       from: 'x',
     })
+    // Another master's snapshot, and one from before snapshots named their master.
+    for (const [key, name] of [
+      ['snap-theirs', 'mason-pool-0123456789-android-2026'],
+      ['snap-legacy', 'mason-pool-android-2026'],
+    ] as const)
+      cloud.snapshotList.set(key, {
+        id: key,
+        name,
+        sizeGb: 10,
+        createdAt: 0,
+        from: 'x',
+      })
     const own = (c.master.master!.pools.view().snapshots as Json[])[0]
     const result = await c.master.master!.pools.reconcile()
     assert.deepEqual(result, { machines: 1, snapshots: 1 })
@@ -497,6 +568,9 @@ export async function work(ctx: Stage) {
     assert(cloud.snapshotList.has('snap-user'))
     assert(cloud.snapshotList.has(own.provider_id))
     assert(other == null || cloud.machines.has(other.id))
+    assert(theirs == null || cloud.machines.has(theirs.id))
+    assert(cloud.snapshotList.has('snap-theirs'))
+    assert(cloud.snapshotList.has('snap-legacy'))
   })
 
   it('U11.6 a provider failure fails only the placement, with the reason, and retries later', async () => {
@@ -558,10 +632,20 @@ export async function work(ctx: Stage) {
     assert.equal(waiting.status, 'queued')
     assert.match(waiting.reason, /mason releases fetch v0\.3\.1/)
     assert.equal(cloud.created.length, created)
-    // The whole release current again: the stage gets its machine.
-    releases.setCurrent('0.3.0')
+    // The master's own release on GitHub has the platform: machines install from there.
+    assets = async (): Promise<string[]> => [
+      `mason-${version}-linux-x64.tar.gz`,
+      'install.sh',
+    ]
+    offset += 11 * MINUTE
     assert.equal((await finish(id)).status, 'succeeded')
     assert.equal(cloud.created.length, created + 1)
+    assert.match(
+      cloud.created.at(-1)!.userData,
+      /releases\/latest\/download\/install\.sh/,
+    )
+    assets = async (): Promise<string[]> => []
+    releases.setCurrent('0.3.0')
     offset += 6 * MINUTE
     await wait(() => machines().length === 0, 15_000, 'retired')
   })
@@ -581,7 +665,6 @@ export async function work(ctx: Stage) {
     const spend = await pools.spend(now)
     assert(spend >= 0.1, String(spend))
     await c.master.master!.settings.set(admin, 'cloud', {
-      token: { keep: true },
       monthlyBudget: spend / 0.85,
       pools: [pool()],
     })
@@ -592,7 +675,6 @@ export async function work(ctx: Stage) {
       'the warning',
     )
     await c.master.master!.settings.set(admin, 'cloud', {
-      token: { keep: true },
       monthlyBudget: 0.05,
       pools: [pool()],
     })
@@ -614,7 +696,6 @@ export async function work(ctx: Stage) {
     )
     // Raising the cap resumes creation for the waiting stage.
     await c.master.master!.settings.set(admin, 'cloud', {
-      token: { keep: true },
       monthlyBudget: 200,
       pools: [pool()],
     })
@@ -629,5 +710,291 @@ export async function work(ctx: Stage) {
       ) + 3_600_000
     assert(spend > 0.05)
     assert((await pools.spend(next)) < 0.05)
+  })
+
+  it('U3.2/U3.3 with no host, machines install the master’s release from GitHub once its assets list a linux-x64 tarball', async () => {
+    const master = c.master.master!
+    // Earlier machines retire first, so the stage needs a new one.
+    offset += 6 * MINUTE
+    await wait(
+      () => machines().length === 0,
+      15_000,
+      'earlier machines retired',
+    )
+    const db = master.database.db
+    const host = db
+      .prepare("SELECT value FROM settings WHERE area='host'")
+      .get() as { value: string }
+    db.prepare("DELETE FROM settings WHERE area='host'").run()
+    try {
+      let asked = 0
+      assets = async (): Promise<string[]> => {
+        asked++
+        throw new Error('GitHub answered 503')
+      }
+      const id = await run()
+      const reason = async (pattern: RegExp, label: string): Promise<Json> =>
+        await wait(
+          () => {
+            const value = master.run(id) as Json
+            return pattern.test(stage(value)?.reason ?? '')
+              ? stage(value)
+              : undefined
+          },
+          10_000,
+          label,
+        )
+      await reason(
+        /Cannot read release v.* on GitHub: GitHub answered 503/,
+        'the GitHub failure',
+      )
+      assert(asked >= 1)
+      // A failure is asked again after a minute; a release without linux-x64 waits.
+      assets = async (): Promise<string[]> => [
+        `mason-${version}-darwin-arm64.tar.gz`,
+        'install.sh',
+      ]
+      offset += MINUTE + 1000
+      await reason(
+        /has no linux-x64 tarball for linux-cloud machines/,
+        'the missing tarball',
+      )
+      const created = cloud.created.length
+      assets = async (): Promise<string[]> => [
+        `mason-${version}-linux-x64.tar.gz`,
+        'install.sh',
+      ]
+      offset += 11 * MINUTE
+      assert.equal((await finish(id)).status, 'succeeded')
+      assert.equal(cloud.created.length, created + 1)
+      const spec = cloud.created.at(-1)!
+      assert.match(
+        spec.userData,
+        new RegExp(
+          `curl -fsSL https://github.com/[\\w.-]+/[\\w.-]+/releases/latest/download/install.sh -o /root/mason-install.sh\nbash /root/mason-install.sh --version ${version.replaceAll('.', '\\.')}\n`,
+        ),
+      )
+      assert.match(
+        spec.userData,
+        new RegExp(`# Mason ${version.replaceAll('.', '\\.')}`),
+      )
+      offset += 6 * MINUTE
+      await wait(() => machines().length === 0, 15_000, 'retired')
+    } finally {
+      db.prepare(
+        "INSERT INTO settings(area,value,updated_at,updated_by) VALUES('host',?,0,'test')",
+      ).run(host.value)
+    }
+  })
+
+  it('U3.4/U3.5 the Pools panel offers the provider’s regions, sizes and images; pools are added, edited and removed through the API', async () => {
+    const master = c.master.master!
+    const admin = c.admin
+    const paul = master.people
+      .list({ role: 'admin', label: 'pools' })
+      .find((person) => person.username === 'paul')!
+    const { token } = master.auth.start(paul.id, '127.0.0.1')
+    const page = async (): Promise<string> =>
+      await (
+        await pinnedFetch(
+          c.master.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') + '/nodes',
+          { headers: { cookie: `${MASTER_SESSION_COOKIE}=${token}` } },
+          c.master.web!.certificate!.pin,
+        )
+      ).text()
+    const nodes = await page()
+    assert.match(nodes, /<h2>.*Cloud pools<\/h2>/)
+    assert.match(nodes, /Add a pool on DigitalOcean/)
+    assert.match(
+      nodes,
+      /<option value="sfo3"[^>]*>San Francisco 3 \(sfo3\)<\/option>/,
+    )
+    assert.match(
+      nodes,
+      /<option value="s-2vcpu-4gb"[^>]*>s-2vcpu-4gb · Basic · \$24\/month<\/option>/,
+    )
+    assert.match(nodes, /<option value="ubuntu-24-04-x64"/)
+    assert.match(nodes, /id="pool-linux-cloud"/)
+    // The catalog is asked once for ten minutes.
+    const calls = cloud.catalogCalls
+    await page()
+    assert.equal(cloud.catalogCalls, calls)
+    // A form's text fields are typed for the area.
+    assert.deepEqual(
+      poolInput({
+        maxNodes: '2',
+        slots: '',
+        labels: 'docker, gpu ,',
+        name: 'x',
+      }),
+      {
+        maxNodes: 2,
+        slots: undefined,
+        labels: ['docker', 'gpu'],
+        name: 'x',
+      },
+    )
+    assert.deepEqual(poolInput(undefined), {})
+    const form = {
+      account: 'do',
+      name: 'big',
+      type: 'linux-big',
+      region: 'sfo3',
+      size: 's-2vcpu-4gb',
+      image: 'ubuntu-24-04-x64',
+      labels: 'docker',
+      maxNodes: '2',
+      slots: '2',
+      ttlMinutes: '5',
+      maxHoursPerNode: '12',
+    }
+    const bad = await c.api(
+      'POST',
+      '/api/v2/cloud/pools',
+      { ...form, maxNodes: '0' },
+      admin,
+    )
+    assert.equal(bad.status, 400)
+    assert.match(bad.json.error, /pool.maxNodes is a whole number from 1 to 50/)
+    const added = await c.api('POST', '/api/v2/cloud/pools', form, admin)
+    assert.equal(added.status, 201, added.text)
+    assert.deepEqual(added.json, {
+      name: 'big',
+      type: 'linux-big',
+      account: 'do',
+      provider: 'digitalocean',
+      region: 'sfo3',
+      size: 's-2vcpu-4gb',
+      image: 'ubuntu-24-04-x64',
+      labels: ['docker'],
+      maxNodes: 2,
+      slots: 2,
+      ttlMinutes: 5,
+      maxHoursPerNode: 12,
+    })
+    assert.equal(
+      (await c.api('POST', '/api/v2/cloud/pools', form, admin)).status,
+      409,
+    )
+    const listed = await c.api('GET', '/api/v2/cloud/pools', undefined, admin)
+    assert.deepEqual(
+      listed.json.map((pool: Json) => pool.name),
+      ['linux-cloud', 'big'],
+    )
+    const catalog = await c.api(
+      'GET',
+      '/api/v2/cloud/accounts/do/catalog',
+      undefined,
+      admin,
+    )
+    assert.deepEqual(
+      catalog.json.regions.map((region: Json) => region.slug),
+      ['nyc3', 'sfo3'],
+    )
+    assert.equal(
+      (
+        await c.api(
+          'GET',
+          '/api/v2/cloud/accounts/none/catalog',
+          undefined,
+          admin,
+        )
+      ).status,
+      404,
+    )
+    // A machine of the pool survives an edit, which keeps the pool's name.
+    const db = master.database.db
+    db.prepare(
+      "INSERT INTO cloud_machines(pool,account,state,size,created_at,provider_id) VALUES('big','do','creating','s-2vcpu-4gb',?,'none')",
+    ).run(Date.now() + offset)
+    const edited = await c.api(
+      'PUT',
+      '/api/v2/cloud/pools/big',
+      { ...form, name: 'renamed', maxNodes: '3' },
+      admin,
+    )
+    assert.equal(edited.status, 200, edited.text)
+    assert.equal(edited.json.name, 'big')
+    assert.equal(edited.json.maxNodes, 3)
+    assert.equal(machines().filter((row) => row.pool === 'big').length, 1)
+    assert.equal(
+      (await c.api('PUT', '/api/v2/cloud/pools/none', form, admin)).status,
+      404,
+    )
+    // Removing the pool retires its machines.
+    db.prepare(
+      "INSERT INTO nodes(fingerprint,public_key,certificate_hash,role,host,port,name,added_at) VALUES('mldsa65:gone','','','worker','203.0.113.8',9310,'mason-big-1',0)",
+    ).run()
+    db.prepare(
+      "UPDATE cloud_machines SET state='ready',fingerprint='mldsa65:gone' WHERE pool='big'",
+    ).run()
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/cloud/pools/big', undefined, admin))
+        .status,
+      200,
+    )
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/cloud/pools/big', undefined, admin))
+        .status,
+      404,
+    )
+    await wait(
+      () => machines().every((row) => row.pool !== 'big'),
+      10_000,
+      'the removed pool’s machine retired',
+    )
+    // An account without a catalog, and a catalog that fails, still render the form.
+    const view = await import('../../view/admin.js')
+    const html = view.nodesView({
+      nodes: [],
+      types: {},
+      pools: [
+        {
+          name: 'old',
+          type: 'linux',
+          account: 'gone',
+          region: 'ams3',
+          size: 's-1vcpu-1gb',
+          image: 'ubuntu-24-04-x64',
+          labels: ['a'],
+          maxNodes: 1,
+          slots: 1,
+          ttlMinutes: 5,
+          maxHoursPerNode: 1,
+          machines: [{ id: 7, state: 'ready', address: '203.0.113.9:9310' }],
+        },
+      ],
+      poolAccounts: [
+        { id: 'do', name: 'DigitalOcean', error: 'Could not list regions' },
+        {
+          id: 'cat',
+          name: 'Catalogued',
+          catalog: {
+            regions: [{ slug: 'sfo3', name: 'SF' }],
+            sizes: [],
+            images: [],
+          },
+        },
+      ],
+      budget: { monthly: 200 },
+      canChange: true,
+    })
+    assert.match(html, /<p class="notice">Could not list regions<\/p>/)
+    assert.match(
+      html,
+      /<input id="new-do-region" name="region" value="" required placeholder="sfo3">/,
+    )
+    assert.match(html, /203\.0\.113\.9:9310/)
+    assert.match(html, /machine · 1 stage at a time/)
+    assert.match(
+      view.nodesView({
+        nodes: [],
+        types: {},
+        pools: [],
+        budget: { monthly: 1 },
+        canChange: true,
+      }),
+      /Add a DigitalOcean or NoMac account on the <a href="\/cloud">Cloud<\/a> page/,
+    )
   })
 })

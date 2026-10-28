@@ -42,7 +42,12 @@ import {
 } from '../node/service.js'
 import { cluster } from '../test/cluster.js'
 import { releasesRepository, repository, repositoryName } from '../version.js'
-import { buildRelease, releaseMain, tarballName } from './build.js'
+import {
+  buildRelease,
+  releaseCreateArgs,
+  releaseMain,
+  tarballName,
+} from './build.js'
 import {
   checkOffer,
   receiveUpdate,
@@ -490,6 +495,8 @@ describe('Releases, install.sh and updates', function () {
         first.out,
         /Installed Mason 0\.1\.1 in .*\.mason\/app\/0\.1\.1/,
       )
+      // ~/.mason doubles as the node's data directory: private.
+      assert.equal(statSync(path.join(home, '.mason')).mode & 0o777, 0o700)
       const link = path.join(home, '.local', 'bin', 'mason')
       assert.equal(
         readlinkSync(link),
@@ -1404,6 +1411,7 @@ describe('Releases, install.sh and updates', function () {
         'EdgeApp/mason',
       ])
       assert(published[0]!.includes(path.join(out, 'SHA256SUMS')))
+      assert(!published[0]!.includes('--prerelease'), 'a release is latest')
       const list = execFileSync(
         'tar',
         ['-tzf', path.join(out, tarballName('0.1.8', here as never))],
@@ -1431,6 +1439,48 @@ describe('Releases, install.sh and updates', function () {
       await assert.rejects(
         buildRelease({ repo: work, version: '0.1.8', out }),
         /Build lib\/ first/,
+      )
+    })
+
+    it('U1.7 a --prerelease publish is never marked latest', () => {
+      const files = ['/out/SHA256SUMS']
+      assert.deepEqual(
+        releaseCreateArgs(
+          'v0.2.0-dev.1',
+          'example/mason',
+          '0.2.0-dev.1',
+          files,
+          true,
+        ),
+        [
+          'release',
+          'create',
+          'v0.2.0-dev.1',
+          '--repo',
+          'example/mason',
+          '--title',
+          'Mason 0.2.0-dev.1',
+          '--notes',
+          'Mason 0.2.0-dev.1',
+          '--prerelease',
+          '--latest=false',
+          '/out/SHA256SUMS',
+        ],
+      )
+      assert.deepEqual(
+        releaseCreateArgs('v0.2.0', 'example/mason', '0.2.0', files),
+        [
+          'release',
+          'create',
+          'v0.2.0',
+          '--repo',
+          'example/mason',
+          '--title',
+          'Mason 0.2.0',
+          '--notes',
+          'Mason 0.2.0',
+          '/out/SHA256SUMS',
+        ],
       )
     })
 
