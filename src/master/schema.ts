@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 10
+export const MASTER_SCHEMA = 11
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -309,6 +309,50 @@ const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void => {
     db.exec(`ALTER TABLE job_steps ADD COLUMN log_start INTEGER;
     ALTER TABLE job_steps ADD COLUMN log_end INTEGER;`)
+  },
+  // 11: cloud accounts. The `cloud` area's token becomes the `digitalocean`
+  // account, every pool names it, and machines and snapshots record theirs.
+  (db): void => {
+    db.exec(`ALTER TABLE cloud_machines ADD COLUMN account TEXT;
+    ALTER TABLE cloud_snapshots ADD COLUMN account TEXT;`)
+    const row = db
+      .prepare("SELECT value FROM settings WHERE area='cloud'")
+      .get() as { value: string } | undefined
+    if (row == null) return
+    const cloud = JSON.parse(row.value) as {
+      token?: string
+      pools?: Array<Record<string, unknown>>
+    }
+    const { token, ...rest } = cloud
+    if (token != null) {
+      db.prepare(
+        "INSERT INTO settings(area,value,updated_at,updated_by) VALUES('cloudAccounts',?,?,'migration') ON CONFLICT(area) DO NOTHING",
+      ).run(
+        JSON.stringify({
+          accounts: [
+            {
+              id: 'digitalocean',
+              name: 'DigitalOcean',
+              provider: 'digitalocean',
+              key: token,
+            },
+          ],
+        }),
+        Date.now(),
+      )
+      db.exec(
+        "UPDATE cloud_machines SET account='digitalocean'; UPDATE cloud_snapshots SET account='digitalocean';",
+      )
+    }
+    db.prepare("UPDATE settings SET value=? WHERE area='cloud'").run(
+      JSON.stringify({
+        ...rest,
+        pools: (rest.pools ?? []).map((pool) => ({
+          ...pool,
+          account: pool.account ?? 'digitalocean',
+        })),
+      }),
+    )
   },
 ]
 

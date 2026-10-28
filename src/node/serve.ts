@@ -90,6 +90,7 @@ export interface NodeOptions {
     | 'appleFetch'
     | 'appleSleep'
     | 'cloud'
+    | 'cloudAccounts'
     | 'now'
   >
   pollMs?: number

@@ -470,3 +470,70 @@ export function projectView(data: {
       : ''
   }</section></aside></div>`
 }
+
+/** One cloud account on the Cloud page: its provider, what its last check found, and its actions. */
+export interface CloudAccountRow {
+  id: string
+  name: string
+  provider: 'digitalocean' | 'nomac'
+  check?: {
+    state: 'ok' | 'refused' | 'timeout' | 'unavailable' | 'error'
+    checkedAt: number
+    message?: string
+    digitalocean?: { email: string; dropletLimit: number; status: string }
+    nomac?: {
+      credit: number
+      spendableSeconds: number
+      concurrency: number
+      spendingBlocked: boolean
+    }
+  }
+}
+
+const providerLabels = { digitalocean: 'DigitalOcean', nomac: 'NoMac' }
+
+/** Cloud: the provider accounts pools and hosts use; a key is entered once and never shown. */
+export function cloudView(data: {
+  accounts: CloudAccountRow[]
+  canChange: boolean
+  now: number
+}): string {
+  const state = (account: CloudAccountRow): string => {
+    const check = account.check
+    if (check == null) return '<p>Not checked yet.</p>'
+    const when = `<small>Checked ${escape(ago(check.checkedAt, data.now))}</small>`
+    if (check.state !== 'ok')
+      return `<p class="state-failed">${escape(
+        check.state === 'refused'
+          ? 'Key refused'
+          : check.state === 'timeout'
+            ? 'No answer'
+            : check.state === 'unavailable'
+              ? 'Unavailable'
+              : 'Check failed',
+      )}: ${escape(check.message ?? '')}</p>${when}`
+    if (check.digitalocean != null)
+      return `<p class="state-succeeded">OK</p><dl class="facts"><dt>Account</dt><dd>${escape(check.digitalocean.email)}</dd><dt>Droplet limit</dt><dd>${check.digitalocean.dropletLimit}</dd><dt>Status</dt><dd>${escape(check.digitalocean.status)}</dd></dl>${when}`
+    const nomac = check.nomac!
+    return `<p class="state-succeeded">OK</p><dl class="facts"><dt>Credit</dt><dd>$${nomac.credit.toFixed(2)} (${(nomac.spendableSeconds / 3600).toFixed(1)} hours)</dd><dt>Macs at a time</dt><dd>${nomac.concurrency}</dd>${nomac.spendingBlocked ? '<dt>Spending</dt><dd>Paused for the account</dd>' : ''}</dl>${when}`
+  }
+  const accounts = data.accounts
+    .map(
+      (account) =>
+        `<section class="panel" id="account-${escape(account.id)}" data-account="${escape(account.id)}"><h2>${icon('cloud')}${escape(account.name)}</h2><p>${escape(providerLabels[account.provider])} · <span class="mono">${escape(account.id)}</span></p>${state(account)}${
+          data.canChange
+            ? `<div class="actions">${apiForm(`/api/v2/cloud/accounts/${encodeURIComponent(account.id)}/check`, '', `${icon('refresh')} Check`, { className: 'secondary' })}${apiForm(`/api/v2/cloud/accounts/${encodeURIComponent(account.id)}`, '', `${icon('delete')} Remove`, { method: 'DELETE', className: 'secondary' })}</div>`
+            : ''
+        }</section>`,
+    )
+    .join('')
+  const add = data.canChange
+    ? `<section class="panel" id="add-account"><h2>${icon('add')}Add account</h2>${apiForm(
+        '/api/v2/cloud/accounts',
+        `<label for="account-provider">Provider</label><select id="account-provider" name="provider"><option value="digitalocean">DigitalOcean</option><option value="nomac">NoMac</option></select><label for="account-name">Name</label><input id="account-name" name="name" required maxlength="80" placeholder="DigitalOcean"><label for="account-key">API key</label><input id="account-key" name="key" type="password" autocomplete="off" required><p><small>A DigitalOcean personal access token with read and write scope, or a NoMac API key (nmk_…). It is kept in this master's database and never shown again.</small></p>`,
+        `${icon('add')} Add account`,
+        { fields: ['provider', 'name', 'key'] },
+      )}</section>`
+    : ''
+  return `${head('Cloud', 'The provider accounts cloud pools and hosts are made in.', ['Cloud'])}${accounts || '<p class="empty-state">No cloud accounts yet.</p>'}${add}`
+}

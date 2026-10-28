@@ -289,7 +289,33 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
   return [...files, path.join(options.out, 'SHA256SUMS')]
 }
 
-/** `scripts/release.ts --version <x.y.z> --out <dir> [--platform <p>]… [--publish <tag>]`. */
+/**
+ * `gh release create`'s arguments. A prerelease is never marked latest, so
+ * nothing that installs `releases/latest` picks it up.
+ */
+export function releaseCreateArgs(
+  tag: string,
+  repository: string,
+  version: string,
+  files: string[],
+  prerelease = false,
+): string[] {
+  return [
+    'release',
+    'create',
+    tag,
+    '--repo',
+    repository,
+    '--title',
+    `Mason ${version}`,
+    '--notes',
+    `Mason ${version}`,
+    ...(prerelease ? ['--prerelease', '--latest=false'] : []),
+    ...files,
+  ]
+}
+
+/** `scripts/release.ts --version <x.y.z> --out <dir> [--platform <p>]… [--publish <tag> [--prerelease]]`. */
 export async function releaseMain(
   argv: string[],
   repo: string,
@@ -308,7 +334,7 @@ export async function releaseMain(
   const out = value('--out')
   if (version == null || out == null) {
     console.error(
-      'Usage: scripts/release.ts --version <x.y.z> --out <dir> [--platform <p>]… [--publish <tag> [--repo <owner/name>]]',
+      'Usage: scripts/release.ts --version <x.y.z> --out <dir> [--platform <p>]… [--publish <tag> [--repo <owner/name>] [--prerelease]]',
     )
     return 2
   }
@@ -345,19 +371,9 @@ export async function releaseMain(
       'Name the GitHub repository to publish to with --repo owner/name, or in package.json',
     )
   if (tag != null && publishTo != null) {
-    await gh([
-      'release',
-      'create',
-      tag,
-      '--repo',
-      publishTo,
-      '--title',
-      `Mason ${version}`,
-      '--notes',
-      `Mason ${version}`,
-      ...files,
-    ])
-    console.log(`Published ${tag}`)
+    const prerelease = argv.includes('--prerelease')
+    await gh(releaseCreateArgs(tag, publishTo, version, files, prerelease))
+    console.log(`Published ${tag}${prerelease ? ' as a prerelease' : ''}`)
   }
   return 0
 }

@@ -35,6 +35,8 @@ export class FakeCloud implements CloudProvider {
   /** Make the next calls fail like the provider would. */
   failCreate: ProviderError['kind'] | undefined
   failSnapshot = false
+  /** How long a machine stays `new` after its worker starts, as a slow boot. */
+  bootDelayMs = 0
   /** Snapshots that boot but never pair (a broken image). */
   readonly broken = new Set<string>()
   private next = 1
@@ -97,6 +99,8 @@ export class FakeCloud implements CloudProvider {
       },
       () => undefined,
     )
+    if (this.bootDelayMs > 0)
+      await new Promise((resolve) => setTimeout(resolve, this.bootDelayMs))
     machine.status = 'active'
     machine.address = '127.0.0.1'
     machine.port = machine.node.link!.port

@@ -26,6 +26,7 @@ import { importDeployment } from '../master/import.js'
 import { importHost } from '../host/import.js'
 import type { ClientPasswordCosts } from '../auth/passwordProtocol.js'
 import { readStdin, setupCommand, withStoppedMaster } from '../setup/cli.js'
+import type { AccountView } from '../master/cloud/accounts.js'
 import { prepareDataDir, writePrivate } from './dataDir.js'
 import { PAIRING_FILE, readPairingFile } from './identity.js'
 import {
@@ -142,6 +143,7 @@ const usage = `Usage:
   mason keys create --role <role> [--name <n>] [--project <slug>]… [--branch <glob>]… [--app <id>]… --out <file>
   mason keys list | mason keys revoke <id>
   mason settings get <area> | mason settings set <area> --file <json>
+  mason cloud accounts list [--json] | add --provider <digitalocean|nomac> --name <n> [--id <id>] --key-stdin | check <id> | remove <id>
   mason projects list | get <slug> | set <slug> --file <json> | remove <slug>
 Options: --data <dir> --port <n> --link-port <n> --listen <address> --link-listen <address>
   --web-cert <file> --web-key <file> --web-plain --new-key --test-endpoints --slots <n>
@@ -365,6 +367,72 @@ async function keysCommand(argv: string[], io: MainIO): Promise<number> {
   if (action === 'revoke' && args.positional.length === 1) {
     await controlRequest(data, 'keys.revoke', { id: args.positional[0] })
     io.out(`Revoked ${args.positional[0]}`)
+    return 0
+  }
+  throw new Error(usage)
+}
+
+/** `mason cloud accounts …`, through the master's control socket; a key comes only on stdin. */
+async function cloudCommand(argv: string[], io: MainIO): Promise<number> {
+  const [group, action, ...rest] = argv
+  const args = parseArgs(
+    rest,
+    ['--data', '--provider', '--name', '--id'],
+    ['--json', '--key-stdin'],
+  )
+  const data = resolveDataDir(single(args, '--data'))
+  if (group !== 'accounts') throw new Error(usage)
+  const describe = (account: AccountView): string => {
+    const check = account.check
+    const state =
+      check == null
+        ? 'not checked'
+        : check.state === 'ok'
+          ? check.digitalocean != null
+            ? `ok: ${check.digitalocean.email}, ${check.digitalocean.dropletLimit} droplets`
+            : `ok: $${check.nomac!.credit.toFixed(2)} credit, ${check.nomac!.concurrency} at a time`
+          : `${check.state}: ${check.message ?? ''}`
+    return `${account.id}  ${account.provider}  ${account.name}  ${state}`
+  }
+  if (action === 'list' && args.positional.length === 0) {
+    const accounts = (await controlRequest(
+      data,
+      'cloud.accounts.list',
+    )) as AccountView[]
+    if (args.flags.has('--json')) io.out(JSON.stringify(accounts))
+    else for (const account of accounts) io.out(describe(account))
+    return 0
+  }
+  if (action === 'add' && args.positional.length === 0) {
+    const provider = single(args, '--provider')
+    const name = single(args, '--name')
+    if (provider == null || name == null || !args.flags.has('--key-stdin'))
+      throw new Error(
+        'Usage: mason cloud accounts add --provider <digitalocean|nomac> --name <n> [--id <id>] --key-stdin',
+      )
+    const key = (await (io.stdin ?? readStdin)()).trim()
+    const id = single(args, '--id')
+    const account = (await controlRequest(data, 'cloud.accounts.add', {
+      provider,
+      name,
+      key,
+      ...(id == null ? {} : { id }),
+    })) as AccountView
+    io.out(`Added cloud account ${account.id}`)
+    return 0
+  }
+  if (action === 'check' && args.positional.length === 1) {
+    const account = (await controlRequest(data, 'cloud.accounts.check', {
+      id: args.positional[0],
+    })) as AccountView
+    io.out(describe(account))
+    return account.check?.state === 'ok' ? 0 : 1
+  }
+  if (action === 'remove' && args.positional.length === 1) {
+    await controlRequest(data, 'cloud.accounts.remove', {
+      id: args.positional[0],
+    })
+    io.out(`Removed cloud account ${args.positional[0]}`)
     return 0
   }
   throw new Error(usage)
@@ -969,6 +1037,7 @@ export async function nodeMain(
     }
     if (first === 'keys') return await keysCommand(rest, io)
     if (first === 'settings') return await settingsCommand(rest, io)
+    if (first === 'cloud') return await cloudCommand(rest, io)
     if (first === 'projects') return await projectsCommand(rest, io)
     if (first === 'runs') return await runsCommand(rest, io)
     if (first === 'helper') return await helperCommand(rest, io)

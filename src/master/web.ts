@@ -8,6 +8,7 @@ import {
 import { accountsApi } from './accountsApi.js'
 import { masterApi } from './api.js'
 import { backupApi } from './backupApi.js'
+import { cloudApi } from './cloudApi.js'
 import { appleApi } from '../apple/api.js'
 import { masterPages } from './pages.js'
 import { projectsApi } from './projectsApi.js'
@@ -50,6 +51,7 @@ export function masterApp(context: MasterWebContext): express.Express {
     }),
   )
   app.use(backupApi(master))
+  app.use(cloudApi(master))
   app.use(appleApi(master))
   app.use(wizardApi(master))
   app.use(projectsApi(master))
