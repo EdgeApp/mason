@@ -91,6 +91,20 @@ export interface CloudProvider {
   ): Promise<DnsRecord>
   updateDnsRecord?(domain: string, id: string, address: string): Promise<void>
   deleteDnsRecord?(domain: string, id: string): Promise<void>
+  /** Spaces access keys: their ids (access keys), names and grants. */
+  spacesKeys?(): Promise<Array<{ id: string; name: string }>>
+  /** Makes a Spaces key; its secret is returned only now. */
+  createSpacesKey?(
+    name: string,
+    grants: SpacesGrant[],
+  ): Promise<{ id: string; secret: string }>
+  deleteSpacesKey?(id: string): Promise<void>
+}
+
+/** A Spaces key's right on a bucket; an empty bucket with fullaccess is every bucket. */
+export interface SpacesGrant {
+  bucket: string
+  permission: 'read' | 'readwrite' | 'fullaccess'
 }
 
 /** An A record: its id and the address it holds. */
@@ -497,6 +511,37 @@ export class DigitalOcean implements CloudProvider {
         'DELETE',
         `/domains/${encodeURIComponent(domain)}/records/${id}`,
       )
+    } catch (error) {
+      if (!(error instanceof ProviderError && error.kind === 'missing'))
+        throw error
+    }
+  }
+
+  async spacesKeys(): Promise<Array<{ id: string; name: string }>> {
+    const out: Array<{ id: string; name: string }> = []
+    for (let page = 1; ; page++) {
+      const { keys, links } = await this.call<{
+        keys: Array<{ access_key: string; name: string }>
+        links?: { pages?: { next?: string } }
+      }>('GET', `/spaces/keys?per_page=200&page=${page}`)
+      out.push(...keys.map((key) => ({ id: key.access_key, name: key.name })))
+      if (links?.pages?.next == null) return out
+    }
+  }
+
+  async createSpacesKey(
+    name: string,
+    grants: SpacesGrant[],
+  ): Promise<{ id: string; secret: string }> {
+    const { key } = await this.call<{
+      key: { access_key: string; secret_key: string }
+    }>('POST', '/spaces/keys', { name, grants })
+    return { id: key.access_key, secret: key.secret_key }
+  }
+
+  async deleteSpacesKey(id: string): Promise<void> {
+    try {
+      await this.call('DELETE', `/spaces/keys/${encodeURIComponent(id)}`)
     } catch (error) {
       if (!(error instanceof ProviderError && error.kind === 'missing'))
         throw error

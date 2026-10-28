@@ -9,6 +9,7 @@ import {
   type CloudProvider,
   type ProviderMachine,
 } from './digitalocean.js'
+import { SpaceError } from './spaces.js'
 
 /**
  * Mason hosts the master makes on DigitalOcean. Each is a row in
@@ -54,6 +55,15 @@ export interface CloudHostRow {
   version: string | null
   /** When its DNS name first answered with a trusted certificate. */
   certificate_at: number | null
+  /** Its DigitalOcean Space for builds, and the key limited to it. */
+  space_bucket: string | null
+  space_region: string | null
+  space_key_id: string | null
+  space_secret: string | null
+  space_owned: number
+  space_key_owned: number
+  /** An administrator asked for the host's storage to be the Space. */
+  space_pending: number
   created_at: number
   updated_at: number
 }
@@ -66,6 +76,8 @@ export interface HostInput {
   size: string
   image?: string
   dns?: { domain: string; name: string }
+  /** Store builds in a new DigitalOcean Space. */
+  space?: { bucket: string; region: string }
 }
 
 export interface CloudHostsOptions {
@@ -87,6 +99,8 @@ export interface CloudHostsOptions {
   masterId: string
   /** A DNS step for hosts with a DNS name; none by default. */
   dns?: CloudHostDns
+  /** The Space step for hosts that store builds in one; none by default. */
+  space?: CloudHostSpace
   /** Whether an origin answers with a certificate this computer trusts. */
   trusted?: (origin: string) => Promise<boolean>
   linkPort?: number
@@ -94,6 +108,21 @@ export interface CloudHostsOptions {
   /** How soon a host still being made is reconciled again. */
   settleMs?: number
   log?: (line: string) => void
+}
+
+/** The Space part of reconciling a host. */
+export interface CloudHostSpace {
+  /** Keeps the host's key and bucket; returns why the host is in error, if it is. */
+  reconcile(
+    row: CloudHostRow,
+    provider: CloudProvider,
+    keyName: string,
+  ): Promise<string | undefined>
+  remove(
+    row: CloudHostRow,
+    provider: CloudProvider,
+    options: { deleteSpace: boolean; keyName: string },
+  ): Promise<void>
 }
 
 /** The DNS part of reconciling a host. */
@@ -211,7 +240,30 @@ export function asHostInput(value: unknown): HostInput {
     ...(dns == null
       ? {}
       : { dns: { domain: dns.domain as string, name: dns.name as string } }),
+    ...(input.space == null ||
+    (input.space as { bucket?: unknown }).bucket == null ||
+    (input.space as { bucket?: unknown }).bucket === ''
+      ? {}
+      : { space: asSpaceInput(input.space) }),
   }
+}
+
+/** A Space to make for a host: a bucket name and a Spaces region. */
+export function asSpaceInput(value: unknown): {
+  bucket: string
+  region: string
+} {
+  const input = (value ?? {}) as Record<string, unknown>
+  if (
+    typeof input.bucket !== 'string' ||
+    !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(input.bucket)
+  )
+    throw new Error(
+      'space.bucket is a Space name: 3 to 63 lowercase letters, digits and dashes',
+    )
+  if (typeof input.region !== 'string' || !/^[a-z]{3}[0-9]$/.test(input.region))
+    throw new Error('space.region is a Spaces region such as sfo3')
+  return { bucket: input.bucket, region: input.region }
 }
 
 /** The host's DNS name, `name.domain` (or the domain for `@`). */
@@ -329,7 +381,7 @@ export class CloudHosts {
       .run(input.name)
     this.db
       .prepare(
-        "INSERT INTO cloud_hosts(name,account,provider,region,size,image,dns_domain,dns_name,dns_owned,state,created_at,updated_at) VALUES(?,?,'digitalocean',?,?,?,?,?,0,'creating',?,?)",
+        "INSERT INTO cloud_hosts(name,account,provider,region,size,image,dns_domain,dns_name,dns_owned,space_bucket,space_region,space_pending,state,created_at,updated_at) VALUES(?,?,'digitalocean',?,?,?,?,?,0,?,?,?,'creating',?,?)",
       )
       .run(
         input.name,
@@ -339,6 +391,9 @@ export class CloudHosts {
         input.image ?? 'ubuntu-24-04-x64',
         input.dns?.domain ?? null,
         input.dns?.name ?? null,
+        input.space?.bucket ?? null,
+        input.space?.region ?? null,
+        input.space == null ? 0 : 1,
         now,
         now,
       )
@@ -447,6 +502,19 @@ export class CloudHosts {
           return this.get(name)!
         }
       }
+      // The Space, before the host pairs, so its first sync carries the storage.
+      const spaced = this.get(name)!
+      if (spaced.space_bucket != null && this.options.space != null) {
+        const problem = await this.options.space.reconcile(
+          spaced,
+          provider,
+          this.tag(name),
+        )
+        if (problem != null) {
+          this.update(name, { state: 'error', error: problem })
+          return this.get(name)!
+        }
+      }
       // 4. The host: reconnected when paired, paired when it boots with our material.
       await this.host(this.get(name)!)
       // 5. The master's host settings point at it, unless an administrator chose otherwise.
@@ -458,7 +526,9 @@ export class CloudHosts {
       return this.get(name)!
     } catch (error) {
       const message =
-        error instanceof HostError || error instanceof ProviderError
+        error instanceof HostError ||
+        error instanceof ProviderError ||
+        error instanceof SpaceError
           ? error.message
           : `Reconcile failed: ${(error as Error).message}`
       this.update(name, { state: 'error', error: message })
@@ -603,8 +673,36 @@ export class CloudHosts {
     if (row.origin !== origin) this.update(row.name, { origin })
   }
 
-  /** Destroys the host's droplet, firewall and owned DNS record, and unpairs it. */
-  async remove(name: string, confirm: unknown): Promise<void> {
+  /**
+   * Gives a host a new DigitalOcean Space for its builds: an administrator's
+   * choice, so its storage switches to the Space once it exists.
+   */
+  async setSpace(name: string, value: unknown): Promise<CloudHostRow> {
+    const row = this.get(name)
+    if (row == null) throw new MissingHost(name)
+    const space = asSpaceInput(value)
+    this.update(name, {
+      space_bucket: space.bucket,
+      space_region: space.region,
+      space_pending: 1,
+      // Another bucket needs a key that can use it.
+      ...(row.space_bucket === space.bucket
+        ? {}
+        : { space_owned: 0, space_key_id: null, space_secret: null }),
+    })
+    return await this.reconcile(name)
+  }
+
+  /**
+   * Destroys the host's droplet, firewall and owned DNS record, and unpairs
+   * it. Its Space and builds stay unless `deleteSpace`; the key Mason made
+   * for it goes.
+   */
+  async remove(
+    name: string,
+    confirm: unknown,
+    options: { deleteSpace?: boolean } = {},
+  ): Promise<void> {
     const row = this.get(name)
     if (row == null) throw new MissingHost(name)
     if (confirm !== name)
@@ -617,6 +715,11 @@ export class CloudHosts {
         await provider.destroy(machine.id)
       await provider.deleteFirewall?.(this.tag(name))
       if (this.options.dns != null) await this.options.dns.remove(row, provider)
+      if (this.options.space != null)
+        await this.options.space.remove(row, provider, {
+          deleteSpace: options.deleteSpace === true,
+          keyName: this.tag(name),
+        })
     }
     if (
       row.fingerprint != null &&

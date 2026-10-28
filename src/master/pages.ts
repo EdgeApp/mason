@@ -539,7 +539,26 @@ export function masterPages(
                   : ('trusted' as const),
             }),
         error: row.error,
+        ...(row.space_bucket == null || row.space_region == null
+          ? {}
+          : { space: { bucket: row.space_bucket, region: row.space_region } }),
       })),
+      storage: ((): {
+        driver: 'disk' | 's3'
+        bucket?: string
+        endpoint?: string
+      } => {
+        const value = master.settings.value('storage') as
+          | { driver?: string; s3?: { bucket: string; endpoint: string } }
+          | undefined
+        return value?.driver === 's3' && value.s3 != null
+          ? {
+              driver: 's3',
+              bucket: value.s3.bucket,
+              endpoint: value.s3.endpoint,
+            }
+          : { driver: 'disk' }
+      })(),
       poolAccounts: await Promise.all(
         master.cloudAccounts
           .all()

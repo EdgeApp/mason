@@ -54,7 +54,10 @@ class Refused extends Error {
  * a run's artifacts (keys under `runs/`) go in `<storage>/runs`.
  */
 export class HostObjects {
-  private s3: { key: string; driver: S3Storage } | undefined
+  /** An S3 driver per storage setting, by the setting's JSON. */
+  private readonly s3 = new Map<string, S3Storage>()
+  /** The S3 setting used last, for objects recorded before stores were. */
+  private lastS3: string | undefined
   private readonly disk: DiskStorage
   private readonly runs: DiskStorage
 
@@ -68,6 +71,15 @@ export class HostObjects {
     this.runs = new DiskStorage(storage)
     cache.db.exec(`CREATE TABLE IF NOT EXISTS host_objects(
       key TEXT PRIMARY KEY, driver TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL, created_at INTEGER NOT NULL) STRICT`)
+    // Each S3 object names the bucket and key it was written with, so a later
+    // storage change still serves it from there.
+    cache.db.exec(`CREATE TABLE IF NOT EXISTS host_object_stores(
+      id INTEGER PRIMARY KEY, config TEXT NOT NULL UNIQUE) STRICT`)
+    const columns = cache.db
+      .prepare('PRAGMA table_info(host_objects)')
+      .all() as Array<{ name: string }>
+    if (!columns.some((column) => column.name === 'store'))
+      cache.db.exec('ALTER TABLE host_objects ADD COLUMN store INTEGER')
   }
 
   /** The disk driver for a key: a run's artifacts beside the build files. */
@@ -75,47 +87,82 @@ export class HostObjects {
     return key.startsWith('runs/') ? this.runs : this.disk
   }
 
+  /** The S3 driver for a storage setting's `s3` value, as JSON. */
+  private s3Driver(config: string): S3Storage {
+    let driver = this.s3.get(config)
+    if (driver == null) {
+      const s3 = JSON.parse(config) as NonNullable<StorageSetting['s3']>
+      driver = new S3Storage(
+        {
+          ...s3,
+          // A bucket name cannot prefix an IP address or localhost, so those use path-style URLs.
+          pathStyle:
+            /^https?:\/\/(\d+\.\d+\.\d+\.\d+|localhost|\[[0-9a-f:]+\])(:\d+)?$/i.test(
+              s3.endpoint,
+            ),
+        },
+        this.fetchImpl,
+      )
+      this.s3.set(config, driver)
+    }
+    return driver
+  }
+
+  /** The `storage` setting's S3 value as JSON, when it names S3. */
+  private currentS3(): string | undefined {
+    const setting = this.cache.setting<StorageSetting>('storage')
+    if (setting?.driver !== 's3' || setting.s3 == null) return undefined
+    const config = JSON.stringify(setting.s3)
+    this.lastS3 = config
+    return config
+  }
+
   /** The driver the `storage` setting names now, for a key. */
   current(object = ''): StorageDriver {
-    const setting = this.cache.setting<StorageSetting>('storage')
-    if (setting?.driver !== 's3' || setting.s3 == null)
-      return this.diskFor(object)
-    const key = JSON.stringify(setting.s3)
-    if (this.s3?.key !== key)
-      this.s3 = {
-        key,
-        driver: new S3Storage(
-          {
-            ...setting.s3,
-            // A bucket name cannot prefix an IP address or localhost, so those use path-style URLs.
-            pathStyle:
-              /^https?:\/\/(\d+\.\d+\.\d+\.\d+|localhost|\[[0-9a-f:]+\])(:\d+)?$/i.test(
-                setting.s3.endpoint,
-              ),
-          },
-          this.fetchImpl,
-        ),
-      }
-    return this.s3.driver
+    const config = this.currentS3()
+    return config == null ? this.diskFor(object) : this.s3Driver(config)
   }
 
   private driverOf(key: string): StorageDriver {
     const row = this.cache.db
-      .prepare('SELECT driver FROM host_objects WHERE key=?')
-      .get(key) as { driver: string } | undefined
-    if (row?.driver === 's3')
-      return this.current().kind === 's3' ? this.current() : this.s3!.driver
-    return this.diskFor(key)
+      .prepare(
+        'SELECT o.driver, s.config FROM host_objects o LEFT JOIN host_object_stores s ON s.id=o.store WHERE o.key=?',
+      )
+      .get(key) as { driver: string; config: string | null } | undefined
+    if (row?.driver !== 's3') return this.diskFor(key)
+    if (row.config != null) return this.s3Driver(row.config)
+    // Recorded before stores were: the current S3 storage, or the last one.
+    const config = this.currentS3() ?? this.lastS3
+    return config == null ? this.diskFor(key) : this.s3Driver(config)
   }
 
   async put(key: string, file: string, sha256: string): Promise<void> {
-    const driver = this.current(key)
+    const config = this.currentS3()
+    const driver = config == null ? this.diskFor(key) : this.s3Driver(config)
     await driver.put(key, file)
+    let store: number | null = null
+    if (config != null) {
+      this.cache.db
+        .prepare('INSERT OR IGNORE INTO host_object_stores(config) VALUES(?)')
+        .run(config)
+      store = (
+        this.cache.db
+          .prepare('SELECT id FROM host_object_stores WHERE config=?')
+          .get(config) as { id: number }
+      ).id
+    }
     this.cache.db
       .prepare(
-        'INSERT OR REPLACE INTO host_objects(key,driver,size,digest,created_at) VALUES(?,?,?,?,?)',
+        'INSERT OR REPLACE INTO host_objects(key,driver,size,digest,created_at,store) VALUES(?,?,?,?,?,?)',
       )
-      .run(key, driver.kind, statSync(file).size, sha256, this.cache.now())
+      .run(
+        key,
+        driver.kind,
+        statSync(file).size,
+        sha256,
+        this.cache.now(),
+        store,
+      )
   }
   async head(key: string): Promise<{ size: number } | undefined> {
     return await this.driverOf(key).head(key)

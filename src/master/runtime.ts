@@ -63,6 +63,7 @@ import {
   type CloudAccountsOptions,
 } from './cloud/accounts.js'
 import { HostDns } from './cloud/dns.js'
+import { HostSpace, type SpaceStorage } from './cloud/hostSpace.js'
 import { CloudHosts, type CloudHostsOptions } from './cloud/hosts.js'
 import { hostView } from './cloudHostsApi.js'
 import { Changes } from './changes.js'
@@ -138,6 +139,12 @@ export interface MasterOptions {
     | 'log'
     | 'trusted'
   >
+  /** How the master reaches DigitalOcean Spaces: a fake S3 endpoint in tests. */
+  spaces?: {
+    endpoint?: (region: string) => string
+    fetch?: typeof fetch
+    wait?: (ms: number) => Promise<void>
+  }
   /** How the master checks cloud accounts: a fake provider API in tests. */
   cloudAccounts?: Pick<
     CloudAccountsOptions,
@@ -537,6 +544,35 @@ export class Master {
         return response.ok ? (await response.text()).trim() : undefined
       },
       dns: new HostDns(this.database),
+      space: new HostSpace({
+        master: this.database,
+        storage: {
+          get: (): SpaceStorage | undefined => {
+            const value = this.settings.value('storage') as
+              | { driver?: string; s3?: SpaceStorage }
+              | undefined
+            return value?.driver === 's3' ? value.s3 : undefined
+          },
+          set: async (s3): Promise<void> => {
+            await this.settings.set(localOperator, 'storage', {
+              driver: 's3',
+              s3,
+            })
+          },
+          clear: async (): Promise<void> => {
+            await this.settings.set(localOperator, 'storage', {
+              driver: 'disk',
+            })
+          },
+        },
+        ...(options.spaces?.endpoint == null
+          ? {}
+          : { endpoint: options.spaces.endpoint }),
+        ...(options.spaces?.fetch == null
+          ? {}
+          : { fetch: options.spaces.fetch }),
+        ...(options.spaces?.wait == null ? {} : { wait: options.spaces.wait }),
+      }),
       log: (line): void => console.log(line),
       ...options.cloudHosts,
     })
@@ -862,6 +898,11 @@ export class Master {
         (workflow) => workflow.name === row.workflow,
       )?.keep.artifactDays
     })
+  }
+
+  /** How this master reaches DigitalOcean Spaces (a fake in tests). */
+  get spacesOptions(): NonNullable<MasterOptions['spaces']> {
+    return this.options.spaces ?? {}
   }
 
   /** Operator commands; the control socket proves ownership of the data directory. */

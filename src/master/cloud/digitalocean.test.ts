@@ -22,6 +22,7 @@ class FakeApi {
   snapshots = new Map<string, Json>()
   firewalls: Json[] = []
   records: Json[] = []
+  spacesKeys: Json[] = []
   tags = new Set<string>()
   actions = new Map<number, { polls: number; error?: boolean }>()
   /** The next response's status and message, once. */
@@ -259,6 +260,27 @@ class FakeApi {
             (firewall) => firewall.id !== match![1],
           )
           send(204)
+        } else if (route === 'GET /v2/spaces/keys') {
+          send(200, { keys: this.spacesKeys, links: {} })
+        } else if (route === 'POST /v2/spaces/keys') {
+          const key = {
+            name: body.name,
+            access_key: `DO${this.next++}`,
+            secret_key: 'secret',
+            grants: body.grants,
+          }
+          this.spacesKeys.push(key)
+          send(201, { key })
+        } else if (
+          (match = /^DELETE \/v2\/spaces\/keys\/(.+)$/.exec(route)) != null
+        ) {
+          const before = this.spacesKeys.length
+          this.spacesKeys = this.spacesKeys.filter(
+            (key) => key.access_key !== match![1],
+          )
+          if (this.spacesKeys.length === before)
+            send(404, { message: 'no key' })
+          else send(204)
         } else send(404, { message: `no route ${route}` })
       })
     })
@@ -487,6 +509,33 @@ describe('DigitalOcean provider', () => {
       provider.deleteDnsRecord('example.com', '1'),
       (error: unknown) =>
         error instanceof ProviderError && error.kind === 'unavailable',
+    )
+  })
+
+  it('U6.3 makes, lists and deletes Spaces keys', async () => {
+    const made = await provider.createSpacesKey('mason-host-x', [
+      { bucket: 'mason-x', permission: 'readwrite' },
+    ])
+    assert.equal(made.secret, 'secret')
+    assert.deepEqual(await provider.spacesKeys(), [
+      { id: made.id, name: 'mason-host-x' },
+    ])
+    assert.deepEqual(
+      api.requests.find((request) => request.path === '/v2/spaces/keys')?.body,
+      {
+        name: 'mason-host-x',
+        grants: [{ bucket: 'mason-x', permission: 'readwrite' }],
+      },
+    )
+    await provider.deleteSpacesKey(made.id)
+    // A key already gone is not an error.
+    await provider.deleteSpacesKey(made.id)
+    assert.deepEqual(await provider.spacesKeys(), [])
+    api.fail = { status: 401, message: 'Unable to authenticate you' }
+    await assert.rejects(
+      provider.deleteSpacesKey('x'),
+      (error: unknown) =>
+        error instanceof ProviderError && error.kind === 'auth',
     )
   })
 })

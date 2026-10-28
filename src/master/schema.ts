@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 13
+export const MASTER_SCHEMA = 14
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -371,6 +371,16 @@ const migrations: Array<(db: DatabaseSync) => void> = [
   // 13: when a host's DNS name first answered with a trusted certificate.
   (db): void => {
     db.exec('ALTER TABLE cloud_hosts ADD COLUMN certificate_at INTEGER;')
+  },
+  // 14: a cloud host's DigitalOcean Space for its builds, and the key limited to it.
+  (db): void => {
+    db.exec(`ALTER TABLE cloud_hosts ADD COLUMN space_bucket TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_region TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_key_id TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_secret TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_owned INTEGER NOT NULL DEFAULT 0 CHECK(space_owned IN (0,1));
+    ALTER TABLE cloud_hosts ADD COLUMN space_key_owned INTEGER NOT NULL DEFAULT 0 CHECK(space_key_owned IN (0,1));
+    ALTER TABLE cloud_hosts ADD COLUMN space_pending INTEGER NOT NULL DEFAULT 0 CHECK(space_pending IN (0,1));`)
   },
 ]
 

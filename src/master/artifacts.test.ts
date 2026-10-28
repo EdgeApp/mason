@@ -901,6 +901,54 @@ describe('Artifacts and publication', function () {
         'fake-secret-value-1234',
       ),
     )
+    // Another bucket: new artifacts go there, and the earlier one is still
+    // read from the bucket it was written to.
+    const second = new FakeS3({
+      bucket: 'mason-artifacts-2',
+      region: 'nyc3',
+      accessKeyId: 'AKIAFAKE5678',
+      secretAccessKey: 'fake-secret-value-5678',
+    })
+    await second.start()
+    try {
+      await settings.set(admin, 'storage', {
+        driver: 's3',
+        s3: {
+          endpoint: second.endpoint.replace(/^http:/, 'https:'),
+          bucket: 'mason-artifacts-2',
+          region: 'nyc3',
+          accessKeyId: 'AKIAFAKE5678',
+          secretAccessKey: 'fake-secret-value-5678',
+        },
+      })
+      await c.until(
+        () =>
+          host.host!.cache.setting<Json>('storage')?.s3?.bucket ===
+          'mason-artifacts-2',
+        2000,
+        'the second bucket on the host',
+      )
+      const later = await run('save')
+      assert(
+        [...second.objects.keys()].some((key) =>
+          key.includes(`runs/${later.id}/results.tar.gz`),
+        ),
+      )
+      for (const id of [value.id, later.id]) {
+        const response = await fetch(
+          `${host.web!.url}/runs/${id}/artifacts/results`,
+          {
+            headers: { cookie: `__Host-mason-session=${developer}` },
+            // @ts-expect-error undici's dispatcher option
+            dispatcher: insecure,
+          },
+        )
+        assert.equal(response.status, 200, id)
+        await response.arrayBuffer()
+      }
+    } finally {
+      await second.close()
+    }
     await settings.set(admin, 'storage', { driver: 'disk' })
   })
 

@@ -19,6 +19,7 @@ export function hostView(row: CloudHostRow): Record<string, unknown> {
   }
   delete out.pairing_hash
   delete out.pairing_secret
+  delete out.space_secret
   return out
 }
 
@@ -64,6 +65,17 @@ export function cloudHostsApi(master: Master): Router {
       )
     }),
   )
+  router.post(
+    '/api/v2/cloud/hosts/:name/space',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      return hostView(
+        await master.cloudHosts
+          .setSpace(String(req.params.name), req.body)
+          .catch(missing),
+      )
+    }),
+  )
   router.delete(
     '/api/v2/cloud/hosts/:name',
     json(async (req, res) => {
@@ -72,6 +84,13 @@ export function cloudHostsApi(master: Master): Router {
         .remove(
           String(req.params.name),
           (req.body as { confirm?: unknown } | undefined)?.confirm,
+          {
+            // The form sends its select's value; the API takes true.
+            deleteSpace: ['delete', true].includes(
+              (req.body as { deleteSpace?: unknown } | undefined)
+                ?.deleteSpace as string,
+            ),
+          },
         )
         .catch(missing)
       return null

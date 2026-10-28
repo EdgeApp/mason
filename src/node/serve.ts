@@ -93,6 +93,7 @@ export interface NodeOptions {
     | 'cloud'
     | 'cloudAccounts'
     | 'cloudHosts'
+    | 'spaces'
     | 'now'
   >
   pollMs?: number

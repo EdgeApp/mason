@@ -223,7 +223,26 @@ export interface CloudHostView {
   dnsName?: string
   /** A DNS name's certificate: waiting until it first answers trusted. */
   certificate?: 'waiting' | 'trusted'
+  /** Its DigitalOcean Space for builds. */
+  space?: { bucket: string; region: string }
   error: string | null
+}
+
+/** DigitalOcean's Spaces regions. */
+const spacesRegions = [
+  'sfo3',
+  'nyc3',
+  'ams3',
+  'fra1',
+  'lon1',
+  'sgp1',
+  'syd1',
+  'blr1',
+  'tor1',
+  'atl1',
+]
+function spacesRegionSelect(id: string, value: string): string {
+  return `<select id="${id}" name="space.region">${spacesRegions.map((region) => `<option${region === value ? ' selected' : ''}>${region}</option>`).join('')}</select>`
 }
 
 /** The Create host form's fields for one account. */
@@ -279,6 +298,8 @@ function hostFields(account: PoolAccount): string {
     }`,
     `<label for="${prefix}-domain">DNS domain</label>${select('dns.domain', '', [{ value: '', label: 'No DNS: serve the droplet’s address' }, ...(account.domains ?? []).map((domain) => ({ value: domain, label: domain }))])}`,
     `<label for="${prefix}-record">Record name in the domain (or @)</label>${text('dns.name', '', ' placeholder="builds" pattern="@|[a-z0-9.-]{1,200}"')}`,
+    `<label for="${prefix}-space">Store builds in a new DigitalOcean Space named (empty: the host’s disk)</label><input id="${prefix}-space" name="space.bucket" placeholder="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">`,
+    `<label for="${prefix}-space-region">Space region</label>${spacesRegionSelect(`${prefix}-space-region`, 'sfo3')}`,
   ].join('')
 }
 
@@ -305,6 +326,8 @@ export function nodesView(data: {
   poolAccounts?: PoolAccount[]
   /** Hosts the master made on a cloud provider. */
   cloudHosts?: CloudHostView[]
+  /** Where the host keeps builds. */
+  storage?: { driver: 'disk' | 's3'; bucket?: string; endpoint?: string }
   budget: { monthly: number; notice?: string }
   host?: string
   /** The master's own release, installable from GitHub when no host serves one. */
@@ -351,9 +374,9 @@ export function nodesView(data: {
   const cloudHosts = (data.cloudHosts ?? [])
     .map(
       (host) =>
-        `<section class="panel cloud-host" id="host-${escape(host.name)}" data-state="${escape(host.state)}"><h3>${icon('cloud')}<span class="mono">${escape(host.name)}</span> <small>${escape(host.state)}</small></h3><p>${escape(host.region)} · ${escape(host.size)}${host.address == null ? '' : ` · <span class="mono">${escape(host.address)}</span>`}${host.dnsName == null ? '' : ` · <span class="mono">${escape(host.dnsName)}</span>`}</p>${host.origin == null ? '' : `<p>Serves <a href="${escape(host.origin)}">${escape(host.origin)}</a></p>`}${host.certificate === 'waiting' ? '<p class="notice">Waiting for its certificate: Caddy asks Let’s Encrypt once the DNS name resolves.</p>' : ''}${host.error == null ? '' : `<p class="state-failed">${escape(host.error)}</p>`}${
+        `<section class="panel cloud-host" id="host-${escape(host.name)}" data-state="${escape(host.state)}"><h3>${icon('cloud')}<span class="mono">${escape(host.name)}</span> <small>${escape(host.state)}</small></h3><p>${escape(host.region)} · ${escape(host.size)}${host.address == null ? '' : ` · <span class="mono">${escape(host.address)}</span>`}${host.dnsName == null ? '' : ` · <span class="mono">${escape(host.dnsName)}</span>`}</p>${host.origin == null ? '' : `<p>Serves <a href="${escape(host.origin)}">${escape(host.origin)}</a></p>`}${host.certificate === 'waiting' ? '<p class="notice">Waiting for its certificate: Caddy asks Let’s Encrypt once the DNS name resolves.</p>' : ''}${host.space == null ? '' : `<p>Builds Space <span class="mono">${escape(host.space.bucket)}</span> (${escape(host.space.region)})</p>`}${host.error == null ? '' : `<p class="state-failed">${escape(host.error)}</p>`}${
           data.canChange
-            ? `<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div><details><summary>Remove</summary>${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: ['confirm'], className: 'secondary' })}</details>`
+            ? `${host.space == null ? `<details><summary>Store builds in a new DigitalOcean Space</summary>${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/space`, `<label for="space-${escape(host.name)}">Space name</label><input id="space-${escape(host.name)}" name="bucket" required value="mason-${escape(host.name)}" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"><label for="space-region-${escape(host.name)}">Space region</label>${spacesRegionSelect(`space-region-${escape(host.name)}`, host.region).replace('name="space.region"', 'name="region"')}<p><small>Mason makes the Space and a key that can use only it. New builds are stored there; earlier ones stay where they are.</small></p>`, `${icon('storage')} Make the Space`, { fields: ['bucket', 'region'] })}</details>` : ''}<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div><details><summary>Remove</summary>${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">${host.space == null ? '' : `<label for="remove-space-${escape(host.name)}">Its Space ${escape(host.space.bucket)}</label><select id="remove-space-${escape(host.name)}" name="deleteSpace"><option value="keep">Keep the Space and its builds</option><option value="delete">Also delete the Space and every build in it</option></select>`}`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: host.space == null ? ['confirm'] : ['confirm', 'deleteSpace'], className: 'secondary' })}</details>`
             : ''
         }</section>`,
     )
@@ -362,9 +385,19 @@ export function nodesView(data: {
   const hostAccounts = (data.poolAccounts ?? [])
     .map(
       (account) =>
-        `<details class="add-host" id="add-host-${escape(account.id)}"><summary>On ${escape(account.name)}</summary>${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/hosts', hostFields(account), `${icon('add')} Create host`, { fields: ['account', 'name', 'region', 'size', 'image', 'dns.domain', 'dns.name'] })}</details>`,
+        `<details class="add-host" id="add-host-${escape(account.id)}"><summary>On ${escape(account.name)}</summary>${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/hosts', hostFields(account), `${icon('add')} Create host`, { fields: ['account', 'name', 'region', 'size', 'image', 'dns.domain', 'dns.name', 'space.bucket', 'space.region'] })}</details>`,
     )
     .join('')
+  const storage = data.storage
+  const storagePanel =
+    !data.canChange || (data.host == null && cloudHosts === '')
+      ? ''
+      : `<section class="panel" id="storage"><h3>${icon('storage')}Storage</h3><p>${storage?.driver === 's3' ? `Builds are stored in <span class="mono">${escape(storage.bucket ?? '')}</span> at <span class="mono">${escape(storage.endpoint ?? '')}</span>.` : 'Builds are stored on the host’s disk.'} New builds go to the storage chosen here; earlier ones are still served from where they were written.</p><details><summary>Use a DigitalOcean Space</summary>${apiForm(
+          '/api/v2/storage/space',
+          '<label for="storage-url">Space URL</label><input id="storage-url" name="url" required placeholder="https://name.sfo3.digitaloceanspaces.com"><label for="storage-key">Access key</label><input id="storage-key" name="accessKeyId" required autocomplete="off"><label for="storage-secret">Secret</label><input id="storage-secret" name="secretAccessKey" type="password" required autocomplete="off"><p><small>Mason writes, reads and deletes a check object with the key before saving; a key that cannot is refused and nothing changes.</small></p>',
+          `${icon('check')} Check and save`,
+          { fields: ['url', 'accessKeyId', 'secretAccessKey'] },
+        )}</details>${storage?.driver === 's3' ? apiForm('/api/v2/storage/disk', '', `${icon('storage')} Use the host’s disk`, { className: 'secondary' }) : ''}</section>`
   const hostPanel =
     !data.canChange && cloudHosts === ''
       ? ''
@@ -372,7 +405,7 @@ export function nodesView(data: {
           data.canChange && cloudHosts === '' && data.host == null
             ? `<details class="add-host" open><summary>With a command</summary>${hostCommands}</details>${hostAccounts || '<p>Or add a DigitalOcean account on the <a href="/cloud">Cloud</a> page to make one there.</p>'}`
             : ''
-        }</section>`
+        }${storagePanel}</section>`
   const add = data.canChange
     ? `<section class="panel"><h2>${icon('add')}Add node</h2><ol><li>On the new computer, ${install}</li><li>Start it as a worker: ${command('sudo mason worker --install --link-port 9410')} It prints its pairing key.</li><li>Pair it here:</li></ol>${apiForm('/api/v2/nodes', '<label for="node-address">Address</label><input id="node-address" name="address" placeholder="192.168.1.20:9410" required><label for="node-key">Pairing key</label><input id="node-key" name="key" placeholder="mason1:…" required autocomplete="off">', `${icon('lan')} Pair node`, { fields: ['address', 'key'], then: 'reload' })}</section>`
     : ''

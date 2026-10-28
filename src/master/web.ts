@@ -10,6 +10,7 @@ import { masterApi } from './api.js'
 import { backupApi } from './backupApi.js'
 import { cloudApi } from './cloudApi.js'
 import { cloudHostsApi } from './cloudHostsApi.js'
+import { storageApi } from './storageApi.js'
 import { appleApi } from '../apple/api.js'
 import { masterPages } from './pages.js'
 import { projectsApi } from './projectsApi.js'
@@ -53,6 +54,7 @@ export function masterApp(context: MasterWebContext): express.Express {
   )
   app.use(backupApi(master))
   app.use(cloudHostsApi(master))
+  app.use(storageApi(master, master.spacesOptions))
   app.use(cloudApi(master))
   app.use(appleApi(master))
   app.use(wizardApi(master))

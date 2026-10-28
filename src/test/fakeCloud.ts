@@ -8,10 +8,12 @@ import {
   type ProviderSnapshot,
   type Catalog,
   type FirewallRule,
+  type SpacesGrant,
 } from '../master/cloud/digitalocean.js'
 import { PAIRING_FILE } from '../node/identity.js'
 import { startNode, type RunningNode } from '../node/serve.js'
 import { quietMac } from './fakeMac.js'
+import type { FakeSpaces, FakeSpacesKey } from './fakeSpaces.js'
 
 interface FakeMachine extends ProviderMachine {
   spec: MachineSpec
@@ -283,6 +285,48 @@ export class FakeCloud implements CloudProvider {
   async deleteDnsRecord(domain: string, id: string): Promise<void> {
     this.dnsCalls.push(`delete ${id}`)
     this.removeRecord(domain, id)
+  }
+
+  /** The account's Spaces, when a test gives it some. */
+  spaces: FakeSpaces | undefined
+  /** Spaces key calls, in order. */
+  readonly spacesCalls: string[] = []
+  async spacesKeys(): Promise<Array<{ id: string; name: string }>> {
+    return [...(this.spaces?.keys ?? new Map()).entries()].map(
+      ([id, key]: [string, FakeSpacesKey]) => ({ id, name: key.name }),
+    )
+  }
+  async createSpacesKey(
+    name: string,
+    grants: SpacesGrant[],
+  ): Promise<{ id: string; secret: string }> {
+    if (this.spaces == null) throw new ProviderError('No Spaces', 'missing')
+    this.spacesCalls.push(`create ${name}`)
+    // DigitalOcean grants a key only on a bucket that exists.
+    if (
+      grants.some(
+        (grant) =>
+          grant.bucket !== '' && !this.spaces!.buckets.has(grant.bucket),
+      )
+    )
+      throw new ProviderError(
+        'DigitalOcean POST /spaces/keys: 403 invalid grant',
+        'auth',
+      )
+    const secret = `secret-${name}-${this.spacesCalls.length}`
+    const all = grants.some(
+      (grant) => grant.permission === 'fullaccess' && grant.bucket === '',
+    )
+    const id = this.spaces.addKey({
+      name,
+      secret,
+      grants: all ? 'all' : grants.map((grant) => grant.bucket),
+    })
+    return { id, secret }
+  }
+  async deleteSpacesKey(id: string): Promise<void> {
+    this.spacesCalls.push(`delete ${this.spaces?.keys.get(id)?.name ?? id}`)
+    this.spaces?.keys.delete(id)
   }
 
   /** Stops every machine still running. */
