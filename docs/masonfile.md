@@ -218,6 +218,11 @@ until it has been idle for an hour:
   cannot use it), the master starts from the plain `image` instead, installs
   Mason and the node type's software, and snapshots that machine when it
   retires, so the following start is fast again.
+- A new machine installs Mason from the host, or, while the master has no
+  host, the master's own release from GitHub. Pools are added and edited on
+  the Nodes page, where the region, size and image lists come from the
+  provider. A master with no worker connected starts a machine from its first
+  pool to run a run's setup, so a cluster can be cloud machines alone.
 - The machine's first-boot data carries the one-time pairing secret; the
   master dials it, checks the secret, pins its key, and assigns stages. The
   provider's firewall admits the link port only from the master's public

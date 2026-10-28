@@ -159,7 +159,50 @@ class FakeApi {
             send(404, { message: 'not found' })
           else send(204)
         } else if (route === 'GET /v2/sizes') {
-          send(200, { sizes: [{ slug: 's-1vcpu-1gb', price_hourly: 0.00893 }] })
+          send(200, {
+            sizes: [
+              {
+                slug: 's-1vcpu-1gb',
+                price_hourly: 0.00893,
+                price_monthly: 6,
+                description: 'Basic',
+                regions: ['sfo3'],
+                available: true,
+              },
+              {
+                slug: 's-old',
+                price_hourly: 1,
+                price_monthly: 1,
+                regions: [],
+                available: false,
+              },
+            ],
+          })
+        } else if (route === 'GET /v2/regions') {
+          // Two pages, as DigitalOcean pages long lists.
+          if (url.searchParams.get('page') === '1')
+            send(200, {
+              regions: [
+                { slug: 'sfo3', name: 'San Francisco 3', available: true },
+              ],
+              links: { pages: { next: `${this.base}/regions?page=2` } },
+            })
+          else
+            send(200, {
+              regions: [{ slug: 'old1', name: 'Retired', available: false }],
+              links: {},
+            })
+        } else if (route === 'GET /v2/images') {
+          send(200, {
+            images: [
+              {
+                slug: 'ubuntu-24-04-x64',
+                name: '24.04 (LTS) x64',
+                distribution: 'Ubuntu',
+              },
+              { slug: null, name: 'private', distribution: 'Ubuntu' },
+            ],
+          })
         } else if (route === 'GET /v2/firewalls') {
           send(200, { firewalls: this.firewalls })
         } else if (route === 'POST /v2/tags') {
@@ -334,6 +377,27 @@ describe('DigitalOcean provider', () => {
       offline.priceHourly('x'),
       (error: unknown) =>
         error instanceof ProviderError && error.kind === 'unavailable',
+    )
+  })
+
+  it('U3.4 lists the regions, sizes and images a pool may use', async () => {
+    assert.deepEqual(await provider.catalog(), {
+      regions: [{ slug: 'sfo3', name: 'San Francisco 3' }],
+      sizes: [
+        {
+          slug: 's-1vcpu-1gb',
+          description: 'Basic',
+          priceMonthly: 6,
+          regions: ['sfo3'],
+        },
+      ],
+      images: [{ slug: 'ubuntu-24-04-x64', name: 'Ubuntu 24.04 (LTS) x64' }],
+    })
+    assert(
+      api.requests.some(
+        (request) =>
+          request.path === '/v2/images?type=distribution&per_page=200&page=1',
+      ),
     )
   })
 })

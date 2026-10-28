@@ -473,7 +473,7 @@ export function masterPages(
       )
     })
   }
-  guarded('/nodes', 'nodes.read', 'Nodes', 'nodes', (current) => {
+  guarded('/nodes', 'nodes.read', 'Nodes', 'nodes', async (current) => {
     const busy = cluster(master).nodes
     return nodesView({
       nodes: master.registry.list().map((node) => {
@@ -513,17 +513,34 @@ export function masterPages(
         unknown
       >,
       pools: master.pools.pools().map((pool) => ({
-        name: pool.name,
-        type: pool.type,
-        size: pool.size,
-        maxNodes: pool.maxNodes,
-        machines: master.pools
-          .machines(pool.name)
-          .filter(
-            (row) =>
-              (row as { destroyed_at?: number | null }).destroyed_at == null,
-          ).length,
+        ...pool,
+        machines: master.pools.machines(pool.name).map((row) => ({
+          id: row.id,
+          state: row.state,
+          address: row.address,
+        })),
       })),
+      poolAccounts: await Promise.all(
+        master.cloudAccounts
+          .all()
+          .filter((account) => account.provider === 'digitalocean')
+          .map(async (account) => {
+            try {
+              const catalog = await master.pools.catalog(account.id)
+              return {
+                id: account.id,
+                name: account.name,
+                ...(catalog == null ? {} : { catalog }),
+              }
+            } catch (error) {
+              return {
+                id: account.id,
+                name: account.name,
+                error: `Could not list ${account.name}'s regions and sizes: ${(error as Error).message}`,
+              }
+            }
+          }),
+      ),
       budget: {
         monthly: Number(
           ((master.settings.value('cloud') ?? {}) as { monthlyBudget?: number })

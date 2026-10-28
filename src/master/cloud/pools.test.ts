@@ -16,6 +16,10 @@ import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeCloud } from '../../test/fakeCloud.js'
 import { quietMac } from '../../test/fakeMac.js'
 import { ProviderError } from './digitalocean.js'
+import { pinnedFetch } from '../../node/pinnedFetch.js'
+import { MASTER_SESSION_COOKIE } from '../auth.js'
+import { poolInput } from '../cloudApi.js'
+import { version } from '../../version.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -33,6 +37,7 @@ describe('Cloud node pools', function () {
   let cloud: FakeCloud
   let offset = 0
   let address = '203.0.113.7'
+  let assets: () => Promise<string[]> = async () => []
   const pool = (
     extra: Record<string, unknown> = {},
   ): Record<string, unknown> => ({
@@ -60,6 +65,7 @@ describe('Cloud node pools', function () {
         cloud: {
           provider: () => cloud,
           publicAddress: async () => address,
+          releaseAssets: async () => await assets(),
           tickMs: 200,
           pairTimeoutMs: 20_000,
           log: (line: string) => {
@@ -167,7 +173,7 @@ export async function work(ctx: Stage) {
       )
     })
 
-  it('U11.1 validates pools against cloud accounts and keeps the provider key on the master', async () => {
+  it('U11.1/U3.1 validates pools against cloud accounts and keeps the provider key on the master', async () => {
     const settings = c.master.master!.settings
     await assert.rejects(
       settings.set(admin, 'cloud', { pools: [pool()] }),
@@ -648,5 +654,291 @@ export async function work(ctx: Stage) {
       ) + 3_600_000
     assert(spend > 0.05)
     assert((await pools.spend(next)) < 0.05)
+  })
+
+  it('U3.2/U3.3 with no host, machines install the master’s release from GitHub once its assets list a linux-x64 tarball', async () => {
+    const master = c.master.master!
+    // Earlier machines retire first, so the stage needs a new one.
+    offset += 6 * MINUTE
+    await wait(
+      () => machines().length === 0,
+      15_000,
+      'earlier machines retired',
+    )
+    const db = master.database.db
+    const host = db
+      .prepare("SELECT value FROM settings WHERE area='host'")
+      .get() as { value: string }
+    db.prepare("DELETE FROM settings WHERE area='host'").run()
+    try {
+      let asked = 0
+      assets = async (): Promise<string[]> => {
+        asked++
+        throw new Error('GitHub answered 503')
+      }
+      const id = await run()
+      const reason = async (pattern: RegExp, label: string): Promise<Json> =>
+        await wait(
+          () => {
+            const value = master.run(id) as Json
+            return pattern.test(stage(value)?.reason ?? '')
+              ? stage(value)
+              : undefined
+          },
+          10_000,
+          label,
+        )
+      await reason(
+        /Cannot read release v.* on GitHub: GitHub answered 503/,
+        'the GitHub failure',
+      )
+      assert(asked >= 1)
+      // A failure is asked again after a minute; a release without linux-x64 waits.
+      assets = async (): Promise<string[]> => [
+        `mason-${version}-darwin-arm64.tar.gz`,
+        'install.sh',
+      ]
+      offset += MINUTE + 1000
+      await reason(
+        /has no linux-x64 tarball for linux-cloud machines/,
+        'the missing tarball',
+      )
+      const created = cloud.created.length
+      assets = async (): Promise<string[]> => [
+        `mason-${version}-linux-x64.tar.gz`,
+        'install.sh',
+      ]
+      offset += 11 * MINUTE
+      assert.equal((await finish(id)).status, 'succeeded')
+      assert.equal(cloud.created.length, created + 1)
+      const spec = cloud.created.at(-1)!
+      assert.match(
+        spec.userData,
+        new RegExp(
+          `curl -fsSL https://github.com/[\\w.-]+/[\\w.-]+/releases/latest/download/install.sh -o /root/mason-install.sh\nbash /root/mason-install.sh --version ${version.replaceAll('.', '\\.')}\n`,
+        ),
+      )
+      assert.match(
+        spec.userData,
+        new RegExp(`# Mason ${version.replaceAll('.', '\\.')}`),
+      )
+      offset += 6 * MINUTE
+      await wait(() => machines().length === 0, 15_000, 'retired')
+    } finally {
+      db.prepare(
+        "INSERT INTO settings(area,value,updated_at,updated_by) VALUES('host',?,0,'test')",
+      ).run(host.value)
+    }
+  })
+
+  it('U3.4/U3.5 the Pools panel offers the provider’s regions, sizes and images; pools are added, edited and removed through the API', async () => {
+    const master = c.master.master!
+    const admin = c.admin
+    const paul = master.people
+      .list({ role: 'admin', label: 'pools' })
+      .find((person) => person.username === 'paul')!
+    const { token } = master.auth.start(paul.id, '127.0.0.1')
+    const page = async (): Promise<string> =>
+      await (
+        await pinnedFetch(
+          c.master.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') + '/nodes',
+          { headers: { cookie: `${MASTER_SESSION_COOKIE}=${token}` } },
+          c.master.web!.certificate!.pin,
+        )
+      ).text()
+    const nodes = await page()
+    assert.match(nodes, /<h2>.*Cloud pools<\/h2>/)
+    assert.match(nodes, /Add a pool on DigitalOcean/)
+    assert.match(
+      nodes,
+      /<option value="sfo3"[^>]*>San Francisco 3 \(sfo3\)<\/option>/,
+    )
+    assert.match(
+      nodes,
+      /<option value="s-2vcpu-4gb"[^>]*>s-2vcpu-4gb · Basic · \$24\/month<\/option>/,
+    )
+    assert.match(nodes, /<option value="ubuntu-24-04-x64"/)
+    assert.match(nodes, /id="pool-linux-cloud"/)
+    // The catalog is asked once for ten minutes.
+    const calls = cloud.catalogCalls
+    await page()
+    assert.equal(cloud.catalogCalls, calls)
+    // A form's text fields are typed for the area.
+    assert.deepEqual(
+      poolInput({
+        maxNodes: '2',
+        slots: '',
+        labels: 'docker, gpu ,',
+        name: 'x',
+      }),
+      {
+        maxNodes: 2,
+        slots: undefined,
+        labels: ['docker', 'gpu'],
+        name: 'x',
+      },
+    )
+    assert.deepEqual(poolInput(undefined), {})
+    const form = {
+      account: 'do',
+      name: 'big',
+      type: 'linux-big',
+      region: 'sfo3',
+      size: 's-2vcpu-4gb',
+      image: 'ubuntu-24-04-x64',
+      labels: 'docker',
+      maxNodes: '2',
+      slots: '2',
+      ttlMinutes: '5',
+      maxHoursPerNode: '12',
+    }
+    const bad = await c.api(
+      'POST',
+      '/api/v2/cloud/pools',
+      { ...form, maxNodes: '0' },
+      admin,
+    )
+    assert.equal(bad.status, 400)
+    assert.match(bad.json.error, /pool.maxNodes is a whole number from 1 to 50/)
+    const added = await c.api('POST', '/api/v2/cloud/pools', form, admin)
+    assert.equal(added.status, 201, added.text)
+    assert.deepEqual(added.json, {
+      name: 'big',
+      type: 'linux-big',
+      account: 'do',
+      provider: 'digitalocean',
+      region: 'sfo3',
+      size: 's-2vcpu-4gb',
+      image: 'ubuntu-24-04-x64',
+      labels: ['docker'],
+      maxNodes: 2,
+      slots: 2,
+      ttlMinutes: 5,
+      maxHoursPerNode: 12,
+    })
+    assert.equal(
+      (await c.api('POST', '/api/v2/cloud/pools', form, admin)).status,
+      409,
+    )
+    const listed = await c.api('GET', '/api/v2/cloud/pools', undefined, admin)
+    assert.deepEqual(
+      listed.json.map((pool: Json) => pool.name),
+      ['linux-cloud', 'big'],
+    )
+    const catalog = await c.api(
+      'GET',
+      '/api/v2/cloud/accounts/do/catalog',
+      undefined,
+      admin,
+    )
+    assert.deepEqual(
+      catalog.json.regions.map((region: Json) => region.slug),
+      ['nyc3', 'sfo3'],
+    )
+    assert.equal(
+      (
+        await c.api(
+          'GET',
+          '/api/v2/cloud/accounts/none/catalog',
+          undefined,
+          admin,
+        )
+      ).status,
+      404,
+    )
+    // A machine of the pool survives an edit, which keeps the pool's name.
+    const db = master.database.db
+    db.prepare(
+      "INSERT INTO cloud_machines(pool,account,state,size,created_at,provider_id) VALUES('big','do','creating','s-2vcpu-4gb',?,'none')",
+    ).run(Date.now() + offset)
+    const edited = await c.api(
+      'PUT',
+      '/api/v2/cloud/pools/big',
+      { ...form, name: 'renamed', maxNodes: '3' },
+      admin,
+    )
+    assert.equal(edited.status, 200, edited.text)
+    assert.equal(edited.json.name, 'big')
+    assert.equal(edited.json.maxNodes, 3)
+    assert.equal(machines().filter((row) => row.pool === 'big').length, 1)
+    assert.equal(
+      (await c.api('PUT', '/api/v2/cloud/pools/none', form, admin)).status,
+      404,
+    )
+    // Removing the pool retires its machines.
+    db.prepare(
+      "INSERT INTO nodes(fingerprint,public_key,certificate_hash,role,host,port,name,added_at) VALUES('mldsa65:gone','','','worker','203.0.113.8',9310,'mason-big-1',0)",
+    ).run()
+    db.prepare(
+      "UPDATE cloud_machines SET state='ready',fingerprint='mldsa65:gone' WHERE pool='big'",
+    ).run()
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/cloud/pools/big', undefined, admin))
+        .status,
+      200,
+    )
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/cloud/pools/big', undefined, admin))
+        .status,
+      404,
+    )
+    await wait(
+      () => machines().every((row) => row.pool !== 'big'),
+      10_000,
+      'the removed pool’s machine retired',
+    )
+    // An account without a catalog, and a catalog that fails, still render the form.
+    const view = await import('../../view/admin.js')
+    const html = view.nodesView({
+      nodes: [],
+      types: {},
+      pools: [
+        {
+          name: 'old',
+          type: 'linux',
+          account: 'gone',
+          region: 'ams3',
+          size: 's-1vcpu-1gb',
+          image: 'ubuntu-24-04-x64',
+          labels: ['a'],
+          maxNodes: 1,
+          slots: 1,
+          ttlMinutes: 5,
+          maxHoursPerNode: 1,
+          machines: [{ id: 7, state: 'ready', address: '203.0.113.9:9310' }],
+        },
+      ],
+      poolAccounts: [
+        { id: 'do', name: 'DigitalOcean', error: 'Could not list regions' },
+        {
+          id: 'cat',
+          name: 'Catalogued',
+          catalog: {
+            regions: [{ slug: 'sfo3', name: 'SF' }],
+            sizes: [],
+            images: [],
+          },
+        },
+      ],
+      budget: { monthly: 200 },
+      canChange: true,
+    })
+    assert.match(html, /<p class="notice">Could not list regions<\/p>/)
+    assert.match(
+      html,
+      /<input id="new-do-region" name="region" value="" required placeholder="sfo3">/,
+    )
+    assert.match(html, /203\.0\.113\.9:9310/)
+    assert.match(html, /machine · 1 stage at a time/)
+    assert.match(
+      view.nodesView({
+        nodes: [],
+        types: {},
+        pools: [],
+        budget: { monthly: 1 },
+        canChange: true,
+      }),
+      /Add a DigitalOcean account on the <a href="\/cloud">Cloud<\/a> page/,
+    )
   })
 })

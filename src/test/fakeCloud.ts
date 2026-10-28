@@ -6,6 +6,7 @@ import {
   type MachineSpec,
   type ProviderMachine,
   type ProviderSnapshot,
+  type Catalog,
 } from '../master/cloud/digitalocean.js'
 import { PAIRING_FILE } from '../node/identity.js'
 import { startNode, type RunningNode } from '../node/serve.js'
@@ -163,6 +164,33 @@ export class FakeCloud implements CloudProvider {
   async deleteSnapshot(id: string): Promise<void> {
     this.snapshotList.delete(id)
   }
+  /** Asked for by the pool form. */
+  catalogCalls = 0
+  async catalog(): Promise<Catalog> {
+    this.catalogCalls++
+    return {
+      regions: [
+        { slug: 'nyc3', name: 'New York 3' },
+        { slug: 'sfo3', name: 'San Francisco 3' },
+      ],
+      sizes: [
+        {
+          slug: 's-1vcpu-1gb',
+          description: 'Basic',
+          priceMonthly: 6,
+          regions: ['nyc3', 'sfo3'],
+        },
+        {
+          slug: 's-2vcpu-4gb',
+          description: 'Basic',
+          priceMonthly: 24,
+          regions: ['sfo3'],
+        },
+      ],
+      images: [{ slug: 'ubuntu-24-04-x64', name: 'Ubuntu 24.04 (LTS) x64' }],
+    }
+  }
+
   async priceHourly(): Promise<number> {
     return 0.01
   }

@@ -792,6 +792,11 @@ describe('Master sign-in, setup, people and permissions', function () {
       'POST /api/v2/cloud/accounts': 'settings.change',
       'POST /api/v2/cloud/accounts/:id/check': 'settings.read',
       'DELETE /api/v2/cloud/accounts/:id': 'settings.change',
+      'GET /api/v2/cloud/accounts/:id/catalog': 'settings.read',
+      'GET /api/v2/cloud/pools': 'settings.read',
+      'POST /api/v2/cloud/pools': 'settings.change',
+      'PUT /api/v2/cloud/pools/:name': 'settings.change',
+      'DELETE /api/v2/cloud/pools/:name': 'settings.change',
       'GET /api/v2/people': 'people.read',
       'POST /api/v2/people': 'people.change',
       'GET /api/v2/people/:id': 'people.read',
@@ -869,6 +874,7 @@ describe('Master sign-in, setup, people and permissions', function () {
         .replace(':area', 'no-such-area')
         .replace(':fingerprint', 'no-such-node')
         .replace(':id', '424242')
+        .replace(':name', 'no-such-pool')
     const failures: string[] = []
     for (const [route, action] of Object.entries(table)) {
       const [method, pathname] = route.split(' ') as [string, string]

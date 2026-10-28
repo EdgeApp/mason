@@ -47,7 +47,22 @@ export class ProviderError extends Error {
   }
 }
 
+/** What a provider offers a new machine, for the pool form. */
+export interface Catalog {
+  regions: Array<{ slug: string; name: string }>
+  sizes: Array<{
+    slug: string
+    description: string
+    /** Dollars per month. */
+    priceMonthly: number
+    regions: string[]
+  }>
+  images: Array<{ slug: string; name: string }>
+}
+
 export interface CloudProvider {
+  /** Regions, sizes and base images a pool may use. */
+  catalog?(): Promise<Catalog>
   create(spec: MachineSpec): Promise<ProviderMachine>
   get(id: string): Promise<ProviderMachine | undefined>
   /** Machines carrying a tag. */
@@ -291,6 +306,59 @@ export class DigitalOcean implements CloudProvider {
     } catch (error) {
       if (!(error instanceof ProviderError && error.kind === 'missing'))
         throw error
+    }
+  }
+
+  /** Available regions and sizes, and distribution images with a slug. */
+  async catalog(): Promise<Catalog> {
+    const pages = async <T>(route: string, field: string): Promise<T[]> => {
+      const out: T[] = []
+      for (let page = 1; ; page++) {
+        const body = await this.call<
+          Record<string, unknown> & { links?: { pages?: { next?: string } } }
+        >(
+          'GET',
+          `${route}${route.includes('?') ? '&' : '?'}per_page=200&page=${page}`,
+        )
+        out.push(...((body[field] ?? []) as T[]))
+        if (body.links?.pages?.next == null) return out
+      }
+    }
+    const [regions, sizes, images] = await Promise.all([
+      pages<{ slug: string; name: string; available: boolean }>(
+        '/regions',
+        'regions',
+      ),
+      pages<{
+        slug: string
+        description?: string
+        price_monthly: number
+        regions: string[]
+        available: boolean
+      }>('/sizes', 'sizes'),
+      pages<{ slug: string | null; name: string; distribution: string }>(
+        '/images?type=distribution',
+        'images',
+      ),
+    ])
+    return {
+      regions: regions
+        .filter((region) => region.available)
+        .map((region) => ({ slug: region.slug, name: region.name })),
+      sizes: sizes
+        .filter((size) => size.available)
+        .map((size) => ({
+          slug: size.slug,
+          description: size.description ?? size.slug,
+          priceMonthly: size.price_monthly,
+          regions: size.regions,
+        })),
+      images: images
+        .filter((image) => image.slug != null)
+        .map((image) => ({
+          slug: image.slug!,
+          name: `${image.distribution} ${image.name}`,
+        })),
     }
   }
 

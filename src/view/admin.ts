@@ -53,17 +53,183 @@ export interface NodeRow {
   version?: string
 }
 
+/** A cloud pool on the Nodes page, with its machines. */
+export interface PoolRow {
+  name: string
+  type: string
+  account: string
+  region: string
+  size: string
+  image: string
+  labels: string[]
+  maxNodes: number
+  slots: number
+  ttlMinutes: number
+  maxHoursPerNode: number
+  machines: Array<{ id: number; state: string; address: string | null }>
+}
+
+/** An account pools may be made in, with what its provider offers. */
+export interface PoolAccount {
+  id: string
+  name: string
+  catalog?: {
+    regions: Array<{ slug: string; name: string }>
+    sizes: Array<{ slug: string; description: string; priceMonthly: number }>
+    images: Array<{ slug: string; name: string }>
+  }
+  /** Why the catalog could not be read. */
+  error?: string
+}
+
+/** The pool form's fields: selects from the account's catalog, text inputs without one. */
+function poolFields(
+  prefix: string,
+  account: PoolAccount | undefined,
+  pool: Partial<PoolRow>,
+  editing: boolean,
+): string {
+  const field = (name: string, label: string, input: string): string =>
+    `<label for="${prefix}-${name}">${label}</label>${input}`
+  const text = (name: string, value: string, extra = ''): string =>
+    `<input id="${prefix}-${name}" name="${name}" value="${escape(value)}"${extra}>`
+  const select = (
+    name: string,
+    value: string,
+    options: Array<{ value: string; label: string }>,
+  ): string => {
+    // A stored value the catalog no longer lists stays selectable.
+    const all =
+      options.some((option) => option.value === value) || value === ''
+        ? options
+        : [{ value, label: value }, ...options]
+    return `<select id="${prefix}-${name}" name="${name}">${all.map((option) => `<option value="${escape(option.value)}"${option.value === value ? ' selected' : ''}>${escape(option.label)}</option>`).join('')}</select>`
+  }
+  const catalog = account?.catalog
+  const number = (
+    name: string,
+    value: number,
+    min: number,
+    max: number,
+  ): string =>
+    text(
+      name,
+      String(value),
+      ` type="number" min="${min}" max="${max}" required`,
+    )
+  return [
+    `<input type="hidden" name="account" value="${escape(account?.id ?? pool.account ?? '')}">`,
+    editing
+      ? ''
+      : field(
+          'name',
+          'Name',
+          text(
+            'name',
+            pool.name ?? '',
+            ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-cloud"',
+          ),
+        ),
+    field(
+      'type',
+      'Node type its machines serve',
+      text(
+        'type',
+        pool.type ?? '',
+        ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux"',
+      ),
+    ),
+    field(
+      'region',
+      'Region',
+      catalog == null
+        ? text('region', pool.region ?? '', ' required placeholder="sfo3"')
+        : select(
+            'region',
+            pool.region ?? 'sfo3',
+            catalog.regions.map((region) => ({
+              value: region.slug,
+              label: `${region.name} (${region.slug})`,
+            })),
+          ),
+    ),
+    field(
+      'size',
+      'Size',
+      catalog == null
+        ? text('size', pool.size ?? '', ' required placeholder="s-2vcpu-4gb"')
+        : select(
+            'size',
+            pool.size ?? 's-2vcpu-4gb',
+            catalog.sizes.map((size) => ({
+              value: size.slug,
+              label: `${size.slug} · ${size.description} · $${size.priceMonthly}/month`,
+            })),
+          ),
+    ),
+    field(
+      'image',
+      'Base image',
+      catalog == null
+        ? text('image', pool.image ?? 'ubuntu-24-04-x64', ' required')
+        : select(
+            'image',
+            pool.image ?? 'ubuntu-24-04-x64',
+            catalog.images.map((image) => ({
+              value: image.slug,
+              label: image.name,
+            })),
+          ),
+    ),
+    field(
+      'labels',
+      'Labels (comma-separated)',
+      text('labels', (pool.labels ?? []).join(', ')),
+    ),
+    field(
+      'maxNodes',
+      'Machines at most',
+      number('maxNodes', pool.maxNodes ?? 1, 1, 50),
+    ),
+    field(
+      'slots',
+      'Stages at a time per machine',
+      number('slots', pool.slots ?? 1, 1, 64),
+    ),
+    field(
+      'ttlMinutes',
+      'Retire after idle minutes',
+      number('ttlMinutes', pool.ttlMinutes ?? 60, 1, 1440),
+    ),
+    field(
+      'maxHoursPerNode',
+      'Retire after hours up',
+      number('maxHoursPerNode', pool.maxHoursPerNode ?? 24, 1, 720),
+    ),
+  ].join('')
+}
+
+const poolFieldNames = [
+  'account',
+  'name',
+  'type',
+  'region',
+  'size',
+  'image',
+  'labels',
+  'maxNodes',
+  'slots',
+  'ttlMinutes',
+  'maxHoursPerNode',
+]
+
 /** Nodes: status, type, current stage, inventory and checklist; node types; cloud pools and their budget; adding a node. */
 export function nodesView(data: {
   nodes: NodeRow[]
   types: Record<string, unknown>
-  pools: Array<{
-    name: string
-    type: string
-    size: string
-    maxNodes: number
-    machines: number
-  }>
+  pools: PoolRow[]
+  /** Accounts pools may be made in. */
+  poolAccounts?: PoolAccount[]
   budget: { monthly: number; notice?: string }
   host?: string
   /** The master's own release, installable from GitHub when no host serves one. */
@@ -116,13 +282,35 @@ export function nodesView(data: {
         `<li><span class="mono">${escape(name)}</span> <small class="mono">${escape(JSON.stringify(value).slice(0, 200))}</small></li>`,
     )
     .join('')
+  const accounts = data.poolAccounts ?? []
   const pools = data.pools
-    .map(
-      (pool) =>
-        `<li><span class="mono">${escape(pool.name)}</span> <small>${escape(pool.type)} · ${escape(pool.size)} · ${pool.machines} of at most ${pool.maxNodes} machines</small></li>`,
-    )
+    .map((pool) => {
+      const account = accounts.find((entry) => entry.id === pool.account)
+      const machines = pool.machines
+        .map(
+          (machine) =>
+            `<li><span class="mono">${escape(String(machine.id))}</span> ${escape(machine.state)}${machine.address == null ? '' : ` · <span class="mono">${escape(machine.address)}</span>`}</li>`,
+        )
+        .join('')
+      return `<section class="panel pool" id="pool-${escape(pool.name)}"><h3>${icon('cloud')}<span class="mono">${escape(pool.name)}</span></h3><p>${escape(pool.type)} · ${escape(account?.name ?? pool.account)} · ${escape(pool.region)} · ${escape(pool.size)}${pool.labels.length === 0 ? '' : ` · ${escape(pool.labels.join(', '))}`}</p><p>${pool.machines.length} of at most ${pool.maxNodes} machine${pool.maxNodes === 1 ? '' : 's'} · ${pool.slots} stage${pool.slots === 1 ? '' : 's'} at a time · retire after ${pool.ttlMinutes} idle minutes or ${pool.maxHoursPerNode} hours</p>${machines === '' ? '' : `<ul class="plain">${machines}</ul>`}${
+        data.canChange
+          ? `<details><summary>Edit</summary>${apiForm(`/api/v2/cloud/pools/${encodeURIComponent(pool.name)}`, poolFields(`pool-${pool.name}`, account, pool, true), `${icon('check')} Save`, { method: 'PUT', fields: poolFieldNames.filter((name) => name !== 'name') })}</details><div class="actions">${apiForm(`/api/v2/cloud/pools/${encodeURIComponent(pool.name)}`, '', `${icon('delete')} Remove`, { method: 'DELETE', className: 'secondary' })}</div>`
+          : ''
+      }</section>`
+    })
     .join('')
-  return `${head('Nodes', 'Workers and the host, their software, and what each still needs from a person.', ['Nodes'])}${rows || '<p class="empty-state">No nodes are paired.</p>'}<div class="columns"><div>${add}</div><aside><section class="panel"><h2>${icon('tune')}Node types</h2><ul class="plain">${types || '<li>None yet.</li>'}</ul><p><a href="/settings#nodeTypes">Edit in Settings</a></p></section><section class="panel"><h2>${icon('cloud')}Cloud pools</h2><ul class="plain">${pools || '<li>None.</li>'}</ul><p>Monthly budget: $${data.budget.monthly}</p>${data.budget.notice == null ? '' : `<p class="notice">${escape(data.budget.notice)}</p>`}</section></aside></div>`
+  const addPool = !data.canChange
+    ? ''
+    : accounts.length === 0
+      ? '<p>Add a DigitalOcean account on the <a href="/cloud">Cloud</a> page to make pools.</p>'
+      : accounts
+          .map(
+            (account) =>
+              `<details class="add-pool" id="add-pool-${escape(account.id)}"><summary>${icon('add')}Add a pool on ${escape(account.name)}</summary>${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/pools', poolFields(`new-${account.id}`, account, {}, false), `${icon('add')} Add pool`, { fields: poolFieldNames })}</details>`,
+          )
+          .join('')
+  const poolsPanel = `<section class="panel" id="pools"><h2>${icon('cloud')}Cloud pools</h2><p>Machines made on demand for a node type, reused like your own computers and retired when idle. Monthly budget: $${data.budget.monthly}.</p>${data.budget.notice == null ? '' : `<p class="notice">${escape(data.budget.notice)}</p>`}${pools || '<p>None yet.</p>'}${addPool}</section>`
+  return `${head('Nodes', 'Workers and the host, their software, and what each still needs from a person.', ['Nodes'])}${rows || '<p class="empty-state">No nodes are paired.</p>'}<div class="columns"><div>${add}${poolsPanel}</div><aside><section class="panel"><h2>${icon('tune')}Node types</h2><ul class="plain">${types || '<li>None yet.</li>'}</ul><p><a href="/settings#nodeTypes">Edit in Settings</a></p></section></aside></div>`
 }
 
 /** Settings: every area the master keeps, edited as JSON with secrets write-only, plus the Apple ID session. */

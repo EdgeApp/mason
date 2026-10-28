@@ -33,7 +33,7 @@ import { Stashes } from './stash.js'
 import { Releases } from './releases.js'
 import { Updates } from './updates.js'
 import { runningInstall } from '../release/install.js'
-import { version } from '../version.js'
+import { repository, version } from '../version.js'
 import {
   AppleDownloads,
   type AppleEndpoints,
@@ -119,6 +119,8 @@ export interface MasterOptions {
     | 'pairTimeoutMs'
     | 'linkPort'
     | 'log'
+    | 'github'
+    | 'releaseAssets'
   >
   /** How the master checks cloud accounts: a fake provider API in tests. */
   cloudAccounts?: Pick<
@@ -332,6 +334,7 @@ export class Master {
       cloud: {
         demand: (type): string | undefined => this.pools.demand(type),
         draining: (fingerprint): boolean => this.pools.draining(fingerprint),
+        setupDemand: (): string | undefined => this.pools.setupDemand(),
       },
     })
     this.nodeStates = new NodeStates({
@@ -472,6 +475,8 @@ export class Master {
         }
         return host.workerOrigin ?? host.origin
       },
+      github: (): { repository: string; version: string } | undefined =>
+        repository == null ? undefined : { repository, version },
       publicAddress: async (): Promise<string | undefined> => {
         const response = await fetch('https://api.ipify.org', {
           signal: AbortSignal.timeout(10_000),

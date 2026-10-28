@@ -140,6 +140,8 @@ export interface SchedulerOptions {
   cloud?: {
     demand(type: string): string | undefined
     draining(fingerprint: string): boolean
+    /** A setup with no connected worker asks a pool for a machine. */
+    setupDemand?(): string | undefined
   }
 }
 
@@ -547,7 +549,22 @@ export class Scheduler {
     }
     const project = this.project(job)
     const worker = this.pick(undefined, id)
-    if (worker == null) return
+    if (worker == null) {
+      // With no worker connected at all, only a cloud machine can run it.
+      const connected = this.options.registry
+        .list()
+        .some((node) => node.role === 'worker' && node.connected)
+      const reason = connected ? undefined : this.options.cloud?.setupDemand?.()
+      if (reason != null && this.stage(id, SETUP)?.reason !== reason) {
+        this.db
+          .prepare(
+            "UPDATE job_stages SET reason=? WHERE job_id=? AND name=? AND status='queued'",
+          )
+          .run(reason, id, SETUP)
+        this.options.master.change('job', id)
+      }
+      return
+    }
     const attempt = Number(this.stage(id, SETUP)!.attempt) + 1
     const token = randomBytes(24).toString('hex')
     const assignment: SetupAssignment = {

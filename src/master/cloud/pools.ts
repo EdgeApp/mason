@@ -8,6 +8,7 @@ import {
   DigitalOcean,
   ProviderError,
   SNAPSHOT_GB_MONTH,
+  type Catalog,
   type CloudProvider,
 } from './digitalocean.js'
 
@@ -172,6 +173,10 @@ export interface PoolsOptions {
   releasePlatforms?: (version: string) => string[]
   /** Where machines download the installer: the host's worker origin or origin. */
   hostOrigin: () => string | undefined
+  /** With no host, machines install the master's own release from GitHub. */
+  github?: () => { repository: string; version: string } | undefined
+  /** A GitHub release's asset names; the GitHub API by default. */
+  releaseAssets?: (repository: string, version: string) => Promise<string[]>
   /** The master's public address, for the firewall rule. */
   publicAddress?: () => Promise<string | undefined>
   /** The link port machines listen on. */
@@ -180,6 +185,28 @@ export interface PoolsOptions {
   /** How long a machine may take to boot and pair. */
   pairTimeoutMs?: number
   log?: (line: string) => void
+}
+
+/** Where a machine installs Mason from: the host, or a GitHub release. */
+type Installer =
+  | { origin: string; version: string }
+  | { repository: string; version: string }
+
+/** A release's asset names from the GitHub API (public repositories need no token). */
+async function gitHubReleaseAssets(
+  repository: string,
+  version: string,
+): Promise<string[]> {
+  const response = await fetch(
+    `https://api.github.com/repos/${repository}/releases/tags/v${version}`,
+    {
+      headers: { Accept: 'application/vnd.github+json' },
+      signal: AbortSignal.timeout(15_000),
+    },
+  )
+  if (!response.ok) throw new Error(`GitHub answered ${response.status}`)
+  const body = (await response.json()) as { assets?: Array<{ name: string }> }
+  return (body.assets ?? []).map((asset) => asset.name)
 }
 
 const TAG = 'mason-pool'
@@ -399,17 +426,8 @@ export class Pools {
     if (budget != null) return budget
     if (this.provider(pool.account) == null)
       return `The ${pool.name} pool's cloud account ${pool.account} is gone: add it on the Cloud page`
-    const release = this.options.release()
-    if (release == null)
-      return 'The release store is empty: add the release machines install with mason releases add'
-    // The copy beside a master's own install holds only its platform.
-    if (
-      this.options.releasePlatforms != null &&
-      !this.options.releasePlatforms(release).includes(machinePlatform)
-    )
-      return `Release ${release} has no ${machinePlatform} tarball for ${pool.name} machines: store the whole release with mason releases fetch v${release}`
-    if (this.options.hostOrigin() == null)
-      return 'Cloud machines install from the host: set the host setting first'
+    const installer = this.installer(pool)
+    if (typeof installer === 'string') return installer
     const machines = this.machines(pool.name)
     if (
       machines.some(
@@ -425,33 +443,119 @@ export class Pools {
       ).length >= pool.maxNodes
     )
       return `The ${pool.name} pool is at its ${pool.maxNodes}-machine limit`
-    void this.create(pool)
+    void this.create(pool, installer)
     return `Starting a ${pool.name} machine`
   }
 
-  /** First-boot data: install Mason from the host, then pair with the material the master made. */
-  userData(
-    origin: string,
-    version: string,
-    pairing: string,
-    slots: number,
-  ): string {
+  /**
+   * A job's setup when no worker is connected: a master whose only nodes are
+   * cloud machines starts one from its first pool to run it.
+   */
+  setupDemand(): string | undefined {
+    const pool = this.pools()[0]
+    return pool == null ? undefined : this.demand(pool.type)
+  }
+
+  /** GitHub release assets by `repository@version`, refreshed every ten minutes. */
+  private readonly assets = new Map<
+    string,
+    { at: number; names?: string[]; error?: string }
+  >()
+  private readonly fetching = new Set<string>()
+
+  /** Where a new machine installs Mason from, or why it cannot yet. */
+  private installer(pool: PoolSetting): Installer | string {
+    const origin = this.options.hostOrigin()
+    if (origin != null) {
+      const release = this.options.release()
+      if (release == null)
+        return 'The release store is empty: add the release machines install with mason releases add'
+      // The copy beside a master's own install holds only its platform.
+      if (
+        this.options.releasePlatforms != null &&
+        !this.options.releasePlatforms(release).includes(machinePlatform)
+      )
+        return `Release ${release} has no ${machinePlatform} tarball for ${pool.name} machines: store the whole release with mason releases fetch v${release}`
+      return { origin, version: release }
+    }
+    const github = this.options.github?.()
+    if (github == null)
+      return 'Cloud machines install from the host or from the master’s GitHub release: set the host setting first'
+    const key = `${github.repository}@${github.version}`
+    const known = this.assets.get(key)
+    const stale =
+      known == null ||
+      this.now() - known.at >= (known.error == null ? 600_000 : 60_000)
+    if (stale && !this.fetching.has(key)) {
+      this.fetching.add(key)
+      void (this.options.releaseAssets ?? gitHubReleaseAssets)(
+        github.repository,
+        github.version,
+      )
+        .then(
+          (names) => this.assets.set(key, { at: this.now(), names }),
+          (error: unknown) =>
+            this.assets.set(key, {
+              at: this.now(),
+              error: (error as Error).message,
+            }),
+        )
+        .finally(() => this.fetching.delete(key))
+    }
+    if (known == null)
+      return `Checking release v${github.version} on GitHub for ${pool.name} machines`
+    if (known.names == null)
+      return `Cannot read release v${github.version} of ${github.repository} on GitHub: ${known.error}`
+    if (
+      !known.names.includes(`mason-${github.version}-${machinePlatform}.tar.gz`)
+    )
+      return `Release v${github.version} of ${github.repository} has no ${machinePlatform} tarball for ${pool.name} machines`
+    return github
+  }
+
+  /** Regions, sizes and images an account's provider offers, cached for ten minutes. */
+  private readonly catalogs = new Map<
+    string,
+    { at: number; catalog: Catalog }
+  >()
+  async catalog(account: string): Promise<Catalog | undefined> {
+    const provider = this.provider(account)
+    if (provider?.catalog == null) return undefined
+    const cached = this.catalogs.get(account)
+    if (cached != null && this.now() - cached.at < 600_000)
+      return cached.catalog
+    const catalog = await provider.catalog()
+    this.catalogs.set(account, { at: this.now(), catalog })
+    return catalog
+  }
+
+  /**
+   * First-boot data: install Mason from the host, or with no host the
+   * master's own release from GitHub, then pair with the material the master
+   * made.
+   */
+  userData(installer: Installer, pairing: string, slots: number): string {
     const port = this.options.linkPort ?? 9310
+    const install =
+      'origin' in installer
+        ? `curl -fsSL ${installer.origin}/install.sh -o /root/mason-install.sh
+bash /root/mason-install.sh --from ${installer.origin}`
+        : `curl -fsSL https://github.com/${installer.repository}/releases/latest/download/install.sh -o /root/mason-install.sh
+bash /root/mason-install.sh --version ${installer.version}`
     return `#!/bin/bash
 set -euo pipefail
-curl -fsSL ${origin}/install.sh -o /root/mason-install.sh
-bash /root/mason-install.sh --from ${origin}
+${install}
 rm -f /root/mason-install.sh
 umask 077
 cat > /root/mason-pairing.json <<'MASON_PAIRING'
 ${pairing}
 MASON_PAIRING
 mason worker --install --pairing-file /root/mason-pairing.json --link-port ${port} --listen 0.0.0.0 --slots ${slots}
-# Mason ${version}
+# Mason ${installer.version}
 `
   }
 
-  private async create(pool: PoolSetting): Promise<void> {
+  private async create(pool: PoolSetting, installer: Installer): Promise<void> {
     const provider = this.provider(pool.account)
     if (provider == null) return
     const now = this.now()
@@ -501,12 +605,7 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
         size: pool.size,
         image: snapshot?.provider_id ?? pool.image,
         tags: [TAG, `${TAG}-${pool.name}`],
-        userData: this.userData(
-          this.options.hostOrigin()!,
-          this.options.release()!,
-          pairing,
-          pool.slots,
-        ),
+        userData: this.userData(installer, pairing, pool.slots),
       })
       this.db
         .prepare(
@@ -681,7 +780,7 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
               snapshot.id,
               row.id,
               snapshot.sizeGb,
-              this.options.release() ?? '',
+              this.options.release() ?? this.options.github?.()?.version ?? '',
               this.now(),
             )
           for (const old of previous) {
