@@ -150,6 +150,8 @@ export interface MasterOptions {
     | 'linkPort'
     | 'log'
     | 'trusted'
+    | 'version'
+    | 'updateTimeoutMs'
   >
   /** How the master reaches DigitalOcean Spaces: a fake S3 endpoint in tests. */
   spaces?: {

@@ -100,6 +100,8 @@ export interface NodeLinkOptions {
   onLink?(link: Link): void
   onPaired?(fingerprint: string): void
   onRemoved?(): void
+  /** The master asks this node to update to a version; absent, it refuses. */
+  onUpdate?(version: unknown): unknown
 }
 
 export interface NodeLinks {
@@ -189,6 +191,13 @@ export function serveNodeLinks(
             requests: {
               ...options.methods.requests,
               'node.configure': (params): Assignment => pairing.assign(params),
+              'node.update': (params): unknown => {
+                if (options.onUpdate == null)
+                  throw new Error('This node does not update over the link')
+                return options.onUpdate(
+                  (params as { version?: unknown } | undefined)?.version,
+                )
+              },
             },
             events: {
               ...options.methods.events,

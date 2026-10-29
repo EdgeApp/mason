@@ -11,6 +11,8 @@ export interface NodeCheck {
   /** Workers: when the master last heard the node's inventory. */
   inventoryAt?: number
   quarantine?: string
+  /** A cloud host restarting into the release the master asked it for. */
+  updating?: string
   /** The host: how many changes it has yet to apply, its outbox and refused messages. */
   cache?: { revision: number; lag: number; outbox: number; refused: number }
   problems: string[]
@@ -42,6 +44,9 @@ export async function clusterCheck(
 ): Promise<ClusterReport> {
   const revision = master.changes.revision()
   const nodes: NodeCheck[] = []
+  const cloudHosts = new Map(
+    (master.cloudHosts?.list() ?? []).map((row) => [row.fingerprint, row]),
+  )
   for (const node of master.registry.list()) {
     const link = master.registry.link(node.fingerprint)
     const linked = link != null || node.host === 'in-process'
@@ -53,11 +58,21 @@ export async function clusterCheck(
       ...(node.version == null ? {} : { version: node.version }),
       problems: [],
     }
-    if (!linked) check.problems.push('not linked')
-    if (node.version != null && node.version !== masonVersion)
-      check.problems.push(
-        `runs Mason ${node.version}, the master ${masonVersion}`,
+    const cloud = cloudHosts.get(node.fingerprint)
+    if (cloud?.state === 'updating' && cloud.version != null)
+      check.updating = cloud.version
+    else if (cloud?.error != null) check.problems.push(cloud.error)
+    // An updating host is not linked, or on its old release, for a while.
+    if (!linked && check.updating == null) check.problems.push('not linked')
+    const behind = (running: string): void => {
+      if (
+        running !== masonVersion &&
+        check.updating == null &&
+        !check.problems.some((problem) => problem.startsWith('runs Mason'))
       )
+        check.problems.push(`runs Mason ${running}, the master ${masonVersion}`)
+    }
+    if (node.version != null) behind(node.version)
     if (node.role === 'worker') {
       const row = master.database.db
         .prepare(
@@ -86,13 +101,7 @@ export async function clusterCheck(
           refused: status.refused,
         }
         check.version = status.version
-        if (
-          status.version !== masonVersion &&
-          !check.problems.some((problem) => problem.startsWith('runs Mason'))
-        )
-          check.problems.push(
-            `runs Mason ${status.version}, the master ${masonVersion}`,
-          )
+        behind(status.version)
         if (check.cache.lag > 0)
           check.problems.push(`is ${check.cache.lag} changes behind`)
         if (status.outbox > 0)
@@ -108,7 +117,9 @@ export async function clusterCheck(
   return {
     master: { version: masonVersion, revision },
     nodes,
-    green: nodes.every((node) => node.problems.length === 0),
+    green: nodes.every(
+      (node) => node.problems.length === 0 && node.updating == null,
+    ),
   }
 }
 
@@ -121,6 +132,7 @@ export function formatCheck(report: ClusterReport, now = Date.now()): string {
     const facts = [
       node.linked ? 'linked' : 'NOT LINKED',
       node.version == null ? undefined : `Mason ${node.version}`,
+      node.updating == null ? undefined : `updating to ${node.updating}`,
       node.inventoryAt == null
         ? undefined
         : `inventory ${Math.round((now - node.inventoryAt) / 1000)}s ago`,
@@ -129,12 +141,19 @@ export function formatCheck(report: ClusterReport, now = Date.now()): string {
         : `cache ${node.cache.revision} (${node.cache.lag} behind), outbox ${node.cache.outbox}, refused ${node.cache.refused}`,
     ].filter((fact) => fact != null)
     lines.push(
-      `${node.problems.length === 0 ? '✓' : '✗'} ${node.role.padEnd(6)} ${node.name}  ${facts.join(' · ')}`,
+      `${node.problems.length > 0 ? '✗' : node.updating != null ? '…' : '✓'} ${node.role.padEnd(6)} ${node.name}  ${facts.join(' · ')}`,
     )
     for (const problem of node.problems)
       lines.push(`    ${node.name} ${problem}`)
   }
   if (report.nodes.length === 0) lines.push('No nodes are paired.')
-  lines.push(report.green ? 'All green.' : 'Something needs a person.')
+  const updating = report.nodes.filter((node) => node.updating != null)
+  lines.push(
+    report.green
+      ? 'All green.'
+      : report.nodes.every((node) => node.problems.length === 0)
+        ? `Updating ${updating.map((node) => node.name).join(', ')} to the master’s release; check again in a few minutes.`
+        : 'Something needs a person.',
+  )
   return lines.join('\n')
 }
