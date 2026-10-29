@@ -36,6 +36,8 @@ export interface NodeTypeSoftware {
   node?: string
   java?: string
   rust?: string
+  python?: string
+  go?: string
   android: string[]
 }
 
@@ -117,6 +119,8 @@ export function asNodeType(
   const node = version(software.node, 'software.node')
   const java = version(software.java, 'software.java')
   const rust = version(software.rust, 'software.rust')
+  const python = version(software.python, 'software.python')
+  const go = version(software.go, 'software.go')
   return {
     software: {
       xcode,
@@ -142,6 +146,8 @@ export function asNodeType(
       ...(node == null ? {} : { node }),
       ...(java == null ? {} : { java }),
       ...(rust == null ? {} : { rust }),
+      ...(python == null ? {} : { python }),
+      ...(go == null ? {} : { go }),
       android: list(
         software.android,
         'software.android',

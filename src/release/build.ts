@@ -157,7 +157,14 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
   const files: string[] = []
   const context: InstallContext = {
     toolsDir: work,
-    sources: { node: nodeSource, rust: '', adoptium: '', android: '' },
+    sources: {
+      node: nodeSource,
+      rust: '',
+      adoptium: '',
+      android: '',
+      python: '',
+      go: '',
+    },
     os: 'macos',
     arch: 'arm64',
     log,

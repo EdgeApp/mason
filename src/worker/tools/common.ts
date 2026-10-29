@@ -26,6 +26,9 @@ export interface ToolSources {
   rust: string
   adoptium: string
   android: string
+  /** python-build-standalone's `latest-release.json` directory. */
+  python: string
+  go: string
 }
 
 export const defaultSources: ToolSources = {
@@ -33,6 +36,9 @@ export const defaultSources: ToolSources = {
   rust: 'https://static.rust-lang.org',
   adoptium: 'https://api.adoptium.net',
   android: 'https://dl.google.com/android/repository',
+  python:
+    'https://raw.githubusercontent.com/astral-sh/python-build-standalone/latest-release',
+  go: 'https://go.dev/dl',
 }
 
 export interface InstallContext {

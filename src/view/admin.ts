@@ -437,6 +437,8 @@ function typeSummary(value: unknown): string {
     ...(software.node == null ? [] : [`Node ${software.node}`]),
     ...(software.java == null ? [] : [`Java ${software.java}`]),
     ...(software.rust == null ? [] : [`Rust ${software.rust}`]),
+    ...(software.python == null ? [] : [`Python ${software.python}`]),
+    ...(software.go == null ? [] : [`Go ${software.go}`]),
     ...count(
       [...(software.brew?.formulae ?? []), ...(software.brew?.casks ?? [])],
       'Homebrew package',
@@ -1147,6 +1149,8 @@ export interface NodeTypeView {
     node?: string
     java?: string
     rust?: string
+    python?: string
+    go?: string
     android: string[]
   }
   settings: {
@@ -1211,7 +1215,7 @@ function nodeTypesCard(types: Record<string, NodeTypeView>): string {
         ),
         description,
       )
-    return `<h3>Software</h3>${list('software.xcode', 'Xcode versions', sw?.xcode, 'Kept installed side by side.', '26.1, 16.4')}${ver('software.xcodeDefault', 'Default Xcode', sw?.xcodeDefault, 'The Xcode a stage uses when it names none and the repository has no .xcode-version; one of the versions above.', '26.1')}${flag('software.allowBeta', 'Allow beta Xcodes', sw?.allowBeta, 'Whether latest-beta may pick a beta.')}${list('software.simulators', 'Simulator runtimes', sw?.simulators, 'Runtimes to keep, such as iOS 26.1.', 'iOS 26.1')}${flag('software.commandLineTools', 'Command Line Tools', sw?.commandLineTools, 'Apple’s command line developer tools.')}${flag('software.rosetta', 'Rosetta', sw?.rosetta, 'Runs Intel binaries on Apple silicon.')}${list('software.brew.formulae', 'Homebrew formulae', sw?.brew.formulae, 'Installed with brew install.')}${list('software.brew.casks', 'Homebrew casks', sw?.brew.casks, 'Installed with brew install --cask.')}${list('software.apt', 'apt packages', sw?.apt, 'On Debian and Ubuntu nodes.', 'jq, zip')}${list('software.dnf', 'dnf packages', sw?.dnf, 'On Fedora and Red Hat nodes.')}${flag('software.docker', 'Docker', sw?.docker, 'Docker Engine, for stages that run containers.')}${ver('software.node', 'Node.js version', sw?.node, 'Empty: Node.js is not managed.', '24')}${ver('software.java', 'Java version', sw?.java, 'Empty: Java is not managed.', '21')}${ver('software.rust', 'Rust version', sw?.rust, 'Empty: Rust is not managed.', 'stable')}${list('software.android', 'Android SDK packages', sw?.android, 'sdkmanager package names. Their licences are accepted on a node’s page.', 'platforms;android-35')}<h3>Settings</h3>${flag('settings.noSleep', 'Keep awake', type?.settings.noSleep, 'The node never sleeps while Mason runs.')}${flag('settings.devToolsSecurity', 'Developer tools security', type?.settings.devToolsSecurity, 'Lets tools debug and automate apps without a password prompt (macOS).')}${flag('settings.automationMode', 'Automation mode', type?.settings.automationMode, 'Lets UI tests drive the Mac without prompts (macOS).')}${field(id('diskThresholdGb'), 'Disk threshold (GB)', input(id('diskThresholdGb'), 'diskThresholdGb', String(type?.diskThresholdGb ?? 40), ' required type="number" min="0" data-kind="number"'), 'Unused Xcodes and runtimes are removed when free disk falls below this.')}`
+    return `<h3>Software</h3>${list('software.xcode', 'Xcode versions', sw?.xcode, 'Kept installed side by side.', '26.1, 16.4')}${ver('software.xcodeDefault', 'Default Xcode', sw?.xcodeDefault, 'The Xcode a stage uses when it names none and the repository has no .xcode-version; one of the versions above.', '26.1')}${flag('software.allowBeta', 'Allow beta Xcodes', sw?.allowBeta, 'Whether latest-beta may pick a beta.')}${list('software.simulators', 'Simulator runtimes', sw?.simulators, 'Runtimes to keep, such as iOS 26.1.', 'iOS 26.1')}${flag('software.commandLineTools', 'Command Line Tools', sw?.commandLineTools, 'Apple’s command line developer tools.')}${flag('software.rosetta', 'Rosetta', sw?.rosetta, 'Runs Intel binaries on Apple silicon.')}${list('software.brew.formulae', 'Homebrew formulae', sw?.brew.formulae, 'Installed with brew install.')}${list('software.brew.casks', 'Homebrew casks', sw?.brew.casks, 'Installed with brew install --cask.')}${list('software.apt', 'apt packages', sw?.apt, 'On Debian and Ubuntu nodes.', 'jq, zip')}${list('software.dnf', 'dnf packages', sw?.dnf, 'On Fedora and Red Hat nodes.')}${flag('software.docker', 'Docker', sw?.docker, 'Docker Engine, for stages that run containers.')}${ver('software.node', 'Node.js version', sw?.node, 'Empty: Node.js is not managed.', '24')}${ver('software.java', 'Java version', sw?.java, 'Empty: Java is not managed.', '21')}${ver('software.rust', 'Rust version', sw?.rust, 'Empty: Rust is not managed.', 'stable')}${ver('software.python', 'Python version', sw?.python, 'Empty: Python is not managed.', '3.12')}${ver('software.go', 'Go version', sw?.go, 'Empty: Go is not managed.', '1.23')}${list('software.android', 'Android SDK packages', sw?.android, 'sdkmanager package names. Their licences are accepted on a node’s page.', 'platforms;android-35')}<h3>Settings</h3>${flag('settings.noSleep', 'Keep awake', type?.settings.noSleep, 'The node never sleeps while Mason runs.')}${flag('settings.devToolsSecurity', 'Developer tools security', type?.settings.devToolsSecurity, 'Lets tools debug and automate apps without a password prompt (macOS).')}${flag('settings.automationMode', 'Automation mode', type?.settings.automationMode, 'Lets UI tests drive the Mac without prompts (macOS).')}${field(id('diskThresholdGb'), 'Disk threshold (GB)', input(id('diskThresholdGb'), 'diskThresholdGb', String(type?.diskThresholdGb ?? 40), ' required type="number" min="0" data-kind="number"'), 'Unused Xcodes and runtimes are removed when free disk falls below this.')}`
   }
   const names = [
     'software.xcode',
@@ -1228,6 +1232,8 @@ function nodeTypesCard(types: Record<string, NodeTypeView>): string {
     'software.node',
     'software.java',
     'software.rust',
+    'software.python',
+    'software.go',
     'software.android',
     'settings.noSleep',
     'settings.devToolsSecurity',

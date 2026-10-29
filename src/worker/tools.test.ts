@@ -160,6 +160,54 @@ async function toolServer(dir: string): Promise<{
   })
   const zip = readFileSync(toolsZip)
   files.set('/android/commandlinetools.zip', zip)
+  const cpu = arch === 'arm64' ? 'aarch64' : 'x86_64'
+  const triple = `${cpu}-${os === 'macos' ? 'apple-darwin' : 'unknown-linux-gnu'}`
+  const sums: string[] = [
+    `${'0'.repeat(64)}  cpython-3.12.9+20261026-other-install_only.tar.gz`,
+  ]
+  for (const version of ['3.12.4', '3.12.7', '3.13.1']) {
+    const name = `cpython-${version}+20261026-${triple}-install_only.tar.gz`
+    const build = tarball(`python-${version}`, 'python', (top) => {
+      script(path.join(top, 'bin', 'python3'), `echo Python ${version}`)
+    })
+    files.set(`/python/download/${encodeURIComponent(name)}`, build)
+    sums.push(`${createHash('sha256').update(build).digest('hex')}  ${name}`)
+  }
+  files.set('/python/download/SHA256SUMS', Buffer.from(sums.join('\n') + '\n'))
+  const goOs = os === 'macos' ? 'darwin' : 'linux'
+  const goArch = arch === 'arm64' ? 'arm64' : 'amd64'
+  const goReleases: Json[] = []
+  for (const [version, stable] of [
+    ['1.24rc1', false],
+    ['1.23.4', true],
+    ['1.22.9', true],
+  ] as const) {
+    const filename = `go${version}.${goOs}-${goArch}.tar.gz`
+    const build = tarball(`go-${version}`, 'go', (top) => {
+      script(path.join(top, 'bin', 'go'), `echo go version go${version}`)
+    })
+    files.set(`/go/${filename}`, build)
+    goReleases.push({
+      version: `go${version}`,
+      stable,
+      files: [
+        {
+          filename: `go${version}.src.tar.gz`,
+          os: '',
+          arch: '',
+          sha256: '0'.repeat(64),
+          kind: 'source',
+        },
+        {
+          filename,
+          os: goOs,
+          arch: goArch,
+          sha256: createHash('sha256').update(build).digest('hex'),
+          kind: 'archive',
+        },
+      ],
+    })
+  }
   let server!: Server
   const base = await new Promise<string>((resolve) => {
     server = createServer((req, res) => {
@@ -182,6 +230,21 @@ async function toolServer(dir: string): Promise<{
             },
           ]),
         )
+        return
+      }
+      if (url.pathname === '/python/latest-release.json') {
+        res.end(
+          JSON.stringify({
+            tag: '20261026',
+            asset_url_prefix: corrupt.has('python-index')
+              ? 'file:///etc'
+              : `${base}/python/download`,
+          }),
+        )
+        return
+      }
+      if (url.pathname === '/go/' && url.searchParams.get('mode') === 'json') {
+        res.end(JSON.stringify(goReleases))
         return
       }
       if (url.pathname === '/android/repository2-3.xml') {
@@ -228,6 +291,8 @@ describe('Worker tooling', function () {
       rust: `${served.base}/rust`,
       adoptium: `${served.base}/adoptium`,
       android: `${served.base}/android`,
+      python: `${served.base}/python`,
+      go: `${served.base}/go`,
     }
   })
   after(() => {
@@ -291,6 +356,8 @@ describe('Worker tooling', function () {
       node: ['24.9.0'],
       rust: [],
       java: [],
+      python: [],
+      go: [],
       android: ['platform-tools', 'platforms;android-35'],
     })
     assert.deepEqual(
@@ -334,6 +401,87 @@ describe('Worker tooling', function () {
     }
     assert.deepEqual(installedTools(fresh).node, [])
     assert.equal(existsSync(path.join(fresh, 'node', '24.11.1')), false)
+  })
+
+  it('U2.1/U2.2 installs Python and Go side by side after their checksums, newest match first', async () => {
+    const tools = path.join(root(), 'tools')
+    const log: string[] = []
+    assert.equal(
+      await install({ tool: 'python', version: '3.12' }, context(tools, log)),
+      '3.12.7',
+    )
+    assert.equal(
+      await install({ tool: 'python', version: '3.12.4' }, context(tools)),
+      '3.12.4',
+    )
+    assert.equal(
+      await install({ tool: 'go', version: '1.23' }, context(tools)),
+      '1.23.4',
+    )
+    assert.equal(
+      await install({ tool: 'go', version: '1.22.9' }, context(tools)),
+      '1.22.9',
+    )
+    assert.match(log.join(''), /Verified sha256 [0-9a-f]{64}/)
+    assert.deepEqual(installedTools(tools).python, ['3.12.4', '3.12.7'])
+    assert.deepEqual(installedTools(tools).go, ['1.22.9', '1.23.4'])
+    assert.equal(
+      execFileSync(path.join(tools, 'python', '3.12.4', 'bin', 'python3'), {
+        encoding: 'utf8',
+      }).trim(),
+      'Python 3.12.4',
+    )
+    const env = toolEnvironment(
+      { python: '3.12', go: '1.22' },
+      tools,
+      '/usr/bin',
+      null,
+    )
+    assert.equal(env.GOROOT, path.join(tools, 'go', '1.22.9'))
+    assert.equal(env.GOTOOLCHAIN, 'local')
+    assert.equal(env.PYTHONNOUSERSITE, '1')
+    assert(env.PATH!.startsWith(path.join(tools, 'python', '3.12.7', 'bin')))
+    assert.deepEqual(
+      missingTools(
+        { python: '3.13', go: '1.23' },
+        { ...installedTools(tools) },
+      ),
+      [{ tool: 'python', version: '3.13' }],
+    )
+    await assert.rejects(
+      install({ tool: 'python', version: '3.11' }, context(tools)),
+      /Python 3\.11 is not in python-build-standalone 20261026/,
+    )
+    await assert.rejects(
+      install({ tool: 'python', version: '3' }, context(tools)),
+      /Invalid Python version/,
+    )
+    await assert.rejects(
+      install({ tool: 'go', version: '1.24' }, context(tools)),
+      /No Go release matches 1\.24/,
+    )
+    await assert.rejects(
+      install({ tool: 'go', version: 'x' }, context(tools)),
+      /Invalid Go version/,
+    )
+    served.corrupt.add('python-index')
+    served.corrupt.add(
+      `/go/go1.23.4.${os === 'macos' ? 'darwin' : 'linux'}-${arch === 'arm64' ? 'arm64' : 'amd64'}.tar.gz`,
+    )
+    const fresh = path.join(root(), 'tools')
+    try {
+      await assert.rejects(
+        install({ tool: 'python', version: '3.13' }, context(fresh)),
+        /names no download location/,
+      )
+      await assert.rejects(
+        install({ tool: 'go', version: '1.23' }, context(fresh)),
+        ChecksumMismatch,
+      )
+    } finally {
+      served.corrupt.clear()
+    }
+    assert.deepEqual(installedTools(fresh).go, [])
   })
 
   it('U8.3 installs Rust and Java after their checksums, and Android only where the node type accepted its licences', async () => {
@@ -402,6 +550,8 @@ describe('Worker tooling', function () {
       node: [],
       rust: ['1.82.0'],
       java: ['21.0.5'],
+      python: [],
+      go: [],
       android: [
         'build-tools;35.0.0',
         'cmdline-tools;latest',
@@ -580,8 +730,8 @@ describe('Worker tooling', function () {
 
   it('U8.6 calls only the closed set of installers', async () => {
     await assert.rejects(
-      install({ tool: 'python' as never, version: '3' }, context(root())),
-      /python is not a tool Mason installs/,
+      install({ tool: 'perl' as never, version: '5' }, context(root())),
+      /perl is not a tool Mason installs/,
     )
     assert.deepEqual(
       missingTools(
@@ -597,13 +747,22 @@ describe('Worker tooling', function () {
           node: ['24.1.0'],
           java: [],
           rust: ['1.82.0'],
+          python: [],
+          go: [],
           android: ['platforms;android-35'],
         },
       ),
       [{ tool: 'java', version: '21' }],
     )
     assert.deepEqual(
-      missingTools(undefined, { node: [], java: [], rust: [], android: [] }),
+      missingTools(undefined, {
+        node: [],
+        java: [],
+        rust: [],
+        python: [],
+        go: [],
+        android: [],
+      }),
       [],
     )
   })
@@ -635,6 +794,8 @@ describe('Worker tooling', function () {
       repo.commit({
         '.nvmrc': 'lts/*\n',
         'rust-toolchain.toml': '[toolchain]\nchannel = "1.82.0"\n',
+        '.python-version': '3.13\n',
+        'go.mod': 'module example.com/x\n\ngo 1.22\n',
         'Masonfile.ts': `
 import type { Setup, Stage } from '@mason/types'
 export function setup(m: Setup) {
@@ -644,6 +805,8 @@ export function setup(m: Setup) {
   const tools =
     want === 'node' ? { node: '24', java: '21' } :
     want === 'project' ? { node: 'project', rust: 'project' } :
+    want === 'pygo' ? { python: 'project', go: 'project' } :
+    want === 'py312' ? { python: '3.12' } :
     want === 'android' ? { android: ['platforms;android-35'] } :
     want === 'xcode' ? { xcode: '26.1' } :
     want === 'nox' ? { xcode: '99' } : {}
@@ -654,6 +817,8 @@ export async function use(ctx: Stage) {
   return {
     node: ctx.node.name,
     nodeVersion: await sh('node --version'),
+    python: await sh('python3 --version'),
+    go: await sh('go version'),
     nodeBinary: process.env.NODE_BINARY ?? null,
     cargo: process.env.CARGO_HOME ?? null,
     javaHome: process.env.JAVA_HOME ?? null,
@@ -742,6 +907,20 @@ export async function use(ctx: Stage) {
       const output = use(run).output
       assert.equal(output.nodeVersion, 'v24.11.1')
       assert.match(output.nodeBinary, /tools\/node\/24\.11\.1\/bin\/node$/)
+    })
+
+    it('U2.3 Python and Go come from .python-version and go.mod; another stage on the node runs its own Python', async () => {
+      const run = await runWith('pygo')
+      const log = c.master.master!.scheduler.logs(run.id)!
+      assert.equal(run.status, 'succeeded', log)
+      assert.match(log, /python 3\.13 from \.python-version/)
+      assert.match(log, /go 1\.22 from go\.mod/)
+      assert.equal(use(run).output.python, 'Python 3.13.1')
+      assert.equal(use(run).output.go, 'go version go1.22.9')
+      const other = await runWith('py312')
+      assert.equal(other.status, 'succeeded')
+      assert.equal(use(other).output.node, use(run).output.node)
+      assert.equal(use(other).output.python, 'Python 3.12.7')
     })
 
     it('U8.5 fails the stage with the installer log when an install fails', async () => {
@@ -840,15 +1019,17 @@ export async function use(ctx: Stage) {
     it('U8.6 refuses an install outside the closed set over the link', async () => {
       const link = c.master.master!.registry.link(c.fingerprint('bare'))!
       const answer = (await link.request('tools.install', {
-        tool: 'python',
-        version: '3',
+        tool: 'perl',
+        version: '5',
       })) as Json
       assert.equal(answer.ok, false)
-      assert.equal(answer.error, 'python is not a tool Mason installs')
+      assert.equal(answer.error, 'perl is not a tool Mason installs')
       assert.deepEqual(Object.keys(answer.inventory.tools), [
         'node',
         'rust',
         'java',
+        'python',
+        'go',
         'android',
       ])
     })

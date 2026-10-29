@@ -65,7 +65,7 @@ function inventory(extra: Partial<FullInventory> = {}): FullInventory {
     slots: 1,
     version: '0.1.0',
     xcodes: [],
-    tools: { node: [], rust: [], java: [], android: [] },
+    tools: { node: [], rust: [], java: [], python: [], go: [], android: [] },
     ...extra,
   }
 }
@@ -157,7 +157,14 @@ describe('Node software', () => {
               beta: false,
             },
           ],
-          tools: { node: ['24.11.1'], rust: [], java: [], android: [] },
+          tools: {
+            node: ['24.11.1'],
+            rust: [],
+            java: [],
+            python: [],
+            go: [],
+            android: [],
+          },
         }),
         system: {
           commandLineTools: true,
@@ -359,7 +366,14 @@ describe('Node software', () => {
       inventory: {
         ...inventory({
           xcodes: scanXcodes(mac.applications),
-          tools: { node: ['24.11.1'], rust: [], java: [], android: [] },
+          tools: {
+            node: ['24.11.1'],
+            rust: [],
+            java: [],
+            python: [],
+            go: [],
+            android: [],
+          },
         }),
         system: await systemInventory({
           os: 'macos',

@@ -264,6 +264,8 @@ const toolNames = [
   'node',
   'java',
   'rust',
+  'python',
+  'go',
   'android',
   'xcode',
   'simulators',

@@ -245,7 +245,14 @@ interface Fit {
   blocked?: string
 }
 
-const noTools = { node: [], rust: [], java: [], android: [] }
+const noTools = {
+  node: [],
+  rust: [],
+  java: [],
+  python: [],
+  go: [],
+  android: [],
+}
 
 /**
  * The master's scheduler: resolves each job's commit, gets its validated

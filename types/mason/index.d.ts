@@ -57,13 +57,21 @@ export type NodeSelector =
 /** Tool versions a stage needs; missing ones are installed before it starts. */
 export interface Tools {
   /**
-   * Major or exact version, `'24'` or `'24.11.1'`, or `'project'` for the
-   * repository's `.nvmrc`, `.node-version` or `package.json` `engines.node`.
-   * The stage's Node is first on `PATH` and in `NODE_BINARY`.
+   * Each version-managed tool takes a version, or `'project'` for the
+   * version the repository pins (section 7 lists the files). Versions are
+   * installed side by side; the stage's are first on `PATH`.
+   *
+   * Node: major or exact, `'24'` or `'24.11.1'`; also in `NODE_BINARY`.
    */
   node?: string
+  /** Temurin JDK, major or exact: `'21'`. */
   java?: string
+  /** Toolchain: `'1.82.0'`, `'stable'`. */
   rust?: string
+  /** CPython, minor or exact: `'3.12'`, `'3.12.7'`. */
+  python?: string
+  /** Minor or exact: `'1.23'`, `'1.23.4'`. */
+  go?: string
   /** `sdkmanager` packages, `'platforms;android-35'`. */
   android?: string[]
   /** Exact version, range, Xcode build number, `'latest'` or `'latest-beta'`. */
