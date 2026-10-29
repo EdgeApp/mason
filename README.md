@@ -23,8 +23,6 @@ Mason and starts its role as a service:
 ```sh
 curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh | bash -s -- master
 curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh | bash -s -- worker
-# a node joining a cluster can install the host's copy of the current release:
-curl -fsSL https://builds.example.test/install.sh | bash -s -- --from https://builds.example.test worker
 mason status        # role, state, version, fingerprint, web address
 ```
 

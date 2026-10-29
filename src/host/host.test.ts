@@ -28,7 +28,7 @@ import {
   clientParameters,
   DEFAULT_PASSWORD_COSTS,
 } from '../auth/passwordProtocol.js'
-import { releaseRoutes } from './web.js'
+import { xcodeRoutes } from './web.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -141,22 +141,17 @@ class Browser {
   }
 }
 
-describe('Host release files', () => {
-  it('U9.14 serves the release from a data directory under a dot folder, as service installs keep it', async () => {
-    const dir = path.join(root(), '.mason', 'releases', '0.3.0')
+describe('Host Xcode mirror', () => {
+  it('U9.14 serves a granted Xcode from a data directory under a dot folder, and no Mason install files', async () => {
+    const dir = path.join(root(), '.mason', 'storage', 'xcode')
     mkdirSync(dir, { recursive: true })
-    writeFileSync(path.join(dir, 'install.sh'), '#!/bin/bash\n')
-    writeFileSync(path.join(dir, 'SHA256SUMS'), 'sums\n')
+    writeFileSync(path.join(dir, 'Xcode-26.6.xip'), 'xip')
+    let granted = true
     const app = express()
     app.use(
-      releaseRoutes({
-        currentRelease: () => ({
-          version: '0.3.0',
-          dir,
-          files: { 'install.sh': 'x' },
-        }),
-        xcodeFile: () => path.join(dir, 'missing.xip'),
-        granted: () => false,
+      xcodeRoutes({
+        xcodeFile: (version) => path.join(dir, `Xcode-${version}.xip`),
+        granted: () => granted,
       }),
     )
     const server = app.listen(0, '127.0.0.1')
@@ -164,12 +159,19 @@ describe('Host release files', () => {
     const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
     try {
       assert.equal(
-        await (await fetch(`${base}/install.sh`)).text(),
-        '#!/bin/bash\n',
+        await (await fetch(`${base}/xcode/Xcode-26.6.xip?grant=g`)).text(),
+        'xip',
       )
+      granted = false
       assert.equal(
-        await (await fetch(`${base}/releases/current/SHA256SUMS`)).text(),
-        'sums\n',
+        (await fetch(`${base}/xcode/Xcode-26.6.xip?grant=g`)).status,
+        403,
+      )
+      // Nodes install Mason from its public GitHub release, never the host.
+      assert.equal((await fetch(`${base}/install.sh`)).status, 404)
+      assert.equal(
+        (await fetch(`${base}/releases/current/SHA256SUMS`)).status,
+        404,
       )
     } finally {
       server.close()
@@ -1004,9 +1006,8 @@ describe('Host cache, sign-in and offline serving', function () {
     master.database.change('account', 10)
   })
 
-  it('U10.14 serves exactly the current release at /install.sh and switches with it', async () => {
+  it('U10.14 keeps no Mason release: nodes install from GitHub, and the current release never reaches the host', async () => {
     const b = browser()
-    assert.equal((await b.get('/install.sh')).status, 404)
     const release = (version: string, platforms = ['linux-x64']): string => {
       const dir = path.join(root(), version)
       mkdirSync(dir)
@@ -1035,54 +1036,24 @@ describe('Host cache, sign-in and offline serving', function () {
     const master = c.master.master!
     await master.releases.add(release('0.2.0'))
     master.releases.setCurrent('0.2.0')
+    // The host still syncs (a later change arrives) but serves no install files.
+    const before = master.settings.value('host') as Record<string, unknown>
+    await master.settings.set(admin, 'host', {
+      ...before,
+      offlineGraceHours: 71,
+    })
     await c.until(
-      () => runtime().currentRelease()?.version === '0.2.0',
+      () => runtime().cache.host()?.offlineGraceHours === 71,
       5000,
-      'install.sh on the host',
+      'the host synced',
     )
+    await master.settings.set(admin, 'host', before)
+    assert.equal((await b.get('/install.sh')).status, 404)
     assert.equal(
-      await (await b.get('/install.sh')).text(),
-      '#!/bin/bash\necho 0.2.0\n',
+      (await b.get('/releases/current/mason-0.2.0-linux-x64.tar.gz')).status,
+      404,
     )
-    assert.equal(
-      await (
-        await b.get('/releases/current/mason-0.2.0-linux-x64.tar.gz')
-      ).text(),
-      'tarball 0.2.0',
-    )
-    assert.match(
-      await (await b.get('/releases/current/SHA256SUMS')).text(),
-      /mason-0\.2\.0-linux-x64/,
-    )
-    assert.equal((await b.get('/releases/current/other.txt')).status, 404)
-    // The same release stored again with every platform (mason releases
-    // fetch): the host adds the new tarballs and their SHA256SUMS.
-    await master.releases.add(release('0.2.0', ['linux-x64', 'darwin-arm64']))
-    for (let i = 0; ; i++) {
-      const added = await b.get(
-        '/releases/current/mason-0.2.0-darwin-arm64.tar.gz',
-      )
-      await added.arrayBuffer()
-      if (added.status === 200) break
-      assert(i < 50, 'the added platform on the host')
-      await new Promise((resolve) => setTimeout(resolve, 100))
-    }
-    assert.match(
-      await (await b.get('/releases/current/SHA256SUMS')).text(),
-      /mason-0\.2\.0-darwin-arm64/,
-    )
-    await master.releases.add(release('0.2.1'))
-    master.releases.setCurrent('0.2.1')
-    await c.until(
-      () => runtime().currentRelease()?.version === '0.2.1',
-      5000,
-      'the new release',
-    )
-    assert.equal(
-      await (await b.get('/install.sh')).text(),
-      '#!/bin/bash\necho 0.2.1\n',
-    )
-    assert(!existsSync(path.join(host.dir, 'storage', 'releases', '0.2.0')))
+    assert(!existsSync(path.join(host.dir, 'storage', 'releases')))
   })
 
   it('U10.14 mirrors the first Xcode a node downloads on the host, and nodes install it from there once Apple’s session lapses', async () => {
@@ -1209,11 +1180,7 @@ describe('Host cache, sign-in and offline serving', function () {
     assert.match(script.headers.get('content-type')!, /javascript/)
     assert.equal((await tess.get('/nothing-here')).status, 404)
     assert.equal((await tess.get('/releases/current/..%2Fsecret')).status, 404)
-    // A listed release file missing from disk, and a granted Xcode the host does not have.
-    const release = runtime().currentRelease()!
-    const { rmSync } = await import('node:fs')
-    rmSync(path.join(release.dir, 'install.sh'))
-    assert.equal((await tess.get('/install.sh')).status, 404)
+    // A granted Xcode the host does not have.
     master.database.db
       .prepare(
         "INSERT INTO xcode_mirrors(version,sha256,size,at) VALUES('27.0',?,1,0)",

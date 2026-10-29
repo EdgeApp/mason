@@ -512,14 +512,13 @@ export class Master {
       identity,
       version,
     )
-    this.changes = new Changes(this.database, hostProjection, this.releases)
+    this.changes = new Changes(this.database, hostProjection)
     this.hosts = new HostLinks({
       master: this.database,
       registry: this.registry,
       changes: this.changes,
       projects: this.projects,
       jobs: this.jobs,
-      releases: this.releases,
       artifacts: this.artifacts,
       privateKey: identity.privateKey,
       onDevices: (): void => {
@@ -565,16 +564,6 @@ export class Master {
       accountProvider: (account): 'digitalocean' | 'nomac' | undefined =>
         this.cloudAccounts.get(account)?.provider,
       busy: (fingerprint): boolean => this.scheduler.busy(fingerprint),
-      release: (): string | undefined => this.releases.current(),
-      releasePlatforms: (version: string): string[] =>
-        this.releases.platforms(version),
-      hostOrigin: (): string | undefined => {
-        const host = (this.settings.value('host') ?? {}) as {
-          origin?: string
-          workerOrigin?: string
-        }
-        return host.workerOrigin ?? host.origin
-      },
       github: (): { repository: string; version: string } | undefined =>
         repository == null ? undefined : { repository, version },
       publicAddress: async (): Promise<string | undefined> => {

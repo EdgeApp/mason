@@ -14,7 +14,6 @@
 #
 # Options: --version <x.y.z>   a release other than the latest
 #          --user              install under ~/.mason/app and ~/.local/bin, without sudo
-#          --from <url>        install a Mason host's copy of the current release (no token)
 #
 # Releases come from MASON_REPO (public: no token). A private repository
 # needs a token: GITHUB_TOKEN, or `gh auth token` when the GitHub CLI is signed in.
@@ -22,7 +21,6 @@ set -euo pipefail
 
 repo=${MASON_REPO:-EdgeApp/mason}
 api=${MASON_GITHUB_API:-https://api.github.com}
-from=${MASON_FROM:-}
 version=''
 user=0
 role=''
@@ -32,7 +30,6 @@ while [[ $# -gt 0 ]]; do
   case $1 in
     --version) version=${2:?--version needs a version}; shift 2 ;;
     --user) user=1; shift ;;
-    --from) from=${2:?--from needs a URL}; shift 2 ;;
     uninstall) [[ -z $role && $uninstall == 0 ]] || { echo "install.sh: uninstall comes before the role" >&2; exit 2; }; uninstall=1; shift ;;
     master | worker | host)
       if [[ -n $role ]]; then role_args+=("$1"); else role=$1; fi
@@ -102,38 +99,29 @@ fetch() { # fetch <url> <file> [curl options…]
   curl -fsSL --retry 3 "$@" -o "$file" "$url" || fail "could not download $url"
 }
 
-if [[ -n $from ]]; then
-  # A Mason host serves the master's current release; nodes need no token.
-  fetch "$from/releases/current/SHA256SUMS" "$work/SHA256SUMS"
-  tarball=$(awk '{print $2}' "$work/SHA256SUMS" | grep -E "^mason-[0-9][^ ]*-$platform\\.tar\\.gz$" | head -1 || true)
-  [[ -n $tarball ]] || fail "this host's release has no $platform tarball"
-  fetch "$from/releases/current/$tarball" "$work/$tarball"
-  fetch "$from/install.sh" "$work/install.sh"
-else
-  token=${GITHUB_TOKEN:-}
-  if [[ -z $token ]] && command -v gh >/dev/null 2>&1; then token=$(gh auth token 2>/dev/null || true); fi
-  auth=(-H "X-GitHub-Api-Version: 2022-11-28")
-  [[ -z $token ]] || auth+=(-H "Authorization: Bearer $token")
-  if [[ -n $version ]]; then route="releases/tags/v$version"; else route=releases/latest; fi
-  if ! curl -fsSL --retry 3 "${auth[@]}" -H 'Accept: application/vnd.github+json' -o "$work/release.json" "$api/repos/$repo/$route"; then
-    if [[ -n $token ]]; then fail "$repo has no ${version:-latest} release this token can read"; fi
-    fail "$repo has no ${version:-latest} release (a private repository needs GITHUB_TOKEN, or 'gh auth login')"
-  fi
-
-  # Each asset object holds its API URL and then its name.
-  asset() {
-    local url
-    url=$(tr -d '\n\r' < "$work/release.json" | sed -E 's/"[[:space:]]*:[[:space:]]*/":/g' | tr '{' '\n' | grep "\"name\":\"$1\"" | grep -o '"url":"[^"]*/releases/assets/[0-9]*"' | head -1 | sed 's/"url":"\(.*\)"/\1/' || true)
-    [[ -n $url ]] || fail "the release has no $1"
-    echo "$url"
-  }
-  sums_url=$(asset SHA256SUMS)
-  fetch "$sums_url" "$work/SHA256SUMS" "${auth[@]}" -H 'Accept: application/octet-stream'
-  tarball=$(awk '{print $2}' "$work/SHA256SUMS" | grep -E "^mason-[0-9][^ ]*-$platform\\.tar\\.gz$" | head -1 || true)
-  [[ -n $tarball ]] || fail "the release has no $platform tarball"
-  fetch "$(asset "$tarball")" "$work/$tarball" "${auth[@]}" -H 'Accept: application/octet-stream'
-  fetch "$(asset install.sh)" "$work/install.sh" "${auth[@]}" -H 'Accept: application/octet-stream'
+token=${GITHUB_TOKEN:-}
+if [[ -z $token ]] && command -v gh >/dev/null 2>&1; then token=$(gh auth token 2>/dev/null || true); fi
+auth=(-H "X-GitHub-Api-Version: 2022-11-28")
+[[ -z $token ]] || auth+=(-H "Authorization: Bearer $token")
+if [[ -n $version ]]; then route="releases/tags/v$version"; else route=releases/latest; fi
+if ! curl -fsSL --retry 3 "${auth[@]}" -H 'Accept: application/vnd.github+json' -o "$work/release.json" "$api/repos/$repo/$route"; then
+  if [[ -n $token ]]; then fail "$repo has no ${version:-latest} release this token can read"; fi
+  fail "$repo has no ${version:-latest} release (a private repository needs GITHUB_TOKEN, or 'gh auth login')"
 fi
+
+# Each asset object holds its API URL and then its name.
+asset() {
+  local url
+  url=$(tr -d '\n\r' < "$work/release.json" | sed -E 's/"[[:space:]]*:[[:space:]]*/":/g' | tr '{' '\n' | grep "\"name\":\"$1\"" | grep -o '"url":"[^"]*/releases/assets/[0-9]*"' | head -1 | sed 's/"url":"\(.*\)"/\1/' || true)
+  [[ -n $url ]] || fail "the release has no $1"
+  echo "$url"
+}
+sums_url=$(asset SHA256SUMS)
+fetch "$sums_url" "$work/SHA256SUMS" "${auth[@]}" -H 'Accept: application/octet-stream'
+tarball=$(awk '{print $2}' "$work/SHA256SUMS" | grep -E "^mason-[0-9][^ ]*-$platform\\.tar\\.gz$" | head -1 || true)
+[[ -n $tarball ]] || fail "the release has no $platform tarball"
+fetch "$(asset "$tarball")" "$work/$tarball" "${auth[@]}" -H 'Accept: application/octet-stream'
+fetch "$(asset install.sh)" "$work/install.sh" "${auth[@]}" -H 'Accept: application/octet-stream'
 
 release=${tarball#mason-}
 release=${release%-$platform.tar.gz}

@@ -62,13 +62,11 @@ const tables: Record<
     },
   },
   setting: { table: 'host_settings', key: 'area' },
-  release: { table: 'host_release', key: 'id' },
 }
 
 /** Deleting in this order keeps foreign keys satisfied; applying uses the reverse. */
 const order = [
   'setting',
-  'release',
   'project',
   'app',
   'account',
@@ -335,10 +333,6 @@ export class HostCache {
         .run(Number(key))
       return
     }
-    if (entity === 'release') {
-      this.db.prepare('DELETE FROM host_release').run()
-      return
-    }
     for (const [child, link] of Object.entries(spec.children ?? {}))
       if (link.field === spec.key)
         this.db.prepare(`DELETE FROM ${child} WHERE ${link.column}=?`).run(key)
@@ -368,10 +362,6 @@ export class HostCache {
               String(value.row[spec.key]),
             ),
           )
-          if (entity === 'release') {
-            if (keep.size === 0) this.remove('release', 'current')
-            continue
-          }
           const condition = entity === 'build' ? " WHERE state<>'deleted'" : ''
           for (const row of this.db
             .prepare(`SELECT ${spec.key} AS k FROM ${spec.table}${condition}`)

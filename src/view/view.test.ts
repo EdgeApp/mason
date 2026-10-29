@@ -705,28 +705,21 @@ describe('Nodes page', () => {
     budget: { monthly: 200 },
     canChange: true,
   }
-  it('gives copyable install commands from the host, else the master’s own release', () => {
-    const fromHost = nodesView({
+  it('gives the copyable install command from the master’s GitHub release, never the host', () => {
+    const page = nodesView({
       ...base,
       host: 'https://builds.example.test',
       release: { repository: 'example/mason', version: '1.2.3' },
     })
     // One line installs Mason and starts the role; no separate sudo command.
     assert.match(
-      fromHost,
-      /<pre class="mono">curl -fsSL https:\/\/builds\.example\.test\/install\.sh \| bash -s -- --from https:\/\/builds\.example\.test worker<\/pre><button type="button" class="secondary copy" data-copy="curl -fsSL https:\/\/builds\.example\.test\/install\.sh \| bash -s -- --from https:\/\/builds\.example\.test worker"/,
+      page,
+      /It installs Mason 1\.2\.3, the master’s version, from GitHub, and starts it as a worker service under your account; it asks for your password once\.<\/small><div class="command"><pre class="mono">curl -fsSL https:\/\/github\.com\/example\/mason\/releases\/download\/v1\.2\.3\/install\.sh \| bash -s -- --version 1\.2\.3 worker<\/pre>/,
     )
-    assert(!fromHost.includes('sudo mason worker --install'))
-    const fromGitHub = nodesView({
-      ...base,
-      release: { repository: 'example/mason', version: '1.2.3' },
-    })
-    assert.match(
-      fromGitHub,
-      /It installs Mason 1\.2\.3, the master’s version, and starts it as a worker service under your account; it asks for your password once\.<\/small><div class="command"><pre class="mono">curl -fsSL https:\/\/github\.com\/example\/mason\/releases\/download\/v1\.2\.3\/install\.sh \| bash -s -- --version 1\.2\.3 worker<\/pre>/,
-    )
-    assert(!fromGitHub.includes('&lt;host&gt;'))
-    assert.match(nodesView(base), /href="\/settings#host"/)
+    assert(!page.includes('--from'))
+    assert(!page.includes('builds.example.test/install.sh'))
+    assert(!page.includes('sudo mason worker --install'))
+    assert.match(nodesView(base), /This master runs no GitHub release of Mason/)
     assert(!nodesView({ ...base, canChange: false }).includes('id="add-node"'))
   })
 

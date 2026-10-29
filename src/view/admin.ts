@@ -602,23 +602,17 @@ export function nodesView(data: {
       }</article>`
     })
     .join('')
-  /** One line that installs Mason and starts it as `role`: from the host, else the master's release. */
+  /** One line that installs Mason and starts it as `role`, from the master's release on GitHub. */
   const installCommand = (role: 'worker' | 'host'): string =>
-    data.host != null
+    data.release != null
       ? command(
-          `curl -fsSL ${data.host}/install.sh | bash -s -- --from ${data.host} ${role}`,
+          `curl -fsSL https://github.com/${data.release.repository}/releases/download/v${data.release.version}/install.sh | bash -s -- --version ${data.release.version} ${role}`,
         )
-      : data.release != null
-        ? command(
-            `curl -fsSL https://github.com/${data.release.repository}/releases/download/v${data.release.version}/install.sh | bash -s -- --version ${data.release.version} ${role}`,
-          )
-        : '<p>Set the host’s origin in <a href="/settings#host">Settings</a> to see the install command.</p>'
+      : '<p>This master runs no GitHub release of Mason, so there is no install command to give.</p>'
   const installFrom =
-    data.host != null
-      ? 'It installs Mason from the host'
-      : data.release != null
-        ? `It installs Mason ${escape(data.release.version)}, the master’s version,`
-        : ''
+    data.release != null
+      ? `It installs Mason ${escape(data.release.version)}, the master’s version, from GitHub,`
+      : ''
   /** A numbered step: its title on its own line, then what to do. */
   const step = (title: string, body: string): string =>
     `<li><strong>${title}</strong>${body}</li>`

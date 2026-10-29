@@ -107,11 +107,10 @@ curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh 
 
 It asks for your password once (or put `sudo` before `bash`); the worker runs
 as the account that ran it, and as a `mason` system user when that is root on
-Linux. Nodes joining a cluster can instead use the host's copy of the
-master's release, `curl -fsSL https://<host>/install.sh | bash -s -- --from
-https://<host> worker`, which the Nodes page shows ready to copy. `master` and
-`host` work the same way, and `uninstall <role>` removes the service and the
-program and keeps the data.
+Linux. Every computer installs this way, cloud machines included: a node never
+downloads Mason from the master or the host. `master` and `host` work the
+same way, and `uninstall <role>` removes the service and the program and keeps
+the data.
 An administrator enters the pairing key and the node's address (URL, IP
 address or DNS name) in **Add node** on the master, or through the API. The
 master pairs, then sets the node's name, type and labels and manages its
@@ -211,9 +210,11 @@ until it has been idle for an hour:
   cannot use it), the master starts from the plain `image` instead, installs
   Mason and the node type's software, and snapshots that machine when it
   retires, so the following start is fast again.
-- A new machine installs Mason from the host, or, while the master has no
-  host, the master's own release from GitHub. Pools are added and edited on
-  the Nodes page, where the region, size and image lists come from the
+- A new machine installs the master's own release from GitHub, as the
+  public install command does, so it needs to trust no certificate but
+  GitHub's. A master that runs no GitHub release (one built from source), or
+  whose release has no tarball for the machine's platform, starts no
+  machine and says why. Pools are added and edited on the Nodes page, where the region, size and image lists come from the
   provider. A master with no worker connected starts a machine from its first
   pool to run a run's setup, so a cluster can be cloud machines alone.
 - The machine's first-boot data carries the one-time pairing secret; the

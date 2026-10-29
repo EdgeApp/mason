@@ -1,6 +1,4 @@
 import { createHmac, sign, timingSafeEqual, type KeyObject } from 'node:crypto'
-import { createReadStream, existsSync } from 'node:fs'
-import path from 'node:path'
 import {
   LinkError,
   type Link,
@@ -13,7 +11,6 @@ import type { Jobs } from './jobs.js'
 import { repositoryName } from './mirrors.js'
 import type { NodeRegistry } from './nodes.js'
 import type { Projects } from './projects.js'
-import type { Releases } from './releases.js'
 import type { Artifacts, HostAccess } from './artifacts.js'
 import type { Format } from '../validation.js'
 import { ruleFor } from './rules.js'
@@ -59,7 +56,6 @@ export class HostLinks {
       changes: Changes
       projects: Projects
       jobs: Jobs
-      releases: Releases
       /** Signs download grants for the host's Xcode mirror. */
       privateKey: KeyObject
       /** The host's public origins, from the `host` setting. */
@@ -569,28 +565,6 @@ export class HostLinks {
             return
           }
           await this.options.forward(params, stream)
-        },
-        /** A file of the current release, for the host to serve `/install.sh` and the tarballs. */
-        'release.get': async (stream, params, link): Promise<void> => {
-          try {
-            this.host(link)
-            const version = this.options.releases.current()
-            const name = String((params as { file?: unknown })?.file ?? '')
-            if (version == null) throw new Error('No current release')
-            if (
-              !(name in this.options.releases.files(version)) &&
-              name !== 'SHA256SUMS'
-            )
-              throw new Error('Not a file of the current release')
-            const file = path.join(this.options.releases.root, version, name)
-            if (!existsSync(file))
-              throw new Error('The release file is not stored')
-            for await (const chunk of createReadStream(file))
-              await stream.write(chunk as Buffer)
-            stream.end()
-          } catch (error) {
-            stream.abort((error as Error).message)
-          }
         },
       },
     }

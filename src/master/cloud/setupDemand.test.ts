@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { version } from '../../version.js'
 import { createHash } from 'node:crypto'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -28,6 +29,12 @@ describe('A master whose only nodes are cloud machines', function () {
         cloud: {
           provider: () => cloud,
           publicAddress: async () => '203.0.113.7',
+          // The master's GitHub release, without the network.
+          github: () => ({ repository: 'EdgeApp/mason', version }),
+          releaseAssets: async () => [
+            `mason-${version}-linux-x64.tar.gz`,
+            'install.sh',
+          ],
           tickMs: 200,
           pairTimeoutMs: 20_000,
         },
@@ -115,7 +122,12 @@ export async function hello(ctx: Stage) {
         const stage = value.stages.find(
           (entry: Json) => entry.name === '@setup',
         )
-        return /linux machine/.test(stage?.reason ?? '') ? stage : undefined
+        // After the first check of the GitHub release, the pool starts one.
+        return /Starting a linux machine|Waiting for a linux machine/.test(
+          stage?.reason ?? '',
+        )
+          ? stage
+          : undefined
       },
       10_000,
       'the setup waiting for a machine',

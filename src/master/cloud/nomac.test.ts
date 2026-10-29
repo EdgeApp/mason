@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { version } from '../../version.js'
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -277,6 +278,12 @@ describe('A NoMac pool', function () {
         now: () => Date.now() + offset,
         cloud: {
           publicAddress: async () => '203.0.113.7',
+          // The master's GitHub release, without the network.
+          github: () => ({ repository: 'EdgeApp/mason', version }),
+          releaseAssets: async () => [
+            `mason-${version}-darwin-arm64.tar.gz`,
+            'install.sh',
+          ],
           tickMs: 200,
           pairTimeoutMs: 60_000,
           nomac: {
@@ -450,8 +457,11 @@ export async function build(ctx: Stage) {
     const command = (setup.body as Json).argv[2] as string
     assert.match(
       command,
-      /bash ~\/mason-install.sh --user --from https:\/\/builds.example.test/,
+      new RegExp(
+        `curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh -o ~/mason-install.sh\nbash ~/mason-install.sh --user --version ${version.replaceAll('.', '\\.')}`,
+      ),
     )
+    assert(!command.includes('builds.example.test'))
     assert.match(
       command,
       /nomac-service start mason-worker -- ~\/.local\/bin\/mason worker --pairing-file ~\/mason-pairing.json --listen 127.0.0.1 --link-port 9310 --slots 1/,
