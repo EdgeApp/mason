@@ -244,15 +244,19 @@ export function masterPages(
       res.redirect(303, '/sign-in')
       return
     }
-    // An administrator sees the Backups page until they confirm the key, or
-    // skip it for this browser session ("Skip for now").
-    if (req.query.later === 'backups') {
+    // An administrator who has not confirmed the backup key is sent to the
+    // Backups page once per browser session; after that, or after "Skip for
+    // now", the dashboard opens and the banner on every page reminds them.
+    const later = (): void => {
       res.cookie(BACKUP_LATER_COOKIE, '1', {
         httpOnly: true,
         sameSite: 'lax',
         path: '/',
         secure: req.secure,
       })
+    }
+    if (req.query.later === 'backups') {
+      later()
       res.redirect(303, '/')
       return
     }
@@ -264,6 +268,7 @@ export function masterPages(
         req.headers.cookie ?? '',
       )
     ) {
+      later()
       res.redirect(303, '/backups')
       return
     }

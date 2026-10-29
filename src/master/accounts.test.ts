@@ -1279,6 +1279,13 @@ export async function one(ctx: Stage) { return 1 }
     )
     const home = await request(c.master, 'GET', '/', { cookie })
     assert.equal(home.headers.get('location'), '/backups')
+    // Once: the redirect itself lets "Projects & apps" through for this browser session.
+    const once = home.headers.get('set-cookie')!.split(';')[0]!
+    const dashboard = await request(c.master, 'GET', '/', {
+      cookie: `${cookie}; ${once}`,
+    })
+    assert.equal(dashboard.status, 200)
+    assert.match(dashboard.text, /This master is not backed up/)
     // "Skip for now" lets the dashboard through for this browser session, with a reminder.
     const later = await request(c.master, 'GET', '/?later=backups', { cookie })
     assert.equal(later.headers.get('location'), '/')
