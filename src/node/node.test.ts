@@ -783,9 +783,28 @@ describe('Configuration-free nodes', function () {
       /^ExecStart=\/opt\/mason\/bin\/mason host --data \/home\/deploy\/.mason --port 9200 --web-plain --listen 127.0.0.1$/m,
     )
     assert.equal(sudo.files.get(unit.file)!.uid, 0)
+    // The updater: a root oneshot started when the node writes its request.
+    const path = sudo.files.get('/etc/systemd/system/mason-host-update.path')!
+    assert.equal(path.uid, 0)
+    assert.match(
+      path.content,
+      /^PathExists=\/home\/deploy\/.mason\/update-request.json$/m,
+    )
+    assert.match(path.content, /^Unit=mason-host-update.service$/m)
+    const updater = sudo.files.get(
+      '/etc/systemd/system/mason-host-update.service',
+    )!
+    assert.equal(updater.uid, 0)
+    assert.match(updater.content, /^Type=oneshot$/m)
+    assert.doesNotMatch(updater.content, /^User=/m)
+    assert.match(
+      updater.content,
+      /^ExecStart=\/opt\/mason\/bin\/mason update --request \/home\/deploy\/.mason\/update-request.json$/m,
+    )
     assert.deepEqual(sudo.commands, [
       'systemctl daemon-reload',
       'systemctl enable mason-host',
+      'systemctl enable --now mason-host-update.path',
       'systemctl restart mason-host',
     ])
     for (const env of [{}, { SUDO_USER: 'root' }]) {
@@ -833,7 +852,10 @@ describe('Configuration-free nodes', function () {
     const removed = uninstallService({ role: 'host' }, sudo)
     assert.equal(removed.label, 'mason-host')
     assert(!sudo.files.has(unit.file))
-    assert.deepEqual(sudo.commands.slice(-2), [
+    assert(!sudo.files.has('/etc/systemd/system/mason-host-update.path'))
+    assert(!sudo.files.has('/etc/systemd/system/mason-host-update.service'))
+    assert.deepEqual(sudo.commands.slice(-3), [
+      'systemctl disable --now mason-host-update.path',
       'systemctl disable --now mason-host',
       'systemctl daemon-reload',
     ])

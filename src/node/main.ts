@@ -13,6 +13,8 @@ import { pinnedFetch } from './pinnedFetch.js'
 import { parseArgs, parseRoleCommand, single } from './args.js'
 import { controlRequest } from './control.js'
 import { resolveDataDir } from './dataDir.js'
+import { takeUpdateRequest } from './update.js'
+import { version as masonVersion } from '../version.js'
 import {
   nodeStatus,
   startNode,
@@ -57,6 +59,8 @@ export interface MainIO {
   install?: () => RunningInstall
   /** Asks a question on the terminal; `hidden` does not echo the answer. */
   prompt?(question: string, hidden: boolean): Promise<string>
+  /** The running Mason's version; this package's by default. */
+  version?: string
 }
 
 /** Reads one line from the terminal, without echo for a password. */
@@ -808,12 +812,25 @@ async function releasesCommand(argv: string[], io: MainIO): Promise<number> {
 }
 
 /**
- * `mason update [--version <x.y.z>]`: installs a newer release the way
- * install.sh does and restarts this user's Mason services. The data
- * directories stay as they are.
+ * `mason update [--version <x.y.z> | --request <file>]`: installs a newer
+ * release the way install.sh does and restarts this user's Mason services.
+ * The data directories stay as they are. `--request` takes the version from
+ * the request a node writes when its master asks it to update.
  */
 async function updateCommand(argv: string[], io: MainIO): Promise<number> {
-  const args = parseArgs(argv, ['--version'], [])
+  const args = parseArgs(argv, ['--version', '--request'], [])
+  let version = single(args, '--version')
+  const request = single(args, '--request')
+  if (request != null) {
+    if (version != null)
+      throw new Error('mason update takes --version or --request, not both')
+    const running = io.version ?? masonVersion
+    version = takeUpdateRequest(request, running)
+    if (version == null) {
+      io.out(`Already on ${running}.`)
+      return 0
+    }
+  }
   const install = io.install?.() ?? runningInstall()
   if (install.kind === 'checkout')
     throw new Error(
@@ -824,7 +841,6 @@ async function updateCommand(argv: string[], io: MainIO): Promise<number> {
     throw new Error(
       'This install has no copy of install.sh; run install.sh again',
     )
-  const version = single(args, '--version')
   const status = await new Promise<number>((resolve) => {
     const child = spawn(
       'bash',

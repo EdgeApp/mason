@@ -47,6 +47,7 @@ import { createPublicKey, type KeyObject } from 'node:crypto'
 import type { Server as HttpsServer } from 'node:https'
 import { Link, type MethodTable } from '../link/link.js'
 import { Pairing, serveNodeLinks, type NodeLinks } from '../link/nodeSide.js'
+import { requestUpdate } from './update.js'
 import { memoryPair } from '../link/wire.js'
 import type { NodeRegistry } from '../master/nodes.js'
 import { Master, type MasterOptions } from '../master/runtime.js'
@@ -543,6 +544,13 @@ export async function startNode(
         },
         onRemoved: () =>
           log('Removed by its master; start with --new-key to pair it again.'),
+        onUpdate: (version) => {
+          const requested = requestUpdate(dir, options.role, version)
+          log(
+            `The master asked for ${requested.requested}; the updater installs it`,
+          )
+          return requested
+        },
       })
       const nodeLinks = links
       cleanup.push(() => nodeLinks.close())

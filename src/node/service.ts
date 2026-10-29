@@ -118,6 +118,14 @@ function serviceUser(
   return { name, ...account, created: false }
 }
 
+/** A node's update request, in its data directory: `{ version, at }`. */
+export const UPDATE_REQUEST = 'update-request.json'
+
+/** The systemd units (`.path` and `.service`) that update a role's install as root. */
+export function updaterUnit(role: string): string {
+  return `mason-${role}-update`
+}
+
 /** Installs the role as a service of its user and starts it. */
 export function installService(
   request: ServiceRequest,
@@ -195,8 +203,40 @@ UMask=0077
 WantedBy=multi-user.target
 `
   system.writeFile(file, content, { uid: 0, gid: 0 }, 0o644)
+  // The node's updater: over its link the node only writes a request naming
+  // a version in its data directory; root installs that release.
+  const updater = updaterUnit(request.role)
+  const requestFile = path.join(data, UPDATE_REQUEST)
+  system.writeFile(
+    `/etc/systemd/system/${updater}.path`,
+    `[Unit]
+Description=Mason ${request.role} update requests
+
+[Path]
+PathExists=${systemdWord(requestFile)}
+Unit=${updater}.service
+
+[Install]
+WantedBy=multi-user.target
+`,
+    { uid: 0, gid: 0 },
+    0o644,
+  )
+  system.writeFile(
+    `/etc/systemd/system/${updater}.service`,
+    `[Unit]
+Description=Mason ${request.role} update to the requested release
+
+[Service]
+Type=oneshot
+ExecStart=${[...request.program, 'update', '--request', requestFile].map(systemdWord).join(' ')}
+`,
+    { uid: 0, gid: 0 },
+    0o644,
+  )
   system.run('systemctl', ['daemon-reload'])
   system.run('systemctl', ['enable', unit])
+  system.run('systemctl', ['enable', '--now', `${updater}.path`])
   system.run('systemctl', ['restart', unit])
   return { label: unit, file, user: user.name, uid: user.uid, data }
 }
@@ -230,8 +270,12 @@ export function uninstallService(
   }
   const unit = `mason-${request.role}`
   const file = `/etc/systemd/system/${unit}.service`
+  const updater = updaterUnit(request.role)
+  system.run('systemctl', ['disable', '--now', `${updater}.path`], true)
   system.run('systemctl', ['disable', '--now', unit], true)
   system.removeFile(file)
+  system.removeFile(`/etc/systemd/system/${updater}.path`)
+  system.removeFile(`/etc/systemd/system/${updater}.service`)
   system.run('systemctl', ['daemon-reload'])
   return { label: unit, file }
 }

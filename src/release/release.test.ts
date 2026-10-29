@@ -667,6 +667,82 @@ describe('Releases, install.sh and updates', function () {
         Object.assign(process.env, saved)
       }
     })
+
+    it('U1.2 mason update --request installs the requested version once and refuses a bad one', async () => {
+      const home = root()
+      mkdirSync(path.join(home, 'tmp'))
+      assert.equal(
+        (
+          await bash(
+            ['--user', '--version', '0.1.1'],
+            { GITHUB_TOKEN: 'read-token' },
+            home,
+          )
+        ).status,
+        0,
+      )
+      const prefix = path.join(home, '.mason', 'app')
+      const request = path.join(home, 'update-request.json')
+      const saved = { ...process.env }
+      Object.assign(process.env, {
+        HOME: home,
+        TMPDIR: path.join(home, 'tmp'),
+        GITHUB_TOKEN: 'read-token',
+        MASON_GITHUB_API: github.base,
+        PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+      })
+      const update = async (
+        args: string[],
+      ): Promise<{ status: number; out: ReturnType<typeof io> }> => {
+        const out = io({
+          version: '0.1.1',
+          install: () => ({
+            kind: 'user',
+            appRoot: path.join(prefix, '0.1.1'),
+            prefix,
+          }),
+          system: () =>
+            ({
+              platform: 'linux',
+              run: () => undefined,
+            }) as unknown as ServiceSystem,
+        })
+        return { status: await nodeMain(['update', ...args], out), out }
+      }
+      try {
+        for (const [body, refusal] of [
+          ['{"version":"0.1.2 --user"}', /not a release version/],
+          ['{"version":"0.1.0"}', /older than the running 0\.1\.1/],
+        ] as const) {
+          writeFileSync(request, body)
+          const refused = await update(['--request', request])
+          assert.equal(refused.status, 1)
+          assert.match(refused.out.errors.join(''), refusal)
+          assert(!existsSync(request))
+        }
+        const missing = await update(['--request', request])
+        assert.equal(missing.status, 1)
+        assert.match(missing.out.errors.join(''), /No update request/)
+        writeFileSync(request, '{"version":"0.1.2"}')
+        const both = await update(['--request', request, '--version', '0.1.2'])
+        assert.equal(both.status, 1)
+        assert.match(both.out.errors.join(''), /not both/)
+        writeFileSync(request, '{"version":"0.1.1"}')
+        const same = await update(['--request', request])
+        assert.equal(same.status, 0)
+        assert.match(same.out.lines.join('\n'), /Already on 0\.1\.1/)
+        assert.equal(readlinkSync(path.join(prefix, 'current')), '0.1.1')
+        writeFileSync(request, '{"version":"0.1.2","at":1}')
+        const updated = await update(['--request', request])
+        assert.equal(updated.status, 0, updated.out.errors.join('\n'))
+        assert(!existsSync(request))
+        assert.equal(readlinkSync(path.join(prefix, 'current')), '0.1.2')
+      } finally {
+        for (const key of Object.keys(process.env))
+          if (!(key in saved)) delete process.env[key]
+        Object.assign(process.env, saved)
+      }
+    })
   })
 
   it('U9.14 stores releases only when SHA256SUMS matches, and serves one as current', async () => {
