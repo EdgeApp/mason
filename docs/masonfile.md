@@ -712,9 +712,12 @@ the same value.
 
 ```ts fragment
 tools: {
-  node: '24',              // major or exact version, or 'project' (below)
+  node: '24',              // a version, or 'project' for the repository's pin (below)
   java: '21',
   rust: '1.90.0',
+  python: '3.12',
+  ruby: 'project',
+  go: '1.23',
   android: ['platforms;android-35', 'build-tools;35.0.0'],
   xcode: '>=26 <27',       // installed from the master's Xcode downloads when missing
   simulators: ['iOS 26.1'],
@@ -724,11 +727,37 @@ tools: {
 ```
 
 Missing tools are installed before the stage starts (stage status
-`preparing`) and put first on `PATH` (`JAVA_HOME`, `ANDROID_HOME`,
-`DEVELOPER_DIR` set accordingly):
+`preparing`). Every version lives side by side, so stages, branches and
+projects on one node use different versions at the same time; nothing is
+switched system-wide. A stage gets exactly its versions first on `PATH`, with
+their variables, for everything it runs: `ctx.sh`, `ctx.exec`, and the build
+phases `ctx.apple.archive`, `testflight` and `notarize` run in Xcode.
 
-- Node, Java, Rust and the Android SDK go into the node's tools directory from
-  official archives with verified checksums.
+| Tool | Versions | `'project'` reads (first found at the checkout's root) | Installed from | Stage environment |
+| --- | --- | --- | --- | --- |
+| `node` | `24`, `24.11.1` | `.nvmrc`, `.node-version`, `.tool-versions`, `package.json` `engines.node` | nodejs.org, checked against `SHASUMS256.txt` | `bin` on `PATH`, `NODE_BINARY` |
+| `rust` | `1.82.0`, `stable` | `rust-toolchain.toml`, `rust-toolchain`, `.tool-versions` | rustup, checked against its SHA-256 | `CARGO_HOME`, `RUSTUP_HOME`, cargo `bin` on `PATH` |
+| `java` | `21`, `21.0.5` | `.java-version`, `.sdkmanrc`, `.tool-versions` | Temurin (Adoptium), checked against the published checksum | `JAVA_HOME`, `bin` on `PATH` |
+| `python` | `3.12`, `3.12.7` | `.python-version`, `.tool-versions`, `pyproject.toml` `requires-python` | python-build-standalone's current release, checked against its `SHA256SUMS` | `bin` on `PATH`, `PYTHONNOUSERSITE=1` |
+| `ruby` | `3.3`, `3.3.5` | `.ruby-version`, `.tool-versions`, the `Gemfile`'s `ruby` line | built once per node with a pinned ruby-build, which checks each tarball | `bin` on `PATH`; gems install into that Ruby's own directory |
+| `go` | `1.23`, `1.23.4` | `go.mod` (`toolchain`, else `go`), `.tool-versions` | go.dev, checked against the published sha256 | `GOROOT`, `bin` on `PATH`, `GOTOOLCHAIN=local` |
+| `xcode` | see below | `.xcode-version`, `.tool-versions` | Apple, through the node's helper | `DEVELOPER_DIR` |
+
+- A minor or major (`3.12`, `22`) takes the newest installed version that
+  matches, or installs the newest release that does; an exact version is
+  exact.
+- `'project'` is read at setup. A range gives its first version
+  (`>=3.11` → `3.11`, `engines.node: ">=20"` → `20`); Node's `lts/*` and
+  `lts/<codename>` give that LTS line's newest major; `.tool-versions` uses
+  asdf's names (`nodejs`, `golang`, …). A run whose workflow has a stage with
+  `'project'` and no usable pin fails at setup naming the tool and the files
+  looked for. A stage that needs Xcode and names none still uses
+  `.xcode-version` when the repository has one.
+- Ruby is compiled, so its first install on a node takes several minutes and
+  needs a C compiler and libyaml (the Command Line Tools and Homebrew's
+  `libyaml` on macOS, `build-essential` and `libyaml-dev` on Linux, which a
+  node type can list). Each Ruby keeps its own gems, so `bundle exec pod
+  install` and Fastlane run with the stage's Ruby, never the system's.
 - **Xcode** is downloaded by each node itself, directly from Apple, when the
   master tells it to (section 12 explains the sign-in). The node checks
   Apple's signature, installs it side by side as
@@ -737,37 +766,24 @@ Missing tools are installed before the stage starts (stage status
   system-wide Xcode for a stage.
 - **Simulator runtimes** are downloaded by each node with `xcodebuild
   -downloadPlatform`, which needs no Apple ID.
-- Homebrew and its packages, apt/dnf packages, Command Line Tools and Rosetta
-  are installed by the node's privileged helper.
+- Xcode, simulators, Homebrew and its packages, apt/dnf packages, Command
+  Line Tools and Rosetta are installed by the node's privileged helper
+  (`sudo mason worker --install`). A NoMac Mac has no helper: it installs the
+  tools in the table except Xcode, and uses the Xcodes NoMac provides.
 
-Stages share installed tools; an administrator can pin or remove versions per
-node type, and unused Xcodes are removed when disk space runs low.
+Stages share installed tools; an administrator can keep versions installed
+per node type (Node, Java, Rust, Python, Go, Ruby, Xcode), and unused Xcodes
+are removed when disk space runs low.
 
-### Node.js for React Native and other JavaScript builds
+### Node.js for React Native
 
-`node: 'project'` uses the version the repository pins, read at setup from the
-first of `.nvmrc`, `.node-version` and `package.json` `engines.node` at the
-checkout's root:
-
-| File says | Mason installs |
-| --- | --- |
-| `v22.11.0`, `22.11.0` | exactly that version |
-| `22`, `22.x` | the newest 22 |
-| `lts/*`, `lts` | the newest major of the newest LTS line |
-| `lts/jod` | the newest release of that LTS line's major |
-| `engines.node: ">=20"` or `"^20.5"` | the newest of the first major named (20) |
-
-A run whose workflow has such a stage and no usable file fails at setup with
-the reason. Mason installs Node itself, the way nvm would, but side by side in
-the node's tools directory and checked against the release's `SHASUMS256.txt`;
-nvm and a shell profile are not needed.
-
-The stage's Node is first on `PATH` and in `NODE_BINARY` for everything the
-stage runs, `ctx.apple.archive` included. React Native's "Bundle React Native
-code and images" phase and its other Xcode build scripts run `$NODE_BINARY`
-(the default `ios/.xcode.env` sets it from `command -v node`, which finds the
-same Node), so the JavaScript bundle is built with the version the Masonfile
-or the repository asks for.
+React Native's "Bundle React Native code and images" phase and its other
+Xcode build scripts run `$NODE_BINARY` (the default `ios/.xcode.env` sets it
+from `command -v node`, which finds the same Node), so with
+`tools: { node: 'project', ruby: 'project' }` the JavaScript bundle is built
+with the `.nvmrc` Node and CocoaPods runs on the `.ruby-version` Ruby. Mason
+installs these itself, the way nvm or rbenv would but checked and side by
+side; neither is needed on the node, nor a shell profile.
 
 ### Several Xcodes on one node
 
