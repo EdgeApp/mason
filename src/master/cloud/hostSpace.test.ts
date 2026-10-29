@@ -229,7 +229,12 @@ describe('Host storage on DigitalOcean Spaces', function () {
           error: null,
         },
       ],
-      storage: { driver: 's3', bucket: 'mason-e2e', endpoint: spaces.endpoint },
+      storage: {
+        driver: 's3',
+        bucket: 'mason-e2e',
+        endpoint: spaces.endpoint,
+        locations: c.master.master!.storageLocations.list(),
+      },
       budget: { monthly: 200 },
       canChange: true,
     })
@@ -238,11 +243,15 @@ describe('Host storage on DigitalOcean Spaces', function () {
       /Builds Space <span class="mono">mason-e2e<\/span> \(sfo3\)/,
     )
     assert.match(html, /Also delete the Space and every build in it/)
+    // The Space is a storage row new builds go to; the disk is a row to switch to.
     assert.match(
       html,
-      /Builds are stored in <span class="mono">mason-e2e<\/span>/,
+      /<tr data-location="space-mason-e2e-[^"]+"><td><span class="mono">mason-e2e<\/span> · sfo3 · made for host e2e<\/td><td>[^<]*<span class="icon"[^>]*>[^<]*<\/span> New builds go here<\/td>/,
     )
-    assert.match(html, /Store on the host’s disk/)
+    assert.match(
+      html,
+      /<tr data-location="disk"><td>Host’s disk<\/td><td><form data-mason="api" data-path="\/api\/v2\/storage\/disk"[\s\S]*?Use for new builds/,
+    )
     assert.match(html, /value="mason-other"/)
     assert.match(
       nodesView({
@@ -253,7 +262,7 @@ describe('Host storage on DigitalOcean Spaces', function () {
         budget: { monthly: 1 },
         canChange: true,
       }),
-      /Builds are stored on the host’s disk/,
+      /<tr data-location="disk"><td>Host’s disk<\/td><td><span class="icon"[^>]*>[^<]*<\/span> New builds go here<\/td>/,
     )
   })
 
@@ -615,7 +624,7 @@ describe('Host storage on DigitalOcean Spaces', function () {
     )
     assert.match(
       card,
-      /data-path="\/api\/v2\/storage\/space\/new" data-fields="account,bucket,region"/,
+      /data-path="\/api\/v2\/storage\/space\/new" data-fields="account,bucket,region,use"/,
     )
     assert.match(
       card,
@@ -623,9 +632,16 @@ describe('Host storage on DigitalOcean Spaces', function () {
     )
     assert.match(
       card,
-      /<details class="action" id="storage-existing"><summary class="button">.*Use an existing Space<\/summary>/,
+      /<details class="action" id="storage-existing"><summary class="button">.*Add an existing Space<\/summary>/,
     )
-    assert.match(card, /Store on the host’s disk/)
+    assert.match(
+      card,
+      /<input id="new-space-use" name="use" type="checkbox" data-kind="checkbox" checked> Use it for new builds/,
+    )
+    assert.match(
+      card,
+      /<th>Location<\/th><th>New builds<\/th><th>Files<\/th><th>Size<\/th>/,
+    )
   })
 
   it('U4.6 a key that fails after the bucket is made: the host still owns the Space, old keys keep working, and a failed new storage Space leaves nothing', async () => {
