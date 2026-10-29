@@ -24,6 +24,7 @@ import {
 } from '../../master/scheduler.js'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { RuntimeStore } from '../../master/runtimes.js'
+import { NOMAC_HELPER } from '../../master/runtime.js'
 import { EventEmitter } from 'node:events'
 import { FakeApple } from '../../test/fakeApple.js'
 import { FakeMac, fakeXcode } from '../../test/fakeMac.js'
@@ -946,6 +947,7 @@ export async function use(ctx: Stage) {
               systemRun: b.run,
               helper: b.helper,
               helperSocket: sockets.b,
+              helperWatchMs: 50,
             },
           },
         ],
@@ -1267,6 +1269,33 @@ export async function use(ctx: Stage) {
       )
       assert.deepEqual(b.brew!.formulae, ['jq'])
       rmSync(sockets.b)
+    })
+
+    it('U9.3 a helper installed after the worker started clears the checklist without a reconcile; a NoMac Mac says it has none by design', async () => {
+      const master = c.master.master!
+      const helperItem = (): Json | undefined =>
+        (master.nodeDetails(c.fingerprint('mac-b')) as Json).checklist.find(
+          (item: Json) => item.id === 'helper',
+        )
+      await c.until(() => helperItem() != null, 20000, 'helper item on b')
+      // mason worker --install starts the worker, then the helper.
+      writeFileSync(sockets.b, '')
+      await c.until(() => helperItem() == null, 20000, 'helper item cleared')
+      rmSync(sockets.b)
+      await c.until(() => helperItem() != null, 20000, 'helper item back')
+      assert.match(helperItem()!.title, /run sudo mason worker --install/)
+      const fingerprint = c.fingerprint('mac-b')
+      const host = master.registry.get(fingerprint)!.host
+      master.database.db
+        .prepare('UPDATE nodes SET host=? WHERE fingerprint=?')
+        .run('nomac:ses_test', fingerprint)
+      try {
+        assert.deepEqual(helperItem(), NOMAC_HELPER)
+      } finally {
+        master.database.db
+          .prepare('UPDATE nodes SET host=? WHERE fingerprint=?')
+          .run(host, fingerprint)
+      }
     })
 
     it('U9.3 installs a stage’s Homebrew formula on demand and refuses unwanted downloads and runtimes', async () => {
