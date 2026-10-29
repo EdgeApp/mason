@@ -504,29 +504,34 @@ export function nodesView(data: {
       }</article>`
     })
     .join('')
-  const installCommand =
+  /** One line that installs Mason and starts it as `role`: from the host, else the master's release. */
+  const installCommand = (role: 'worker' | 'host'): string =>
     data.host != null
       ? command(
-          `/bin/bash -c "$(curl -fsSL ${data.host}/install.sh)" -- --from ${data.host}`,
+          `curl -fsSL ${data.host}/install.sh | bash -s -- --from ${data.host} ${role}`,
         )
       : data.release != null
         ? command(
-            `/bin/bash -c "$(curl -fsSL https://github.com/${data.release.repository}/releases/latest/download/install.sh)" -- --version ${data.release.version}`,
+            `curl -fsSL https://github.com/${data.release.repository}/releases/download/v${data.release.version}/install.sh | bash -s -- --version ${data.release.version} ${role}`,
           )
         : '<p>Set the host’s origin in <a href="/settings#host">Settings</a> to see the install command.</p>'
   const installFrom =
     data.host != null
-      ? 'It installs Mason from the host.'
+      ? 'It installs Mason from the host'
       : data.release != null
-        ? `It installs Mason ${escape(data.release.version)}, the master’s version.`
+        ? `It installs Mason ${escape(data.release.version)}, the master’s version,`
         : ''
   /** A numbered step: its title on its own line, then what to do. */
   const step = (title: string, body: string): string =>
     `<li><strong>${title}</strong>${body}</li>`
-  const installStep = (where: string): string =>
+  const installStep = (
+    title: string,
+    where: string,
+    role: 'worker' | 'host',
+  ): string =>
     step(
-      'Install Mason',
-      `<small class="hint">${where} ${installFrom}</small>${installCommand}`,
+      title,
+      `<small class="hint">${where} ${installFrom} and starts it as a ${role} service under your account; it asks for your password once.</small>${installCommand(role)}<small class="hint">It prints the pairing key.</small>`,
     )
   const pairForm = (
     prefix: string,
@@ -549,7 +554,7 @@ export function nodesView(data: {
         }</section>`,
     )
     .join('')
-  const hostCommands = `<ol class="howto">${installStep('On a computer the internet can reach.')}${step('Start it as the host', `${command('sudo mason host --install')}<small class="hint">It prints its pairing key. To put it behind TLS on port 443, see the README’s public-server command.</small>`)}${step('Pair it here', pairForm('host', 'builds.example.com:9310', `${icon('lan')} Pair host`))}</ol>`
+  const hostCommands = `<ol class="howto">${installStep('Install and start Mason as the host', 'On a computer the internet can reach.', 'host')}${step('Pair it here', `<small class="hint">To put the host behind TLS on port 443, see the README’s public-server command.</small>${pairForm('host', 'builds.example.com:9310', `${icon('lan')} Pair host`)}`)}</ol>`
   // Hosts run on DigitalOcean; a NoMac account makes only pool Macs.
   const hostAccounts = (data.poolAccounts ?? [])
     .filter((account) => account.provider !== 'nomac')
@@ -607,7 +612,7 @@ export function nodesView(data: {
     )
     .join('')
   const add = data.canChange
-    ? `<section class="panel" id="add-node"><h2>${icon('add')}Nodes</h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks. Run the following commands to start Mason on a Linux or macOS computer (Windows coming).</p>${cloudNodes}<ol class="howto">${installStep('On the new computer.')}${step('Start as a worker', `${command('sudo mason worker --install --link-port 9410')}<small class="hint">It prints its pairing key.</small>`)}${step('Pair it here', pairForm('node', '192.168.1.20:9410', `${icon('lan')} Pair node`))}</ol>${nodeAccounts}</section>`
+    ? `<section class="panel" id="add-node"><h2>${icon('add')}Nodes</h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks. Run the following commands to start Mason on a Linux or macOS computer (Windows coming).</p>${cloudNodes}<ol class="howto">${installStep('Install and start Mason as a worker', 'On the new computer.', 'worker')}${step('Pair it here', pairForm('node', '192.168.1.20:9310', `${icon('lan')} Pair node`))}</ol>${nodeAccounts}</section>`
     : cloudNodes === ''
       ? ''
       : `<section class="panel" id="add-node"><h2>${icon('cloud')}Cloud nodes</h2>${cloudNodes}</section>`

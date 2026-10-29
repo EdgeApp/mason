@@ -608,6 +608,70 @@ describe('Releases, install.sh and updates', function () {
       assert(!leaked.out.includes('secret-token-x'), leaked.out)
     })
 
+    it('U9.1 installs and starts a role in one command, as root through sudo, and uninstalls it keeping the data', async () => {
+      const home = root()
+      mkdirSync(path.join(home, 'tmp'))
+      const prefix = path.join(home, 'opt')
+      const bin = path.join(home, 'bin')
+      // Stands in for sudo: records what it would run as root.
+      const record = path.join(home, 'sudo.log')
+      const sudo = path.join(home, 'fake-sudo')
+      writeFileSync(sudo, `#!/bin/sh\necho "$*" >> '${record}'\n`)
+      chmodSync(sudo, 0o755)
+      const env = { MASON_PREFIX: prefix, MASON_BIN: bin, MASON_SUDO: sudo }
+      const master = await bash(
+        ['master', '--worker', '--port', '9500'],
+        env,
+        home,
+      )
+      assert.equal(master.status, 0, master.out)
+      assert.match(master.out, /Installed Mason 0\.1\.2 in .*\/opt\/0\.1\.2/)
+      assert.doesNotMatch(master.out, /Next:/)
+      assert.equal(
+        readFileSync(record, 'utf8'),
+        `${path.join(bin, 'mason')} master --install --worker --port 9500\n`,
+      )
+      const worker = await bash(['--version', '0.1.1', 'worker'], env, home)
+      assert.equal(worker.status, 0, worker.out)
+      assert.match(
+        readFileSync(record, 'utf8'),
+        new RegExp(`${path.join(bin, 'mason')} worker --install\\n$`),
+      )
+      // A service needs root; --user installs only the program.
+      assert.match(
+        (await bash(['--user', 'host'], env, home)).out,
+        /a host service needs root: leave out --user/,
+      )
+      assert.match(
+        (await bash(['uninstall'], env, home)).out,
+        /uninstall needs the role/,
+      )
+      assert.match(
+        (await bash(['worker', 'uninstall'], env, home)).out,
+        /uninstall comes before the role/,
+      )
+      writeFileSync(path.join(home, '.mason-data'), 'kept')
+      const removed = await bash(['uninstall', 'worker'], env, home)
+      assert.equal(removed.status, 0, removed.out)
+      assert.match(
+        readFileSync(record, 'utf8'),
+        new RegExp(`${path.join(bin, 'mason')} worker --uninstall\\n$`),
+      )
+      assert.equal(existsSync(prefix), false)
+      assert.equal(existsSync(path.join(bin, 'mason')), false)
+      assert(existsSync(path.join(home, '.mason-data')))
+      // Nothing that is not a Mason install is removed.
+      mkdirSync(path.join(home, 'other'))
+      const refused = await bash(
+        ['uninstall', 'worker'],
+        { ...env, MASON_PREFIX: path.join(home, 'other') },
+        home,
+      )
+      assert.notEqual(refused.status, 0)
+      assert.match(refused.out, /is not a Mason install/)
+      assert(existsSync(path.join(home, 'other')))
+    })
+
     it('U9.1 mason update installs the newer release and keeps the data directory', async () => {
       const home = root()
       mkdirSync(path.join(home, 'tmp'))
