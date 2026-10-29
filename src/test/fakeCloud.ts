@@ -113,6 +113,7 @@ export class FakeCloud implements CloudProvider {
             linkPort: 0,
             listen: '127.0.0.1',
             heartbeatMs: 0,
+            updaterExists: (): boolean => this.updater,
             workerOptions: { flushMs: 50, systemRun: quietMac() },
           },
       () => undefined,

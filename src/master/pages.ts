@@ -572,6 +572,19 @@ export function masterPages(
           ? {}
           : { space: { bucket: row.space_bucket, region: row.space_region } }),
       })),
+      cloudNodes: master.cloudHosts.list('worker').map((row) => ({
+        name: row.name,
+        state: row.state,
+        account: row.account,
+        region: row.region,
+        size: row.size,
+        address: row.address,
+        origin: null,
+        error: row.error,
+        version: row.version,
+        nodeType: row.node_type,
+        labels: JSON.parse(row.labels) as string[],
+      })),
       storage: ((): {
         driver: 'disk' | 's3'
         bucket?: string

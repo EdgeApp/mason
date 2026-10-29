@@ -851,6 +851,62 @@ describe('Nodes page', () => {
     assert.doesNotMatch(html, /Machines at most|Node type its machines serve/)
   })
 
+  it('U3.6 the Nodes card creates a permanent node on DigitalOcean and lists cloud nodes, also to read-only viewers', () => {
+    const cloudNode = {
+      name: 'linux-node',
+      state: 'ready',
+      account: 'do',
+      region: 'sfo3',
+      size: 's-1vcpu-1gb',
+      address: '203.0.113.20',
+      origin: null,
+      error: null,
+      version: '1.2.3',
+      nodeType: 'linux-x86',
+      labels: ['e2e'],
+    }
+    const html = nodesView({
+      ...base,
+      poolAccounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
+        { id: 'mac', name: 'NoMac', provider: 'nomac' },
+      ],
+      cloudNodes: [cloudNode],
+    })
+    const form = html.slice(html.indexOf('id="add-node-do"'))
+    assert.match(
+      form,
+      /<summary class="button">.*Create a node on DigitalOcean<\/summary>/,
+    )
+    assert.match(form, /only this master reaches it, on its link port/)
+    assert.match(
+      form,
+      /data-path="\/api\/v2\/cloud\/nodes" data-fields="account,name,type,labels,region,size,image"/,
+    )
+    for (const id of ['name', 'type', 'labels', 'region', 'size', 'image'])
+      assert.match(form, new RegExp(`id="node-do-${id}"`))
+    assert.doesNotMatch(
+      form.slice(0, form.indexOf('</details>')),
+      /dns\.|space\./,
+    )
+    assert.doesNotMatch(html, /id="add-node-mac"/)
+    assert.match(
+      html,
+      /id="cloud-node-linux-node" data-state="ready"[\s\S]*linux-x86 · e2e · sfo3/,
+    )
+    assert.match(
+      html,
+      /data-path="\/api\/v2\/cloud\/nodes\/linux-node" data-method="DELETE" data-fields="confirm"/,
+    )
+    const viewer = nodesView({
+      ...base,
+      canChange: false,
+      cloudNodes: [cloudNode],
+    })
+    assert.match(viewer, /<h2>.*Cloud nodes<\/h2>.*id="cloud-node-linux-node"/)
+    assert.doesNotMatch(viewer, /Remove node|Reconcile/)
+  })
+
   it('U2.2 every disclosure on the page is a button: red to add or use, secondary for Edit and Remove', () => {
     const html = nodesView({
       ...base,

@@ -1098,6 +1098,19 @@ export class Master {
         await this.cloudHosts.remove(String(args.name ?? ''), args.name)
         return null
       },
+      'cloud.nodes.list': () => this.cloudHosts.list('worker').map(hostView),
+      'cloud.nodes.add': async (args) =>
+        hostView(await this.cloudHosts.createNode(args.value)),
+      'cloud.nodes.reconcile': async (args) =>
+        hostView(
+          await this.cloudHosts.reconcile(String(args.name ?? ''), 'worker'),
+        ),
+      'cloud.nodes.remove': async (args): Promise<null> => {
+        await this.cloudHosts.remove(String(args.name ?? ''), args.name, {
+          role: 'worker',
+        })
+        return null
+      },
       'nodes.remove': (args): null => {
         this.registry.remove(String(args.fingerprint ?? ''))
         return null

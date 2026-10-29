@@ -292,6 +292,7 @@ describe('Mason hosts on DigitalOcean', function () {
       cloudHosts: [
         {
           ...row(),
+          labels: [],
           dnsName: undefined,
           certificate: undefined,
           space: undefined,
@@ -422,6 +423,62 @@ describe('Mason hosts on DigitalOcean', function () {
         failed,
       ),
       1,
+    )
+  })
+
+  it('U3.1b with a cloud node beside it, the host is still the one host, and lists and API show only hosts', async () => {
+    const side = await c.api('POST', '/api/v2/cloud/nodes', {
+      name: 'side-node',
+      account: 'do',
+      region: 'sfo3',
+      size: 's-1vcpu-1gb',
+      type: 'linux-x86',
+    })
+    assert.equal(side.status, 201, side.text)
+    assert.match(
+      (await c.api('POST', '/api/v2/cloud/hosts', { ...host, name: 'other' }))
+        .json.error,
+      /already has a host: e2e/,
+    )
+    assert.match(
+      (
+        await c.api('POST', '/api/v2/cloud/nodes', {
+          name: 'e2e',
+          account: 'do',
+          region: 'sfo3',
+          size: 's-1vcpu-1gb',
+          type: 'linux-x86',
+        })
+      ).json.error,
+      /already has a host named e2e/,
+    )
+    assert.deepEqual(
+      (await c.api('GET', '/api/v2/cloud/hosts')).json.map(
+        (entry: Json) => entry.name,
+      ),
+      ['e2e'],
+    )
+    const listed = io()
+    await nodeMain(['cloud', 'hosts', 'list', '--data', c.master.dir], listed)
+    assert.deepEqual(
+      listed.lines.map((line) => line.split(' ')[0]),
+      ['e2e'],
+    )
+    assert.deepEqual(c.master.master!.cloudHosts.usedBy('do'), [
+      'host e2e',
+      'node side-node',
+    ])
+    assert.match(
+      (await c.api('DELETE', '/api/v2/cloud/accounts/do')).json.error,
+      /used by host e2e, node side-node/,
+    )
+    assert.equal(
+      (
+        await c.api('DELETE', '/api/v2/cloud/nodes/side-node', {
+          confirm: 'side-node',
+        })
+      ).status,
+      200,
     )
   })
 

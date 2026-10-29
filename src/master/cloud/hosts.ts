@@ -67,8 +67,27 @@ export interface CloudHostRow {
   space_key_owned: number
   /** An administrator asked for the host's storage to be the Space. */
   space_pending: number
+  /** `host`, or `worker` for a permanent cloud node. */
+  role: CloudRole
+  /** A node's type and labels, given to it once it pairs. */
+  node_type: string | null
+  labels: string
   created_at: number
   updated_at: number
+}
+
+/** A cloud host serves builds; a cloud node is a worker the master keeps. */
+export type CloudRole = 'host' | 'worker'
+
+/** A permanent cloud node to make, as the form or API sends it. */
+export interface NodeInput {
+  name: string
+  account: string
+  region: string
+  size: string
+  image?: string
+  type: string
+  labels: string[]
 }
 
 /** A host to make, as the form or API sends it. */
@@ -143,8 +162,8 @@ export interface CloudHostDns {
 }
 
 export class MissingHost extends Error {
-  constructor(name: string) {
-    super(`No cloud host named ${name}`)
+  constructor(name: string, role: CloudRole = 'host') {
+    super(`No cloud ${roleWord(role)} named ${name}`)
   }
 }
 
@@ -152,6 +171,10 @@ const slug = /^[a-z0-9][a-z0-9-]{0,39}$/
 /** States a host passes through while it is made. */
 const settlingStates: HostState[] = ['creating', 'installing', 'pairing']
 const TAG = 'mason-host'
+const NODE_TAG = 'mason-node'
+/** A row's name in its droplet, tags and messages. */
+const roleWord = (role: CloudRole): string =>
+  role === 'host' ? 'host' : 'node'
 /** Hosts are x86-64 Linux droplets. */
 const hostPlatform = 'linux-x64'
 
@@ -273,6 +296,73 @@ export function asSpaceInput(value: unknown): {
   return { bucket: input.bucket, region: input.region }
 }
 
+/** The cloud-init script a new permanent node boots with: Mason and a worker, no web server. */
+export function nodeUserData(options: {
+  repository: string
+  version: string
+  pairing: string
+  linkPort: number
+}): string {
+  return `#!/bin/bash
+# A Mason node's first boot. Running it again changes nothing. MASON_HOST_ROOT
+# (empty on a droplet) is the filesystem root, for testing the script.
+set -euo pipefail
+root=\${MASON_HOST_ROOT:-}
+curl -fsSL https://github.com/${options.repository}/releases/latest/download/install.sh -o "$root/root/mason-install.sh"
+bash "$root/root/mason-install.sh" --version ${options.version}
+rm -f "$root/root/mason-install.sh"
+if [ ! -f "$root/var/lib/mason/.mason/identity.key" ]; then
+  umask 077
+  cat > "$root/root/mason-pairing.json" <<'MASON_PAIRING'
+${options.pairing}
+MASON_PAIRING
+  umask 022
+  mason worker --install --pairing-file "$root/root/mason-pairing.json" --link-port ${options.linkPort} --listen 0.0.0.0
+fi
+rm -f "$root/root/mason-pairing.json"
+# Mason ${options.version} node (${hostPlatform})
+`
+}
+
+/** Validates a permanent cloud node to make. */
+export function asNodeInput(value: unknown): NodeInput {
+  const input = (value ?? {}) as Record<string, unknown>
+  const text = (field: string, pattern: RegExp): string => {
+    const out = input[field]
+    if (typeof out !== 'string' || !pattern.test(out))
+      throw new Error(`node.${field} is invalid`)
+    return out
+  }
+  const labels =
+    typeof input.labels === 'string'
+      ? input.labels.split(',').map((label) => label.trim())
+      : (input.labels ?? [])
+  if (
+    !Array.isArray(labels) ||
+    labels.length > 20 ||
+    labels.some(
+      (label) =>
+        typeof label !== 'string' ||
+        (!/^[a-z0-9][a-z0-9._-]{0,39}$/.test(label) && label !== ''),
+    )
+  )
+    throw new Error(
+      'node.labels are names of lowercase letters, digits, dots, dashes and underscores',
+    )
+  return {
+    name: text('name', slug),
+    account: text('account', slug),
+    region: text('region', /^[a-z0-9-]{2,20}$/),
+    size: text('size', /^[a-z0-9-]{2,40}$/),
+    image:
+      input.image == null || input.image === ''
+        ? 'ubuntu-24-04-x64'
+        : text('image', /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/),
+    type: text('type', slug),
+    labels: [...new Set((labels as string[]).filter((label) => label !== ''))],
+  }
+}
+
 /** The host's DNS name, `name.domain` (or the domain for `@`). */
 export function fqdn(
   row: Pick<CloudHostRow, 'dns_domain' | 'dns_name'>,
@@ -301,7 +391,9 @@ export class CloudHosts {
   private readonly asking = new Set<string>()
   private readonly updateTimers = new Map<string, NodeJS.Timeout>()
   private readonly onConnected = (fingerprint: string, link: Link): void => {
-    const row = this.list().find((host) => host.fingerprint === fingerprint)
+    const row = this.list('all').find(
+      (host) => host.fingerprint === fingerprint,
+    )
     if (row != null) void this.follow(row, link)
   }
 
@@ -322,9 +414,9 @@ export class CloudHosts {
     this.options.log?.(line)
   }
 
-  /** The tag and firewall name of one of this master's hosts. */
-  private tag(name: string): string {
-    return `${TAG}-${this.options.masterId}-${name}`
+  /** The tag and firewall name of one of this master's hosts or nodes. */
+  private tag(name: string, role: CloudRole = 'host'): string {
+    return `${role === 'host' ? TAG : NODE_TAG}-${this.options.masterId}-${name}`
   }
 
   provider(account: string): CloudProvider | undefined {
@@ -341,23 +433,32 @@ export class CloudHosts {
     return provider
   }
 
-  list(): CloudHostRow[] {
-    return this.db
-      .prepare(
-        "SELECT * FROM cloud_hosts WHERE state<>'removed' ORDER BY created_at",
-      )
-      .all() as unknown as CloudHostRow[]
+  /** The host (by default), the permanent nodes, or both. */
+  list(role: CloudRole | 'all' = 'host'): CloudHostRow[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM cloud_hosts WHERE state<>'removed' ORDER BY created_at",
+        )
+        .all() as unknown as CloudHostRow[]
+    ).filter((row) => role === 'all' || row.role === role)
   }
-  get(name: string): CloudHostRow | undefined {
-    return this.db
+  get(
+    name: string,
+    role: CloudRole | 'all' = 'host',
+  ): CloudHostRow | undefined {
+    const row = this.db
       .prepare("SELECT * FROM cloud_hosts WHERE name=? AND state<>'removed'")
       .get(name) as CloudHostRow | undefined
+    return row != null && (role === 'all' || row.role === role)
+      ? row
+      : undefined
   }
   /** What uses an account, for the Cloud page's refusal to remove it. */
   usedBy(account: string): string[] {
-    return this.list()
+    return this.list('all')
       .filter((row) => row.account === account)
-      .map((row) => `host ${row.name}`)
+      .map((row) => `${roleWord(row.role)} ${row.name}`)
   }
 
   private update(name: string, fields: Partial<CloudHostRow>): void {
@@ -384,6 +485,7 @@ export class CloudHosts {
       throw new Error(`Account ${input.account} is not a DigitalOcean account`)
     if (this.list().length > 0)
       throw new Error(`This master already has a host: ${this.list()[0]!.name}`)
+    this.nameFree(input.name)
     if (this.options.github() == null)
       throw new Error(
         'A cloud host installs the master’s release from GitHub, and this master has none',
@@ -419,6 +521,51 @@ export class CloudHosts {
     return this.get(input.name)!
   }
 
+  /** Hosts and nodes share names, since they share droplet and firewall names' space. */
+  private nameFree(name: string): void {
+    const taken = this.get(name, 'all')
+    if (taken != null)
+      throw new Error(
+        `This master already has a ${roleWord(taken.role)} named ${name}`,
+      )
+  }
+
+  /** Records a permanent cloud node and starts making it; a master may have any number. */
+  async createNode(value: unknown): Promise<CloudHostRow> {
+    const input = asNodeInput(value)
+    const account = this.options.account(input.account)
+    if (account == null)
+      throw new Error(`No cloud account named ${input.account}`)
+    if (account.provider !== 'digitalocean')
+      throw new Error(`Account ${input.account} is not a DigitalOcean account`)
+    this.nameFree(input.name)
+    if (this.options.github() == null)
+      throw new Error(
+        'A cloud node installs the master’s release from GitHub, and this master has none',
+      )
+    const now = this.now()
+    this.db
+      .prepare("DELETE FROM cloud_hosts WHERE name=? AND state='removed'")
+      .run(input.name)
+    this.db
+      .prepare(
+        "INSERT INTO cloud_hosts(name,account,provider,region,size,image,dns_owned,space_pending,state,role,node_type,labels,created_at,updated_at) VALUES(?,?,'digitalocean',?,?,?,0,0,'creating','worker',?,?,?,?)",
+      )
+      .run(
+        input.name,
+        input.account,
+        input.region,
+        input.size,
+        input.image ?? 'ubuntu-24-04-x64',
+        input.type,
+        JSON.stringify(input.labels),
+        now,
+        now,
+      )
+    void this.reconcile(input.name, 'worker').catch(() => undefined)
+    return this.get(input.name, 'worker')!
+  }
+
   start(): void {
     this.options.registry.on('connected', this.onConnected)
     void this.reconcileAll().finally(() => {
@@ -439,20 +586,22 @@ export class CloudHosts {
   }
 
   async reconcileAll(): Promise<void> {
-    for (const row of this.list())
+    for (const row of this.list('all'))
       if (row.state !== 'removing')
-        await this.reconcile(row.name).catch((error: unknown) =>
+        await this.reconcile(row.name, row.role).catch((error: unknown) =>
           this.log(
-            `Reconciling host ${row.name} failed: ${(error as Error).message}`,
+            `Reconciling ${roleWord(row.role)} ${row.name} failed: ${(error as Error).message}`,
           ),
         )
   }
 
-  /** Reconciles one host; a reconcile already under way for it is shared. */
-  reconcile(name: string): Promise<CloudHostRow> {
+  /** Reconciles one host or node; a reconcile already under way for it is shared. */
+  reconcile(name: string, role: CloudRole = 'host'): Promise<CloudHostRow> {
+    if (this.get(name, role) == null)
+      return Promise.reject(new MissingHost(name, role))
     const running = this.running.get(name)
     if (running != null) return running
-    const work = this.pass(name).finally(() => this.running.delete(name))
+    const work = this.pass(name, role).finally(() => this.running.delete(name))
     this.running.set(name, work)
     // A host still being made is checked again soon, not at the next tick.
     void work.then(
@@ -460,7 +609,7 @@ export class CloudHosts {
         clearTimeout(this.settling.get(name))
         if (this.stopped || !settlingStates.includes(row.state)) return
         const timer = setTimeout(() => {
-          void this.reconcile(name).catch(() => undefined)
+          void this.reconcile(name, role).catch(() => undefined)
         }, this.options.settleMs ?? 20_000)
         timer.unref()
         this.settling.set(name, timer)
@@ -471,16 +620,16 @@ export class CloudHosts {
   }
   private readonly settling = new Map<string, NodeJS.Timeout>()
 
-  private async pass(name: string): Promise<CloudHostRow> {
-    const row = this.get(name)
-    if (row == null) throw new MissingHost(name)
+  private async pass(name: string, role: CloudRole): Promise<CloudHostRow> {
+    const row = this.get(name, role)
+    if (row == null) throw new MissingHost(name, role)
     const provider = this.provider(row.account)
     if (provider == null) {
       this.update(name, {
         state: 'error',
         error: `Its cloud account ${row.account} is gone`,
       })
-      return this.get(name)!
+      return this.get(name, role)!
     }
     try {
       // 1. The droplet: the recorded one, else the one tagged for this host, else a new one.
@@ -488,10 +637,10 @@ export class CloudHosts {
       let created = false
       if (row.provider_id != null) machine = await provider.get(row.provider_id)
       if (machine == null) {
-        const tagged = await provider.list(this.tag(name))
+        const tagged = await provider.list(this.tag(name, role))
         if (tagged.length > 1)
           throw new HostError(
-            `${tagged.length} droplets are tagged ${this.tag(name)}; remove the extra ones by hand`,
+            `${tagged.length} droplets are tagged ${this.tag(name, role)}; remove the extra ones by hand`,
           )
         machine = tagged[0]
       }
@@ -510,41 +659,49 @@ export class CloudHosts {
         this.update(name, { port: machine.port })
       if (machine.address == null) {
         this.update(name, { state: 'installing', error: null })
-        return this.get(name)!
+        return this.get(name, role)!
       }
       // 2. The firewall: the web ports from anywhere, the link port from the master only.
-      await this.firewall(name, provider)
+      await this.firewall(name, role, provider)
       // 3. DNS, when the host has a name.
-      const current = this.get(name)!
-      if (current.dns_domain != null && this.options.dns != null) {
+      const current = this.get(name, role)!
+      if (
+        role === 'host' &&
+        current.dns_domain != null &&
+        this.options.dns != null
+      ) {
         const problem = await this.options.dns.reconcile(current, provider)
         if (problem != null) {
           this.update(name, { state: 'error', error: problem })
-          return this.get(name)!
+          return this.get(name, role)!
         }
       }
       // The Space, before the host pairs, so its first sync carries the storage.
-      const spaced = this.get(name)!
-      if (spaced.space_bucket != null && this.options.space != null) {
+      const spaced = this.get(name, role)!
+      if (
+        role === 'host' &&
+        spaced.space_bucket != null &&
+        this.options.space != null
+      ) {
         const problem = await this.options.space.reconcile(
           spaced,
           provider,
-          this.tag(name),
+          this.tag(name, role),
         )
         if (problem != null) {
           this.update(name, { state: 'error', error: problem })
-          return this.get(name)!
+          return this.get(name, role)!
         }
       }
       // 4. The host: reconnected when paired, paired when it boots with our material.
-      await this.host(this.get(name)!)
+      await this.host(this.get(name, role)!)
       // 5. The master's host settings point at it, unless an administrator chose otherwise.
-      const ready = this.get(name)!
-      if (ready.state === 'ready') {
+      const ready = this.get(name, role)!
+      if (role === 'host' && ready.state === 'ready') {
         await this.settings(ready)
         await this.certificate(ready)
       }
-      return this.get(name)!
+      return this.get(name, role)!
     } catch (error) {
       const message =
         error instanceof HostError ||
@@ -553,8 +710,8 @@ export class CloudHosts {
           ? error.message
           : `Reconcile failed: ${(error as Error).message}`
       this.update(name, { state: 'error', error: message })
-      this.log(`Host ${name}: ${message}`)
-      return this.get(name)!
+      this.log(`${role === 'host' ? 'Host' : 'Node'} ${name}: ${message}`)
+      return this.get(name, role)!
     }
   }
 
@@ -565,28 +722,42 @@ export class CloudHosts {
     const github = this.options.github()
     if (github == null)
       throw new HostError(
-        'A cloud host installs the master’s release from GitHub, and this master has none',
+        `A cloud ${roleWord(row.role)} installs the master’s release from GitHub, and this master has none`,
       )
-    const certificate = createCertificate([`mason-host-${row.name}`])
+    const droplet = `mason-${roleWord(row.role)}-${row.name}`
+    const certificate = createCertificate([droplet])
     const secret = randomBytes(32).toString('base64url')
+    const pairing = JSON.stringify({
+      cert: certificate.cert,
+      key: certificate.key,
+      secret,
+    })
+    const linkPort = this.options.linkPort ?? 9310
     const dnsName = fqdn(row)
     const machine = await provider.create({
-      name: `mason-host-${row.name}`,
+      name: droplet,
       region: row.region,
       size: row.size,
       image: row.image,
-      tags: [TAG, this.tag(row.name)],
-      userData: hostUserData({
-        repository: github.repository,
-        version: github.version,
-        pairing: JSON.stringify({
-          cert: certificate.cert,
-          key: certificate.key,
-          secret,
-        }),
-        ...(dnsName == null ? {} : { dnsName }),
-        linkPort: this.options.linkPort ?? 9310,
-      }),
+      tags: [
+        row.role === 'host' ? TAG : NODE_TAG,
+        this.tag(row.name, row.role),
+      ],
+      userData:
+        row.role === 'host'
+          ? hostUserData({
+              repository: github.repository,
+              version: github.version,
+              pairing,
+              ...(dnsName == null ? {} : { dnsName }),
+              linkPort,
+            })
+          : nodeUserData({
+              repository: github.repository,
+              version: github.version,
+              pairing,
+              linkPort,
+            }),
     })
     this.update(row.name, {
       provider_id: machine.id,
@@ -596,26 +767,37 @@ export class CloudHosts {
       error: null,
       version: github.version,
     })
-    this.log(`Created droplet ${machine.name} for host ${row.name}`)
+    this.log(
+      `Created droplet ${machine.name} for ${roleWord(row.role)} ${row.name}`,
+    )
     return machine
   }
 
   private readonly firewallFor = new Map<string, string>()
-  private async firewall(name: string, provider: CloudProvider): Promise<void> {
+  /** A host's firewall opens the web ports to all and the link port to the master; a node's, only the link port. */
+  private async firewall(
+    name: string,
+    role: CloudRole,
+    provider: CloudProvider,
+  ): Promise<void> {
     const master =
       (await this.options.publicAddress?.().catch(() => undefined)) ?? undefined
     const key = `${name}:${master ?? ''}`
     if (this.firewallFor.get(name) === key) return
     await provider.firewall(
-      this.tag(name),
+      this.tag(name, role),
       [
-        { port: 80, sources: ['0.0.0.0/0', '::/0'] },
-        { port: 443, sources: ['0.0.0.0/0', '::/0'] },
+        ...(role === 'host'
+          ? [
+              { port: 80, sources: ['0.0.0.0/0', '::/0'] },
+              { port: 443, sources: ['0.0.0.0/0', '::/0'] },
+            ]
+          : []),
         ...(master == null
           ? []
           : [{ port: this.options.linkPort ?? 9310, sources: [master] }]),
       ],
-      this.tag(name),
+      this.tag(name, role),
     )
     this.firewallFor.set(name, key)
   }
@@ -624,24 +806,30 @@ export class CloudHosts {
     const registry = this.options.registry
     if (row.fingerprint != null && registry.get(row.fingerprint) != null) {
       const link = registry.link(row.fingerprint)
-      if (link != null) await this.follow(row, link)
+      if (link != null) {
+        await this.assigned(row)
+        await this.follow(row, link)
+      }
       // Restarting into the release it was asked for; the timeout watches it.
       else if (row.state === 'updating') {
         this.watch(row)
         return
+      } else if (row.role === 'worker') {
+        // A node offline for a while (restarting into a worker update, say)
+        // stays as it is: the registry redials it and the cluster check
+        // reports it not linked.
       } else if (row.pairing_secret == null)
         // Adopted, not answering: nothing is remade, a person looks.
         this.update(row.name, {
           state: 'error',
-          error: 'The host is not answering on its link',
+          error: `The ${roleWord(row.role)} is not answering on its link`,
         })
       return
     }
     if (row.pairing_hash == null || row.pairing_secret == null) {
       this.update(row.name, {
         state: 'error',
-        error:
-          'The host is not answering and its pairing material is gone; pair it by hand or remove it',
+        error: `The ${roleWord(row.role)} is not answering and its pairing material is gone; pair it by hand or remove it`,
       })
       return
     }
@@ -651,8 +839,9 @@ export class CloudHosts {
         `${row.address}:${row.port ?? this.options.linkPort ?? 9310}`,
         row.pairing_hash,
         row.pairing_secret,
-        'host',
+        row.role,
       )
+      // The pairing secret is spent: record the node before anything else can fail.
       this.update(row.name, {
         fingerprint: node.fingerprint,
         pairing_hash: null,
@@ -660,14 +849,43 @@ export class CloudHosts {
         state: 'ready',
         error: null,
       })
-      this.log(`Host ${row.name} paired as ${node.fingerprint}`)
+      this.log(
+        `${roleWord(row.role)} ${row.name} paired as ${node.fingerprint}`,
+      )
+      const paired = this.get(row.name, row.role)!
+      await this.assigned(paired)
       const link = registry.link(node.fingerprint)
-      if (link != null) await this.follow(this.get(row.name)!, link)
+      if (link != null) await this.follow(paired, link)
     } catch (error) {
       // Still installing: the next reconcile tries again.
       this.update(row.name, { state: 'installing', error: null })
       this.log(
-        `Host ${row.name} is not paired yet: ${(error as Error).message}`,
+        `${roleWord(row.role)} ${row.name} is not paired yet: ${(error as Error).message}`,
+      )
+    }
+  }
+
+  /**
+   * A paired node gets the name, type and labels its row was made with, as
+   * any worker given them on the Nodes page does. It is done once: a node
+   * with no type yet is one Mason has not named, so a failed attempt is tried
+   * again at the next reconcile, and a type an administrator gives it later
+   * is left alone.
+   */
+  private async assigned(row: CloudHostRow): Promise<void> {
+    if (row.role !== 'worker' || row.fingerprint == null) return
+    const record = this.options.registry.get(row.fingerprint)
+    const labels = JSON.parse(row.labels) as string[]
+    if (record == null || record.type !== '') return
+    try {
+      await this.options.registry.assign(row.fingerprint, {
+        name: row.name,
+        type: row.node_type ?? '',
+        labels,
+      })
+    } catch (error) {
+      this.log(
+        `Node ${row.name} keeps its old name, type or labels for now: ${(error as Error).message}`,
       )
     }
   }
@@ -682,6 +900,17 @@ export class CloudHosts {
   private async follow(row: CloudHostRow, link: Link): Promise<void> {
     const target = this.target
     const running = link.peer?.version
+    // A node is a worker: the master's worker updates install releases when
+    // it is idle. Here it is only ready, on the release it runs.
+    if (row.role === 'worker') {
+      if (row.state !== 'ready' || row.version !== (running ?? null))
+        this.update(row.name, {
+          state: 'ready',
+          error: null,
+          version: running ?? null,
+        })
+      return
+    }
     if (running === target) {
       if (
         row.state !== 'ready' ||
@@ -691,7 +920,7 @@ export class CloudHosts {
         clearTimeout(this.updateTimers.get(row.name))
         this.updateTimers.delete(row.name)
         if (row.state === 'updating')
-          this.log(`Host ${row.name} is back on ${target}`)
+          this.log(`${roleWord(row.role)} ${row.name} is back on ${target}`)
         this.update(row.name, { state: 'ready', error: null, version: target })
       }
       return
@@ -711,12 +940,12 @@ export class CloudHosts {
       })
       await link.request('node.update', { version: target })
       this.log(
-        `Asked host ${row.name} to update from ${running ?? 'an unknown release'} to ${target}`,
+        `Asked ${roleWord(row.role)} ${row.name} to update from ${running ?? 'an unknown release'} to ${target}`,
       )
       // A wait for an earlier release ends with this request.
       clearTimeout(this.updateTimers.get(row.name))
       this.updateTimers.delete(row.name)
-      this.watch(this.get(row.name)!)
+      this.watch(this.get(row.name, 'all')!)
     } catch (error) {
       const message = `It cannot update itself to ${target}: ${(error as Error).message}`
       this.update(row.name, {
@@ -724,7 +953,7 @@ export class CloudHosts {
         version: running ?? null,
         error: message,
       })
-      this.log(`Host ${row.name}: ${message}`)
+      this.log(`${roleWord(row.role)} ${row.name}: ${message}`)
     } finally {
       this.asking.delete(row.name)
     }
@@ -740,10 +969,10 @@ export class CloudHosts {
     const timer = setTimeout(
       () => {
         this.updateTimers.delete(row.name)
-        const now = this.get(row.name)
+        const now = this.get(row.name, 'all')
         if (now?.state !== 'updating' || now.version !== target) return
         this.update(row.name, { state: 'error', error: notBack(target) })
-        this.log(`Host ${row.name}: ${notBack(target)}`)
+        this.log(`${roleWord(row.role)} ${row.name}: ${notBack(target)}`)
       },
       Math.max(
         0,
@@ -811,21 +1040,25 @@ export class CloudHosts {
   async remove(
     name: string,
     confirm: unknown,
-    options: { deleteSpace?: boolean } = {},
+    options: { deleteSpace?: boolean; role?: CloudRole } = {},
   ): Promise<void> {
-    const row = this.get(name)
-    if (row == null) throw new MissingHost(name)
+    const role = options.role ?? 'host'
+    const row = this.get(name, role)
+    if (row == null) throw new MissingHost(name, role)
     if (confirm !== name)
-      throw new Error(`Type the host's name, ${name}, to remove it`)
+      throw new Error(
+        `Type the ${roleWord(role)}'s name, ${name}, to remove it`,
+      )
     this.update(name, { state: 'removing' })
     const provider = this.provider(row.account)
     if (provider != null) {
       if (row.provider_id != null) await provider.destroy(row.provider_id)
-      for (const machine of await provider.list(this.tag(name)))
+      for (const machine of await provider.list(this.tag(name, role)))
         await provider.destroy(machine.id)
-      await provider.deleteFirewall?.(this.tag(name))
-      if (this.options.dns != null) await this.options.dns.remove(row, provider)
-      if (this.options.space != null)
+      await provider.deleteFirewall?.(this.tag(name, role))
+      if (role === 'host' && this.options.dns != null)
+        await this.options.dns.remove(row, provider)
+      if (role === 'host' && this.options.space != null)
         await this.options.space.remove(row, provider, {
           deleteSpace: options.deleteSpace === true,
           keyName: this.tag(name),
@@ -843,7 +1076,7 @@ export class CloudHosts {
       await this.options.hostSettings.set(undefined)
     this.firewallFor.delete(name)
     this.update(name, { state: 'removed' })
-    this.log(`Removed host ${name}`)
+    this.log(`Removed ${roleWord(role)} ${name}`)
   }
 }
 

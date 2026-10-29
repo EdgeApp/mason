@@ -288,6 +288,9 @@ export interface CloudHostView {
   error: string | null
   /** The release it runs, or the one it is updating to. */
   version?: string | null
+  /** A permanent node's type and labels. */
+  nodeType?: string | null
+  labels?: string[]
 }
 
 /** DigitalOcean's Spaces regions. */
@@ -307,9 +310,12 @@ function spacesRegionSelect(id: string, value: string): string {
   return `<select id="${id}" name="space.region">${spacesRegions.map((region) => `<option${region === value ? ' selected' : ''}>${region}</option>`).join('')}</select>`
 }
 
-/** The Create host form's fields for one account. */
-function hostFields(account: PoolAccount): string {
-  const prefix = `host-${account.id}`
+/** The Create host (or permanent node) form's fields for one account. */
+function hostFields(
+  account: PoolAccount,
+  role: 'host' | 'worker' = 'host',
+): string {
+  const prefix = `${role === 'host' ? 'host' : 'node'}-${account.id}`
   const catalog = account.catalog
   const select = (
     name: string,
@@ -321,7 +327,9 @@ function hostFields(account: PoolAccount): string {
     `<input id="${prefix}-${name === 'dns.name' ? 'record' : name}" name="${name}" value="${escape(value)}"${extra}>`
   return [
     `<input type="hidden" name="account" value="${escape(account.id)}">`,
-    `<label for="${prefix}-name">Name</label>${text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="builds"')}`,
+    role === 'host'
+      ? `<label for="${prefix}-name">Name</label>${text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="builds"')}`
+      : `${field(`${prefix}-name`, 'Name', text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-node"'), 'The node’s name on this master and its droplet’s.')}${field(`${prefix}-type`, 'Node type', text('type', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-x86"'), 'Type of node as specified in the Masonfile.')}${field(`${prefix}-labels`, 'Labels', text('labels', ''), 'Extra labels it carries, comma-separated, for stages that ask for them.')}`,
     `<label for="${prefix}-region">Region</label>${
       catalog == null
         ? text('region', 'sfo3', ' required')
@@ -358,10 +366,18 @@ function hostFields(account: PoolAccount): string {
             })),
           )
     }`,
-    `<label for="${prefix}-domain">DNS domain</label>${select('dns.domain', '', [{ value: '', label: 'No DNS: serve the droplet’s address' }, ...(account.domains ?? []).map((domain) => ({ value: domain, label: domain }))])}`,
-    `<label for="${prefix}-record">Record name in the domain (or @)</label>${text('dns.name', '', ' placeholder="builds" pattern="@|[a-z0-9.-]{1,200}"')}`,
-    `<label for="${prefix}-space">Store builds in a new DigitalOcean Space named (empty: the host’s disk)</label><input id="${prefix}-space" name="space.bucket" placeholder="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">`,
-    `<label for="${prefix}-space-region">Space region</label>${spacesRegionSelect(`${prefix}-space-region`, 'sfo3')}`,
+    role === 'worker'
+      ? ''
+      : `<label for="${prefix}-domain">DNS domain</label>${select('dns.domain', '', [{ value: '', label: 'No DNS: serve the droplet’s address' }, ...(account.domains ?? []).map((domain) => ({ value: domain, label: domain }))])}`,
+    role === 'worker'
+      ? ''
+      : `<label for="${prefix}-record">Record name in the domain (or @)</label>${text('dns.name', '', ' placeholder="builds" pattern="@|[a-z0-9.-]{1,200}"')}`,
+    role === 'worker'
+      ? ''
+      : `<label for="${prefix}-space">Store builds in a new DigitalOcean Space named (empty: the host’s disk)</label><input id="${prefix}-space" name="space.bucket" placeholder="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">`,
+    role === 'worker'
+      ? ''
+      : `<label for="${prefix}-space-region">Space region</label>${spacesRegionSelect(`${prefix}-space-region`, 'sfo3')}`,
   ].join('')
 }
 
@@ -388,6 +404,8 @@ export function nodesView(data: {
   poolAccounts?: PoolAccount[]
   /** Hosts the master made on a cloud provider. */
   cloudHosts?: CloudHostView[]
+  /** Permanent worker nodes the master made on a cloud provider. */
+  cloudNodes?: CloudHostView[]
   /** Where the host keeps builds. */
   storage?: { driver: 'disk' | 's3'; bucket?: string; endpoint?: string }
   budget: { monthly: number; notice?: string }
@@ -506,9 +524,40 @@ export function nodesView(data: {
             ? `${hostAccounts || '<p>Add a DigitalOcean account on the <a href="/cloud">Cloud</a> page to create a host there.</p>'}${action(`${icon('terminal')} Install a host yourself`, hostCommands, { id: 'add-host-command', className: 'add-host' })}`
             : ''
         }${storagePanel}</section>`
+  const cloudNodes = (data.cloudNodes ?? [])
+    .map(
+      (node) =>
+        `<section class="panel cloud-node" id="cloud-node-${escape(node.name)}" data-state="${escape(node.state)}"><h3>${icon('cloud')}<span class="mono">${escape(node.name)}</span> <small>${escape(node.state)}</small></h3><p>${[
+          node.nodeType ?? '',
+          ...(node.labels ?? []),
+        ]
+          .filter((part) => part !== '')
+          .map(escape)
+          .join(
+            ' · ',
+          )} · ${escape(node.region)} · ${escape(node.size)}${node.address == null ? '' : ` · <span class="mono">${escape(node.address)}</span>`}${node.version == null || node.state === 'updating' ? '' : ` · Mason ${escape(node.version)}`}</p>${node.state === 'updating' && node.version != null ? `<p class="notice">Updating to Mason ${escape(node.version)}, as the master asked over its link; it reconnects on its own.</p>` : ''}${node.error == null ? '' : `<p class="state-failed">${escape(node.error)}</p>`}${
+          data.canChange
+            ? `<div class="actions">${apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div>${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}`, `<label for="remove-node-${escape(node.name)}">Type ${escape(node.name)} to destroy its droplet and unpair it</label><input id="remove-node-${escape(node.name)}" name="confirm" required autocomplete="off">`, `${icon('delete')} Remove node`, { method: 'DELETE', fields: ['confirm'], className: 'secondary' }), { kind: 'secondary' })}`
+            : ''
+        }</section>`,
+    )
+    .join('')
+  // Permanent nodes run on DigitalOcean; NoMac Macs come only from pools.
+  const nodeAccounts = (data.poolAccounts ?? [])
+    .filter((account) => account.provider !== 'nomac')
+    .map((account) =>
+      action(
+        `${icon('cloud')} Create a node on ${escape(account.name)}`,
+        `<p>A DigitalOcean machine that stays a worker until you remove it. It needs no public address: only this master reaches it, on its link port.</p>${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/nodes', hostFields(account, 'worker'), `${icon('add')} Create node`, { fields: ['account', 'name', 'type', 'labels', 'region', 'size', 'image'], then: 'reload' })}`,
+        { id: `add-node-${account.id}`, className: 'add-node' },
+      ),
+    )
+    .join('')
   const add = data.canChange
-    ? `<section class="panel" id="add-node"><h2>${icon('add')}Nodes</h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks. Run the following commands to start Mason on a Linux or macOS computer (Windows coming).</p><ol class="howto">${installStep('On the new computer.')}${step('Start as a worker', `${command('sudo mason worker --install --link-port 9410')}<small class="hint">It prints its pairing key.</small>`)}${step('Pair it here', pairForm('node', '192.168.1.20:9410', `${icon('lan')} Pair node`))}</ol></section>`
-    : ''
+    ? `<section class="panel" id="add-node"><h2>${icon('add')}Nodes</h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks. Run the following commands to start Mason on a Linux or macOS computer (Windows coming).</p>${cloudNodes}<ol class="howto">${installStep('On the new computer.')}${step('Start as a worker', `${command('sudo mason worker --install --link-port 9410')}<small class="hint">It prints its pairing key.</small>`)}${step('Pair it here', pairForm('node', '192.168.1.20:9410', `${icon('lan')} Pair node`))}</ol>${nodeAccounts}</section>`
+    : cloudNodes === ''
+      ? ''
+      : `<section class="panel" id="add-node"><h2>${icon('cloud')}Cloud nodes</h2>${cloudNodes}</section>`
   const types = Object.entries(data.types)
     .map(
       ([name, value]) =>

@@ -8,6 +8,7 @@ import type { Master } from './runtime.js'
 export function hostView(row: CloudHostRow): Record<string, unknown> {
   const out: Record<string, unknown> = {
     ...row,
+    labels: JSON.parse(row.labels) as string[],
     pairing: row.pairing_secret != null,
     // A host with a DNS name waits for Caddy's Let's Encrypt certificate.
     certificate:
@@ -97,5 +98,53 @@ export function cloudHostsApi(master: Master): Router {
     }),
   )
   router.use('/api/v2/cloud/hosts', apiErrors)
+  // Permanent cloud nodes: workers the master keeps on a cloud provider.
+  router.use(
+    '/api/v2/cloud/nodes',
+    express.json({ limit: '64kb' }),
+    authenticate(master),
+  )
+  router.get(
+    '/api/v2/cloud/nodes',
+    json((_req, res) => {
+      allow(actorOf(res), 'settings.read')
+      return master.cloudHosts.list('worker').map(hostView)
+    }),
+  )
+  router.post(
+    '/api/v2/cloud/nodes',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      const row = await master.cloudHosts.createNode(req.body)
+      res.status(201)
+      return hostView(row)
+    }),
+  )
+  router.post(
+    '/api/v2/cloud/nodes/:name/reconcile',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      return hostView(
+        await master.cloudHosts
+          .reconcile(String(req.params.name), 'worker')
+          .catch(missing),
+      )
+    }),
+  )
+  router.delete(
+    '/api/v2/cloud/nodes/:name',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      await master.cloudHosts
+        .remove(
+          String(req.params.name),
+          (req.body as { confirm?: unknown } | undefined)?.confirm,
+          { role: 'worker' },
+        )
+        .catch(missing)
+      return null
+    }),
+  )
+  router.use('/api/v2/cloud/nodes', apiErrors)
   return router
 }

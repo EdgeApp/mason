@@ -233,6 +233,33 @@ describe('Master database, setup and import', function () {
     db.close()
   })
 
+  it('U3.1 schema 16 keeps every cloud host as a host and allows a worker row with its type and labels', () => {
+    const db = new DatabaseSync(path.join(root, 'nodes.sqlite'))
+    migrateMaster(db)
+    db.exec(`INSERT INTO cloud_hosts(name,account,provider,region,size,image,fingerprint,state,version,created_at,updated_at,certificate_at,space_bucket,space_owned)
+      VALUES('h','do','digitalocean','sfo3','s-1vcpu-1gb','ubuntu-24-04-x64','fp','ready','0.2.0',1,2,3,'b',1)`)
+    const host = db.prepare('SELECT * FROM cloud_hosts').get() as Record<
+      string,
+      unknown
+    >
+    assert.equal(host.role, 'host')
+    assert.equal(host.node_type, null)
+    assert.equal(host.labels, '[]')
+    assert.equal(host.space_owned, 1)
+    db.exec(`INSERT INTO cloud_hosts(name,account,provider,region,size,image,state,role,node_type,labels,created_at,updated_at)
+      VALUES('n','do','digitalocean','sfo3','s-1vcpu-1gb','ubuntu-24-04-x64','creating','worker','linux-x86','["e2e"]',1,1)`)
+    assert.throws(() =>
+      db.exec(`INSERT INTO cloud_hosts(name,account,provider,region,size,image,state,role,created_at,updated_at)
+        VALUES('x','do','digitalocean','sfo3','s','i','creating','pool',1,1)`),
+    )
+    // Names are unique across hosts and nodes.
+    assert.throws(() =>
+      db.exec(`INSERT INTO cloud_hosts(name,account,provider,region,size,image,state,role,created_at,updated_at)
+        VALUES('h','do','digitalocean','sfo3','s','i','creating','worker',1,1)`),
+    )
+    db.close()
+  })
+
   it('imports the current deployment with IDs, roles, addresses, keys and projects', async () => {
     const fixture = deploymentFixture(root)
     const db = new DatabaseSync(path.join(root, 'master.sqlite'), {
