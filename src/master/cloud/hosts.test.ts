@@ -1,11 +1,21 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import path from 'node:path'
 import { after, before, describe, it } from 'mocha'
 import { nodeMain, type MainIO } from '../../node/main.js'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeCloud } from '../../test/fakeCloud.js'
+import { nodesView, type CloudHostView } from '../../view/admin.js'
+import { clusterCheck, formatCheck } from '../clusterCheck.js'
 import { localOperator } from '../roles.js'
 import type { CloudHostRow } from './hosts.js'
 
@@ -263,6 +273,135 @@ describe('Mason hosts on DigitalOcean', function () {
       1,
     )
     assert.match(add.lines.join('\n'), /already has a host: e2e/)
+  })
+
+  /** The master's release and update timeout, as `mason update` would change them. */
+  const follows = (): { version?: string; updateTimeoutMs?: number } =>
+    (
+      c.master.master!.cloudHosts as unknown as {
+        options: { version?: string; updateTimeoutMs?: number }
+      }
+    ).options
+  const panel = (): string =>
+    nodesView({
+      nodes: [],
+      types: {},
+      pools: [],
+      budget: { monthly: 0 },
+      canChange: true,
+      cloudHosts: [
+        {
+          ...row(),
+          dnsName: undefined,
+          certificate: undefined,
+          space: undefined,
+        } as CloudHostView,
+      ],
+    })
+
+  it('U2.2 a host that cannot update itself stays ready and says why', async () => {
+    const running = row().version
+    follows().version = '99.0.0'
+    try {
+      const refused = await reconcile()
+      assert.equal(refused.state, 'ready')
+      assert.equal(refused.version, running)
+      assert.match(
+        refused.error,
+        /^It cannot update itself to 99\.0\.0: .*updates only by hand.*sudo mason update/,
+      )
+      const report = await clusterCheck(c.master.master!)
+      assert(report.nodes[0]!.problems.includes(refused.error))
+      assert.match(formatCheck(report), /Something needs a person/)
+      assert.match(panel(), /updates only by hand/)
+    } finally {
+      follows().version = undefined
+    }
+    // On the master's release again, the reason goes.
+    const back = await reconcile()
+    assert.equal(back.state, 'ready')
+    assert.equal(back.error, null)
+  })
+
+  it('U2.1/U2.3 a host on another release is asked over its link, shows updating, and is ready when it links again on the release', async () => {
+    cloud.updater = true
+    const fingerprint = row().fingerprint!
+    const request = path.join(
+      cloud.machines.get(row().provider_id!)!.dir,
+      'data',
+      'update-request.json',
+    )
+    const running = row().version!
+    follows().version = '99.0.0'
+    const updating = await reconcile()
+    assert.equal(updating.state, 'updating')
+    assert.equal(updating.version, '99.0.0')
+    assert.equal(updating.error, null)
+    assert.equal(
+      (JSON.parse(readFileSync(request, 'utf8')) as Json).version,
+      '99.0.0',
+    )
+    assert.equal(statSync(request).mode & 0o777, 0o600)
+    // Asked once: another reconcile while it updates leaves it be.
+    rmSync(request)
+    assert.equal((await reconcile()).state, 'updating')
+    assert(!existsSync(request))
+    const report = await clusterCheck(c.master.master!)
+    assert.equal(report.nodes[0]!.updating, '99.0.0')
+    assert.deepEqual(report.nodes[0]!.problems, [])
+    assert(!report.green)
+    assert.match(
+      formatCheck(report),
+      /… host {3}\S+ .*updating to 99\.0\.0[\s\S]*Updating \S+ to the master’s release; check again in a few minutes\.$/,
+    )
+    assert.match(panel(), /data-state="updating"/)
+    assert.match(panel(), /Updating to Mason 99\.0\.0, as the master asked/)
+    // The updater restarts the host into the release; the master's dialer links it again.
+    follows().version = running
+    c.master.master!.registry.link(fingerprint)!.close()
+    await c.until(
+      () => (row().state === 'ready' ? row() : undefined),
+      30_000,
+      'the host linking again on the release',
+    )
+    assert.equal(row().version, running)
+    assert.equal(row().error, null)
+    // Its cache may still be catching up; it is no longer updating or behind.
+    const after = (await clusterCheck(c.master.master!)).nodes[0]!
+    assert.equal(after.updating, undefined)
+    assert.deepEqual(
+      after.problems.filter((problem) => !/changes behind/.test(problem)),
+      [],
+    )
+  })
+
+  it('U2.2 a host that does not come back on the release in time is in error, and not asked again', async () => {
+    follows().version = '98.0.0'
+    follows().updateTimeoutMs = 200
+    try {
+      assert.equal((await reconcile()).state, 'updating')
+      const late = await c.until(
+        () => (row().state === 'error' ? row() : undefined),
+        10_000,
+        'the update timeout',
+      )
+      assert.equal(late.error, 'It did not come back on 98.0.0')
+      const request = path.join(
+        cloud.machines.get(row().provider_id!)!.dir,
+        'data',
+        'update-request.json',
+      )
+      rmSync(request)
+      const still = await reconcile()
+      assert.equal(still.state, 'error')
+      assert(!existsSync(request), 'not asked again')
+    } finally {
+      follows().version = undefined
+      follows().updateTimeoutMs = undefined
+      cloud.updater = false
+    }
+    assert.equal((await reconcile()).state, 'ready')
+    assert.equal(row().error, null)
   })
 
   it('U4.3 an adopted droplet whose host does not answer is in error, never remade', async () => {

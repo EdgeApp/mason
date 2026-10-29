@@ -177,6 +177,62 @@ describe('Master database, setup and import', function () {
     newer.close()
   })
 
+  it('U2.1 schema 15 keeps every cloud host and lets one be updating', () => {
+    const db = new DatabaseSync(path.join(root, 'hosts.sqlite'))
+    migrateMaster(db)
+    // Back to schema 14's cloud_hosts, with a host in it.
+    db.exec(`DROP TABLE cloud_hosts;
+    CREATE TABLE cloud_hosts (
+      name TEXT NOT NULL, account TEXT NOT NULL, provider TEXT NOT NULL,
+      region TEXT NOT NULL, size TEXT NOT NULL, image TEXT NOT NULL,
+      dns_domain TEXT, dns_name TEXT, provider_id TEXT, address TEXT, port INTEGER,
+      dns_record_id TEXT, dns_owned INTEGER NOT NULL DEFAULT 0 CHECK(dns_owned IN (0,1)),
+      fingerprint TEXT, pairing_hash TEXT, pairing_secret TEXT, origin TEXT,
+      state TEXT NOT NULL CHECK(state IN ('creating','installing','pairing','ready','error','removing','removed')),
+      error TEXT, version TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE UNIQUE INDEX cloud_hosts_name ON cloud_hosts(name) WHERE state<>'removed';
+    ALTER TABLE cloud_hosts ADD COLUMN certificate_at INTEGER;
+    ALTER TABLE cloud_hosts ADD COLUMN space_bucket TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_region TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_key_id TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_secret TEXT;
+    ALTER TABLE cloud_hosts ADD COLUMN space_owned INTEGER NOT NULL DEFAULT 0 CHECK(space_owned IN (0,1));
+    ALTER TABLE cloud_hosts ADD COLUMN space_key_owned INTEGER NOT NULL DEFAULT 0 CHECK(space_key_owned IN (0,1));
+    ALTER TABLE cloud_hosts ADD COLUMN space_pending INTEGER NOT NULL DEFAULT 0 CHECK(space_pending IN (0,1));
+    INSERT INTO cloud_hosts(name,account,provider,region,size,image,fingerprint,state,version,created_at,updated_at,certificate_at,space_bucket,space_owned)
+      VALUES('h','do','digitalocean','sfo3','s-1vcpu-1gb','ubuntu-24-04-x64','fp','ready','0.2.0',1,2,3,'b',1);
+    UPDATE meta SET value='14' WHERE key='master_schema';`)
+    assert.throws(() =>
+      db.exec("UPDATE cloud_hosts SET state='updating' WHERE name='h'"),
+    )
+    migrateMaster(db)
+    db.exec("UPDATE cloud_hosts SET state='updating' WHERE name='h'")
+    assert.deepEqual(
+      {
+        ...(db
+          .prepare(
+            'SELECT name,fingerprint,state,version,created_at,certificate_at,space_bucket,space_owned FROM cloud_hosts',
+          )
+          .get() as object),
+      },
+      {
+        name: 'h',
+        fingerprint: 'fp',
+        state: 'updating',
+        version: '0.2.0',
+        created_at: 1,
+        certificate_at: 3,
+        space_bucket: 'b',
+        space_owned: 1,
+      },
+    )
+    assert.throws(() =>
+      db.exec("UPDATE cloud_hosts SET state='lost' WHERE name='h'"),
+    )
+    db.close()
+  })
+
   it('imports the current deployment with IDs, roles, addresses, keys and projects', async () => {
     const fixture = deploymentFixture(root)
     const db = new DatabaseSync(path.join(root, 'master.sqlite'), {

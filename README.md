@@ -72,7 +72,17 @@ Each node's page lists what still needs a person, such as a macOS permission.
 `mason cluster check` reports every node: linked or not, its Mason version
 against the master's, a worker's last inventory and quarantine, and the
 host's cache revision lag, outbox depth and refused messages. It exits
-non-zero until everything is green.
+non-zero until everything is green. A host the master made on a cloud
+provider shows as updating to the master's release while it does.
+
+A host the master made on a cloud provider follows the master's release.
+After `mason update` on the master, the master asks the host over its link to
+update; the host writes the request in its data directory and a root unit
+that `--install` set up (`mason-host-update.path`) installs that release and
+restarts it. No SSH is involved. The Nodes page shows the host as
+**updating** until it links again on the release, or the reason it could not.
+A host installed before this has no such unit: run `sudo mason update` on it
+once, or recreate it.
 
 ## Projects
 

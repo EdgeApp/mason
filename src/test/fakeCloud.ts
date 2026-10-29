@@ -41,6 +41,8 @@ export class FakeCloud implements CloudProvider {
   failSnapshot = false
   /** How long a machine stays `new` after its worker starts, as a slow boot. */
   bootDelayMs = 0
+  /** Whether hosts have the root updater `--install` writes. */
+  updater = false
   /** Snapshots that boot but never pair (a broken image). */
   readonly broken = new Set<string>()
   private next = 1
@@ -103,6 +105,7 @@ export class FakeCloud implements CloudProvider {
             linkPort: 0,
             listen: '127.0.0.1',
             heartbeatMs: 0,
+            updaterExists: (): boolean => this.updater,
           }
         : {
             role: 'worker',

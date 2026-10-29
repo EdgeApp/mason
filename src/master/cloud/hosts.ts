@@ -1,6 +1,8 @@
 import { randomBytes } from 'node:crypto'
 import { createCertificate, certificateHash } from '../../node/certificate.js'
 import type { MasterDatabase } from '../database.js'
+import type { Link } from '../../link/link.js'
+import { version as masonVersion } from '../../version.js'
 import type { NodeRegistry } from '../nodes.js'
 import type { CloudAccount } from './accounts.js'
 import {
@@ -25,6 +27,7 @@ export type HostState =
   | 'installing'
   | 'pairing'
   | 'ready'
+  | 'updating'
   | 'error'
   | 'removing'
   | 'removed'
@@ -104,6 +107,10 @@ export interface CloudHostsOptions {
   /** Whether an origin answers with a certificate this computer trusts. */
   trusted?: (origin: string) => Promise<boolean>
   linkPort?: number
+  /** The release its hosts follow: the master's own by default. */
+  version?: string
+  /** How long a host has to come back on the release it was asked for. */
+  updateTimeoutMs?: number
   tickMs?: number
   /** How soon a host still being made is reconciled again. */
   settleMs?: number
@@ -291,8 +298,19 @@ export class CloudHosts {
   private readonly running = new Map<string, Promise<CloudHostRow>>()
   private readonly providers = new Map<string, CloudProvider>()
   private stopped = false
+  private readonly asking = new Set<string>()
+  private readonly updateTimers = new Map<string, NodeJS.Timeout>()
+  private readonly onConnected = (fingerprint: string, link: Link): void => {
+    const row = this.list().find((host) => host.fingerprint === fingerprint)
+    if (row != null) void this.follow(row, link)
+  }
 
   constructor(private readonly options: CloudHostsOptions) {}
+
+  /** The release this master's hosts run: its own. */
+  private get target(): string {
+    return this.options.version ?? masonVersion
+  }
 
   private get db(): MasterDatabase['db'] {
     return this.options.master.db
@@ -402,6 +420,7 @@ export class CloudHosts {
   }
 
   start(): void {
+    this.options.registry.on('connected', this.onConnected)
     void this.reconcileAll().finally(() => {
       if (this.stopped) return
       this.timer = setInterval(() => {
@@ -412,6 +431,8 @@ export class CloudHosts {
   }
   async stop(): Promise<void> {
     this.stopped = true
+    this.options.registry.off('connected', this.onConnected)
+    for (const timer of this.updateTimers.values()) clearTimeout(timer)
     clearInterval(this.timer)
     for (const timer of this.settling.values()) clearTimeout(timer)
     await Promise.allSettled([...this.running.values()])
@@ -602,9 +623,12 @@ export class CloudHosts {
   private async host(row: CloudHostRow): Promise<void> {
     const registry = this.options.registry
     if (row.fingerprint != null && registry.get(row.fingerprint) != null) {
-      if (registry.link(row.fingerprint) != null) {
-        if (row.state !== 'ready')
-          this.update(row.name, { state: 'ready', error: null })
+      const link = registry.link(row.fingerprint)
+      if (link != null) await this.follow(row, link)
+      // Restarting into the release it was asked for; the timeout watches it.
+      else if (row.state === 'updating') {
+        this.watch(row)
+        return
       } else if (row.pairing_secret == null)
         // Adopted, not answering: nothing is remade, a person looks.
         this.update(row.name, {
@@ -637,6 +661,8 @@ export class CloudHosts {
         error: null,
       })
       this.log(`Host ${row.name} paired as ${node.fingerprint}`)
+      const link = registry.link(node.fingerprint)
+      if (link != null) await this.follow(this.get(row.name)!, link)
     } catch (error) {
       // Still installing: the next reconcile tries again.
       this.update(row.name, { state: 'installing', error: null })
@@ -644,6 +670,90 @@ export class CloudHosts {
         `Host ${row.name} is not paired yet: ${(error as Error).message}`,
       )
     }
+  }
+
+  /**
+   * Keeps a linked host on the master's release. On it, the host is ready.
+   * On another, the master asks it over the link to update (no SSH: its
+   * root updater installs the release and restarts it); it is `updating`
+   * until it links again on that release, or in error after the timeout.
+   * A host that cannot update itself stays ready, with the reason.
+   */
+  private async follow(row: CloudHostRow, link: Link): Promise<void> {
+    const target = this.target
+    const running = link.peer?.version
+    if (running === target) {
+      if (
+        row.state !== 'ready' ||
+        row.version !== target ||
+        row.error != null
+      ) {
+        clearTimeout(this.updateTimers.get(row.name))
+        this.updateTimers.delete(row.name)
+        if (row.state === 'updating')
+          this.log(`Host ${row.name} is back on ${target}`)
+        this.update(row.name, { state: 'ready', error: null, version: target })
+      }
+      return
+    }
+    if (row.state === 'updating' && row.version === target) {
+      this.watch(row)
+      return
+    }
+    if (row.error === notBack(target)) return
+    if (this.asking.has(row.name)) return
+    this.asking.add(row.name)
+    try {
+      this.update(row.name, {
+        state: 'updating',
+        version: target,
+        error: null,
+      })
+      await link.request('node.update', { version: target })
+      this.log(
+        `Asked host ${row.name} to update from ${running ?? 'an unknown release'} to ${target}`,
+      )
+      // A wait for an earlier release ends with this request.
+      clearTimeout(this.updateTimers.get(row.name))
+      this.updateTimers.delete(row.name)
+      this.watch(this.get(row.name)!)
+    } catch (error) {
+      const message = `It cannot update itself to ${target}: ${(error as Error).message}`
+      this.update(row.name, {
+        state: 'ready',
+        version: running ?? null,
+        error: message,
+      })
+      this.log(`Host ${row.name}: ${message}`)
+    } finally {
+      this.asking.delete(row.name)
+    }
+  }
+
+  /**
+   * An updating host is in error once the timeout passes since it was asked,
+   * also across a restart of the master.
+   */
+  private watch(row: CloudHostRow): void {
+    if (this.updateTimers.has(row.name) || row.version == null) return
+    const target = row.version
+    const timer = setTimeout(
+      () => {
+        this.updateTimers.delete(row.name)
+        const now = this.get(row.name)
+        if (now?.state !== 'updating' || now.version !== target) return
+        this.update(row.name, { state: 'error', error: notBack(target) })
+        this.log(`Host ${row.name}: ${notBack(target)}`)
+      },
+      Math.max(
+        0,
+        row.updated_at +
+          (this.options.updateTimeoutMs ?? 20 * 60_000) -
+          this.now(),
+      ),
+    )
+    timer.unref()
+    this.updateTimers.set(row.name, timer)
   }
 
   /** Notes when the host's DNS name first answers with a trusted certificate. */
@@ -738,3 +848,6 @@ export class CloudHosts {
 }
 
 class HostError extends Error {}
+
+const notBack = (version: string): string =>
+  `It did not come back on ${version}`

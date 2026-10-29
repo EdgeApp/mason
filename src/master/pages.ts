@@ -562,6 +562,7 @@ export function masterPages(
                   : ('trusted' as const),
             }),
         error: row.error,
+        version: row.version,
         ...(row.space_bucket == null || row.space_region == null
           ? {}
           : { space: { bucket: row.space_bucket, region: row.space_region } }),

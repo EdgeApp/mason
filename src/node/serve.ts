@@ -77,6 +77,8 @@ export interface NodeOptions {
   /** Methods a worker or host accepts from its master. */
   nodeMethods?: MethodTable
   heartbeatMs?: number
+  /** Whether a file exists, for the updater unit `--install` writes (tests). */
+  updaterExists?: (file: string) => boolean
   redialBaseMs?: number
   /** Master internals for tests: GitHub API origin, branch heads, repository remotes, pass interval. */
   masterOptions?: Pick<
@@ -545,7 +547,11 @@ export async function startNode(
         onRemoved: () =>
           log('Removed by its master; start with --new-key to pair it again.'),
         onUpdate: (version) => {
-          const requested = requestUpdate(dir, options.role, version)
+          const requested = requestUpdate(dir, options.role, version, {
+            ...(options.updaterExists == null
+              ? {}
+              : { exists: options.updaterExists }),
+          })
           log(
             `The master asked for ${requested.requested}; the updater installs it`,
           )
