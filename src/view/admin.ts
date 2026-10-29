@@ -655,8 +655,13 @@ export function settingsView(data: {
     role: string
     createdAt: number
     revoked: boolean
+    /** `builder` for a key imported from the builder, whose token has no id in it. */
+    format?: 'v1' | 'builder'
   }>
+  /** Apps an upload key may be limited to. */
+  apps: Array<{ id: number; name: string }>
   canChange: boolean
+  canCreate: boolean
   canRevoke: boolean
 }): string {
   const areas = data.areas
@@ -702,14 +707,43 @@ export function settingsView(data: {
       ? `<h3>${icon('key')}Signing for a team</h3>${signing(data.apple.setup)}`
       : ''
   }</section>`
-  const keys = `<section class="panel" id="keys"><h2>${icon('key')}API keys</h2><table class="list"><thead><tr><th>Name</th><th>Role</th><th>Created</th><th>State</th><th></th></tr></thead><tbody>${
+  /** The key's creation day, in the master's time zone. */
+  const day = (ms: number): string => {
+    const date = new Date(ms)
+    const two = (n: number): string => String(n).padStart(2, '0')
+    return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`
+  }
+  // A v1 token is mason_v1_<id>.<secret>: its id's first characters name it without the secret.
+  const keyPrefix = (key: (typeof data.keys)[number]): string => {
+    if (key.format === 'builder') return '<small>builder key</small>'
+    const prefix = `mason_v1_${key.id.slice(0, 5)}…`
+    return `<button type="button" class="secondary copy icon-only" data-copy="${escape(prefix)}" aria-label="Copy ${escape(prefix)}">${icon('content_copy')}<span data-copy-label hidden>Copy</span></button><span class="mono">${escape(prefix)}</span>`
+  }
+  const roles = ['developer', 'tester', 'manager', 'admin', 'upload']
+  const createKey = data.canCreate
+    ? action(
+        `${icon('add')} Create API key`,
+        apiForm(
+          '/api/v2/keys',
+          `${field('key-name', 'Name', '<input id="key-name" name="name" required maxlength="120" placeholder="ci-uploads">', 'What uses it, so you can find it later.')}${field('key-role', 'Role', `<select id="key-role" name="role">${roles.map((role) => `<option value="${role}">${role}</option>`).join('')}</select>`, 'What it may do: the same as a person with that role. An upload key may only publish builds of the apps chosen below.')}${
+            data.apps.length === 0
+              ? ''
+              : `<fieldset><legend>Apps an upload key may publish</legend>${data.apps.map((app) => `<label><input type="checkbox" name="app" value="${app.id}"> ${escape(app.name)}</label>`).join('')}</fieldset>`
+          }<div data-field="token" hidden><p class="notice">Copy it now. Mason stores only a hash of it and cannot show it again. If it is lost, revoke it and create a new one.</p><div class="command"><pre class="mono"></pre><button type="button" class="secondary copy" data-copy="">${icon('content_copy')}<span data-copy-label>Copy</span></button></div><p><a href="/settings?key=created#keys">Done</a></p></div>`,
+          `${icon('key')} Create key`,
+          { fields: ['name', 'role'], then: 'token' },
+        ),
+        { id: 'create-key' },
+      )
+    : ''
+  const keys = `<section class="panel" id="keys"><h2>${icon('key')}API keys</h2><p>Create API keys to access Mason from other apps and agents.</p>${createKey}<table class="list compact"><thead><tr><th>Name</th><th>Role</th><th>Created</th><th>State</th><th>Key</th><th></th></tr></thead><tbody>${
     data.keys
       .map(
         (key) =>
-          `<tr><td class="mono">${escape(key.name)}</td><td>${escape(key.role)}</td><td>${escape(ago(key.createdAt, Date.now()))}</td><td>${key.revoked ? 'revoked' : 'active'}</td><td>${data.canRevoke ? apiForm(`/api/v2/keys/${encodeURIComponent(key.id)}`, '', 'Revoke', { method: 'DELETE', then: 'reload', className: 'danger' }) : ''}</td></tr>`,
+          `<tr><td class="mono">${escape(key.name)}</td><td>${escape(key.role)}</td><td>${day(key.createdAt)}</td><td>${key.revoked ? 'revoked' : 'active'}</td><td>${keyPrefix(key)}</td><td>${data.canRevoke && !key.revoked ? apiForm(`/api/v2/keys/${encodeURIComponent(key.id)}`, '', 'Revoke', { method: 'DELETE', then: 'reload', className: 'danger' }) : ''}</td></tr>`,
       )
-      .join('') || '<tr><td colspan="5">No keys.</td></tr>'
-  }</tbody></table><p>Create keys with <span class="mono">mason keys create</span> or <span class="mono">POST /api/v2/keys</span>; a key's token is shown once.</p></section>`
+      .join('') || '<tr><td colspan="6">No keys.</td></tr>'
+  }</tbody></table></section>`
   return `${head('Settings', 'How this master signs people in, reaches GitHub and Apple, keeps its backups and runs its nodes.', ['Settings'])}<p><a href="/people">People and groups</a> · <a href="/backups">Backups</a> · <a href="/nodes">Nodes</a></p>${apple}${keys}${areas}`
 }
 

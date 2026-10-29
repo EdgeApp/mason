@@ -735,9 +735,16 @@ export function masterPages(
               role: key.role,
               createdAt: key.createdAt,
               revoked: key.revoked,
+              format: key.format,
             }))
           : [],
+        apps: (
+          master.database.db
+            .prepare('SELECT id,name FROM apps ORDER BY position,id')
+            .all() as Array<{ id: number; name: string }>
+        ).map((app) => ({ id: Number(app.id), name: String(app.name) })),
         canChange: can(actor, 'settings.change'),
+        canCreate: can(actor, 'keys.create'),
         canRevoke: can(actor, 'keys.revoke'),
       })
     },

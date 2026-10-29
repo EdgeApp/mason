@@ -227,12 +227,25 @@ export async function submitAction(
   )
   const body = (await response.json().catch(() => ({}))) as {
     id?: string
+    token?: string
     error?: string
     slug?: string
     repository?: string
     defaultBranch?: string
   }
   if (!response.ok) return body.error ?? `Request failed (${response.status})`
+  // A new API key's token, shown once in the form's command box.
+  if (form.dataset.then === 'token' && typeof body.token === 'string') {
+    const out = form.querySelector<HTMLElement>('[data-field="token"]')
+    if (out != null) {
+      out.hidden = false
+      const pre = out.querySelector('pre')
+      if (pre != null) pre.textContent = body.token
+      const copy = out.querySelector<HTMLElement>('button[data-copy]')
+      if (copy != null) copy.dataset.copy = body.token
+    }
+    return undefined
+  }
   if (form.dataset.then === 'run' && body.id != null)
     go(`/runs/${encodeURIComponent(body.id)}`)
   else if (form.dataset.then === 'wizard' && body.slug != null) {

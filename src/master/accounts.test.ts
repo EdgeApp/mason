@@ -771,6 +771,34 @@ describe('Master sign-in, setup, people and permissions', function () {
     return out
   }
 
+  it('U5.2 the Settings form creates a key: apps as the form sends them, the token once, never in the list', async () => {
+    const developer = await c.api('POST', '/api/v2/keys', {
+      name: 'from the page',
+      role: 'developer',
+      apps: '',
+    })
+    assert.equal(developer.status, 201, developer.text)
+    assert.match(developer.json.token, /^mason_v1_[0-9a-f]{32}\./)
+    assert.equal(developer.json.token.slice(9, 41), developer.json.id)
+    // The form's comma-separated app ids are ids: unknown ones are refused as apps.
+    assert.match(
+      (
+        await c.api('POST', '/api/v2/keys', {
+          name: 'uploads',
+          role: 'upload',
+          apps: '999998, 999999',
+        })
+      ).json.error,
+      /Unknown app scope/,
+    )
+    const listed = (await c.api('GET', '/api/v2/keys')).json as Json[]
+    const mine = listed.find((key) => key.id === developer.json.id)!
+    assert.equal(mine.name, 'from the page')
+    assert.equal(mine.token, undefined)
+    assert.equal(mine.hash, undefined)
+    assert(!JSON.stringify(listed).includes(developer.json.token))
+  })
+
   it('U13.13 every API route is checked against the policy table for every role', async () => {
     // Open routes: sign-in and first-run setup.
     const open = [

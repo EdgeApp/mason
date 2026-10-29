@@ -801,4 +801,36 @@ describe('Typed form fields', () => {
     })
     assert.equal(calls[1]!.init.body, undefined)
   })
+
+  it('U5.3 a created key’s token is shown once in the form, with Copy', async () => {
+    const created = typed(
+      '/api/v2/keys',
+      { name: { value: 'ci' }, role: { value: 'developer' } },
+      { then: 'token' },
+    ) as unknown as El
+    const box = new El()
+    const pre = new El()
+    const copy = new El()
+    box.set('pre', pre).set('button[data-copy]', copy)
+    created.set('[data-field="token"]', box)
+    const visits: string[] = []
+    const fetcher = (async () =>
+      reply(201, {
+        id: 'k1',
+        token: 'mason_v1_abc.secret',
+      })) as unknown as typeof fetch
+    assert.equal(
+      await submitAction(
+        created as unknown as HTMLFormElement,
+        'proof',
+        fetcher,
+        (href) => visits.push(href),
+      ),
+      undefined,
+    )
+    assert.equal(box.hidden, false)
+    assert.equal(pre.textContent, 'mason_v1_abc.secret')
+    assert.equal(copy.dataset.copy, 'mason_v1_abc.secret')
+    assert.deepEqual(visits, [], 'the page stays, so the token can be copied')
+  })
 })

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, it } from 'mocha'
 import { MasterDatabase } from '../master/database.js'
-import { action, field, nodesView } from './admin.js'
+import { action, field, nodesView, settingsView } from './admin.js'
 import { artifactsView } from './artifacts.js'
 import {
   bytes,
@@ -995,6 +995,78 @@ describe('Form helpers', () => {
     assert.match(
       stylesheet,
       /\.panel ol\.howto>li,ol\.howto>li\{display:list-item;/,
+    )
+  })
+})
+
+describe('Settings page', () => {
+  const base = {
+    areas: [],
+    apple: { signedIn: false, needsCode: false },
+    keys: [],
+    apps: [],
+    canChange: true,
+    canCreate: true,
+    canRevoke: true,
+  }
+  it('U5.1 API keys: what they are for, a create form, and each key by its prefix and creation day', () => {
+    const created = new Date(2026, 9, 3, 23, 30).getTime()
+    const html = settingsView({
+      ...base,
+      apps: [{ id: 3, name: 'Edge' }],
+      keys: [
+        {
+          id: 'abcdef0123456789abcdef0123456789',
+          name: 'ci',
+          role: 'developer',
+          createdAt: created,
+          revoked: false,
+          format: 'v1',
+        },
+        {
+          id: 'b1',
+          name: 'old builder',
+          role: 'upload',
+          createdAt: created,
+          revoked: true,
+          format: 'builder',
+        },
+      ],
+    })
+    const card = html.slice(html.indexOf('id="keys"'))
+    assert.match(
+      card,
+      /<h2>.*API keys<\/h2><p>Create API keys to access Mason from other apps and agents\.<\/p>/,
+    )
+    assert.match(card, /<summary class="button">.*Create API key<\/summary>/)
+    for (const role of ['developer', 'tester', 'manager', 'admin', 'upload'])
+      assert.match(card, new RegExp(`<option value="${role}">`))
+    assert.match(card, /<input type="checkbox" name="app" value="3"> Edge/)
+    assert.match(card, /data-then="token"/)
+    // Done loads the page again (a new query, not only a hash), so the new key is listed.
+    assert.match(card, /<a href="\/settings\?key=created#keys">Done<\/a>/)
+    assert.match(
+      card,
+      /cannot show it again\. If it is lost, revoke it and create a new one/,
+    )
+    assert.match(
+      card,
+      /<table class="list compact"><thead><tr><th>Name<\/th><th>Role<\/th><th>Created<\/th><th>State<\/th><th>Key<\/th>/,
+    )
+    assert.match(
+      card,
+      /<td>2026-10-03<\/td><td>active<\/td><td><button type="button" class="secondary copy icon-only" data-copy="mason_v1_abcde…"/,
+    )
+    assert.match(card, /<span class="mono">mason_v1_abcde…<\/span>/)
+    assert.match(
+      card,
+      /<td>revoked<\/td><td><small>builder key<\/small><\/td><td><\/td>/,
+    )
+    assert.doesNotMatch(card, /ago</)
+    // Without the right to create keys, no form.
+    assert.doesNotMatch(
+      settingsView({ ...base, canCreate: false }),
+      /Create API key<\/summary>/,
     )
   })
 })
