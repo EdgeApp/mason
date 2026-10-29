@@ -1616,7 +1616,7 @@ export class WorkerRuntime {
       signing: prepared.signing,
       keychain: prepared.keychain,
       exportOptions: prepared.exportOptions,
-      exec: this.options.appleExec ?? spawnExec,
+      exec: this.appleExec(assignment),
       log: say,
       entitlements: async (values) =>
         await this.request('apple.entitlements', {
@@ -1636,6 +1636,20 @@ export class WorkerRuntime {
       },
       ...(keep == null ? {} : { keep }),
     }
+  }
+
+  /**
+   * Runs the Apple steps' tools (xcodebuild, xcrun) with the stage's
+   * environment under the call's own, so build phases see the stage's tools
+   * and Xcode as `ctx.sh` does.
+   */
+  private appleExec(assignment: StageAssignment): Exec {
+    const exec = this.options.appleExec ?? spawnExec
+    return async (file, args, options) =>
+      await exec(file, args, {
+        ...options,
+        env: { ...this.stageEnvironment(assignment), ...options.env },
+      })
   }
 
   private distributeContext(
@@ -1667,7 +1681,7 @@ export class WorkerRuntime {
         const controller = this.controllers.get(assignment.key)
         await this.connected(controller?.signal ?? new AbortController().signal)
       },
-      exec: this.options.appleExec ?? spawnExec,
+      exec: this.appleExec(assignment),
       log: say,
       ...(keep == null ? {} : { keep }),
       ...(this.options.appleFetch == null

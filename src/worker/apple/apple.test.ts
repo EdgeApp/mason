@@ -158,9 +158,13 @@ function ipa(bundleId: string, version: string, buildNumber: string): Buffer {
 }
 
 /** Xcode and the signing tools on a fake Mac: an archive with the app and its widget, an exported IPA, and plists as JSON. */
-function fakeXcodebuild(commands: string[][]): Exec {
+function fakeXcodebuild(
+  commands: string[][],
+  envs: Array<NodeJS.ProcessEnv | undefined> = [],
+): Exec {
   return async (file, args, options) => {
     commands.push([file, ...args])
+    envs.push(options.env)
     const name = path.basename(file)
     if (name === 'xcrun' && args[1] === 'archive') {
       const archivePath = args[args.indexOf('-archivePath') + 1]!
@@ -617,6 +621,7 @@ describe('Apple signing on a worker', function () {
     const securities = new Map<string, ReturnType<typeof fakeSecurity>>()
     let sha1 = ''
     const xcodeCalls: string[][] = []
+    const xcodeEnvs: Array<NodeJS.ProcessEnv | undefined> = []
     const key = fakeConnectKey()
     before(async () => {
       apple = new FakeAppleConnect(key, TEAM)
@@ -644,7 +649,7 @@ describe('Apple signing on a worker', function () {
             helper: macs[index]!.helper,
             appleCommand: securities.get(name)!.run,
             home: homes.get(name)!,
-            appleExec: fakeXcodebuild(xcodeCalls),
+            appleExec: fakeXcodebuild(xcodeCalls, xcodeEnvs),
             applePollMs: 10,
           },
         })),
@@ -692,14 +697,14 @@ import type { Setup, Stage } from '@mason/types'
 export function setup(m: Setup) {
   m.apiVersion(1)
   m.workflow('build', { params: { mode: { type: 'string', default: 'signing' } } }, () => {})
-  m.stage('sign', { on: { type: 'mac-xcode' }, apple: { distribution: 'adHoc', app: 'app.example.signed' }, run: sign })
+  m.stage('sign', { on: { type: 'mac-xcode' }, env: { FIXTURE_STAGE: 'stage', FIXTURE_SET_BY: 'stage' }, apple: { distribution: 'adHoc', app: 'app.example.signed' }, run: sign })
 }
 export async function sign(ctx: Stage) {
   const { existsSync, writeFileSync } = await import('node:fs')
   const path = await import('node:path')
   const signing = ctx.apple.signing
   if (ctx.run.params.mode === 'ship') {
-    const built = await ctx.apple.archive({ project: 'App.xcodeproj', scheme: 'App', version: '1.0', buildNumber: '7' })
+    const built = await ctx.apple.archive({ project: 'App.xcodeproj', scheme: 'App', version: '1.0', buildNumber: '7', env: { FIXTURE_SET_BY: 'call' } })
     const testflight = await ctx.apple.testflight({ path: path.relative(ctx.workspace, built.ipa!), groups: ['Internal'], whatToTest: 'Fixture' })
     writeFileSync('App.dmg', 'disk image')
     const notarized = await ctx.apple.notarize({ path: 'App.dmg' })
@@ -851,6 +856,19 @@ export async function sign(ctx: Stage) {
       )
       assert.equal(output.notarized.status, 'accepted')
       assert(xcodeCalls.some((call) => call[1] === 'stapler'))
+      // xcodebuild and xcrun run with the stage's environment under the call's own.
+      const envOf = (step: string): NodeJS.ProcessEnv =>
+        xcodeEnvs[
+          xcodeCalls.findLastIndex((call) => call.slice(1, 3).includes(step))
+        ]!
+      const archived = envOf('archive')
+      assert.equal(archived.FIXTURE_STAGE, 'stage')
+      assert.equal(archived.FIXTURE_SET_BY, 'call')
+      assert.match(archived.DEVELOPER_DIR!, /Xcode\.app\/Contents\/Developer$/)
+      assert.equal(archived.NODE_BINARY, undefined)
+      assert.equal(envOf('-exportArchive').FIXTURE_SET_BY, 'call')
+      assert.equal(envOf('stapler').FIXTURE_STAGE, 'stage')
+      assert.equal(envOf('stapler').FIXTURE_SET_BY, 'stage')
       // The archive's entitlements added push to both bundle IDs on Apple's side.
       assert(
         [...apple.capabilities.values()].every((types) =>

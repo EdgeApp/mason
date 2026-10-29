@@ -651,6 +651,7 @@ export async function use(ctx: Stage) {
   return {
     node: ctx.node.name,
     nodeVersion: await sh('node --version'),
+    nodeBinary: process.env.NODE_BINARY ?? null,
     javaHome: process.env.JAVA_HOME ?? null,
     developerDir: process.env.DEVELOPER_DIR ?? null,
     android: process.env.ANDROID_HOME ?? null,
@@ -699,6 +700,7 @@ export async function use(ctx: Stage) {
       assert(run.seen.has('use:preparing'), [...run.seen].join(' '))
       const output = use(run).output
       assert.equal(output.nodeVersion, 'v24.11.1')
+      assert.match(output.nodeBinary, /tools\/node\/24\.11\.1\/bin\/node$/)
       assert.match(output.javaHome, /tools\/java\/21\.0\.5/)
       const log = c.master.master!.scheduler.logs(run.id)!
       assert.match(
