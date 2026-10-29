@@ -1087,6 +1087,8 @@ describe('Master sign-in, setup, people and permissions', function () {
       'PUT /api/v2/settings/nodeTypes/:type': 'settings.change',
       'DELETE /api/v2/settings/nodeTypes/:type': 'settings.change',
       'POST /api/v2/storage/disk': 'settings.change',
+      'POST /api/v2/storage/locations/:id/use': 'settings.change',
+      'DELETE /api/v2/storage/locations/:id': 'settings.change',
       'GET /api/v2/people': 'people.read',
       'POST /api/v2/people': 'people.change',
       'GET /api/v2/people/:id': 'people.read',

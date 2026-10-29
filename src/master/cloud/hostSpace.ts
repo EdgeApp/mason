@@ -41,6 +41,11 @@ export interface HostSpaceOptions {
   fetch?: typeof fetch
   /** Waits between tries while a new key starts to work; five seconds by default. */
   wait?: (ms: number) => Promise<void>
+  /** The master's storage locations, which a removed host's Space stays in or leaves. */
+  locations?: {
+    hostRemoved(name: string): void
+    dropHostSpace(name: string, bucket: string): void
+  }
 }
 
 /**
@@ -297,7 +302,12 @@ export class HostSpace implements CloudHostSpace {
     options: { deleteSpace: boolean; keyName: string },
   ): Promise<void> {
     if (row.space_bucket == null || row.space_region == null) return
-    if (options.deleteSpace && row.space_owned === 1)
+    // Kept, the Space and its key stay a storage location of their own.
+    if (!options.deleteSpace) {
+      this.options.locations?.hostRemoved(row.name)
+      return
+    }
+    if (row.space_owned === 1)
       await this.destroyBucket(provider, {
         bucket: row.space_bucket,
         region: row.space_region,
@@ -305,12 +315,13 @@ export class HostSpace implements CloudHostSpace {
       })
     if (row.space_key_owned === 1 && row.space_key_id != null)
       await provider.deleteSpacesKey?.(row.space_key_id)
-    // Storage through the key just deleted, or in the Space just deleted,
-    // would leave the next host storing builds nowhere: back to its disk.
+    this.options.locations?.dropHostSpace(row.name, row.space_bucket)
+    // Storage in the Space just deleted, or through its key, would leave the
+    // next host storing builds nowhere: back to its disk.
     const storage = this.options.storage.get()
     if (
       storage?.bucket === row.space_bucket &&
-      ((options.deleteSpace && row.space_owned === 1) ||
+      (row.space_owned === 1 ||
         (row.space_key_owned === 1 && storage.accessKeyId === row.space_key_id))
     )
       await this.options.storage.clear()

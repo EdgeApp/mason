@@ -82,7 +82,9 @@ import {
   hostProjection,
   signInArea,
   storageArea,
+  type StorageSetting,
 } from './hostSettings.js'
+import { StorageLocations } from './storageLocations.js'
 import { Artifacts } from './artifacts.js'
 import type { Graph } from '../pipeline/graph.js'
 
@@ -239,6 +241,7 @@ export class Master {
   readonly masterId: string
   readonly appleSetup: AppleSetup
   readonly artifacts: Artifacts
+  readonly storageLocations: StorageLocations
   readonly backups: Backups
   private expiry: NodeJS.Timeout | undefined
   private backupTimer: NodeJS.Timeout | undefined
@@ -462,7 +465,14 @@ export class Master {
       'cloud',
       cloudArea(() => this.cloudAccounts.all()),
     )
-    this.settings.register('storage', storageArea)
+    this.storageLocations = new StorageLocations(this.database, this.settings)
+    // Every Space new builds go to becomes a storage location that stays.
+    this.settings.register('storage', {
+      ...storageArea,
+      changed: (value): void => {
+        this.storageLocations.remember(value as unknown as StorageSetting)
+      },
+    })
     this.settings.register('signIn', signInArea)
     this.backups = new Backups({
       master: this.database,
@@ -645,6 +655,7 @@ export class Master {
       dns: new HostDns(this.database),
       space: (this.hostSpace = new HostSpace({
         master: this.database,
+        locations: this.storageLocations,
         storage: {
           get: (): SpaceStorage | undefined => {
             const value = this.settings.value('storage') as

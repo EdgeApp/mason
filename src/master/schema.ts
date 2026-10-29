@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 16
+export const MASTER_SCHEMA = 17
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -443,7 +443,112 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     ALTER TABLE cloud_hosts_16 RENAME TO cloud_hosts;
     CREATE UNIQUE INDEX cloud_hosts_name ON cloud_hosts(name) WHERE state<>'removed';`)
   },
+  // 17: every Space builds are stored in, beside the host's disk; the storage
+  // setting names the one new builds go to.
+  (db): void => {
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS storage_locations (
+      id TEXT PRIMARY KEY, bucket TEXT NOT NULL, region TEXT NOT NULL, endpoint TEXT NOT NULL,
+      access_key_id TEXT NOT NULL, secret TEXT NOT NULL,
+      origin TEXT NOT NULL CHECK(origin IN ('made','added','host')),
+      bucket_owned INTEGER NOT NULL DEFAULT 0 CHECK(bucket_owned IN (0,1)),
+      key_owned INTEGER NOT NULL DEFAULT 0 CHECK(key_owned IN (0,1)),
+      account TEXT, key_id TEXT, host TEXT,
+      added_at INTEGER NOT NULL, added_by TEXT NOT NULL,
+      UNIQUE(bucket, endpoint)
+    ) STRICT;`)
+    importStorageLocations(db)
+  },
 ]
+
+/**
+ * The Spaces a master knew before storage locations: the storage setting's
+ * and each cloud host's. Run once, by migration 17.
+ */
+function importStorageLocations(db: DatabaseSync): void {
+  const add = db.prepare(
+    `INSERT OR IGNORE INTO storage_locations(id,bucket,region,endpoint,access_key_id,secret,origin,bucket_owned,key_owned,account,key_id,host,added_at,added_by)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'migration')`,
+  )
+  const now = Date.now()
+  const hosts = db
+    .prepare(
+      "SELECT name,account,space_bucket,space_region,space_key_id,space_secret,space_owned,space_key_owned FROM cloud_hosts WHERE role='host' AND state<>'removed' AND space_bucket IS NOT NULL AND space_key_id IS NOT NULL AND space_secret IS NOT NULL",
+    )
+    .all() as Array<{
+    name: string
+    account: string
+    space_bucket: string
+    space_region: string
+    space_key_id: string
+    space_secret: string
+    space_owned: number
+    space_key_owned: number
+  }>
+  const row = db
+    .prepare("SELECT value FROM settings WHERE area='storage'")
+    .get() as { value: string } | undefined
+  const storage =
+    row == null
+      ? undefined
+      : (JSON.parse(row.value) as {
+          driver?: string
+          s3?: {
+            endpoint: string
+            bucket: string
+            region: string
+            accessKeyId: string
+            secretAccessKey: string
+          }
+          managed?: { account: string; keyId: string }
+        })
+  if (storage?.driver === 's3' && storage.s3 != null) {
+    const s3 = storage.s3
+    const host = hosts.find((entry) => entry.space_bucket === s3.bucket)
+    add.run(
+      storageLocationId(s3.bucket, s3.endpoint),
+      s3.bucket,
+      s3.region,
+      s3.endpoint,
+      s3.accessKeyId,
+      s3.secretAccessKey,
+      storage.managed != null ? 'made' : host != null ? 'host' : 'added',
+      storage.managed != null ? 1 : (host?.space_owned ?? 0),
+      storage.managed != null ? 1 : (host?.space_key_owned ?? 0),
+      storage.managed?.account ?? host?.account ?? null,
+      storage.managed?.keyId ?? host?.space_key_id ?? null,
+      host?.name ?? null,
+      now,
+    )
+  }
+  for (const host of hosts) {
+    const endpoint = `https://${host.space_region}.digitaloceanspaces.com`
+    add.run(
+      storageLocationId(host.space_bucket, endpoint),
+      host.space_bucket,
+      host.space_region,
+      endpoint,
+      host.space_key_id,
+      host.space_secret,
+      'host',
+      host.space_owned,
+      host.space_key_owned,
+      host.account,
+      host.space_key_id,
+      host.name,
+      now,
+    )
+  }
+}
+
+/** A storage location's id: its bucket and endpoint's host, `space-mason-builds-sfo3.digitaloceanspaces.com`. */
+export function storageLocationId(bucket: string, endpoint: string): string {
+  let host = endpoint
+  try {
+    host = new URL(endpoint).host
+  } catch {}
+  return `space-${bucket}-${host}`
+}
 
 export function migrateMaster(db: DatabaseSync): void {
   // The distribution tables (accounts, apps, builds, devices, keys) come first.

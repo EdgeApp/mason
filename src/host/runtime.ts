@@ -49,6 +49,19 @@ const sha256File = async (file: string): Promise<string> => {
  * The host role: its cache of the master's data, kept current over the
  * master's link, and what it serves from it while the master is away.
  */
+/** A Space as the master names it: its bucket and S3 endpoint. */
+function asStore(params: unknown): { bucket: string; endpoint: string } {
+  const { bucket, endpoint } = (params ?? {}) as Record<string, unknown>
+  if (
+    typeof bucket !== 'string' ||
+    !/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(bucket) ||
+    typeof endpoint !== 'string' ||
+    !/^https?:\/\/[^\s]+$/.test(endpoint)
+  )
+    throw new Error('A store is a bucket and an endpoint')
+  return { bucket, endpoint }
+}
+
 export class HostRuntime {
   readonly cache: HostCache
   readonly accounts: Accounts
@@ -240,6 +253,15 @@ export class HostRuntime {
   methods(): MethodTable {
     return {
       requests: {
+        /** Files and bytes per storage location, for the master's Storage page. */
+        'host.storeUsage': (): unknown => this.objects.usage(),
+        /** The files written to a Space, before the master removes it. */
+        'host.storeKeys': (params): string[] =>
+          this.objects.keys(asStore(params)),
+        /** The master removed a Space: its files' records go; the files stay where they are. */
+        'host.forgetStore': (params): { removed: number } => ({
+          removed: this.objects.forget(asStore(params)),
+        }),
         /** For `mason cluster check`: the cache revision applied, and what the outbox holds. */
         'host.status': (): HostStatus => ({
           revision: this.cache.revision(),

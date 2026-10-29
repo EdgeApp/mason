@@ -952,6 +952,102 @@ describe('Artifacts and publication', function () {
     await settings.set(admin, 'storage', { driver: 'disk' })
   })
 
+  it('U2.1/U2.2 lists every storage location with its files, keeps a Space after switching to disk, and forgets an added Space with its builds', async () => {
+    const master = c.master.master!
+    const endpoint = s3.endpoint.replace(/^http:/, 'https:')
+    const listed = await c.api('GET', '/api/v2/storage')
+    assert.equal(listed.status, 200, listed.text)
+    const locations = listed.json.locations as Json[]
+    assert.deepEqual(
+      locations.map((location: Json) => [
+        location.bucket ?? location.id,
+        location.active,
+        location.origin ?? null,
+      ]),
+      [
+        ['disk', true, null],
+        ['mason-artifacts', false, 'added'],
+        ['mason-artifacts-2', false, 'added'],
+      ],
+    )
+    assert(!listed.text.includes('fake-secret-value-1234'))
+    const first = locations[1]
+    assert(first.usage.files >= 1, JSON.stringify(first))
+    assert(locations[0].usage.files >= 1, 'builds stored on the disk')
+    // Using a Space and then the disk again leaves the Space a location.
+    const used = await c.api(
+      'POST',
+      `/api/v2/storage/locations/${encodeURIComponent(first.id)}/use`,
+      {},
+    )
+    assert.equal(used.status, 200, used.text)
+    assert.equal(master.settings.value('storage')!.driver, 's3')
+    const active = await c.api(
+      'DELETE',
+      `/api/v2/storage/locations/${encodeURIComponent(first.id)}`,
+      { confirm: 'mason-artifacts' },
+    )
+    assert.equal(active.status, 400)
+    assert.match(active.json.error, /New builds go to this Space/)
+    assert.equal((await c.api('POST', '/api/v2/storage/disk', {})).status, 200)
+    assert(
+      master.storageLocations
+        .list()
+        .some((location) => location.bucket === 'mason-artifacts'),
+    )
+    assert.match(
+      (
+        await c.api(
+          'DELETE',
+          `/api/v2/storage/locations/${encodeURIComponent(first.id)}`,
+          { confirm: 'wrong' },
+        )
+      ).json.error,
+      /Type the Space’s name, mason-artifacts/,
+    )
+    assert.match(
+      (await c.api('DELETE', '/api/v2/storage/locations/disk', {})).json.error,
+      /always a storage location/,
+    )
+    assert.equal(
+      (await c.api('POST', '/api/v2/storage/locations/nowhere/use', {})).status,
+      400,
+    )
+    // Forgetting the added Space: its run artifacts leave Mason, the host
+    // forgets the store, and the files stay in the bucket.
+    const store = { bucket: 'mason-artifacts', endpoint }
+    const keys = host.host!.objects.keys(store)
+    assert(keys.length > 0)
+    const runId = /^runs\/([^/]+)\//.exec(
+      keys.find((key) => key.startsWith('runs/'))!,
+    )![1]!
+    const bucketKeys = s3.objects.size
+    const removed = await c.api(
+      'DELETE',
+      `/api/v2/storage/locations/${encodeURIComponent(first.id)}`,
+      { confirm: 'mason-artifacts' },
+    )
+    assert.equal(removed.status, 200, removed.text)
+    assert.deepEqual(removed.json, { files: keys.length, bucketDeleted: false })
+    assert.equal(
+      (
+        db()
+          .prepare('SELECT count(*) AS n FROM run_artifacts WHERE job_id=?')
+          .get(runId) as { n: number }
+      ).n,
+      0,
+    )
+    assert.deepEqual(host.host!.objects.keys(store), [])
+    assert.equal(s3.objects.size, bucketKeys, 'an added Space keeps its files')
+    assert(
+      !master.storageLocations
+        .list()
+        .some((location) => location.bucket === 'mason-artifacts'),
+    )
+    const usage = host.host!.objects.usage()
+    assert(!usage.some((entry) => entry.bucket === 'mason-artifacts'))
+  })
+
   it('U12.15 expires builds and saved artifacts: the host deletes the files and confirms once, also after being offline', async () => {
     const master = c.master.master!
     const build = db()
