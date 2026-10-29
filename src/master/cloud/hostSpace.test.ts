@@ -334,7 +334,7 @@ describe('Host storage on DigitalOcean Spaces', function () {
     assert.equal(storage().s3.bucket, 'mason-e2e')
   })
 
-  it('U6.7 remove keeps the Space by default and deletes the Mason key; asked, it empties and deletes a Space it made', async () => {
+  it('U6.7 remove keeps the Space and its key as a storage location by default; asked, it empties and deletes a Space it made', async () => {
     const key = row('e2e').space_key_id!
     spaces.buckets.get('mason-e2e')!.set('builds/one.ipa', Buffer.from('one'))
     assert.equal(
@@ -343,9 +343,14 @@ describe('Host storage on DigitalOcean Spaces', function () {
       200,
     )
     assert(spaces.buckets.has('mason-e2e'), 'the Space and its builds stay')
-    assert(!spaces.keys.has(key), 'the Mason key goes')
-    // Storage was through that key: the next host stores on its disk.
-    assert.equal(storage().driver, 'disk')
+    assert(spaces.keys.has(key), 'the key stays, so the Space stays usable')
+    // New builds still go there, and the Space is a storage location of its own.
+    assert.equal(storage().s3.bucket, 'mason-e2e')
+    const kept = c.master
+      .master!.storageLocations.list()
+      .find((location) => location.bucket === 'mason-e2e')!
+    assert.equal(kept.host, undefined)
+    assert.equal(kept.bucketOwned, true)
     // A host made with the same Space adopts it; deleted with the host, Mason
     // empties it only because this host made it.
     assert.equal(
@@ -371,6 +376,11 @@ describe('Host storage on DigitalOcean Spaces', function () {
     assert(!spaces.buckets.has('mason-fresh'))
     assert(spaces.buckets.has('mason-e2e'))
     assert.equal(storage().driver, 'disk')
+    const buckets = c.master
+      .master!.storageLocations.list()
+      .map((location) => location.bucket)
+    assert(buckets.includes('mason-e2e'), 'the kept Space stays a location')
+    assert(!buckets.includes('mason-fresh'), 'the deleted Space is gone')
     assert.deepEqual(
       [...spaces.keys.values()].filter((entry) =>
         entry.name.startsWith('mason-host-'),
@@ -739,5 +749,74 @@ describe('Host storage on DigitalOcean Spaces', function () {
       cloud.createSpacesKey = create
       spaces.newKeyRefusals = 0
     }
+  })
+
+  it('U2.2/U2.3 a Space made without using it is a location; deleting it empties and deletes the bucket and its key; nothing goes while the host cannot answer', async () => {
+    const master = c.master.master!
+    const before = storage()
+    const made = await c.api('POST', '/api/v2/storage/space/new', {
+      account: 'do',
+      bucket: 'mason-spare',
+      region: 'sfo3',
+      use: false,
+    })
+    assert.equal(made.status, 200, made.text)
+    assert.deepEqual(storage(), before, 'new builds still go where they did')
+    const spare = master.storageLocations
+      .list()
+      .find((location) => location.bucket === 'mason-spare')!
+    assert.equal(spare.origin, 'made')
+    assert.equal(spare.bucketOwned, true)
+    assert.equal(spare.active, false)
+    const keyId = (
+      master.database.db
+        .prepare('SELECT key_id FROM storage_locations WHERE id=?')
+        .get(spare.id) as { key_id: string }
+    ).key_id
+    assert(spaces.keys.has(keyId))
+    spaces.buckets.get('mason-spare')!.set('builds/x.ipa', Buffer.from('x'))
+    // A host that cannot answer: nothing is removed.
+    const deps = {
+      hostKeys: async (): Promise<string[]> => {
+        throw new Error('the host is not connected')
+      },
+      hostForget: async (): Promise<void> => undefined,
+      forgetFiles: (): void => undefined,
+      provider: (): FakeCloud => cloud,
+      destroyBucket: async (): Promise<void> => undefined,
+      masterId: master.masterId,
+    }
+    await assert.rejects(
+      master.storageLocations.remove(
+        localOperator,
+        spare.id,
+        'mason-spare',
+        deps,
+      ),
+      /Nothing was removed: the host did not answer \(the host is not connected\)/,
+    )
+    await assert.rejects(
+      master.storageLocations.remove(localOperator, spare.id, 'mason-spare', {
+        ...deps,
+        hostKeys: async () => undefined,
+        provider: () => undefined,
+      }),
+      /Nothing was removed: do has no API key/,
+    )
+    assert(spaces.buckets.has('mason-spare'))
+    const removed = await c.api(
+      'DELETE',
+      `/api/v2/storage/locations/${encodeURIComponent(spare.id)}`,
+      { confirm: 'mason-spare' },
+    )
+    assert.equal(removed.status, 200, removed.text)
+    assert.deepEqual(removed.json, { files: 0, bucketDeleted: true })
+    assert(!spaces.buckets.has('mason-spare'))
+    assert(!spaces.keys.has(keyId))
+    assert(
+      !master.storageLocations
+        .list()
+        .some((location) => location.bucket === 'mason-spare'),
+    )
   })
 })

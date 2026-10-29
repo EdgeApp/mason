@@ -5,13 +5,17 @@ import { spacesRegions } from './cloud/regions.js'
 import { parseSpaceUrl, SpaceClient, SpaceError } from './cloud/spaces.js'
 import { allow } from './permissions.js'
 import type { Master } from './runtime.js'
+import type { StorageLocation } from './storageLocations.js'
 
 /**
- * `/api/v2/storage`: where the host keeps builds. `POST …/space` takes a
- * DigitalOcean Space's URL, access key and secret, checks that the key can
- * write, read and delete in it, and only then saves it as the `storage`
- * area; `POST …/disk` returns to the host's own disk. New files go to the
- * new storage; earlier ones are still served from where they were written.
+ * `/api/v2/storage`: where the host keeps builds. The host's disk and every
+ * Space Mason knows are storage locations; one is where new builds go, and
+ * each keeps serving the builds already in it. `POST …/space` adds a Space by
+ * URL, access key and secret after checking the key can write, read and
+ * delete in it; `POST …/space/new` makes one; both use it for new builds
+ * unless `use` is false. `POST …/locations/:id/use` switches where new builds
+ * go (`POST …/disk` for the disk), and `DELETE …/locations/:id` removes a
+ * Space and its builds.
  */
 export function storageApi(
   master: Master,
@@ -29,7 +33,76 @@ export function storageApi(
   )
   router.get(
     '/api/v2/storage',
-    json((_req, res) => master.settings.get(actorOf(res), 'storage')),
+    json(async (_req, res) => {
+      const storage = master.settings.get(actorOf(res), 'storage')
+      return { ...storage, locations: await locationsWithUsage() }
+    }),
+  )
+  /** The locations with the files and bytes the host holds in each, when it answers. */
+  const locationsWithUsage = async (): Promise<StorageLocation[]> => {
+    const locations = master.storageLocations.list()
+    const usage = await master.hosts
+      .askHost<
+        Array<{
+          bucket?: string
+          endpoint?: string
+          files: number
+          bytes: number
+        }>
+      >('host.storeUsage', {}, 5_000)
+      .catch(() => undefined)
+    if (usage == null) return locations
+    return locations.map((location) => {
+      const entries = usage.filter((entry) =>
+        location.kind === 'disk'
+          ? entry.bucket == null
+          : entry.bucket === location.bucket &&
+            entry.endpoint === location.endpoint,
+      )
+      return {
+        ...location,
+        usage: {
+          files: entries.reduce((sum, entry) => sum + entry.files, 0),
+          bytes: entries.reduce((sum, entry) => sum + entry.bytes, 0),
+        },
+      }
+    })
+  }
+  router.post(
+    '/api/v2/storage/locations/:id/use',
+    json(async (req, res) => {
+      const actor = actorOf(res)
+      allow(actor, 'settings.change')
+      await master.storageLocations.use(actor, String(req.params.id))
+      return master.settings.get(actor, 'storage')
+    }),
+  )
+  router.delete(
+    '/api/v2/storage/locations/:id',
+    json(async (req, res) => {
+      const actor = actorOf(res)
+      allow(actor, 'settings.change')
+      return await master.storageLocations.remove(
+        actor,
+        String(req.params.id),
+        (req.body as { confirm?: unknown } | undefined)?.confirm,
+        {
+          hostKeys: async (store) =>
+            await master.hosts.askHost<string[]>('host.storeKeys', store),
+          hostForget: async (store) => {
+            await master.hosts.askHost('host.forgetStore', store)
+          },
+          forgetFiles: (keys) => {
+            master.artifacts.forgetFiles(keys)
+          },
+          provider: (account) => master.cloudHosts.provider(account),
+          destroyBucket: async (provider, options) => {
+            await master.hostSpace.destroyBucket(provider, options)
+          },
+          masterId: master.masterId,
+        },
+      )
+    }),
   )
   router.post(
     '/api/v2/storage/space',
@@ -72,8 +145,8 @@ export function storageApi(
           `Nothing was saved: ${error instanceof SpaceError ? error.message : (error as Error).message}`,
         )
       }
-      return await master.settings.set(actor, 'storage', {
-        driver: 's3',
+      const added = {
+        driver: 's3' as const,
         s3: {
           endpoint: location.endpoint,
           bucket: location.bucket,
@@ -81,7 +154,12 @@ export function storageApi(
           accessKeyId,
           secretAccessKey: secret.trim(),
         },
-      })
+      }
+      if (body.use === false || body.use === 'false') {
+        master.storageLocations.remember(added, actor.label)
+        return master.settings.get(actor, 'storage')
+      }
+      return await master.settings.set(actor, 'storage', added)
     }),
   )
   // A new Space from one of the master's DigitalOcean accounts, with a key
@@ -151,8 +229,8 @@ export function storageApi(
           throw new Error(`Nothing was saved: ${(error as Error).message}`)
         })
       try {
-        return await master.settings.set(actor, 'storage', {
-          driver: 's3',
+        const value = {
+          driver: 's3' as const,
           s3: {
             endpoint: made.endpoint,
             bucket: made.bucket,
@@ -161,7 +239,12 @@ export function storageApi(
             secretAccessKey: made.secret,
           },
           managed: { account, keyId: made.keyId },
-        })
+        }
+        if (body.use === false || body.use === 'false') {
+          master.storageLocations.remember(value, actor.label)
+          return master.settings.get(actor, 'storage')
+        }
+        return await master.settings.set(actor, 'storage', value)
       } catch (error) {
         // Nothing saved means no new key either.
         if (made.keyMade)

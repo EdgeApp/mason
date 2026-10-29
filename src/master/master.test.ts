@@ -177,6 +177,65 @@ describe('Master database, setup and import', function () {
     newer.close()
   })
 
+  it('U1.1 schema 17 makes every known Space a storage location: the storage setting’s, and each cloud host’s', () => {
+    const db = new DatabaseSync(path.join(root, 'locations.sqlite'))
+    migrateMaster(db)
+    db.exec(`DROP TABLE storage_locations;
+    UPDATE meta SET value='16' WHERE key='master_schema';
+    INSERT INTO cloud_hosts(name,account,provider,region,size,image,state,created_at,updated_at,space_bucket,space_region,space_key_id,space_secret,space_owned,space_key_owned,role)
+      VALUES('h','do','digitalocean','sfo3','s','i','ready',1,2,'host-space','sfo3','HOSTKEY12345','host-secret-1',1,1,'host'),
+            ('gone','do','digitalocean','sfo3','s','i','removed',1,2,'old-space','sfo3','OLDKEY123456','old-secret-12',1,1,'host');`)
+    db.prepare(
+      "INSERT INTO settings(area,value,updated_at,updated_by) VALUES('storage',?,1,'paul')",
+    ).run(
+      JSON.stringify({
+        driver: 's3',
+        s3: {
+          endpoint: 'https://nyc3.digitaloceanspaces.com',
+          bucket: 'made-space',
+          region: 'nyc3',
+          accessKeyId: 'MADEKEY12345',
+          secretAccessKey: 'made-secret-1',
+        },
+        managed: { account: 'do', keyId: 'MADEKEY12345' },
+      }),
+    )
+    migrateMaster(db)
+    migrateMaster(db)
+    assert.deepEqual(
+      (
+        db
+          .prepare(
+            'SELECT id,bucket,origin,bucket_owned,key_owned,account,key_id,host FROM storage_locations ORDER BY bucket',
+          )
+          .all() as object[]
+      ).map((row) => ({ ...row })),
+      [
+        {
+          id: 'space-host-space-sfo3.digitaloceanspaces.com',
+          bucket: 'host-space',
+          origin: 'host',
+          bucket_owned: 1,
+          key_owned: 1,
+          account: 'do',
+          key_id: 'HOSTKEY12345',
+          host: 'h',
+        },
+        {
+          id: 'space-made-space-nyc3.digitaloceanspaces.com',
+          bucket: 'made-space',
+          origin: 'made',
+          bucket_owned: 1,
+          key_owned: 1,
+          account: 'do',
+          key_id: 'MADEKEY12345',
+          host: null,
+        },
+      ],
+    )
+    db.close()
+  })
+
   it('U2.1 schema 15 keeps every cloud host and lets one be updating', () => {
     const db = new DatabaseSync(path.join(root, 'hosts.sqlite'))
     migrateMaster(db)
