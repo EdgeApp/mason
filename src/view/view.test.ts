@@ -1069,4 +1069,157 @@ describe('Settings page', () => {
       /Create API key<\/summary>/,
     )
   })
+
+  it('U6.1 GitHub: one form per way in, each with its kind and only its fields; secrets never shown', () => {
+    const html = settingsView({
+      ...base,
+      github: { kind: 'ssh', publicKey: 'ssh-ed25519 AAAA mason-master' },
+    })
+    const card = html.slice(
+      html.indexOf('id="github"'),
+      html.indexOf('id="host"'),
+    )
+    assert.match(card, /Now: an SSH deploy key\./)
+    assert.match(
+      card,
+      /<details class="action" id="github-token-form"><summary class="button">.*Personal access token/,
+    )
+    assert.match(
+      card,
+      /data-fields="kind,token"[^>]*>.*<input type="hidden" name="kind" value="token">.*name="token" type="password" data-kind="secret"[^>]* required/,
+    )
+    assert.match(card, /data-fields="kind,appId,installationId,privateKey"/)
+    assert.match(
+      card,
+      /name="appId" value="" required type="number" min="1" data-kind="number"/,
+    )
+    assert.match(card, /<details class="action" id="github-ssh-form" open>/)
+    assert.match(card, /data-copy="ssh-ed25519 AAAA mason-master"/)
+    assert.match(
+      card,
+      /data-fields="kind,privateKey"[^>]*><input type="hidden" name="kind" value="ssh"><input type="hidden" name="privateKey" data-kind="secret" value="">/,
+    )
+    assert.match(
+      card,
+      /Make a new deploy key<\/summary>.*data-fields="kind"[^>]*><input type="hidden" name="kind" value="ssh">/,
+    )
+    // A stored token is never in the page; its field keeps it when left empty.
+    const token = settingsView({ ...base, github: { kind: 'token' } })
+    assert.match(
+      token,
+      /name="token" type="password" data-kind="secret" autocomplete="off" placeholder="Leave empty to keep the stored token"/,
+    )
+  })
+
+  it('U6.3/U6.4/U6.5 sign-in methods, host, storage and budget as cards; no JSON or build numbers; errors inside the card', () => {
+    const html = settingsView({
+      ...base,
+      areas: [
+        { name: 'buildNumbers', value: { countBase: 0 } },
+        { name: 'cloudAccounts', value: {} },
+        { name: 'apple', value: {} },
+        { name: 'github', value: {} },
+      ],
+      host: { origin: 'https://builds.example.test', offlineGraceHours: 72 },
+      storage: { driver: 'disk' },
+      storageAccounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
+      ],
+      monthlyBudget: 120,
+      signIn: [
+        {
+          id: 'google',
+          type: 'oidc',
+          name: 'Google',
+          issuer: 'https://accounts.google.com',
+          clientId: 'gid',
+          enabled: true,
+          signingAlgorithm: 'RS256',
+        },
+        {
+          id: 'gh',
+          type: 'oauth2',
+          name: 'GitHub',
+          issuer: 'https://github.com',
+          clientId: 'hid',
+          enabled: false,
+          authorizationEndpoint: 'https://github.com/a',
+          tokenEndpoint: 'https://github.com/t',
+          userinfoEndpoint: 'https://api.github.com/user',
+          scopes: ['read:user'],
+          claims: { subject: 'id' },
+        },
+      ],
+    })
+    assert.doesNotMatch(
+      html,
+      /<textarea id="setting-|data-json|buildNumbers|cloudAccounts/,
+    )
+    const host = html.slice(html.indexOf('id="host"'))
+    assert.match(
+      host,
+      /data-path="\/api\/v2\/settings\/host" data-method="PUT" data-fields="origin,workerOrigin,offlineGraceHours"/,
+    )
+    assert.match(host, /name="workerOrigin" value="" data-optional/)
+    assert.match(
+      host,
+      /name="offlineGraceHours" value="72" required type="number" min="1" max="720" data-kind="number"/,
+    )
+    assert.match(
+      host,
+      /How long the host keeps serving installs while it cannot reach the master\./,
+    )
+    assert.match(
+      html,
+      /<section class="panel" id="storage"><h2>.*Storage<\/h2>.*Make a new Space/,
+    )
+    const signIn = html.slice(
+      html.indexOf('id="signIn"'),
+      html.indexOf('id="cloud"'),
+    )
+    assert.match(
+      signIn,
+      /data-path="\/api\/v2\/settings\/signIn\/methods\/google" data-method="PUT" data-fields="type,enabled,name,issuer,clientId,clientSecret,authentication,signingAlgorithm"/,
+    )
+    assert.match(
+      signIn,
+      /data-path="\/api\/v2\/settings\/signIn\/methods\/gh" data-method="PUT" data-fields="type,enabled,name,issuer,clientId,clientSecret,authentication,authorizationEndpoint,tokenEndpoint,userinfoEndpoint,scopes,claims.subject,claims.name,claims.email,claims.emailVerified"/,
+    )
+    assert.match(signIn, /name="scopes" value="read:user" data-kind="list"/)
+    assert.match(
+      signIn,
+      /id="signin-edit-gh-enabled" name="enabled" type="checkbox" data-kind="checkbox">/,
+    )
+    assert.match(
+      signIn,
+      /data-path="\/api\/v2\/settings\/signIn\/methods\/google" data-method="DELETE"/,
+    )
+    assert.match(
+      signIn,
+      /<summary class="button">.*Add an OpenID Connect method<\/summary>.*data-path="\/api\/v2\/settings\/signIn\/methods\/\{id\}" data-method="PUT" data-fields="id,create,type,/,
+    )
+    assert.match(signIn, /Add an OAuth 2 method/)
+    assert.doesNotMatch(signIn, /name="clientSecret"[^>]*value="/)
+    const cloud = html.slice(html.indexOf('id="cloud"'))
+    assert.match(
+      cloud,
+      /data-path="\/api\/v2\/settings\/cloud\/budget" data-method="PUT" data-fields="monthlyBudget"/,
+    )
+    assert.match(cloud, /name="monthlyBudget" value="120"/)
+    assert.match(cloud, /href="\/nodes".*href="\/cloud"/)
+    // Each card's form has the status line a refused save is shown in, before its Save.
+    for (const id of ['github', 'host', 'signIn', 'cloud']) {
+      const section = html.slice(html.indexOf(`id="${id}"`))
+      assert.match(
+        section,
+        /<button>.*(Save|Add)<\/button><p class="notice" role="status" data-field="status" hidden><\/p><\/form>/,
+        id,
+      )
+    }
+    // Without the right to change settings, no cards.
+    assert.doesNotMatch(
+      settingsView({ ...base, canChange: false }),
+      /id="github"/,
+    )
+  })
 })

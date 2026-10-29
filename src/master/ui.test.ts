@@ -617,8 +617,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       /data-path="\/api\/v2\/settings\/host" data-method="PUT"/,
     )
     assert.match(settings.text, /data-path="\/api\/v2\/apple\/session"/)
-    // Secrets stay write-only: the GitHub token shows as set.
-    assert.match(settings.text, /&quot;token&quot;: \{\s*&quot;set&quot;: true/)
+    // Secrets stay write-only: the stored GitHub token is an empty field that keeps it.
+    assert.match(
+      settings.text,
+      /name="token" type="password" data-kind="secret" autocomplete="off" placeholder="Leave empty to keep the stored token"/,
+    )
     assert(!settings.text.includes('ghp_fixture'))
     assert.match(settings.text, /policy|No keys|admin/)
     // The host has no settings, nodes or Apple pages.

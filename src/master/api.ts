@@ -20,6 +20,7 @@ import { isRunAction, isRunRead, type Forwarder } from './forward.js'
 import type { NodeRegistry } from './nodes.js'
 import { allow } from './permissions.js'
 import { asRole, Forbidden, type Actor } from './roles.js'
+import { methodsOf } from './hostSettings.js'
 import { Settings, UnknownArea } from './settings.js'
 
 export class NotFound extends Error {}
@@ -190,6 +191,72 @@ export function masterApi(context: ApiContext): Router {
     json((req, res) =>
       context.settings.set(actorOf(res), String(req.params.area), req.body),
     ),
+  )
+  // Merge routes: a Settings card changes its part of an area, and the rest
+  // is kept as stored, read at the moment of the save.
+  const keepSecrets = (
+    methods: Array<Record<string, unknown>>,
+  ): Array<Record<string, unknown>> =>
+    methods.map((method) => ({ ...method, clientSecret: { keep: true } }))
+  router.put(
+    '/api/v2/settings/signIn/methods/:id',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      const id = String(req.params.id)
+      const stored = methodsOf(context.settings.value('signIn'))
+      const others = keepSecrets(
+        stored.filter((method) => method.id !== id) as unknown as Array<
+          Record<string, unknown>
+        >,
+      )
+      const at = stored.findIndex((entry) => entry.id === id)
+      const body = { ...(req.body as Record<string, unknown>) }
+      // The Add forms send create, so an existing method is not replaced by mistake.
+      if (body.create != null && at >= 0)
+        throw new Error(`A sign-in method named ${id} already exists`)
+      delete body.create
+      // Fields the card does not show (account switching) stay as stored, for the same type.
+      const kept: Record<string, unknown> =
+        at < 0 || stored[at]!.type !== body.type
+          ? {}
+          : { ...(stored[at] as unknown as Record<string, unknown>) }
+      delete kept.clientSecret
+      const method = { ...kept, ...body, id }
+      const methods = [...others]
+      methods.splice(at < 0 ? methods.length : at, 0, method)
+      return await context.settings.set(actorOf(res), 'signIn', { methods })
+    }),
+  )
+  router.delete(
+    '/api/v2/settings/signIn/methods/:id',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      const id = String(req.params.id)
+      const stored = methodsOf(context.settings.value('signIn'))
+      if (!stored.some((method) => method.id === id))
+        throw new NotFound(`No sign-in method ${id}`)
+      return await context.settings.set(actorOf(res), 'signIn', {
+        methods: keepSecrets(
+          stored.filter((method) => method.id !== id) as unknown as Array<
+            Record<string, unknown>
+          >,
+        ),
+      })
+    }),
+  )
+  router.put(
+    '/api/v2/settings/cloud/budget',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      const budget = (req.body as { monthlyBudget?: unknown } | undefined)
+        ?.monthlyBudget
+      if (typeof budget !== 'number' || !Number.isFinite(budget))
+        throw new Error('monthlyBudget is a number of dollars')
+      return await context.settings.set(actorOf(res), 'cloud', {
+        ...(context.settings.value('cloud') ?? {}),
+        monthlyBudget: budget,
+      })
+    }),
   )
 
   router.get(

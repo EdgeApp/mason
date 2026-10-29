@@ -134,8 +134,10 @@ export class GitHub {
       validate: async (input, previous): Promise<SettingValue> => {
         const value = (input ?? {}) as Record<string, unknown>
         if (value.kind === 'token') {
-          const token = keepSecret(value.token, previous?.token, (raw) =>
-            text(raw, 'token'),
+          const token = keepSecret(
+            value.token,
+            previous?.kind === 'token' ? previous.token : undefined,
+            (raw) => text(raw, 'token'),
           )
           if (token == null) throw new Error('token is required')
           await this.checkToken(token)
@@ -151,9 +153,10 @@ export class GitHub {
             installationId < 1
           )
             throw new Error('appId and installationId are required')
+          // Only an app's own stored key is kept: an SSH deploy key is not one.
           const privateKey = keepSecret(
             value.privateKey,
-            previous?.privateKey,
+            previous?.kind === 'app' ? previous.privateKey : undefined,
             (raw) => text(raw, 'privateKey'),
           )
           if (privateKey == null) throw new Error('privateKey is required')

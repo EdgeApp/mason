@@ -115,6 +115,9 @@ function asPool(value: unknown, accounts: CloudAccount[]): PoolSetting {
  * The `cloud` settings area: the monthly budget and the pools, each naming
  * one of `accounts`. Provider keys live in cloud accounts, not here.
  */
+/** The cloud pools' monthly budget in dollars when none is set. */
+export const DEFAULT_MONTHLY_BUDGET = 200
+
 export function cloudArea(accounts: () => CloudAccount[]): SettingsArea {
   return {
     validate: (input): SettingValue => {
@@ -123,7 +126,7 @@ export function cloudArea(accounts: () => CloudAccount[]): SettingsArea {
         throw new Error(
           'Provider keys are cloud accounts now: add the token on the Cloud page and name its account in each pool',
         )
-      const budget = value.monthlyBudget ?? 200
+      const budget = value.monthlyBudget ?? DEFAULT_MONTHLY_BUDGET
       if (typeof budget !== 'number' || !Number.isFinite(budget) || budget < 0)
         throw new Error('monthlyBudget is a number of dollars')
       if (value.pools != null && !Array.isArray(value.pools))
@@ -431,14 +434,16 @@ export class Pools {
 
   private spent: { at: number; dollars: number } | undefined
   private budgetReason(): string | undefined {
-    const budget = this.options.setting()?.monthlyBudget ?? 200
+    const budget =
+      this.options.setting()?.monthlyBudget ?? DEFAULT_MONTHLY_BUDGET
     if (this.spent != null && this.spent.dollars >= budget)
       return `The monthly cloud budget of $${budget} is spent`
     return undefined
   }
   /** The budget warning, for the master's notices. */
   notice(): string | undefined {
-    const budget = this.options.setting()?.monthlyBudget ?? 200
+    const budget =
+      this.options.setting()?.monthlyBudget ?? DEFAULT_MONTHLY_BUDGET
     if (this.spent == null || budget === 0) return this.budgetReason()
     if (this.spent.dollars >= budget) return this.budgetReason()
     if (this.spent.dollars >= 0.8 * budget)

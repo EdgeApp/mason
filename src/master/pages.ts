@@ -13,11 +13,14 @@ import {
   projectView,
   cloudView,
   settingsView,
+  type SignInMethodView,
   wizardView,
   type NodeRow,
 } from '../view/admin.js'
 import { artifactsView } from '../view/artifacts.js'
 import { fqdn } from './cloud/hosts.js'
+import { DEFAULT_MONTHLY_BUDGET } from './cloud/pools.js'
+import { methodsOf } from './hostSettings.js'
 import {
   dashboardData,
   dashboardView,
@@ -636,7 +639,7 @@ export function masterPages(
       budget: {
         monthly: Number(
           ((master.settings.value('cloud') ?? {}) as { monthlyBudget?: number })
-            .monthlyBudget ?? 200,
+            .monthlyBudget ?? DEFAULT_MONTHLY_BUDGET,
         ),
         ...(master.pools.notice() == null
           ? {}
@@ -743,6 +746,64 @@ export function masterPages(
             .prepare('SELECT id,name FROM apps ORDER BY position,id')
             .all() as Array<{ id: number; name: string }>
         ).map((app) => ({ id: Number(app.id), name: String(app.name) })),
+        ...((): Partial<Parameters<typeof settingsView>[0]> => {
+          if (!can(actor, 'settings.change')) return {}
+          const github = master.settings.get(actor, 'github')
+          const host = master.settings.value('host') as
+            | {
+                origin?: string
+                workerOrigin?: string
+                offlineGraceHours?: number
+              }
+            | undefined
+          const storage = master.settings.value('storage') as
+            | { driver?: string; s3?: { bucket?: string; endpoint?: string } }
+            | undefined
+          return {
+            github: {
+              ...(typeof github.kind === 'string' ? { kind: github.kind } : {}),
+              ...(typeof github.appId === 'number'
+                ? { appId: github.appId }
+                : {}),
+              ...(typeof github.installationId === 'number'
+                ? { installationId: github.installationId }
+                : {}),
+              ...(typeof github.publicKey === 'string'
+                ? { publicKey: github.publicKey }
+                : {}),
+            },
+            ...(host == null ? {} : { host }),
+            storage:
+              storage?.driver === 's3'
+                ? {
+                    driver: 's3',
+                    ...(storage.s3?.bucket == null
+                      ? {}
+                      : { bucket: storage.s3.bucket }),
+                    ...(storage.s3?.endpoint == null
+                      ? {}
+                      : { endpoint: storage.s3.endpoint }),
+                  }
+                : { driver: 'disk' },
+            storageAccounts: master.cloudAccounts.all().map((account) => ({
+              id: account.id,
+              name: account.name,
+              provider: account.provider === 'nomac' ? 'nomac' : 'digitalocean',
+            })),
+            signIn: methodsOf(master.settings.value('signIn')).map((method) => {
+              const view = { ...method } as Record<string, unknown>
+              delete view.clientSecret
+              return view as unknown as SignInMethodView
+            }),
+            monthlyBudget: Number(
+              (
+                master.settings.value('cloud') as
+                  | { monthlyBudget?: number }
+                  | undefined
+              )?.monthlyBudget ?? DEFAULT_MONTHLY_BUDGET,
+            ),
+          }
+        })(),
         canChange: can(actor, 'settings.change'),
         canCreate: can(actor, 'keys.create'),
         canRevoke: can(actor, 'keys.revoke'),
