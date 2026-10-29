@@ -1,6 +1,5 @@
 import express, { type ErrorRequestHandler, type RequestHandler } from 'express'
 import { existsSync, readFileSync } from 'node:fs'
-import path from 'node:path'
 import {
   authRoutes,
   cookieOptions,
@@ -406,28 +405,11 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
   return router
 }
 
-/** The current release's installer and files, exactly as the master stores them. */
-export function releaseRoutes(
-  host: Pick<HostRuntime, 'currentRelease' | 'xcodeFile' | 'granted'>,
+/** A mirrored Xcode, for a node holding the master's grant for that version. */
+export function xcodeRoutes(
+  host: Pick<HostRuntime, 'xcodeFile' | 'granted'>,
 ): express.Router {
   const router = express.Router()
-  const serve = (name: string, res: express.Response): void => {
-    const release = host.currentRelease()
-    if (release == null || !(name in release.files || name === 'SHA256SUMS')) {
-      res.status(404).send('Not found')
-      return
-    }
-    const file = path.join(release.dir, name)
-    if (!existsSync(file)) {
-      res.status(404).send('Not found')
-      return
-    }
-    res.type(
-      name.endsWith('.sh') ? 'text/x-shellscript' : 'application/octet-stream',
-    )
-    res.sendFile(file, { dotfiles: 'allow' })
-  }
-  // A mirrored Xcode, for a node holding the master's grant for that version.
   router.get('/xcode/:file', (req, res) => {
     const version = /^Xcode-(\d[\w.-]*)\.xip$/.exec(
       String(req.params.file),
@@ -442,17 +424,6 @@ export function releaseRoutes(
       return
     }
     res.type('application/octet-stream').sendFile(file, { dotfiles: 'allow' })
-  })
-  router.get('/install.sh', (_req, res) => {
-    serve('install.sh', res)
-  })
-  router.get('/releases/current/:file', (req, res) => {
-    const name = String(req.params.file)
-    if (!/^[A-Za-z0-9._-]+$/.test(name)) {
-      res.status(404).send('Not found')
-      return
-    }
-    serve(name, res)
   })
   return router
 }
@@ -560,7 +531,7 @@ export function hostApp(
     next()
   })
   app.use(offlineBanner(host))
-  app.use(releaseRoutes(host))
+  app.use(xcodeRoutes(host))
   // The sign-in page's script and the worker that hashes a password.
   for (const name of ['master', 'password-worker'])
     app.get(`/assets/${name}.js`, (_req, res) => {

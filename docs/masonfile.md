@@ -114,10 +114,9 @@ beforehand:
 
 It downloads the Mason release for the computer's OS and architecture from
 GitHub, which bundles its own Node runtime, and puts `mason` on the `PATH`.
-While the Mason repository is private, the installer needs a GitHub token
-(`GITHUB_TOKEN`, or a signed-in `gh`); nodes joining a cluster can instead use
-the host's copy, `curl -fsSL https://<host>/install.sh | bash`, which needs
-none.
+Every computer installs this way, cloud machines included: a node never
+downloads Mason from the master or the host. A private releases repository
+needs a GitHub token (`GITHUB_TOKEN`, or a signed-in `gh`).
 Then `sudo mason worker --install` as above.
 An administrator enters the pairing key and the node's address (URL, IP
 address or DNS name) in **Add node** on the master, or through the API. The
@@ -218,9 +217,11 @@ until it has been idle for an hour:
   cannot use it), the master starts from the plain `image` instead, installs
   Mason and the node type's software, and snapshots that machine when it
   retires, so the following start is fast again.
-- A new machine installs Mason from the host, or, while the master has no
-  host, the master's own release from GitHub. Pools are added and edited on
-  the Nodes page, where the region, size and image lists come from the
+- A new machine installs the master's own release from GitHub, as the
+  public install command does, so it needs to trust no certificate but
+  GitHub's. A master that runs no GitHub release (one built from source), or
+  whose release has no tarball for the machine's platform, starts no
+  machine and says why. Pools are added and edited on the Nodes page, where the region, size and image lists come from the
   provider. A master with no worker connected starts a machine from its first
   pool to run a run's setup, so a cluster can be cloud machines alone.
 - The machine's first-boot data carries the one-time pairing secret; the

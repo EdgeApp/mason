@@ -21,8 +21,6 @@ A release needs no Node.js or npm. On each computer:
 
 ```sh
 /bin/bash -c "$(curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh)"
-# or, once a host serves the current release:
-/bin/bash -c "$(curl -fsSL https://builds.example.test/install.sh)" -- --from https://builds.example.test
 ```
 
 Then start each role as a service (data in `~/.mason` unless `--data` says

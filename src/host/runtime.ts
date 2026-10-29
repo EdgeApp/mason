@@ -1,10 +1,8 @@
 import { createHash, verify, type KeyObject } from 'node:crypto'
 import {
-  createReadStream,
   createWriteStream,
   existsSync,
   mkdirSync,
-  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -39,12 +37,6 @@ export interface HostOptions {
   testEndpoints?: boolean
 }
 
-const sha256File = async (file: string): Promise<string> => {
-  const hash = createHash('sha256')
-  for await (const chunk of createReadStream(file)) hash.update(chunk as Buffer)
-  return hash.digest('hex')
-}
-
 /**
  * The host role: its cache of the master's data, kept current over the
  * master's link, and what it serves from it while the master is away.
@@ -62,7 +54,6 @@ export class HostRuntime {
   private offset = 0
   private timer: NodeJS.Timeout | undefined
   private providerCache: { key: string; providers: Providers } | undefined
-  private releasing: Promise<void> | undefined
   private stopped = false
   /** The host's own web listener: its URL and, when it serves its own certificate, the pin. */
   web: { url: string; pin?: string } | undefined
@@ -205,7 +196,6 @@ export class HostRuntime {
   async stop(): Promise<void> {
     this.stopped = true
     clearInterval(this.timer)
-    await this.releasing
     this.cache.close()
   }
 
@@ -231,7 +221,6 @@ export class HostRuntime {
   apply(sync: Sync): void {
     if (this.stopped) return
     this.cache.apply(sync)
-    void this.refreshRelease()
     void this.artifacts.cleanup().catch((error: unknown) => {
       this.options.log?.(`Artifact cleanup failed: ${(error as Error).message}`)
     })
@@ -341,93 +330,5 @@ export class HostRuntime {
     } catch {
       return false
     }
-  }
-
-  private releaseRoot(): string {
-    return path.join(this.options.dir, 'storage', 'releases')
-  }
-
-  /** The current release's directory once every file is here and verified. */
-  currentRelease():
-    | { version: string; dir: string; files: Record<string, string> }
-    | undefined {
-    const row = this.cache.db
-      .prepare("SELECT version,files FROM host_release WHERE id='current'")
-      .get() as { version: string; files: string } | undefined
-    if (row == null) return undefined
-    const dir = path.join(this.releaseRoot(), row.version)
-    if (!existsSync(path.join(dir, '.complete'))) return undefined
-    return {
-      version: row.version,
-      dir,
-      files: JSON.parse(row.files) as Record<string, string>,
-    }
-  }
-
-  /** Fetches the master's current release, verifying each file, and drops the others. */
-  refreshRelease(): Promise<void> {
-    return (this.releasing ??= (async (): Promise<void> => {
-      const row = this.cache.db
-        .prepare("SELECT version,files FROM host_release WHERE id='current'")
-        .get() as { version: string; files: string } | undefined
-      const root = this.releaseRoot()
-      mkdirSync(root, { recursive: true, mode: 0o700 })
-      for (const name of readdirSync(root))
-        if (name !== row?.version)
-          rmSync(path.join(root, name), { recursive: true, force: true })
-      if (row == null) return
-      const dir = path.join(root, row.version)
-      // `.complete` names the files it completed; the same version stored
-      // again with more platforms fetches what it lacks, and a new SHA256SUMS.
-      const complete = path.join(dir, '.complete')
-      if (existsSync(complete) && readFileSync(complete, 'utf8') === row.files)
-        return
-      const link = this.options.link()
-      if (link == null || link.closed) return
-      rmSync(complete, { force: true })
-      rmSync(path.join(dir, 'SHA256SUMS'), { force: true })
-      mkdirSync(dir, { recursive: true, mode: 0o700 })
-      const files = JSON.parse(row.files) as Record<string, string>
-      for (const [name, digest] of [
-        ...Object.entries(files),
-        ['SHA256SUMS', ''],
-      ] as Array<[string, string]>) {
-        const target = path.join(dir, name)
-        if (
-          existsSync(target) &&
-          (digest === '' || (await sha256File(target)) === digest)
-        )
-          continue
-        const partial = `${target}.partial`
-        const out = createWriteStream(partial, { mode: 0o600 })
-        const stream = link.openStream('release.get', { file: name })
-        await new Promise<void>((resolve, reject) => {
-          stream.on('data', (chunk: Buffer) => out.write(chunk))
-          stream.once('end', () => {
-            stream.end()
-            out.end(() => resolve())
-          })
-          stream.once('abort', (reason: string) => {
-            out.destroy()
-            reject(new Error(reason))
-          })
-        })
-        if (digest !== '' && (await sha256File(partial)) !== digest) {
-          rmSync(partial, { force: true })
-          throw new Error(`${name} does not match the release's digest`)
-        }
-        renameSync(partial, target)
-      }
-      writeFileSync(complete, row.files)
-      this.options.log?.(`Serving Mason ${row.version} at /install.sh`)
-    })()
-      .catch((error: unknown) => {
-        this.options.log?.(
-          `Could not fetch the current release: ${(error as Error).message}`,
-        )
-      })
-      .finally(() => {
-        this.releasing = undefined
-      }))
   }
 }

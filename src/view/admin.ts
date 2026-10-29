@@ -502,21 +502,15 @@ export function nodesView(data: {
     })
     .join('')
   const installCommand =
-    data.host != null
+    data.release != null
       ? command(
-          `/bin/bash -c "$(curl -fsSL ${data.host}/install.sh)" -- --from ${data.host}`,
+          `/bin/bash -c "$(curl -fsSL https://github.com/${data.release.repository}/releases/latest/download/install.sh)" -- --version ${data.release.version}`,
         )
-      : data.release != null
-        ? command(
-            `/bin/bash -c "$(curl -fsSL https://github.com/${data.release.repository}/releases/latest/download/install.sh)" -- --version ${data.release.version}`,
-          )
-        : '<p>Set the host’s origin in <a href="/settings#host">Settings</a> to see the install command.</p>'
+      : '<p>This master runs no GitHub release of Mason, so there is no install command to give.</p>'
   const installFrom =
-    data.host != null
-      ? 'It installs Mason from the host.'
-      : data.release != null
-        ? `It installs Mason ${escape(data.release.version)}, the master’s version.`
-        : ''
+    data.release != null
+      ? `It installs Mason ${escape(data.release.version)}, the master’s version, from GitHub.`
+      : ''
   /** A numbered step: its title on its own line, then what to do. */
   const step = (title: string, body: string): string =>
     `<li><strong>${title}</strong>${body}</li>`

@@ -40,7 +40,16 @@ describe('Cloud node pools', function () {
   let cloud: FakeCloud
   let offset = 0
   let address = '203.0.113.7'
-  let assets: () => Promise<string[]> = async () => []
+  // The master's own GitHub release, which new machines install, and its assets.
+  const releaseAssets = async (): Promise<string[]> => [
+    `mason-${version}-linux-x64.tar.gz`,
+    'install.sh',
+  ]
+  let assets: () => Promise<string[]> = releaseAssets
+  let gitHub: { repository: string; version: string } | undefined = {
+    repository: 'EdgeApp/mason',
+    version,
+  }
   const pool = (
     extra: Record<string, unknown> = {},
   ): Record<string, unknown> => ({
@@ -70,6 +79,7 @@ describe('Cloud node pools', function () {
           provider: () => cloud,
           publicAddress: async () => address,
           releaseAssets: async () => await assets(),
+          github: () => gitHub,
           tickMs: 200,
           pairTimeoutMs: 20_000,
           log: (line: string) => {
@@ -276,13 +286,19 @@ export async function work(ctx: Stage) {
     assert.equal(spec.image, 'ubuntu-24-04-x64')
     assert.match(
       spec.userData,
-      /curl -fsSL https:\/\/builds\.example\.test\/install\.sh/,
+      new RegExp(
+        `curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh -o /root/mason-install.sh\nbash /root/mason-install.sh --version ${version.replaceAll('.', '\\.')}\n`,
+      ),
     )
+    assert(!spec.userData.includes('builds.example.test'))
     assert.match(
       spec.userData,
       /mason worker --install --pairing-file \/root\/mason-pairing\.json --link-port 9310 --listen 0\.0\.0\.0 --slots 1/,
     )
-    assert.match(spec.userData, /# Mason 0\.3\.0/)
+    assert.match(
+      spec.userData,
+      new RegExp(`# Mason ${version.replaceAll('.', '\\.')}`),
+    )
     const pairing = FakeCloud.pairing(spec.userData)
     // Only one machine while the first boots, though two stages want one.
     const waiting = await wait(
@@ -595,46 +611,41 @@ export async function work(ctx: Stage) {
     assert(new ProviderError('x', 'rate').kind === 'rate')
   })
 
-  it('U11.6 starts no machine while the current release has no linux-x64 tarball', async () => {
-    const releases = c.master.master!.releases
-    // The copy beside a master's own install: one platform.
-    const partial = path.join(root(), 'partial')
-    mkdirSync(partial)
-    const files: Record<string, string> = {
-      'install.sh': '#!/bin/bash\n',
-      'mason-0.3.1-darwin-arm64.tar.gz': 'tarball',
-    }
-    for (const [name, text] of Object.entries(files))
-      writeFileSync(path.join(partial, name), text)
-    writeFileSync(
-      path.join(partial, 'SHA256SUMS'),
-      Object.entries(files)
-        .map(
-          ([name, text]) =>
-            `${createHash('sha256').update(text).digest('hex')}  ${name}`,
-        )
-        .join('\n') + '\n',
-    )
-    await releases.add(partial)
-    releases.setCurrent('0.3.1')
+  it('U11.6 starts no machine while the master runs no GitHub release, or its release has no linux-x64 tarball', async () => {
     const created = cloud.created.length
+    // A master built from source runs no GitHub release: nothing to install.
+    gitHub = undefined
     const id = await run()
-    const waiting = await wait(
-      () => {
-        const value = c.master.master!.run(id) as Json
-        return /no linux-x64 tarball/.test(stage(value)?.reason ?? '')
-          ? stage(value)
-          : undefined
-      },
-      10_000,
-      'the missing platform reason',
+    const reason = async (pattern: RegExp, label: string): Promise<Json> =>
+      await wait(
+        () => {
+          const value = c.master.master!.run(id) as Json
+          return pattern.test(stage(value)?.reason ?? '')
+            ? stage(value)
+            : undefined
+        },
+        10_000,
+        label,
+      )
+    assert.equal(
+      (await reason(/runs no GitHub release of Mason/, 'no release')).status,
+      'queued',
     )
-    assert.equal(waiting.status, 'queued')
-    assert.match(waiting.reason, /mason releases fetch v0\.3\.1/)
     assert.equal(cloud.created.length, created)
-    // The master's own release on GitHub has the platform: machines install from there.
+    // A release (its own entry in the asset cache) without linux-x64 waits too.
+    gitHub = { repository: 'EdgeApp/mason', version: '9.9.9' }
     assets = async (): Promise<string[]> => [
-      `mason-${version}-linux-x64.tar.gz`,
+      'mason-9.9.9-darwin-arm64.tar.gz',
+      'install.sh',
+    ]
+    await reason(
+      /Release v9\.9\.9 of EdgeApp\/mason has no linux-x64 tarball for linux-cloud machines/,
+      'the missing tarball',
+    )
+    assert.equal(cloud.created.length, created)
+    // Once the release lists the tarball, a machine installs it from GitHub.
+    assets = async (): Promise<string[]> => [
+      'mason-9.9.9-linux-x64.tar.gz',
       'install.sh',
     ]
     offset += 11 * MINUTE
@@ -642,14 +653,13 @@ export async function work(ctx: Stage) {
     assert.equal(cloud.created.length, created + 1)
     assert.match(
       cloud.created.at(-1)!.userData,
-      /releases\/latest\/download\/install\.sh/,
+      /releases\/latest\/download\/install\.sh -o \/root\/mason-install\.sh\nbash \/root\/mason-install\.sh --version 9\.9\.9\n/,
     )
-    assets = async (): Promise<string[]> => []
-    releases.setCurrent('0.3.0')
+    gitHub = { repository: 'EdgeApp/mason', version }
+    assets = releaseAssets
     offset += 6 * MINUTE
     await wait(() => machines().length === 0, 15_000, 'retired')
   })
-
   it('U11.7 counts machine time and snapshot storage per month, warns at 80% and stops at the cap', async () => {
     const pools = c.master.master!.pools
     const db = c.master.master!.database.db
@@ -712,7 +722,7 @@ export async function work(ctx: Stage) {
     assert((await pools.spend(next)) < 0.05)
   })
 
-  it('U3.2/U3.3 with no host, machines install the master’s release from GitHub once its assets list a linux-x64 tarball', async () => {
+  it('U3.2/U3.3 machines install the master’s release from GitHub, not the host, once its assets list a linux-x64 tarball', async () => {
     const master = c.master.master!
     // Earlier machines retire first, so the stage needs a new one.
     offset += 6 * MINUTE
@@ -721,11 +731,9 @@ export async function work(ctx: Stage) {
       15_000,
       'earlier machines retired',
     )
-    const db = master.database.db
-    const host = db
-      .prepare("SELECT value FROM settings WHERE area='host'")
-      .get() as { value: string }
-    db.prepare("DELETE FROM settings WHERE area='host'").run()
+    // The host stays set and is never used: a fresh machine need not trust
+    // its certificate. A release of its own keeps the asset cache out of it.
+    gitHub = { repository: 'EdgeApp/mason', version: '9.9.8' }
     try {
       let asked = 0
       assets = async (): Promise<string[]> => {
@@ -749,41 +757,29 @@ export async function work(ctx: Stage) {
         'the GitHub failure',
       )
       assert(asked >= 1)
-      // A failure is asked again after a minute; a release without linux-x64 waits.
+      // A failure is asked again after a minute.
+      const created = cloud.created.length
       assets = async (): Promise<string[]> => [
-        `mason-${version}-darwin-arm64.tar.gz`,
+        'mason-9.9.8-linux-x64.tar.gz',
         'install.sh',
       ]
       offset += MINUTE + 1000
-      await reason(
-        /has no linux-x64 tarball for linux-cloud machines/,
-        'the missing tarball',
-      )
-      const created = cloud.created.length
-      assets = async (): Promise<string[]> => [
-        `mason-${version}-linux-x64.tar.gz`,
-        'install.sh',
-      ]
-      offset += 11 * MINUTE
       assert.equal((await finish(id)).status, 'succeeded')
       assert.equal(cloud.created.length, created + 1)
       const spec = cloud.created.at(-1)!
       assert.match(
         spec.userData,
         new RegExp(
-          `curl -fsSL https://github.com/[\\w.-]+/[\\w.-]+/releases/latest/download/install.sh -o /root/mason-install.sh\nbash /root/mason-install.sh --version ${version.replaceAll('.', '\\.')}\n`,
+          `curl -fsSL https://github.com/[\\w.-]+/[\\w.-]+/releases/latest/download/install.sh -o /root/mason-install.sh\nbash /root/mason-install.sh --version 9\\.9\\.8\n`,
         ),
       )
-      assert.match(
-        spec.userData,
-        new RegExp(`# Mason ${version.replaceAll('.', '\\.')}`),
-      )
+      assert.match(spec.userData, /# Mason 9\.9\.8/)
+      assert(!spec.userData.includes('builds.example.test'))
       offset += 6 * MINUTE
       await wait(() => machines().length === 0, 15_000, 'retired')
     } finally {
-      db.prepare(
-        "INSERT INTO settings(area,value,updated_at,updated_by) VALUES('host',?,0,'test')",
-      ).run(host.value)
+      gitHub = { repository: 'EdgeApp/mason', version }
+      assets = releaseAssets
     }
   })
 

@@ -188,13 +188,7 @@ export interface PoolsOptions {
   provider?: (token: string) => CloudProvider
   /** Whether a worker is running or preparing a stage. */
   busy: (fingerprint: string) => boolean
-  /** The release a new machine installs, from the host. */
-  release: () => string | undefined
-  /** The platforms a stored release has tarballs for, `linux-x64`. */
-  releasePlatforms?: (version: string) => string[]
-  /** Where machines download the installer: the host's worker origin or origin. */
-  hostOrigin: () => string | undefined
-  /** With no host, machines install the master's own release from GitHub. */
+  /** The master's own release on GitHub, which new machines install. */
   github?: () => { repository: string; version: string } | undefined
   /** A GitHub release's asset names; the GitHub API by default. */
   releaseAssets?: (repository: string, version: string) => Promise<string[]>
@@ -214,10 +208,8 @@ export interface PoolsOptions {
   log?: (line: string) => void
 }
 
-/** Where a machine installs Mason from: the host, or a GitHub release. */
-type Installer =
-  | { origin: string; version: string }
-  | { repository: string; version: string }
+/** The GitHub release a machine installs Mason from. */
+type Installer = { repository: string; version: string }
 
 /** A release's asset names from the GitHub API (public repositories need no token). */
 async function gitHubReleaseAssets(
@@ -519,37 +511,17 @@ export class Pools {
   >()
   private readonly fetching = new Set<string>()
 
-  /** Where a new machine installs Mason from, or why it cannot yet. */
+  /**
+   * The master's own release on GitHub, which a new machine installs as the
+   * public install command does, or why it cannot yet.
+   */
   private installer(pool: PoolSetting): Installer | string {
     // A NoMac Mac is Apple silicon; every other machine is x86-64 Linux.
     const platform =
       pool.provider === 'nomac' ? 'darwin-arm64' : machinePlatform
-    const origin = this.options.hostOrigin()
-    if (origin != null) {
-      const release = this.options.release()
-      if (release == null)
-        return 'The release store is empty: add the release machines install with mason releases add'
-      // The copy beside a master's own install holds only its platform; the
-      // master's release on GitHub has every platform.
-      if (
-        this.options.releasePlatforms != null &&
-        !this.options.releasePlatforms(release).includes(platform)
-      ) {
-        const github = this.fromGitHub(pool, platform)
-        return typeof github !== 'string'
-          ? github
-          : `Release ${release} has no ${platform} tarball for ${pool.name} machines: store the whole release with mason releases fetch v${release}`
-      }
-      return { origin, version: release }
-    }
-    return this.fromGitHub(pool, platform)
-  }
-
-  /** The master's own release on GitHub, once its assets list the platform's tarball. */
-  private fromGitHub(pool: PoolSetting, platform: string): Installer | string {
     const github = this.options.github?.()
     if (github == null)
-      return 'Cloud machines install from the host or from the master’s GitHub release: set the host setting first'
+      return 'This master runs no GitHub release of Mason, so cloud machines have none to install'
     const key = `${github.repository}@${github.version}`
     const known = this.assets.get(key)
     const stale =
@@ -597,17 +569,12 @@ export class Pools {
   }
 
   /**
-   * First-boot data: install Mason from the host, or with no host the
-   * master's own release from GitHub, then pair with the material the master
-   * made.
+   * First-boot data: install the master's own release of Mason from GitHub,
+   * then pair with the material the master made.
    */
   userData(installer: Installer, pairing: string, slots: number): string {
     const port = this.options.linkPort ?? 9310
-    const install =
-      'origin' in installer
-        ? `curl -fsSL ${installer.origin}/install.sh -o /root/mason-install.sh
-bash /root/mason-install.sh --from ${installer.origin}`
-        : `curl -fsSL https://github.com/${installer.repository}/releases/latest/download/install.sh -o /root/mason-install.sh
+    const install = `curl -fsSL https://github.com/${installer.repository}/releases/latest/download/install.sh -o /root/mason-install.sh
 bash /root/mason-install.sh --version ${installer.version}`
     return `#!/bin/bash
 set -euo pipefail
@@ -624,16 +591,12 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
 
   /**
    * A NoMac Mac's first boot, run as a NoMac job once the Mac is ready:
-   * Mason installed for the user from the host or GitHub, and the worker run
+   * Mason installed for the user from the master's GitHub release, and the worker run
    * as a NoMac service that keeps it going between commands. Tool caches sit
    * on the account's drive, which NoMac keeps between sessions.
    */
   nomacUserData(installer: Installer, pairing: string, slots: number): string {
-    const install =
-      'origin' in installer
-        ? `curl -fsSL ${installer.origin}/install.sh -o ~/mason-install.sh
-bash ~/mason-install.sh --user --from ${installer.origin}`
-        : `curl -fsSL https://github.com/${installer.repository}/releases/latest/download/install.sh -o ~/mason-install.sh
+    const install = `curl -fsSL https://github.com/${installer.repository}/releases/latest/download/install.sh -o ~/mason-install.sh
 bash ~/mason-install.sh --user --version ${installer.version}`
     // The release's install.sh may predate making ~/.mason, the worker's
     // data directory, private.
@@ -906,7 +869,7 @@ nomac-service start mason-worker -- ~/.local/bin/mason worker --pairing-file ~/m
               snapshot.id,
               row.id,
               snapshot.sizeGb,
-              this.options.release() ?? this.options.github?.()?.version ?? '',
+              this.options.github?.()?.version ?? '',
               this.now(),
             )
           for (const old of previous) {

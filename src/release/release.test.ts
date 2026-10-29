@@ -448,22 +448,12 @@ describe('Releases, install.sh and updates', function () {
 
   describe('install.sh', () => {
     let github: { server: Server; base: string }
-    let host: { server: Server; base: string }
     const tampered = new Set<string>()
     before(async () => {
       github = await serve(work, githubApi(releases, tampered))
-      const hostDir = path.join(work, 'host')
-      mkdirSync(path.join(hostDir, 'releases'), { recursive: true })
-      symlinkSync(releases['0.1.2']!, path.join(hostDir, 'releases', 'current'))
-      symlinkSync(
-        path.join(releases['0.1.2']!, 'install.sh'),
-        path.join(hostDir, 'install.sh'),
-      )
-      host = await serve(hostDir)
     })
     after(() => {
       github.server.close()
-      host.server.close()
     })
     const bash = async (
       args: string[],
@@ -539,7 +529,7 @@ describe('Releases, install.sh and updates', function () {
       )
     })
 
-    it('U9.1 installs from the public releases with no token, needs one for a private repository, refuses a mismatch, and installs from a host with none', async () => {
+    it('U9.1 installs from the public releases with no token, needs one for a private repository, refuses a mismatch, and has no host install', async () => {
       const home = root()
       mkdirSync(path.join(home, 'tmp'))
       const openHome = root()
@@ -573,14 +563,14 @@ describe('Releases, install.sh and updates', function () {
       }
       const prefix = path.join(home, 'opt')
       const bin = path.join(home, 'bin')
-      const fromHost = await bash(
-        ['--from', host.base],
+      const system = await bash(
+        [],
         { MASON_PREFIX: prefix, MASON_BIN: bin },
         home,
       )
-      assert.equal(fromHost.status, 0, fromHost.out)
-      assert.match(fromHost.out, /Installed Mason 0\.1\.2 in .*\/opt\/0\.1\.2/)
-      assert.match(fromHost.out, /sudo mason worker --install/)
+      assert.equal(system.status, 0, system.out)
+      assert.match(system.out, /Installed Mason 0\.1\.2 in .*\/opt\/0\.1\.2/)
+      assert.match(system.out, /sudo mason worker --install/)
       assert.equal(
         readlinkSync(path.join(bin, 'mason')),
         path.join(prefix, 'current', 'mason'),
@@ -588,6 +578,11 @@ describe('Releases, install.sh and updates', function () {
       assert.match(
         (await bash(['--bogus'], {}, home)).out,
         /unknown option --bogus/,
+      )
+      // Mason installs only from its GitHub release, never from a host.
+      assert.match(
+        (await bash(['--from', 'https://builds.example.test'], {}, home)).out,
+        /unknown option --from/,
       )
       assert.match(
         (

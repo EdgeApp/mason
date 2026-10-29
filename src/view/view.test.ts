@@ -705,30 +705,23 @@ describe('Nodes page', () => {
     budget: { monthly: 200 },
     canChange: true,
   }
-  it('gives copyable install commands from the host, else the master’s own release', () => {
-    const fromHost = nodesView({
+  it('gives the copyable install command from the master’s GitHub release, never the host', () => {
+    const page = nodesView({
       ...base,
       host: 'https://builds.example.test',
       release: { repository: 'example/mason', version: '1.2.3' },
     })
     assert.match(
-      fromHost,
-      /<pre class="mono">\/bin\/bash -c &quot;\$\(curl -fsSL https:\/\/builds\.example\.test\/install\.sh\)&quot; -- --from https:\/\/builds\.example\.test<\/pre><button type="button" class="secondary copy" data-copy="\/bin\/bash -c &quot;/,
+      page,
+      /It installs Mason 1\.2\.3, the master’s version, from GitHub\.<\/small><div class="command"><pre class="mono">\/bin\/bash -c &quot;\$\(curl -fsSL https:\/\/github\.com\/example\/mason\/releases\/latest\/download\/install\.sh\)&quot; -- --version 1\.2\.3<\/pre>/,
     )
+    assert(!page.includes('--from'))
+    assert(!page.includes('builds.example.test/install.sh'))
     assert.match(
-      fromHost,
+      page,
       /data-copy="sudo mason worker --install --link-port 9410"/,
     )
-    const fromGitHub = nodesView({
-      ...base,
-      release: { repository: 'example/mason', version: '1.2.3' },
-    })
-    assert.match(
-      fromGitHub,
-      /It installs Mason 1\.2\.3, the master’s version\.<\/small><div class="command"><pre class="mono">.*https:\/\/github\.com\/example\/mason\/releases\/latest\/download\/install\.sh\)&quot; -- --version 1\.2\.3<\/pre>/,
-    )
-    assert(!fromGitHub.includes('&lt;host&gt;'))
-    assert.match(nodesView(base), /href="\/settings#host"/)
+    assert.match(nodesView(base), /This master runs no GitHub release of Mason/)
     assert(!nodesView({ ...base, canChange: false }).includes('id="add-node"'))
   })
 
