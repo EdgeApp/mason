@@ -712,7 +712,7 @@ the same value.
 
 ```ts fragment
 tools: {
-  node: '24',              // major or exact version
+  node: '24',              // major or exact version, or 'project' (below)
   java: '21',
   rust: '1.90.0',
   android: ['platforms;android-35', 'build-tools;35.0.0'],
@@ -742,6 +742,32 @@ Missing tools are installed before the stage starts (stage status
 
 Stages share installed tools; an administrator can pin or remove versions per
 node type, and unused Xcodes are removed when disk space runs low.
+
+### Node.js for React Native and other JavaScript builds
+
+`node: 'project'` uses the version the repository pins, read at setup from the
+first of `.nvmrc`, `.node-version` and `package.json` `engines.node` at the
+checkout's root:
+
+| File says | Mason installs |
+| --- | --- |
+| `v22.11.0`, `22.11.0` | exactly that version |
+| `22`, `22.x` | the newest 22 |
+| `lts/*`, `lts` | the newest major of the newest LTS line |
+| `lts/jod` | the newest release of that LTS line's major |
+| `engines.node: ">=20"` or `"^20.5"` | the newest of the first major named (20) |
+
+A run whose workflow has such a stage and no usable file fails at setup with
+the reason. Mason installs Node itself, the way nvm would, but side by side in
+the node's tools directory and checked against the release's `SHASUMS256.txt`;
+nvm and a shell profile are not needed.
+
+The stage's Node is first on `PATH` and in `NODE_BINARY` for everything the
+stage runs, `ctx.apple.archive` included. React Native's "Bundle React Native
+code and images" phase and its other Xcode build scripts run `$NODE_BINARY`
+(the default `ios/.xcode.env` sets it from `command -v node`, which finds the
+same Node), so the JavaScript bundle is built with the version the Masonfile
+or the repository asks for.
 
 ### Several Xcodes on one node
 
@@ -1259,6 +1285,8 @@ export async function test(ctx: Stage) {
   await ctx.stash('node_modules', ['node_modules/**'])
 }
 
+// The stage's tools.node ('24' here; 'project' reads the .nvmrc) runs npm,
+// CocoaPods' scripts and Xcode's React Native bundling phase.
 async function archiveIos(ctx: Stage) {
   await ctx.sh('npm ci && npx pod-install ios')
   const build = ctx.getBuildNumber(APP)

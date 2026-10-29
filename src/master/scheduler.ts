@@ -187,6 +187,32 @@ export function applyXcodeVersion(
   return undefined
 }
 
+/**
+ * The repository's Node.js version, for stages with `tools.node: 'project'`.
+ * Returns why the run cannot start when such a stage of the workflow it runs
+ * has none.
+ */
+export function applyNodeVersion(
+  graph: Graph,
+  found: RunReport['nodeVersion'],
+  running: string,
+): string | undefined {
+  const version =
+    found?.version != null && /^\d+(\.\d+){0,2}$/.test(found.version)
+      ? found.version
+      : undefined
+  for (const workflow of graph.workflows)
+    for (const stage of workflow.stages) {
+      if (stage.tools?.node !== 'project') continue
+      if (version != null) stage.tools = { ...stage.tools, node: version }
+      else if (workflow.name === running)
+        return found == null
+          ? `${stage.name}: tools.node is 'project' but the repository has no .nvmrc, .node-version or engines.node`
+          : `${stage.name}: tools.node is 'project' but ${found.file} cannot be used: ${found.problem ?? 'it names no Node.js version'}`
+    }
+  return undefined
+}
+
 const hash = (value: string): string =>
   createHash('sha256').update(value).digest('hex')
 const sortedParams = (params: Record<string, unknown>): string =>
@@ -711,6 +737,22 @@ export class Scheduler {
     }
     const ignored = applyXcodeVersion(graph, report.xcodeVersion)
     if (ignored != null) graph.warnings.push(ignored)
+    const noNode = applyNodeVersion(
+      graph,
+      report.nodeVersion,
+      String(job.workflow),
+    )
+    if (noNode != null) {
+      this.appendLog(id, SETUP, `${noNode}\n`)
+      this.finishJob(id, 'failed', noNode)
+      return
+    }
+    if (report.nodeVersion?.version != null)
+      this.appendLog(
+        id,
+        SETUP,
+        `Node.js ${report.nodeVersion.version} from ${report.nodeVersion.file} for tools.node 'project'\n`,
+      )
     for (const warning of graph.warnings)
       this.appendLog(id, SETUP, `warning: ${warning}\n`)
     // An Xcode that launches on none of the nodes a stage can use fails the run now.

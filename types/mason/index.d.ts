@@ -56,7 +56,11 @@ export type NodeSelector =
 
 /** Tool versions a stage needs; missing ones are installed before it starts. */
 export interface Tools {
-  /** Major or exact version, `'24'` or `'24.11.1'`. */
+  /**
+   * Major or exact version, `'24'` or `'24.11.1'`, or `'project'` for the
+   * repository's `.nvmrc`, `.node-version` or `package.json` `engines.node`.
+   * The stage's Node is first on `PATH` and in `NODE_BINARY`.
+   */
   node?: string
   java?: string
   rust?: string

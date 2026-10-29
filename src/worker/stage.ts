@@ -50,7 +50,14 @@ import {
   toolEnvironment,
   type InstallRequest,
 } from './tools/index.js'
-import { defaultSources, type ToolSources } from './tools/common.js'
+import { defaultSources, fetchText, type ToolSources } from './tools/common.js'
+import {
+  isLtsAlias,
+  projectNodeVersion,
+  readProjectNode,
+  type NodeRelease,
+  type ProjectNode,
+} from './tools/projectNode.js'
 import type { KeyObject } from 'node:crypto'
 import { helperPaths, helperRequest } from '../helper/server.js'
 import { runningInstall, type RunningInstall } from '../release/install.js'
@@ -238,6 +245,17 @@ async function unpack(file: string, into: string): Promise<void> {
  * journals their records, and reports them when the master's link is up,
  * replaying from the last acknowledged record after a reconnect.
  */
+/** Whether a setup's graph has a stage with `tools.node: 'project'`. */
+const wantsProjectNode = (graph: unknown): boolean =>
+  (
+    (graph as { workflows?: Array<{ stages?: Array<{ tools?: unknown }> }> })
+      ?.workflows ?? []
+  ).some((workflow) =>
+    (workflow.stages ?? []).some(
+      (stage) => (stage.tools as { node?: unknown })?.node === 'project',
+    ),
+  )
+
 export class WorkerRuntime {
   readonly journal: Journal
   readonly bridge: GitBridge
@@ -1033,10 +1051,14 @@ export class WorkerRuntime {
         lstatSync(file).size < 256
           ? readFileSync(file, 'utf8')
           : undefined
+      const nodeVersion = wantsProjectNode(graph)
+        ? await this.projectNode(dir, signal)
+        : undefined
       return {
         status: 'succeeded',
         value: graph as Json,
         ...(xcodeVersion == null ? {} : { xcodeVersion }),
+        ...(nodeVersion == null ? {} : { nodeVersion }),
       }
     } catch (error) {
       if (error instanceof SetupFailed)
@@ -1050,6 +1072,33 @@ export class WorkerRuntime {
         }
       throw error
     }
+  }
+
+  /**
+   * The Node.js version the repository asks for, for stages with
+   * `tools.node: 'project'`. An LTS alias is resolved with the Node.js
+   * release index the installer uses.
+   */
+  private async projectNode(
+    dir: string,
+    signal: AbortSignal,
+  ): Promise<ProjectNode | undefined> {
+    const found = readProjectNode(dir)
+    if (found == null) return undefined
+    let releases: NodeRelease[] | undefined
+    if (isLtsAlias(found.text))
+      try {
+        const sources = this.options.toolSources ?? defaultSources
+        releases = JSON.parse(
+          await fetchText(`${sources.node}/index.json`, signal),
+        ) as NodeRelease[]
+      } catch (error) {
+        return {
+          file: found.file,
+          problem: `the Node.js release index failed: ${(error as Error).message}`,
+        }
+      }
+    return projectNodeVersion(found.file, found.text, releases)
   }
 
   /**

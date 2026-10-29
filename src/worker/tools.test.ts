@@ -115,9 +115,9 @@ async function toolServer(dir: string): Promise<{
     '/node/index.json',
     Buffer.from(
       JSON.stringify([
-        { version: 'v24.11.1' },
-        { version: 'v24.9.0' },
-        { version: 'v22.20.0' },
+        { version: 'v24.11.1', lts: 'Krypton' },
+        { version: 'v24.9.0', lts: false },
+        { version: 'v22.20.0', lts: 'Jod' },
       ]),
     ),
   )
@@ -633,6 +633,7 @@ describe('Worker tooling', function () {
       })
       const repo = c.repo('fixtures/tools')
       repo.commit({
+        '.nvmrc': 'lts/*\n',
         'Masonfile.ts': `
 import type { Setup, Stage } from '@mason/types'
 export function setup(m: Setup) {
@@ -641,6 +642,7 @@ export function setup(m: Setup) {
   const want = String(m.params.want)
   const tools =
     want === 'node' ? { node: '24', java: '21' } :
+    want === 'project' ? { node: 'project' } :
     want === 'android' ? { android: ['platforms;android-35'] } :
     want === 'xcode' ? { xcode: '26.1' } :
     want === 'nox' ? { xcode: '99' } : {}
@@ -723,6 +725,16 @@ export async function use(ctx: Stage) {
       const again = await runWith('node')
       assert.equal(use(again).output.node, worker)
       assert(!again.seen.has('use:preparing'))
+    })
+
+    it('U2.4 a stage with tools.node project runs with the Node.js the repository’s .nvmrc names', async () => {
+      const run = await runWith('project')
+      const log = c.master.master!.scheduler.logs(run.id)!
+      assert.equal(run.status, 'succeeded', log)
+      assert.match(log, /Node\.js 24 from \.nvmrc for tools\.node 'project'/)
+      const output = use(run).output
+      assert.equal(output.nodeVersion, 'v24.11.1')
+      assert.match(output.nodeBinary, /tools\/node\/24\.11\.1\/bin\/node$/)
     })
 
     it('U8.5 fails the stage with the installer log when an install fails', async () => {
