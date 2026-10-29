@@ -725,11 +725,192 @@ describe('Nodes page', () => {
     })
     assert.match(
       fromGitHub,
-      /install Mason 1\.2\.3, the master’s version: .*https:\/\/github\.com\/example\/mason\/releases\/latest\/download\/install\.sh\)&quot; -- --version 1\.2\.3<\/pre>/,
+      /It installs Mason 1\.2\.3, the master’s version\.<\/small><div class="command"><pre class="mono">.*https:\/\/github\.com\/example\/mason\/releases\/latest\/download\/install\.sh\)&quot; -- --version 1\.2\.3<\/pre>/,
     )
     assert(!fromGitHub.includes('&lt;host&gt;'))
     assert.match(nodesView(base), /href="\/settings#host"/)
-    assert(!nodesView({ ...base, canChange: false }).includes('Add node'))
+    assert(!nodesView({ ...base, canChange: false }).includes('id="add-node"'))
+  })
+
+  it('U2.1 explains the host and the node steps: title above command, Copy right, pairing-key note, address and port', () => {
+    const html = nodesView({
+      ...base,
+      release: { repository: 'example/mason', version: '1.2.3' },
+      poolAccounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
+      ],
+    })
+    assert.match(
+      html,
+      /<h2>.*Host<\/h2><p>A Mason host holds the builds created by the Mason cluster and hosts a web interface for downloading iOS, Android, desktop, and other builds\. If it is internet accessible, it is also the proxy to communicate events back to the Mason master, such as GitHub repository change events\.<\/p>/,
+    )
+    const nodes = html.slice(html.indexOf('id="add-node"'))
+    assert.match(
+      nodes,
+      /<h2>.*Nodes<\/h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks\. Run the following commands to start Mason on a Linux or macOS computer \(Windows coming\)\.<\/p><ol class="howto">/,
+    )
+    // Each step: its title first, then the command box with Copy beside it.
+    assert.match(
+      nodes,
+      /<li><strong>Install Mason<\/strong><small class="hint">[^<]*<\/small><div class="command"><pre class="mono">[^<]*<\/pre><button type="button" class="secondary copy"/,
+    )
+    assert.match(
+      nodes,
+      /<li><strong>Start as a worker<\/strong><div class="command"><pre class="mono">sudo mason worker --install --link-port 9410<\/pre><button[^>]*class="secondary copy"[\s\S]*?<\/div><small class="hint">It prints its pairing key\.<\/small><\/li>/,
+    )
+    assert.match(
+      nodes,
+      /<li><strong>Pair it here<\/strong><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*<label for="node-address">Mason node address and port<\/label><input id="node-address" name="address" placeholder="192\.168\.1\.20:9410"[\s\S]*Pair node/,
+    )
+    // The host's two ways: on DigitalOcean, or by hand with the same steps.
+    assert.match(
+      html,
+      /<details class="action add-host" id="add-host-do"><summary class="button">.*Create a host on DigitalOcean<\/summary>/,
+    )
+    const byHand = html.slice(html.indexOf('id="add-host-command"'))
+    assert.match(
+      byHand,
+      /<summary class="button">.*Install a host yourself<\/summary>/,
+    )
+    assert.match(
+      byHand,
+      /<strong>Install Mason<\/strong><small class="hint">On a computer the internet can reach\./,
+    )
+    assert.match(
+      byHand,
+      /<strong>Start it as the host<\/strong><div class="command"><pre class="mono">sudo mason host --install<\/pre>/,
+    )
+    assert.match(
+      byHand,
+      /<strong>Pair it here<\/strong><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*placeholder="builds\.example\.com:9310"[\s\S]*Pair host/,
+    )
+  })
+
+  it('U2.3 pool fields say what they mean; DigitalOcean defaults are unchanged', () => {
+    const html = nodesView({
+      ...base,
+      poolAccounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
+      ],
+    })
+    const hint = (id: string, title: string, text: string): RegExp =>
+      new RegExp(
+        `<div class="field"><label for="new-do-${id}">${title}</label><small class="hint">${text.replace(/[.()]/g, '\\$&')}</small><input id="new-do-${id}"`,
+      )
+    assert.match(html, hint('name', 'Name', 'The pool’s name on this master.'))
+    assert.match(
+      html,
+      hint('type', 'Node type', 'Type of node as specified in the Masonfile.'),
+    )
+    assert.match(
+      html,
+      /id="new-do-type" name="type" value="" required[^>]*placeholder="linux-x86"/,
+    )
+    assert.match(
+      html,
+      hint(
+        'labels',
+        'Labels',
+        'Extra labels its machines carry, comma-separated, for stages that ask for them.',
+      ),
+    )
+    assert.match(
+      html,
+      hint(
+        'maxNodes',
+        'Max machines',
+        'Spin up no more than max machines concurrently.',
+      ),
+    )
+    assert.match(
+      html,
+      hint(
+        'slots',
+        'Stages per machine',
+        'How many stages one machine runs at the same time.',
+      ),
+    )
+    assert.match(
+      html,
+      hint(
+        'ttlMinutes',
+        'Retire after idle minutes',
+        'A machine with no stage to run for this many minutes is shut down and deleted.',
+      ),
+    )
+    assert.match(
+      html,
+      hint(
+        'maxHoursPerNode',
+        'Retire after hours up',
+        'A machine is replaced after this many hours in total, even if it keeps getting work, so none runs forever. Its current stage finishes first.',
+      ),
+    )
+    assert.match(html, /id="new-do-maxHoursPerNode"[^>]*value="24"/)
+    assert.match(html, /id="new-do-ttlMinutes"[^>]*value="60"/)
+    assert.doesNotMatch(html, /Machines at most|Node type its machines serve/)
+  })
+
+  it('U2.2 every disclosure on the page is a button: red to add or use, secondary for Edit and Remove', () => {
+    const html = nodesView({
+      ...base,
+      host: 'https://builds.example.test',
+      storage: { driver: 'disk' },
+      poolAccounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
+      ],
+      pools: [
+        {
+          name: 'linux-cloud',
+          type: 'linux-x86',
+          account: 'do',
+          region: 'sfo3',
+          size: 's-1vcpu-1gb',
+          image: 'ubuntu-24-04-x64',
+          labels: [],
+          maxNodes: 2,
+          slots: 1,
+          ttlMinutes: 60,
+          maxHoursPerNode: 24,
+          machines: [],
+        },
+      ],
+      cloudHosts: [
+        {
+          name: 'h',
+          state: 'ready',
+          account: 'do',
+          region: 'sfo3',
+          size: 's-1vcpu-1gb',
+          address: '203.0.113.9',
+          origin: null,
+          error: null,
+        },
+      ],
+    })
+    const summaries = [
+      ...html.matchAll(
+        /<details([^>]*)><summary([^>]*)>([\s\S]*?)<\/summary>/g,
+      ),
+    ]
+    assert(summaries.length >= 5, String(summaries.length))
+    for (const [, details, summary, label] of summaries) {
+      assert.match(details!, /class="action/)
+      if (/Edit|Remove/.test(label!))
+        assert.equal(summary, ' class="button secondary"')
+      else assert.equal(summary, ' class="button"')
+    }
+    for (const label of [
+      'Store builds in a new DigitalOcean Space',
+      'Remove',
+      'Use an existing Space',
+      'Edit',
+      'Add a pool on DigitalOcean',
+    ])
+      assert(
+        summaries.some(([, , , text]) => text!.includes(label)),
+        label,
+      )
   })
 })
 
