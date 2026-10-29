@@ -975,7 +975,9 @@ describe('Master database, setup and import', function () {
           })
           return { url: value.url, ...(token == null ? {} : { token }) }
         },
-        changed: (value) => changes.push(value),
+        changed: (value) => {
+          changes.push(value)
+        },
       })
       assert.throws(
         () =>

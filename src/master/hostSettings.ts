@@ -90,6 +90,12 @@ export function hostProjection(
   area: string,
   value: SettingValue,
 ): SettingValue {
+  // Which cloud account made the storage key is the master's business.
+  if (area === 'storage') {
+    const rest = { ...value }
+    delete rest.managed
+    return rest
+  }
   if (area !== 'signIn') return value
   return { methods: methodsOf(value).filter((method) => method.enabled) }
 }
@@ -104,6 +110,20 @@ export interface StorageSetting {
     accessKeyId: string
     secretAccessKey: string
   }
+  /** A Space Mason made: the cloud account and the key it made for it. */
+  managed?: { account: string; keyId: string }
+}
+
+function asManaged(value: unknown): { account: string; keyId: string } {
+  const managed = (value ?? {}) as Record<string, unknown>
+  if (
+    typeof managed.account !== 'string' ||
+    !/^[a-z0-9][a-z0-9-]{0,39}$/.test(managed.account) ||
+    typeof managed.keyId !== 'string' ||
+    !/^[A-Za-z0-9]{8,128}$/.test(managed.keyId)
+  )
+    throw new Error('storage.managed names a cloud account and a key id')
+  return { account: managed.account, keyId: managed.keyId }
 }
 
 /**
@@ -116,6 +136,7 @@ export const storageArea: SettingsArea = {
     const value = (input ?? {}) as {
       driver?: unknown
       s3?: Record<string, unknown>
+      managed?: unknown
     }
     const driver = value.driver ?? 'disk'
     if (driver === 'disk') return { driver: 'disk' }
@@ -140,15 +161,25 @@ export const storageArea: SettingsArea = {
     }
     if (typeof secret !== 'string' || secret.length < 8 || secret.length > 200)
       throw new Error('storage.s3.secretAccessKey is required')
+    const accessKeyId = text('accessKeyId', /^[A-Za-z0-9]{8,128}$/)
+    // A Space Mason made keeps its account and key id while it uses that key.
+    const managed =
+      value.managed != null
+        ? asManaged(value.managed)
+        : (previous?.managed as StorageSetting['managed'])?.keyId ===
+            accessKeyId
+          ? (previous!.managed as StorageSetting['managed'])
+          : undefined
     return {
       driver: 's3',
       s3: {
         endpoint,
         bucket: text('bucket', /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/),
         region: text('region', /^[a-z0-9-]{2,40}$/),
-        accessKeyId: text('accessKeyId', /^[A-Za-z0-9]{8,128}$/),
+        accessKeyId,
         secretAccessKey: secret,
       },
+      ...(managed == null ? {} : { managed }),
     }
   },
   redact: (value): SettingValue =>

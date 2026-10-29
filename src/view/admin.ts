@@ -1,6 +1,7 @@
 import { bytes, platformChip, statusDot } from './dashboard.js'
 import { ago, escape } from './html.js'
 import { icon } from './icons.js'
+import { spacesRegions } from '../master/cloud/regions.js'
 
 const statusLine =
   '<p class="notice" role="status" data-field="status" hidden></p>'
@@ -294,18 +295,6 @@ export interface CloudHostView {
 }
 
 /** DigitalOcean's Spaces regions. */
-const spacesRegions = [
-  'sfo3',
-  'nyc3',
-  'ams3',
-  'fra1',
-  'lon1',
-  'sgp1',
-  'syd1',
-  'blr1',
-  'tor1',
-  'atl1',
-]
 function spacesRegionSelect(id: string, value: string): string {
   return `<select id="${id}" name="space.region">${spacesRegions.map((region) => `<option${region === value ? ' selected' : ''}>${region}</option>`).join('')}</select>`
 }
@@ -503,10 +492,27 @@ export function nodesView(data: {
     )
     .join('')
   const storage = data.storage
+  const spaceAccounts = (data.poolAccounts ?? []).filter(
+    (account) => account.provider !== 'nomac',
+  )
+  // Mason makes the Space and a key that can use only it, from a DigitalOcean account.
+  const newSpace =
+    spaceAccounts.length === 0
+      ? ''
+      : action(
+          `${icon('add')} Make a new Space`,
+          apiForm(
+            '/api/v2/storage/space/new',
+            `<p><small class="hint">A Space is DigitalOcean’s storage, billed by use from $5 a month for 250 GB, so there is no machine size to choose. Mason makes it and a key that can use only it, then stores new builds there.</small></p>${field('new-space-account', 'DigitalOcean account', `<select id="new-space-account" name="account">${spaceAccounts.map((account) => `<option value="${escape(account.id)}">${escape(account.name)}</option>`).join('')}</select>`)}${field('new-space-bucket', 'Space name', '<input id="new-space-bucket" name="bucket" required value="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">', '3 to 63 lowercase letters, digits and dashes; unique across DigitalOcean.')}${field('new-space-region', 'Region', spacesRegionSelect('new-space-region', 'sfo3').replace('name="space.region"', 'name="region"'))}`,
+            `${icon('storage')} Make the Space`,
+            { fields: ['account', 'bucket', 'region'], then: 'reload' },
+          ),
+          { id: 'storage-new' },
+        )
   const storagePanel =
     !data.canChange || (data.host == null && cloudHosts === '')
       ? ''
-      : `<section class="panel" id="storage"><h3>${icon('storage')}Storage</h3><p>${storage?.driver === 's3' ? `Builds are stored in <span class="mono">${escape(storage.bucket ?? '')}</span> at <span class="mono">${escape(storage.endpoint ?? '')}</span>.` : 'Builds are stored on the host’s disk.'} New builds go to the storage chosen here; earlier ones are still served from where they were written.</p>${action(
+      : `<section class="panel" id="storage"><h3>${icon('storage')}Storage</h3><p>${storage?.driver === 's3' ? `Builds are stored in <span class="mono">${escape(storage.bucket ?? '')}</span> at <span class="mono">${escape(storage.endpoint ?? '')}</span>.` : 'Builds are stored on the host’s disk.'} New builds go to the storage chosen here; earlier ones are still served from where they were written.</p>${newSpace}${action(
           `${icon('storage')} Use an existing Space`,
           apiForm(
             '/api/v2/storage/space',
@@ -515,7 +521,7 @@ export function nodesView(data: {
             { fields: ['url', 'accessKeyId', 'secretAccessKey'] },
           ),
           { id: 'storage-existing' },
-        )}${storage?.driver === 's3' ? apiForm('/api/v2/storage/disk', '', `${icon('storage')} Use the host’s disk`, { className: 'secondary' }) : ''}</section>`
+        )}${storage?.driver === 's3' ? apiForm('/api/v2/storage/disk', '', `${icon('storage')} Store on the host’s disk`, { className: 'secondary', then: 'reload' }) : ''}</section>`
   const hostPanel =
     !data.canChange && cloudHosts === ''
       ? ''

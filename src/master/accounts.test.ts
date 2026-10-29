@@ -808,6 +808,7 @@ describe('Master sign-in, setup, people and permissions', function () {
       'DELETE /api/v2/cloud/nodes/:name': 'settings.change',
       'GET /api/v2/storage': 'settings.read',
       'POST /api/v2/storage/space': 'settings.change',
+      'POST /api/v2/storage/space/new': 'settings.change',
       'POST /api/v2/storage/disk': 'settings.change',
       'GET /api/v2/people': 'people.read',
       'POST /api/v2/people': 'people.change',

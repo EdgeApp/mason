@@ -233,6 +233,10 @@ export class Master {
   readonly pools: Pools
   readonly cloudAccounts: CloudAccounts
   readonly cloudHosts: CloudHosts
+  /** Makes DigitalOcean Spaces and their keys, for hosts and for storage. */
+  readonly hostSpace: HostSpace
+  /** This master's short id, in the names of its cloud resources. */
+  readonly masterId: string
   readonly appleSetup: AppleSetup
   readonly artifacts: Artifacts
   readonly backups: Backups
@@ -531,6 +535,7 @@ export class Master {
       .update(identity.fingerprint)
       .digest('hex')
       .slice(0, 10)
+    this.masterId = masterId
     this.pools = new Pools({
       master: this.database,
       masterId,
@@ -638,7 +643,7 @@ export class Master {
         return response.ok ? (await response.text()).trim() : undefined
       },
       dns: new HostDns(this.database),
-      space: new HostSpace({
+      space: (this.hostSpace = new HostSpace({
         master: this.database,
         storage: {
           get: (): SpaceStorage | undefined => {
@@ -666,7 +671,7 @@ export class Master {
           ? {}
           : { fetch: options.spaces.fetch }),
         ...(options.spaces?.wait == null ? {} : { wait: options.spaces.wait }),
-      }),
+      })),
       log: (line): void => console.log(line),
       ...options.cloudHosts,
     })
