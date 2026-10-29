@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, it } from 'mocha'
 import { MasterDatabase } from '../master/database.js'
-import { nodesView } from './admin.js'
+import { action, field, nodesView } from './admin.js'
 import { artifactsView } from './artifacts.js'
 import {
   bytes,
@@ -730,5 +730,34 @@ describe('Nodes page', () => {
     assert(!fromGitHub.includes('&lt;host&gt;'))
     assert.match(nodesView(base), /href="\/settings#host"/)
     assert(!nodesView({ ...base, canChange: false }).includes('Add node'))
+  })
+})
+
+describe('Form helpers', () => {
+  it('action() is a details whose summary is a full button; field() puts the description between title and control', () => {
+    assert.equal(
+      action('Add', '<p>form</p>', { id: 'a' }),
+      '<details class="action" id="a"><summary class="button">Add</summary><div class="action-body"><p>form</p></div></details>',
+    )
+    assert.match(
+      action('Edit', '', { kind: 'secondary', open: true, className: 'x' }),
+      /^<details class="action x" open><summary class="button secondary">Edit<\/summary>/,
+    )
+    assert.equal(
+      field('f', 'Max <machines>', '<input id="f">', 'At most & no more'),
+      '<div class="field"><label for="f">Max &lt;machines&gt;</label><small class="hint">At most &amp; no more</small><input id="f"></div>',
+    )
+    assert.equal(
+      field('g', 'Name', '<input id="g">'),
+      '<div class="field"><label for="g">Name</label><input id="g"></div>',
+    )
+    // The Apple panel's reveal keeps hiding its button once open.
+    assert.match(stylesheet, /details\.reveal\[open\]>summary\{display:none\}/)
+    assert.match(stylesheet, /details\.action>summary\{list-style:none\}/)
+    // A step keeps its number and stacks: its title above its command, not beside it as other panel list items are.
+    assert.match(
+      stylesheet,
+      /\.panel ol\.howto>li,ol\.howto>li\{display:list-item;/,
+    )
   })
 })

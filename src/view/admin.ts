@@ -10,6 +10,33 @@ const command = (text: string): string =>
   `<div class="command"><pre class="mono">${escape(text)}</pre><button type="button" class="secondary copy" data-copy="${escape(text)}">${icon('content_copy')}<span data-copy-label>Copy</span></button></div>`
 
 /**
+ * A disclosure that is a full button: red for adding or using something,
+ * `secondary` for Edit and Remove. Open, the button stays as the form's heading.
+ */
+export function action(
+  label: string,
+  body: string,
+  options: {
+    id?: string
+    kind?: 'primary' | 'secondary'
+    open?: boolean
+    className?: string
+  } = {},
+): string {
+  return `<details class="action${options.className == null ? '' : ` ${options.className}`}"${options.id == null ? '' : ` id="${escape(options.id)}"`}${options.open === true ? ' open' : ''}><summary class="button${options.kind === 'secondary' ? ' secondary' : ''}">${label}</summary><div class="action-body">${body}</div></details>`
+}
+
+/** A form field: its title, an optional description in smaller text, then the control. */
+export function field(
+  id: string,
+  title: string,
+  control: string,
+  description?: string,
+): string {
+  return `<div class="field"><label for="${escape(id)}">${escape(title)}</label>${description == null ? '' : `<small class="hint">${escape(description)}</small>`}${control}</div>`
+}
+
+/**
  * A form the shell's script sends to the API as JSON: `fields` names the
  * inputs, dotted names nest (`addresses.google`), and a field named in
  * `json` is parsed as JSON and becomes the whole body.

@@ -79,9 +79,7 @@ export function applyEvent(page: RunPage, type: string, data: string): void {
 /** A form's named fields, by the names in its `data-fields`; checked boxes named `app` become `apps`. */
 export function formFields(form: HTMLFormElement): Record<string, string> {
   const out: Record<string, string> = {}
-  for (const name of (form.dataset.fields ?? '')
-    .split(',')
-    .filter((entry) => entry !== '')) {
+  for (const name of fieldNames(form)) {
     const element = form.elements.namedItem(name) as HTMLInputElement | null
     if (element != null) out[name] = element.value
   }
@@ -98,35 +96,102 @@ export function formFields(form: HTMLFormElement): Record<string, string> {
   return out
 }
 
-/** A JSON body from fields: dotted names nest, and empty nested values are left out. */
+const fieldNames = (form: HTMLFormElement): string[] =>
+  (form.dataset.fields ?? '').split(',').filter((entry) => entry !== '')
+
+/** Leaves a field out of the body. */
+const omit = Symbol('omit')
+
+/**
+ * A field's value as its `data-kind` says: `number`, `list` (commas and new
+ * lines), `checkbox`, or `secret` (empty keeps the stored one); otherwise
+ * its text. An empty `number`, or an empty `data-optional` field, is left out.
+ */
+function typedValue(element: HTMLInputElement): unknown {
+  const kind = element.dataset?.kind
+  const text = element.value
+  if (kind === 'checkbox') return element.checked
+  if (kind === 'secret') return text === '' ? { keep: true } : text
+  if (
+    text.trim() === '' &&
+    (kind === 'number' || element.dataset?.optional != null)
+  )
+    return omit
+  if (kind === 'number') return Number(text)
+  if (kind === 'list')
+    return text
+      .split(/[,\n]/)
+      .map((item) => item.trim())
+      .filter((item) => item !== '')
+  return text
+}
+
+/** A form's fields, typed by each input's `data-kind`. */
+export function typedFields(form: HTMLFormElement): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...formFields(form) }
+  for (const name of fieldNames(form)) {
+    const element = form.elements.namedItem(name) as HTMLInputElement | null
+    if (element == null) continue
+    const value = typedValue(element)
+    if (value === omit) delete out[name]
+    else out[name] = value
+  }
+  return out
+}
+
+/**
+ * A JSON body from fields: dotted names nest, a numeric part is an array
+ * index (gaps close up), and empty nested text is left out.
+ */
 export function nestedBody(
-  fields: Record<string, string>,
+  fields: Record<string, unknown>,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {}
+  const arrays: unknown[][] = []
   for (const [name, value] of Object.entries(fields)) {
     const parts = name.split('.')
     if (parts.length > 1 && value === '') continue
-    let target = body
-    for (const part of parts.slice(0, -1))
-      target = (target[part] ??= {}) as Record<string, unknown>
+    let target = body as Record<string, unknown>
+    for (let i = 0; i < parts.length - 1; i++) {
+      const next = /^\d+$/.test(parts[i + 1]!)
+      let child = target[parts[i]!]
+      if (child == null) {
+        child = next ? [] : {}
+        if (next) arrays.push(child as unknown[])
+        target[parts[i]!] = child
+      }
+      target = child as Record<string, unknown>
+    }
     target[parts[parts.length - 1]!] = value
+  }
+  for (const array of arrays) {
+    const items = array.filter((item) => item !== undefined)
+    array.splice(0, array.length, ...items)
   }
   return body
 }
 
-/** The JSON a form sends: a run action's fields and parameters, a JSON field as the whole body, or its fields nested. */
+/** The JSON a form sends: a run action's fields and parameters, a JSON field as the whole body, or its typed fields nested. */
 export function requestBody(form: HTMLFormElement): unknown {
-  const fields = formFields(form)
   const json = form.dataset.json
   if (json != null && json !== '')
     return JSON.parse(
-      fields[json] ??
+      formFields(form)[json] ??
         (form.elements.namedItem(json) as HTMLTextAreaElement | null)?.value ??
         '{}',
     ) as unknown
   return /^\/api\/v2\/runs(\/|$)/.test(form.dataset.path ?? '')
-    ? actionBody(fields)
-    : nestedBody(fields)
+    ? actionBody(formFields(form))
+    : nestedBody(typedFields(form))
+}
+
+/** The form's path, each `{name}` filled with that field's URL-encoded value. */
+export function formPath(form: HTMLFormElement): string {
+  return (form.dataset.path ?? '').replace(/\{([^}]+)\}/g, (_, name: string) =>
+    encodeURIComponent(
+      (form.elements.namedItem(name) as HTMLInputElement | null)?.value ?? '',
+    ),
+  )
 }
 
 /**
@@ -152,10 +217,13 @@ export async function submitAction(
       headers: { 'content-type': 'application/json', 'x-mason-csrf': csrf },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
+  // A DELETE sends a body only when the form names fields (a typed confirmation).
   const response = await send(
-    form.dataset.path ?? '',
+    formPath(form),
     method,
-    method === 'DELETE' ? undefined : requestBody(form),
+    method === 'DELETE' && fieldNames(form).length === 0
+      ? undefined
+      : requestBody(form),
   )
   const body = (await response.json().catch(() => ({}))) as {
     id?: string
