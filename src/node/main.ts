@@ -3,6 +3,8 @@ import { formatCheck, type ClusterReport } from '../master/clusterCheck.js'
 import { spawn } from 'node:child_process'
 import { helperPaths, serveHelper, systemContext } from '../helper/server.js'
 import {
+  currentRelease,
+  pruneReleases,
   runningInstall,
   serviceProgram,
   type RunningInstall,
@@ -863,6 +865,14 @@ async function updateCommand(argv: string[], io: MainIO): Promise<number> {
     })
   })
   if (status !== 0) return status
+  // Only the new release and the one that ran before it stay installed.
+  const current = currentRelease(install.prefix!)
+  const removed = pruneReleases(install.prefix!, [
+    ...(current == null ? [] : [current]),
+    path.basename(install.appRoot),
+  ])
+  if (removed.length > 0)
+    io.out(`Removed older releases: ${removed.join(', ')}.`)
   const system = io.system()
   const uid = Number(process.env.SUDO_UID ?? process.getuid?.() ?? 0)
   for (const role of ['master', 'worker', 'host'])

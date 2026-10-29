@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   readlinkSync,
   realpathSync,
   statSync,
@@ -625,6 +626,9 @@ describe('Releases, install.sh and updates', function () {
       mkdirSync(data, { recursive: true })
       writeFileSync(path.join(data, 'keep.txt'), 'kept')
       const prefix = path.join(home, '.mason', 'app')
+      // Older installs, and a failed one, that the update clears away.
+      for (const old of ['0.0.8', '0.0.9', '0.1.0.partial'])
+        mkdirSync(path.join(prefix, old), { recursive: true })
       const ran: string[][] = []
       const saved = { ...process.env }
       Object.assign(process.env, {
@@ -650,6 +654,16 @@ describe('Releases, install.sh and updates', function () {
         })
         assert.equal(await nodeMain(['update'], out), 0, out.errors.join('\n'))
         assert.equal(readlinkSync(path.join(prefix, 'current')), '0.1.2')
+        // Only the new release and the one that ran before it stay.
+        assert.deepEqual(readdirSync(prefix).sort(), [
+          '0.1.1',
+          '0.1.2',
+          'current',
+        ])
+        assert.match(
+          out.lines.join('\n'),
+          /Removed older releases: .*0\.0\.8.*/,
+        )
         assert.deepEqual(
           ran.map((call) => call[3]?.split('/').pop()),
           ['app.mason.master', 'app.mason.worker', 'app.mason.host'],

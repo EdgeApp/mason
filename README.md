@@ -52,6 +52,10 @@ mason setup --username ada --password-stdin --api-key-out ~/.mason/admin.key
 ```
 
 `mason update` installs a newer release on a node and restarts its services.
+It keeps the new release and the one that ran before it, and removes older
+releases and failed installs from the install directory (`/opt/mason`, or
+`~/.mason/app` for a user install). Worker updates the master pushes do the
+same.
 
 ## Pairing nodes
 
