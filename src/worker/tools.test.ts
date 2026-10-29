@@ -634,6 +634,7 @@ describe('Worker tooling', function () {
       const repo = c.repo('fixtures/tools')
       repo.commit({
         '.nvmrc': 'lts/*\n',
+        'rust-toolchain.toml': '[toolchain]\nchannel = "1.82.0"\n',
         'Masonfile.ts': `
 import type { Setup, Stage } from '@mason/types'
 export function setup(m: Setup) {
@@ -642,7 +643,7 @@ export function setup(m: Setup) {
   const want = String(m.params.want)
   const tools =
     want === 'node' ? { node: '24', java: '21' } :
-    want === 'project' ? { node: 'project' } :
+    want === 'project' ? { node: 'project', rust: 'project' } :
     want === 'android' ? { android: ['platforms;android-35'] } :
     want === 'xcode' ? { xcode: '26.1' } :
     want === 'nox' ? { xcode: '99' } : {}
@@ -654,6 +655,7 @@ export async function use(ctx: Stage) {
     node: ctx.node.name,
     nodeVersion: await sh('node --version'),
     nodeBinary: process.env.NODE_BINARY ?? null,
+    cargo: process.env.CARGO_HOME ?? null,
     javaHome: process.env.JAVA_HOME ?? null,
     developerDir: process.env.DEVELOPER_DIR ?? null,
     android: process.env.ANDROID_HOME ?? null,
@@ -727,11 +729,16 @@ export async function use(ctx: Stage) {
       assert(!again.seen.has('use:preparing'))
     })
 
-    it('U2.4 a stage with tools.node project runs with the Node.js the repository’s .nvmrc names', async () => {
+    it('U1.3 a stage with tools project runs with the Node.js and Rust the repository pins', async () => {
       const run = await runWith('project')
       const log = c.master.master!.scheduler.logs(run.id)!
       assert.equal(run.status, 'succeeded', log)
-      assert.match(log, /Node\.js 24 from \.nvmrc for tools\.node 'project'/)
+      assert.match(log, /node 24 from \.nvmrc for tools\.node 'project'/)
+      assert.match(
+        log,
+        /rust 1\.82\.0 from rust-toolchain\.toml for tools\.rust 'project'/,
+      )
+      assert.match(use(run).output.cargo, /tools\/rust\/1\.82\.0\/cargo$/)
       const output = use(run).output
       assert.equal(output.nodeVersion, 'v24.11.1')
       assert.match(output.nodeBinary, /tools\/node\/24\.11\.1\/bin\/node$/)

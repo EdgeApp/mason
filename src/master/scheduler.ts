@@ -57,6 +57,7 @@ import type { Project, Projects } from './projects.js'
 import { matches, ruleFor } from './rules.js'
 import type { Stashes } from './stash.js'
 import { cronMatches, masterTimeZone, parseCron } from './triggers.js'
+import { projectFiles, projectTools } from '../worker/tools/projectTools.js'
 
 type Row = Record<string, unknown>
 
@@ -188,28 +189,32 @@ export function applyXcodeVersion(
 }
 
 /**
- * The repository's Node.js version, for stages with `tools.node: 'project'`.
- * Returns why the run cannot start when such a stage of the workflow it runs
- * has none.
+ * The repository's pinned versions, for stages that set a tool to
+ * `'project'`. Returns why the run cannot start when such a stage of the
+ * workflow it runs has no usable pin.
  */
-export function applyNodeVersion(
+export function applyProjectTools(
   graph: Graph,
-  found: RunReport['nodeVersion'],
+  found: RunReport['projectTools'],
   running: string,
 ): string | undefined {
-  const version =
-    found?.version != null && /^\d+(\.\d+){0,2}$/.test(found.version)
-      ? found.version
-      : undefined
   for (const workflow of graph.workflows)
-    for (const stage of workflow.stages) {
-      if (stage.tools?.node !== 'project') continue
-      if (version != null) stage.tools = { ...stage.tools, node: version }
-      else if (workflow.name === running)
-        return found == null
-          ? `${stage.name}: tools.node is 'project' but the repository has no .nvmrc, .node-version or engines.node`
-          : `${stage.name}: tools.node is 'project' but ${found.file} cannot be used: ${found.problem ?? 'it names no Node.js version'}`
-    }
+    for (const stage of workflow.stages)
+      for (const tool of projectTools) {
+        const tools = stage.tools as Record<string, unknown> | undefined
+        if (tools?.[tool] !== 'project') continue
+        const pin = found?.[tool]
+        const version =
+          typeof pin?.version === 'string' &&
+          /^[\w.<>= -]{1,64}$/.test(pin.version)
+            ? pin.version
+            : undefined
+        if (version != null) stage.tools = { ...stage.tools, [tool]: version }
+        else if (workflow.name === running)
+          return pin == null
+            ? `${stage.name}: tools.${tool} is 'project' but the repository has no ${projectFiles[tool]}`
+            : `${stage.name}: tools.${tool} is 'project' but ${pin.file} cannot be used: ${pin.problem ?? `it names no ${tool} version`}`
+      }
   return undefined
 }
 
@@ -737,22 +742,23 @@ export class Scheduler {
     }
     const ignored = applyXcodeVersion(graph, report.xcodeVersion)
     if (ignored != null) graph.warnings.push(ignored)
-    const noNode = applyNodeVersion(
+    const unpinned = applyProjectTools(
       graph,
-      report.nodeVersion,
+      report.projectTools,
       String(job.workflow),
     )
-    if (noNode != null) {
-      this.appendLog(id, SETUP, `${noNode}\n`)
-      this.finishJob(id, 'failed', noNode)
+    if (unpinned != null) {
+      this.appendLog(id, SETUP, `${unpinned}\n`)
+      this.finishJob(id, 'failed', unpinned)
       return
     }
-    if (report.nodeVersion?.version != null)
-      this.appendLog(
-        id,
-        SETUP,
-        `Node.js ${report.nodeVersion.version} from ${report.nodeVersion.file} for tools.node 'project'\n`,
-      )
+    for (const [tool, pin] of Object.entries(report.projectTools ?? {}))
+      if (pin.version != null)
+        this.appendLog(
+          id,
+          SETUP,
+          `${tool} ${pin.version} from ${pin.file} for tools.${tool} 'project'\n`,
+        )
     for (const warning of graph.warnings)
       this.appendLog(id, SETUP, `warning: ${warning}\n`)
     // An Xcode that launches on none of the nodes a stage can use fails the run now.
