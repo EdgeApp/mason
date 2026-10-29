@@ -96,29 +96,22 @@ constants.
 ## 2. Nodes and node types
 
 A worker **node** is a computer running `mason worker`. It needs no
-configuration file: on first start it creates its identity and prints a
-pairing key and its addresses:
+configuration file. One command installs Mason (with its own Node runtime;
+no Node or npm needed beforehand), starts the worker and its helper as
+services, and prints the pairing key:
 
 ```sh
-sudo mason worker --install      # installs the service and helper, prints the pairing key
+curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh | bash -s -- worker
 # Pairing key: mason1:mldsa65:…
 ```
 
-Mason installs like Homebrew, with one command and no Node or npm needed
-beforehand:
-
-```sh
-/bin/bash -c "$(curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh)"
-# or: wget -qO- …/install.sh | bash
-```
-
-It downloads the Mason release for the computer's OS and architecture from
-GitHub, which bundles its own Node runtime, and puts `mason` on the `PATH`.
-While the Mason repository is private, the installer needs a GitHub token
-(`GITHUB_TOKEN`, or a signed-in `gh`); nodes joining a cluster can instead use
-the host's copy, `curl -fsSL https://<host>/install.sh | bash`, which needs
-none.
-Then `sudo mason worker --install` as above.
+It asks for your password once (or put `sudo` before `bash`); the worker runs
+as the account that ran it, and as a `mason` system user when that is root on
+Linux. Nodes joining a cluster can instead use the host's copy of the
+master's release, `curl -fsSL https://<host>/install.sh | bash -s -- --from
+https://<host> worker`, which the Nodes page shows ready to copy. `master` and
+`host` work the same way, and `uninstall <role>` removes the service and the
+program and keeps the data.
 An administrator enters the pairing key and the node's address (URL, IP
 address or DNS name) in **Add node** on the master, or through the API. The
 master pairs, then sets the node's name, type and labels and manages its

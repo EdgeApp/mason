@@ -96,7 +96,7 @@ function serviceUser(
   if (name == null) {
     if (system.platform === 'darwin')
       throw new Error(
-        'Run this with sudo from the account the service should run as, or pass --user',
+        'On macOS Mason runs in a logged-in account, which Xcode and keychains need: run this with sudo from that account, or pass --user <name>',
       )
     let account = system.user(SYSTEM_USER)
     let created = false

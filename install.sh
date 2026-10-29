@@ -1,7 +1,16 @@
 #!/bin/bash
 # Installs Mason from a release: no Node.js or npm needed.
 #
-#   /bin/bash -c "$(curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh)"
+#   curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh | bash
+#   curl -fsSL …/install.sh | bash -s -- master           # and start a master
+#   curl -fsSL …/install.sh | bash -s -- worker           # or a worker, or a host
+#   curl -fsSL …/install.sh | bash -s -- uninstall worker # stop it and remove Mason
+#
+# master, worker or host installs that role as a service after the program,
+# running as the account that ran this (with or without sudo in front); as
+# root with no other account, Linux uses a mason system user. Words after
+# the role go to `mason <role> --install` (`master --worker`, `host --port 8443`).
+# uninstall <role> removes the service and the program and keeps the data.
 #
 # Options: --version <x.y.z>   a release other than the latest
 #          --user              install under ~/.mason/app and ~/.local/bin, without sudo
@@ -16,16 +25,32 @@ api=${MASON_GITHUB_API:-https://api.github.com}
 from=${MASON_FROM:-}
 version=''
 user=0
+role=''
+uninstall=0
+role_args=()
 while [[ $# -gt 0 ]]; do
   case $1 in
     --version) version=${2:?--version needs a version}; shift 2 ;;
     --user) user=1; shift ;;
     --from) from=${2:?--from needs a URL}; shift 2 ;;
-    *) echo "install.sh: unknown option $1" >&2; exit 2 ;;
+    uninstall) [[ -z $role && $uninstall == 0 ]] || { echo "install.sh: uninstall comes before the role" >&2; exit 2; }; uninstall=1; shift ;;
+    master | worker | host)
+      if [[ -n $role ]]; then role_args+=("$1"); else role=$1; fi
+      shift ;;
+    *)
+      if [[ -n $role ]]; then role_args+=("$1"); shift
+      else echo "install.sh: unknown option $1" >&2; exit 2; fi ;;
   esac
 done
 
 fail() { echo "install.sh: $*" >&2; exit 1; }
+[[ $uninstall == 0 || -n $role ]] || fail "uninstall needs the role: uninstall master, worker or host"
+[[ -z $role || $user == 0 ]] || fail "a $role service needs root: leave out --user"
+
+# The role's service is installed as root; sudo keeps who ran this in SUDO_USER.
+as_admin() {
+  if [[ $(id -u) == 0 ]]; then "$@"; else ${MASON_SUDO:-sudo} "$@"; fi
+}
 
 case $(uname -s) in
   Darwin) os=darwin ;;
@@ -57,6 +82,15 @@ else
   else
     as_root=(sudo)
   fi
+fi
+
+if [[ $uninstall == 1 ]]; then
+  [[ -L $prefix/current ]] || fail "$prefix is not a Mason install"
+  if [[ -x $bindir/mason ]]; then as_admin "$bindir/mason" "$role" --uninstall; fi
+  ${as_root[@]+"${as_root[@]}"} rm -f "$bindir/mason"
+  ${as_root[@]+"${as_root[@]}"} rm -rf "$prefix"
+  echo "Removed Mason from $prefix and $bindir/mason; the $role's data directory is kept."
+  exit 0
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/mason-install.XXXXXX")
@@ -132,12 +166,19 @@ ${as_root[@]+"${as_root[@]}"} ln -sfn "$release" "$prefix/current"
 ${as_root[@]+"${as_root[@]}"} mkdir -p "$bindir"
 ${as_root[@]+"${as_root[@]}"} ln -sfn "$prefix/current/mason" "$bindir/mason"
 echo "Linked $bindir/mason"
+if [[ -n $role ]]; then
+  echo
+  as_admin "$bindir/mason" "$role" --install ${role_args[@]+"${role_args[@]}"}
+  exit 0
+fi
 echo
 echo "Next:"
 echo "  mason                         run a master (prints a setup code)"
 if [[ $user == 1 ]]; then
   echo "  mason worker --install        install a worker service for this user"
 else
+  echo "  sudo mason master --install   install the master service"
   echo "  sudo mason worker --install   install a worker service"
   echo "  sudo mason host --install     install the host"
+  echo "  or run this installer again with master, worker or host"
 fi

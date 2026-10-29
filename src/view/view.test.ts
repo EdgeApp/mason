@@ -711,21 +711,19 @@ describe('Nodes page', () => {
       host: 'https://builds.example.test',
       release: { repository: 'example/mason', version: '1.2.3' },
     })
+    // One line installs Mason and starts the role; no separate sudo command.
     assert.match(
       fromHost,
-      /<pre class="mono">\/bin\/bash -c &quot;\$\(curl -fsSL https:\/\/builds\.example\.test\/install\.sh\)&quot; -- --from https:\/\/builds\.example\.test<\/pre><button type="button" class="secondary copy" data-copy="\/bin\/bash -c &quot;/,
+      /<pre class="mono">curl -fsSL https:\/\/builds\.example\.test\/install\.sh \| bash -s -- --from https:\/\/builds\.example\.test worker<\/pre><button type="button" class="secondary copy" data-copy="curl -fsSL https:\/\/builds\.example\.test\/install\.sh \| bash -s -- --from https:\/\/builds\.example\.test worker"/,
     )
-    assert.match(
-      fromHost,
-      /data-copy="sudo mason worker --install --link-port 9410"/,
-    )
+    assert(!fromHost.includes('sudo mason worker --install'))
     const fromGitHub = nodesView({
       ...base,
       release: { repository: 'example/mason', version: '1.2.3' },
     })
     assert.match(
       fromGitHub,
-      /It installs Mason 1\.2\.3, the master’s version\.<\/small><div class="command"><pre class="mono">.*https:\/\/github\.com\/example\/mason\/releases\/latest\/download\/install\.sh\)&quot; -- --version 1\.2\.3<\/pre>/,
+      /It installs Mason 1\.2\.3, the master’s version, and starts it as a worker service under your account; it asks for your password once\.<\/small><div class="command"><pre class="mono">curl -fsSL https:\/\/github\.com\/example\/mason\/releases\/download\/v1\.2\.3\/install\.sh \| bash -s -- --version 1\.2\.3 worker<\/pre>/,
     )
     assert(!fromGitHub.includes('&lt;host&gt;'))
     assert.match(nodesView(base), /href="\/settings#host"/)
@@ -752,15 +750,11 @@ describe('Nodes page', () => {
     // Each step: its title first, then the command box with Copy beside it.
     assert.match(
       nodes,
-      /<li><strong>Install Mason<\/strong><small class="hint">[^<]*<\/small><div class="command"><pre class="mono">[^<]*<\/pre><button type="button" class="secondary copy"/,
+      /<li><strong>Install and start Mason as a worker<\/strong><small class="hint">On the new computer\.[^<]*<\/small><div class="command"><pre class="mono">[^<]* worker<\/pre><button type="button" class="secondary copy"[\s\S]*?<\/div><small class="hint">It prints the pairing key\.<\/small><\/li>/,
     )
     assert.match(
       nodes,
-      /<li><strong>Start as a worker<\/strong><div class="command"><pre class="mono">sudo mason worker --install --link-port 9410<\/pre><button[^>]*class="secondary copy"[\s\S]*?<\/div><small class="hint">It prints its pairing key\.<\/small><\/li>/,
-    )
-    assert.match(
-      nodes,
-      /<li><strong>Pair it here<\/strong><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*<label for="node-address">Mason node address and port<\/label><input id="node-address" name="address" placeholder="192\.168\.1\.20:9410"[\s\S]*Pair node/,
+      /<li><strong>Pair it here<\/strong><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*<label for="node-address">Mason node address and port<\/label><input id="node-address" name="address" placeholder="192\.168\.1\.20:9310"[\s\S]*Pair node/,
     )
     // The host's two ways: on DigitalOcean, or by hand with the same steps.
     assert.match(
@@ -774,15 +768,11 @@ describe('Nodes page', () => {
     )
     assert.match(
       byHand,
-      /<strong>Install Mason<\/strong><small class="hint">On a computer the internet can reach\./,
+      /<strong>Install and start Mason as the host<\/strong><small class="hint">On a computer the internet can reach\.[^<]*<\/small><div class="command"><pre class="mono">[^<]* host<\/pre>/,
     )
     assert.match(
       byHand,
-      /<strong>Start it as the host<\/strong><div class="command"><pre class="mono">sudo mason host --install<\/pre>/,
-    )
-    assert.match(
-      byHand,
-      /<strong>Pair it here<\/strong><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*placeholder="builds\.example\.com:9310"[\s\S]*Pair host/,
+      /<strong>Pair it here<\/strong><small class="hint">To put the host behind TLS on port 443, see the README’s public-server command\.<\/small><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*placeholder="builds\.example\.com:9310"[\s\S]*Pair host/,
     )
   })
 
