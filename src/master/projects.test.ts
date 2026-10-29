@@ -1475,6 +1475,22 @@ describe('Projects, branch rules and build numbers', function () {
       )
       assert.equal(sshAccess.url, 'git@github.com:a/b.git')
       assert.match(sshAccess.env.GIT_SSH_COMMAND!, /-o IdentitiesOnly=yes/)
+      // Only a stored secret of the same kind is kept: the deploy key is not an app's key or a token.
+      assert.match(
+        (
+          await put({
+            kind: 'app',
+            appId: 12,
+            installationId: 77,
+            privateKey: { keep: true },
+          })
+        ).json.error,
+        /privateKey is required|No stored/,
+      )
+      assert.equal(
+        (await put({ kind: 'token', token: { keep: true } })).status,
+        400,
+      )
       assert.equal((await put({ kind: 'carrier pigeon' })).status, 400)
       assert.equal(storedConnection(undefined), undefined)
       assert.equal(storedConnection({ kind: 'other' }), undefined)

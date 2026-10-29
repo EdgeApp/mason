@@ -149,6 +149,7 @@ const usage = `Usage:
   mason settings get <area> | mason settings set <area> --file <json>
   mason cloud accounts list [--json] | add --provider <digitalocean|nomac> --name <n> [--id <id>] --key-stdin | check <id> | remove <id>
   mason cloud hosts list [--json] | add --file <json> | reconcile <name> | remove <name>
+  mason cloud nodes list [--json] | add --file <json> | reconcile <name> | remove <name>
   mason projects list | get <slug> | set <slug> --file <json> | remove <slug>
 Options: --data <dir> --port <n> --link-port <n> --listen <address> --link-listen <address>
   --web-cert <file> --web-key <file> --web-plain --new-key --test-endpoints --slots <n>
@@ -377,17 +378,19 @@ async function keysCommand(argv: string[], io: MainIO): Promise<number> {
   throw new Error(usage)
 }
 
-/** `mason cloud hosts …`: the Mason hosts the master makes on a cloud provider. */
+/** `mason cloud hosts|nodes …`: the hosts and permanent nodes the master makes on a cloud provider. */
 async function hostsCommand(
+  group: 'hosts' | 'nodes',
   action: string | undefined,
   args: ReturnType<typeof parseArgs>,
   data: string,
   io: MainIO,
 ): Promise<number> {
+  const word = group === 'hosts' ? 'host' : 'node'
   const describe = (host: Record<string, unknown>): string =>
     `${String(host.name)}  ${String(host.state)}  ${String(host.region)} ${String(host.size)}  ${String(host.address ?? '-')}${host.error == null ? '' : `  ${String(host.error)}`}`
   if (action === 'list' && args.positional.length === 0) {
-    const hosts = (await controlRequest(data, 'cloud.hosts.list')) as Array<
+    const hosts = (await controlRequest(data, `cloud.${group}.list`)) as Array<
       Record<string, unknown>
     >
     if (args.flags.has('--json')) io.out(JSON.stringify(hosts))
@@ -396,10 +399,10 @@ async function hostsCommand(
   }
   const file = single(args, '--file')
   if (action === 'add' && file != null && args.positional.length === 0) {
-    const host = (await controlRequest(data, 'cloud.hosts.add', {
+    const host = (await controlRequest(data, `cloud.${group}.add`, {
       value: JSON.parse(readFileSync(file, 'utf8')) as unknown,
     })) as Record<string, unknown>
-    io.out(`Making host ${String(host.name)}: ${describe(host)}`)
+    io.out(`Making ${word} ${String(host.name)}: ${describe(host)}`)
     return 0
   }
   if (
@@ -407,10 +410,10 @@ async function hostsCommand(
     args.positional.length === 1
   ) {
     const name = args.positional[0]
-    const host = (await controlRequest(data, `cloud.hosts.${action}`, {
+    const host = (await controlRequest(data, `cloud.${group}.${action}`, {
       name,
     })) as Record<string, unknown> | null
-    io.out(host == null ? `Removed host ${name}` : describe(host))
+    io.out(host == null ? `Removed ${word} ${name}` : describe(host))
     return host == null || host.state !== 'error' ? 0 : 1
   }
   throw new Error(usage)
@@ -425,7 +428,8 @@ async function cloudCommand(argv: string[], io: MainIO): Promise<number> {
     ['--json', '--key-stdin'],
   )
   const data = resolveDataDir(single(args, '--data'))
-  if (group === 'hosts') return await hostsCommand(action, args, data, io)
+  if (group === 'hosts' || group === 'nodes')
+    return await hostsCommand(group, action, args, data, io)
   if (group !== 'accounts') throw new Error(usage)
   const describe = (account: AccountView): string => {
     const check = account.check

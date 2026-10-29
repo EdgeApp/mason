@@ -19,6 +19,7 @@ export interface SettingsArea {
   /** Top-level fields that are secrets: never returned, only set or unset. */
   secrets?: string[] | ((value: SettingValue | undefined) => string[])
   /** Called after a change commits, for areas published to the host or nodes. */
+  /** After a save: the new value, and the one it replaced. */
   changed?(value: SettingValue): void
   /** What an administrator sees, for secrets nested below the top level. */
   redact?(value: SettingValue): SettingValue

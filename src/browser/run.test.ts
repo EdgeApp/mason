@@ -5,6 +5,7 @@ import {
   applyEvent,
   domRunPage,
   formFields,
+  formPath,
   highlight,
   logLines,
   nestedBody,
@@ -629,5 +630,207 @@ describe('Run view script', () => {
     const plain = new El().set('.run-head', head)
     start(plain as unknown as Document, win)
     assert.equal(streams[2]!.url, '/api/v2/runs/r/events?')
+  })
+})
+
+describe('Typed form fields', () => {
+  /** A form whose inputs carry `data-kind`, `data-optional` and `checked`. */
+  const typed = (
+    path: string,
+    inputs: Record<
+      string,
+      { value?: string; kind?: string; optional?: boolean; checked?: boolean }
+    >,
+    data: Record<string, string> = {},
+  ): HTMLFormElement => {
+    const element = form(
+      path,
+      Object.fromEntries(
+        Object.entries(inputs).map(([name, input]) => [
+          name,
+          input.value ?? '',
+        ]),
+      ),
+      data,
+    )
+    for (const [name, input] of Object.entries(inputs)) {
+      const el = element.named.get(name)!
+      el.dataset = {
+        ...(input.kind == null ? {} : { kind: input.kind }),
+        ...(input.optional === true ? { optional: '' } : {}),
+      }
+      el.checked = input.checked ?? false
+    }
+    return element as unknown as HTMLFormElement
+  }
+
+  it('U1.1 a number field sends a number, and an empty one is left out', () => {
+    assert.deepEqual(
+      requestBody(
+        typed('/api/v2/x', {
+          hours: { value: ' 12 ', kind: 'number' },
+          disk: { value: '', kind: 'number' },
+          'a.size': { value: '2.5', kind: 'number' },
+        }),
+      ),
+      { hours: 12, a: { size: 2.5 } },
+    )
+  })
+
+  it('U1.2 a list field splits commas and new lines, trims and drops empties', () => {
+    assert.deepEqual(
+      requestBody(
+        typed('/api/v2/x', {
+          apt: { value: 'jq, curl\n git ,,\n', kind: 'list' },
+          brew: { value: '', kind: 'list' },
+        }),
+      ),
+      { apt: ['jq', 'curl', 'git'], brew: [] },
+    )
+  })
+
+  it('U1.3 a checkbox sends true or false, and untyped fields stay text', () => {
+    assert.deepEqual(
+      requestBody(
+        typed('/api/v2/x', {
+          on: { kind: 'checkbox', checked: true },
+          off: { kind: 'checkbox' },
+          name: { value: 'n' },
+          empty: { value: '' },
+          'nested.empty': { value: '' },
+        }),
+      ),
+      { on: true, off: false, name: 'n', empty: '' },
+    )
+  })
+
+  it('U1.4 numeric path parts build arrays, and gaps close up', () => {
+    assert.deepEqual(
+      requestBody(
+        typed('/api/v2/x', {
+          'methods.0.id': { value: 'a' },
+          'methods.2.id': { value: 'c' },
+          'methods.2.on': { kind: 'checkbox', checked: true },
+        }),
+      ),
+      { methods: [{ id: 'a' }, { id: 'c', on: true }] },
+    )
+  })
+
+  it('U1.5 an empty secret keeps the stored one, and typed text replaces it', () => {
+    assert.deepEqual(
+      requestBody(
+        typed('/api/v2/x', {
+          token: { value: '', kind: 'secret' },
+          'claims.secret': { value: '', kind: 'secret' },
+          other: { value: 's3cret', kind: 'secret' },
+        }),
+      ),
+      {
+        token: { keep: true },
+        claims: { secret: { keep: true } },
+        other: 's3cret',
+      },
+    )
+  })
+
+  it('U1.6 an empty optional field is left out at any depth', () => {
+    assert.deepEqual(
+      requestBody(
+        typed('/api/v2/x', {
+          workerOrigin: { value: '', optional: true },
+          origin: { value: 'https://a.example' },
+          'claims.email': { value: ' ', optional: true },
+          'claims.subject': { value: 'sub', optional: true },
+          plain: { value: '' },
+        }),
+      ),
+      { origin: 'https://a.example', claims: { subject: 'sub' }, plain: '' },
+    )
+  })
+
+  it('U1.7 braces in the path are filled from fields, URL-encoded', async () => {
+    const named = typed('/api/v2/settings/nodeTypes/{name}', {
+      name: { value: 'mac arm/1' },
+      'software.node': { value: '24' },
+    })
+    assert.equal(formPath(named), '/api/v2/settings/nodeTypes/mac%20arm%2F1')
+    assert.equal(
+      formPath(typed('/api/v2/plain', { a: { value: 'x' } })),
+      '/api/v2/plain',
+    )
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    const fetcher = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init })
+      return reply(200, {})
+    }) as typeof fetch
+    await submitAction(named, 'proof', fetcher, () => undefined)
+    assert.equal(calls[0]!.url, '/api/v2/settings/nodeTypes/mac%20arm%2F1')
+    assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), {
+      name: 'mac arm/1',
+      software: { node: '24' },
+    })
+  })
+
+  it('U1.8 a DELETE sends its fields as the body, and a fieldless DELETE sends none', async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = []
+    const fetcher = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init })
+      return reply(200, {})
+    }) as typeof fetch
+    await submitAction(
+      typed(
+        '/api/v2/cloud/hosts/h',
+        { confirm: { value: 'h' }, deleteSpace: { value: 'keep' } },
+        { method: 'DELETE' },
+      ),
+      'proof',
+      fetcher,
+      () => undefined,
+    )
+    await submitAction(
+      typed('/api/v2/keys/k', {}, { method: 'DELETE' }),
+      'proof',
+      fetcher,
+      () => undefined,
+    )
+    assert.equal(calls[0]!.init.method, 'DELETE')
+    assert.deepEqual(JSON.parse(String(calls[0]!.init.body)), {
+      confirm: 'h',
+      deleteSpace: 'keep',
+    })
+    assert.equal(calls[1]!.init.body, undefined)
+  })
+
+  it('U5.3 a created key’s token is shown once in the form, with Copy', async () => {
+    const created = typed(
+      '/api/v2/keys',
+      { name: { value: 'ci' }, role: { value: 'developer' } },
+      { then: 'token' },
+    ) as unknown as El
+    const box = new El()
+    const pre = new El()
+    const copy = new El()
+    box.set('pre', pre).set('button[data-copy]', copy)
+    created.set('[data-field="token"]', box)
+    const visits: string[] = []
+    const fetcher = (async () =>
+      reply(201, {
+        id: 'k1',
+        token: 'mason_v1_abc.secret',
+      })) as unknown as typeof fetch
+    assert.equal(
+      await submitAction(
+        created as unknown as HTMLFormElement,
+        'proof',
+        fetcher,
+        (href) => visits.push(href),
+      ),
+      undefined,
+    )
+    assert.equal(box.hidden, false)
+    assert.equal(pre.textContent, 'mason_v1_abc.secret')
+    assert.equal(copy.dataset.copy, 'mason_v1_abc.secret')
+    assert.deepEqual(visits, [], 'the page stays, so the token can be copied')
   })
 })

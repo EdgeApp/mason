@@ -771,6 +771,278 @@ describe('Master sign-in, setup, people and permissions', function () {
     return out
   }
 
+  it('U5.2 the Settings form creates a key: apps as the form sends them, the token once, never in the list', async () => {
+    const developer = await c.api('POST', '/api/v2/keys', {
+      name: 'from the page',
+      role: 'developer',
+      apps: '',
+    })
+    assert.equal(developer.status, 201, developer.text)
+    assert.match(developer.json.token, /^mason_v1_[0-9a-f]{32}\./)
+    assert.equal(developer.json.token.slice(9, 41), developer.json.id)
+    // The form's comma-separated app ids are ids: unknown ones are refused as apps.
+    assert.match(
+      (
+        await c.api('POST', '/api/v2/keys', {
+          name: 'uploads',
+          role: 'upload',
+          apps: '999998, 999999',
+        })
+      ).json.error,
+      /Unknown app scope/,
+    )
+    const listed = (await c.api('GET', '/api/v2/keys')).json as Json[]
+    const mine = listed.find((key) => key.id === developer.json.id)!
+    assert.equal(mine.name, 'from the page')
+    assert.equal(mine.token, undefined)
+    assert.equal(mine.hash, undefined)
+    assert(!JSON.stringify(listed).includes(developer.json.token))
+  })
+
+  it('U6.2/U6.3 Settings cards save their part of an area and keep the rest as stored', async () => {
+    // Host: an empty worker address is left out by the form, and accepted.
+    const host = await c.api('PUT', '/api/v2/settings/host', {
+      origin: 'https://builds.example.test',
+      offlineGraceHours: 48,
+    })
+    assert.equal(host.status, 200, host.text)
+    assert.equal(host.json.workerOrigin, undefined)
+    assert.equal(host.json.offlineGraceHours, 48)
+    assert.match(
+      (
+        await c.api('PUT', '/api/v2/settings/host', {
+          origin: 'http://insecure.example.test',
+          offlineGraceHours: 48,
+        })
+      ).json.error,
+      /https/i,
+    )
+    // Cloud budget: the pools stored at the moment of the save stay.
+    const master = c.master.master!
+    const pools = [
+      {
+        name: 'p1',
+        type: 'linux-x86',
+        account: 'digitalocean',
+        region: 'sfo3',
+        size: 's-1vcpu-1gb',
+        image: 'ubuntu-24-04-x64',
+      },
+    ]
+    await master.settings.set(localOperator, 'cloudAccounts', {
+      accounts: [
+        {
+          id: 'digitalocean',
+          name: 'DigitalOcean',
+          provider: 'digitalocean',
+          key: 'dop_v1_' + 'c'.repeat(64),
+        },
+      ],
+    })
+    await master.settings.set(localOperator, 'cloud', { pools })
+    const budget = await c.api('PUT', '/api/v2/settings/cloud/budget', {
+      monthlyBudget: 75,
+    })
+    assert.equal(budget.status, 200, budget.text)
+    const cloud = master.settings.value('cloud') as Json
+    assert.equal(cloud.monthlyBudget, 75)
+    assert.deepEqual(
+      cloud.pools.map((pool: Json) => pool.name),
+      ['p1'],
+    )
+    assert.equal(
+      (
+        await c.api('PUT', '/api/v2/settings/cloud/budget', {
+          monthlyBudget: -1,
+        })
+      ).status,
+      400,
+    )
+    // A cleared field sends no budget: refused, not reset to the default.
+    assert.match(
+      (await c.api('PUT', '/api/v2/settings/cloud/budget', {})).json.error,
+      /monthlyBudget is a number of dollars/,
+    )
+    assert.equal((master.settings.value('cloud') as Json).monthlyBudget, 75)
+    // Sign-in: one method at a time, the others and every stored secret kept.
+    const oidc = {
+      type: 'oidc',
+      enabled: true,
+      name: 'Google',
+      issuer: 'https://accounts.google.com',
+      clientId: 'gid',
+      clientSecret: 'g-secret',
+      authentication: 'post',
+      signingAlgorithm: 'RS256',
+    }
+    assert.equal(
+      (await c.api('PUT', '/api/v2/settings/signIn/methods/google', oidc))
+        .status,
+      200,
+    )
+    const added = await c.api('PUT', '/api/v2/settings/signIn/methods/gh', {
+      type: 'oauth2',
+      enabled: false,
+      name: 'GitHub',
+      issuer: 'https://github.com',
+      clientId: 'hid',
+      clientSecret: 'h-secret',
+      authorizationEndpoint: 'https://github.com/login/oauth/authorize',
+      tokenEndpoint: 'https://github.com/login/oauth/access_token',
+      userinfoEndpoint: 'https://api.github.com/user',
+      scopes: ['read:user'],
+      claims: { subject: 'id' },
+    })
+    assert.equal(added.status, 200, added.text)
+    const edited = await c.api(
+      'PUT',
+      '/api/v2/settings/signIn/methods/google',
+      {
+        ...oidc,
+        name: 'Google Workspace',
+        clientSecret: { keep: true },
+      },
+    )
+    assert.equal(edited.status, 200, edited.text)
+    const methods = (master.settings.value('signIn') as Json).methods as Json[]
+    assert.deepEqual(
+      methods.map((method) => [method.id, method.name, method.clientSecret]),
+      [
+        ['google', 'Google Workspace', 'g-secret'],
+        ['gh', 'GitHub', 'h-secret'],
+      ],
+    )
+    assert.match(
+      (
+        await c.api('PUT', '/api/v2/settings/signIn/methods/google', {
+          ...oidc,
+          scopes: ['openid'],
+        })
+      ).json.error,
+      /Unknown field/,
+    )
+    // Add refuses an ID that exists; a type change carries none of the old type's fields.
+    assert.match(
+      (
+        await c.api('PUT', '/api/v2/settings/signIn/methods/gh', {
+          ...oidc,
+          create: 'yes',
+        })
+      ).json.error,
+      /A sign-in method named gh already exists/,
+    )
+    const retyped = await c.api('PUT', '/api/v2/settings/signIn/methods/gh', {
+      ...oidc,
+      name: 'GitHub OIDC',
+      clientSecret: { keep: true },
+    })
+    assert.equal(retyped.status, 200, retyped.text)
+    const gh = (
+      (master.settings.value('signIn') as Json).methods as Json[]
+    ).find((method) => method.id === 'gh')
+    assert.equal(gh.type, 'oidc')
+    assert.equal(gh.scopes, undefined)
+    assert.equal(gh.claims, undefined)
+    assert.equal(gh.clientSecret, 'h-secret')
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/settings/signIn/methods/google')).status,
+      200,
+    )
+    const left = (master.settings.value('signIn') as Json).methods as Json[]
+    assert.deepEqual(
+      left.map((method) => [method.id, method.clientSecret]),
+      [['gh', 'h-secret']],
+    )
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/settings/signIn/methods/google')).status,
+      404,
+    )
+    await master.settings.set(localOperator, 'signIn', { methods: [] })
+    // Areas not on the page still save through the API.
+    assert.equal(
+      (await c.api('PUT', '/api/v2/settings/buildNumbers', { countBase: 5 }))
+        .status,
+      200,
+    )
+    assert.equal((master.settings.value('buildNumbers') as Json).countBase, 5)
+    await master.settings.set(localOperator, 'buildNumbers', { countBase: 0 })
+  })
+
+  it('U7.2 a node type card saves only its type, keeps every licence acceptance, and adds or removes one type', async () => {
+    const master = c.master.master!
+    await master.settings.set(localOperator, 'nodeTypes', {
+      mac: {
+        software: { android: ['platform-tools'] },
+        androidLicensesAccepted: true,
+      },
+      linux: { software: { apt: ['jq'] }, androidLicensesAccepted: true },
+    })
+    const stored = (): Json => master.settings.value('nodeTypes')
+    const macAccepted = stored().mac.androidLicensesAccepted
+    assert.equal(macAccepted.by, localOperator.label)
+    let reconciled = 0
+    const reconcileAll = master.nodeStates.reconcileAll.bind(master.nodeStates)
+    master.nodeStates.reconcileAll = (): void => {
+      reconciled++
+    }
+    try {
+      const saved = await c.api('PUT', '/api/v2/settings/nodeTypes/linux', {
+        software: { apt: ['jq', 'zip'], node: '24' },
+        settings: { noSleep: true },
+        diskThresholdGb: 30,
+      })
+      assert.equal(saved.status, 200, saved.text)
+      assert.equal(reconciled, 1)
+    } finally {
+      master.nodeStates.reconcileAll = reconcileAll
+    }
+    assert.deepEqual(stored().linux.software.apt, ['jq', 'zip'])
+    assert.equal(stored().linux.software.node, '24')
+    assert.equal(stored().linux.settings.noSleep, true)
+    assert.equal(stored().linux.diskThresholdGb, 30)
+    // The edited type and its neighbour keep their acceptance.
+    assert.equal(stored().linux.androidLicensesAccepted.by, localOperator.label)
+    assert.deepEqual(stored().mac.androidLicensesAccepted, macAccepted)
+    assert.deepEqual(stored().mac.software.android, ['platform-tools'])
+    assert.match(
+      (
+        await c.api('PUT', '/api/v2/settings/nodeTypes/linux', {
+          software: { node: 'bad version!' },
+        })
+      ).json.error,
+      /software\.node is a version/,
+    )
+    // Add: a new type with defaults; an existing name is refused.
+    const added = await c.api('PUT', '/api/v2/settings/nodeTypes/e2e-type', {
+      name: 'e2e-type',
+      create: 'yes',
+      software: { apt: ['jq'] },
+    })
+    assert.equal(added.status, 200, added.text)
+    assert.equal(stored()['e2e-type'].diskThresholdGb, 40)
+    assert.equal(stored()['e2e-type'].name, undefined)
+    assert.match(
+      (
+        await c.api('PUT', '/api/v2/settings/nodeTypes/mac', {
+          name: 'mac',
+          create: 'yes',
+        })
+      ).json.error,
+      /A node type named mac already exists/,
+    )
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/settings/nodeTypes/e2e-type')).status,
+      200,
+    )
+    assert.deepEqual(Object.keys(stored()).sort(), ['linux', 'mac'])
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/settings/nodeTypes/e2e-type')).status,
+      404,
+    )
+    assert.deepEqual(stored().mac.androidLicensesAccepted, macAccepted)
+    await master.settings.set(localOperator, 'nodeTypes', {})
+  })
+
   it('U13.13 every API route is checked against the policy table for every role', async () => {
     // Open routes: sign-in and first-run setup.
     const open = [
@@ -802,8 +1074,18 @@ describe('Master sign-in, setup, people and permissions', function () {
       'POST /api/v2/cloud/hosts/:name/reconcile': 'settings.change',
       'DELETE /api/v2/cloud/hosts/:name': 'settings.change',
       'POST /api/v2/cloud/hosts/:name/space': 'settings.change',
+      'GET /api/v2/cloud/nodes': 'settings.read',
+      'POST /api/v2/cloud/nodes': 'settings.change',
+      'POST /api/v2/cloud/nodes/:name/reconcile': 'settings.change',
+      'DELETE /api/v2/cloud/nodes/:name': 'settings.change',
       'GET /api/v2/storage': 'settings.read',
       'POST /api/v2/storage/space': 'settings.change',
+      'POST /api/v2/storage/space/new': 'settings.change',
+      'PUT /api/v2/settings/signIn/methods/:id': 'settings.change',
+      'DELETE /api/v2/settings/signIn/methods/:id': 'settings.change',
+      'PUT /api/v2/settings/cloud/budget': 'settings.change',
+      'PUT /api/v2/settings/nodeTypes/:type': 'settings.change',
+      'DELETE /api/v2/settings/nodeTypes/:type': 'settings.change',
       'POST /api/v2/storage/disk': 'settings.change',
       'GET /api/v2/people': 'people.read',
       'POST /api/v2/people': 'people.change',

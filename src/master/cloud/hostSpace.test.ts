@@ -242,7 +242,7 @@ describe('Host storage on DigitalOcean Spaces', function () {
       html,
       /Builds are stored in <span class="mono">mason-e2e<\/span>/,
     )
-    assert.match(html, /Use the host’s disk/)
+    assert.match(html, /Store on the host’s disk/)
     assert.match(html, /value="mason-other"/)
     assert.match(
       nodesView({
@@ -397,5 +397,347 @@ describe('Host storage on DigitalOcean Spaces', function () {
       200,
     )
     assert(spaces.buckets.get('mason-e2e')?.has('builds/one.ipa'))
+  })
+
+  it('U4.1/U4.5 makeSpace makes or adopts the bucket, reuses a working key, replaces keys of its name unless told not to, and waits for a new key to work', async () => {
+    const hostSpace = c.master.master!.hostSpace
+    spaces.newKeyRefusals = 2
+    const first = await hostSpace.makeSpace(cloud, {
+      bucket: 'mason-direct',
+      region: 'sfo3',
+      keyName: 'direct-key',
+    })
+    spaces.newKeyRefusals = 0
+    assert.equal(first.made, true)
+    assert.equal(first.keyMade, true)
+    assert.equal(first.keyId, first.accessKeyId)
+    assert.deepEqual(spaces.keys.get(first.keyId)!.grants, ['mason-direct'])
+    const reused = await hostSpace.makeSpace(cloud, {
+      bucket: 'mason-direct',
+      region: 'sfo3',
+      keyName: 'direct-key',
+      key: { accessKeyId: first.accessKeyId, secretAccessKey: first.secret },
+    })
+    assert.equal(reused.made, false)
+    assert.equal(reused.keyMade, false)
+    assert.equal(reused.keyId, first.keyId)
+    // Without deleteOld, the earlier key of the name stays.
+    const beside = await hostSpace.makeSpace(cloud, {
+      bucket: 'mason-direct',
+      region: 'sfo3',
+      keyName: 'direct-key',
+      deleteOld: false,
+    })
+    assert.equal(beside.made, false)
+    assert(spaces.keys.has(first.keyId))
+    const replaced = await hostSpace.makeSpace(cloud, {
+      bucket: 'mason-direct',
+      region: 'sfo3',
+      keyName: 'direct-key',
+    })
+    assert(!spaces.keys.has(first.keyId))
+    assert(!spaces.keys.has(beside.keyId))
+    assert(spaces.keys.has(replaced.keyId))
+    spaces.taken.add('someone-elses')
+    await assert.rejects(
+      hostSpace.makeSpace(cloud, {
+        bucket: 'someone-elses',
+        region: 'sfo3',
+        keyName: 'direct-key',
+      }),
+      /taken/,
+    )
+    // A key that never starts to work is the error, and is deleted: only the
+    // bucket's own key is refused, so the bucket's setup key works.
+    const create = cloud.createSpacesKey.bind(cloud)
+    cloud.createSpacesKey = async (name, grants): ReturnType<typeof create> => {
+      spaces.newKeyRefusals = name === 'never-works' ? 50 : 0
+      return await create(name, grants)
+    }
+    try {
+      await assert.rejects(
+        hostSpace.makeSpace(cloud, {
+          bucket: 'mason-direct',
+          region: 'sfo3',
+          keyName: 'never-works',
+        }),
+        /AccessDenied|InvalidAccessKeyId|403/,
+      )
+    } finally {
+      cloud.createSpacesKey = create
+    }
+    spaces.newKeyRefusals = 0
+    assert(
+      ![...spaces.keys.values()].some((key) => key.name === 'never-works'),
+      'a key that never worked is deleted',
+    )
+    assert(cloud.spacesCalls.includes('create never-works'))
+    assert(cloud.spacesCalls.includes('delete never-works'))
+  })
+
+  it('U4.3 Make a new Space saves storage with its own key and the account that made it; the secret stays write-only', async () => {
+    const before = storage()
+    assert.match(
+      (
+        await c.api('POST', '/api/v2/storage/space/new', {
+          account: 'none',
+          bucket: 'mason-store',
+          region: 'sfo3',
+        })
+      ).json.error,
+      /none is not a DigitalOcean account/,
+    )
+    assert.match(
+      (
+        await c.api('POST', '/api/v2/storage/space/new', {
+          account: 'do',
+          bucket: 'mason-store',
+          region: 'zzz9',
+        })
+      ).json.error,
+      /^zzz9 has no Spaces; choose one of sfo3, nyc3/,
+    )
+    spaces.taken.add('popular-store')
+    const taken = await c.api('POST', '/api/v2/storage/space/new', {
+      account: 'do',
+      bucket: 'popular-store',
+      region: 'sfo3',
+    })
+    assert.equal(taken.status, 400)
+    assert.match(taken.json.error, /^Nothing was saved: .*taken/)
+    assert.deepEqual(storage(), before)
+    const made = await c.api('POST', '/api/v2/storage/space/new', {
+      account: 'do',
+      bucket: 'mason-store',
+      region: 'sfo3',
+    })
+    assert.equal(made.status, 200, made.text)
+    assert.equal(made.json.driver, 's3')
+    assert.deepEqual(made.json.s3.secretAccessKey, { set: true })
+    assert.equal(made.json.managed.account, 'do')
+    const keyId = storage().managed.keyId
+    assert.equal(storage().s3.accessKeyId, keyId)
+    assert.deepEqual(spaces.keys.get(keyId)!.grants, ['mason-store'])
+    assert.equal(
+      spaces.keys.get(keyId)!.name,
+      `mason-storage-${c.master.master!.masterId}-mason-store`,
+    )
+    // The host never receives which account made it.
+    const { hostProjection } = await import('../hostSettings.js')
+    assert.equal(hostProjection('storage', storage()).managed, undefined)
+  })
+
+  it('U4.3b the Space and key storage used before stay, so earlier builds are still served; a failed Make a new Space leaves no key', async () => {
+    const firstKey = storage().managed.keyId
+    // Re-saving the same Space through Use an existing Space keeps it managed.
+    const resaved = await c.api('POST', '/api/v2/storage/space', {
+      url: 'https://mason-store.sfo3.digitaloceanspaces.com',
+      accessKeyId: firstKey,
+      secretAccessKey: { keep: true },
+    })
+    assert.equal(resaved.status, 200, resaved.text)
+    assert.equal(storage().managed.keyId, firstKey)
+    // A second new Space, then the disk: the first Space's key still works for its builds.
+    await c.api('POST', '/api/v2/storage/space/new', {
+      account: 'do',
+      bucket: 'mason-store-two',
+      region: 'sfo3',
+    })
+    const secondKey = storage().managed.keyId
+    assert.notEqual(secondKey, firstKey)
+    await c.api('POST', '/api/v2/storage/disk', {})
+    assert.equal(storage().driver, 'disk')
+    assert(spaces.keys.has(firstKey), 'the first Space keeps its key')
+    assert(spaces.keys.has(secondKey), 'the second Space keeps its key')
+    assert(spaces.buckets.has('mason-store'))
+    // Back to the first Space: its key is reused, not replaced.
+    await c.api('POST', '/api/v2/storage/space/new', {
+      account: 'do',
+      bucket: 'mason-store-two',
+      region: 'sfo3',
+    })
+    // A save that fails after the key was made deletes that key.
+    const keysBefore = [...spaces.keys.keys()]
+    const set = c.master.master!.settings.set.bind(c.master.master!.settings)
+    c.master.master!.settings.set = async (): Promise<never> => {
+      throw new Error('The database is locked')
+    }
+    try {
+      const failed = await c.api('POST', '/api/v2/storage/space/new', {
+        account: 'do',
+        bucket: 'mason-store-three',
+        region: 'sfo3',
+      })
+      assert.equal(failed.status, 400)
+      assert.equal(
+        failed.json.error,
+        'Nothing was saved: The database is locked',
+      )
+    } finally {
+      c.master.master!.settings.set = set
+    }
+    assert.deepEqual([...spaces.keys.keys()].sort(), keysBefore.sort())
+    await c.api('POST', '/api/v2/storage/disk', {})
+  })
+
+  it('U4.4 the Storage card makes a new Space from a DigitalOcean account, uses an existing one, or the disk', () => {
+    const html = nodesView({
+      nodes: [],
+      types: {},
+      pools: [],
+      host: 'https://h',
+      storage: { driver: 's3', bucket: 'b', endpoint: 'https://sfo3.example' },
+      poolAccounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
+        { id: 'mac', name: 'NoMac', provider: 'nomac' },
+      ],
+      budget: { monthly: 1 },
+      canChange: true,
+    })
+    const card = html.slice(html.indexOf('id="storage"'))
+    assert.match(
+      card,
+      /<details class="action" id="storage-new"><summary class="button">.*Make a new Space<\/summary>/,
+    )
+    assert.match(
+      card,
+      /billed by use from \$5 a month for 250 GB, so there is no machine size to choose/,
+    )
+    assert.match(
+      card,
+      /data-path="\/api\/v2\/storage\/space\/new" data-fields="account,bucket,region"/,
+    )
+    assert.match(
+      card,
+      /<select id="new-space-account" name="account"><option value="do">DigitalOcean<\/option><\/select>/,
+    )
+    assert.match(
+      card,
+      /<details class="action" id="storage-existing"><summary class="button">.*Use an existing Space<\/summary>/,
+    )
+    assert.match(card, /Store on the host’s disk/)
+  })
+
+  it('U4.6 a key that fails after the bucket is made: the host still owns the Space, old keys keep working, and a failed new storage Space leaves nothing', async () => {
+    const hostSpace = c.master.master!.hostSpace
+    const create = cloud.createSpacesKey.bind(cloud)
+    /** Refuses new keys whose name ends with `suffix`, once each or always. */
+    const refuse = (suffix: string, times: number): void => {
+      let left = times
+      cloud.createSpacesKey = async (
+        name,
+        grants,
+      ): ReturnType<typeof create> => {
+        spaces.newKeyRefusals = name.endsWith(suffix) && left-- > 0 ? 50 : 0
+        return await create(name, grants)
+      }
+    }
+    try {
+      // A host whose Space key never works at first still records owning the bucket it made.
+      refuse('-owned', 1)
+      const made = await c.api('POST', '/api/v2/cloud/hosts', {
+        name: 'owned',
+        account: 'do',
+        region: 'sfo3',
+        size: 's-1vcpu-1gb',
+        space: { bucket: 'mason-owned', region: 'sfo3' },
+      })
+      assert.equal(made.status, 201, made.text)
+      await c.until(
+        () => (row('owned')?.space_owned === 1 ? true : undefined),
+        30_000,
+        'the bucket recorded as owned',
+      )
+      assert(spaces.buckets.has('mason-owned'))
+      cloud.createSpacesKey = create
+      spaces.newKeyRefusals = 0
+      // The next reconcile makes the key and the host is ready.
+      for (let i = 0; i < 20 && row('owned').state !== 'ready'; i++) {
+        await reconcile('owned')
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      assert.equal(row('owned').state, 'ready')
+      const removed = await c.api('DELETE', '/api/v2/cloud/hosts/owned', {
+        confirm: 'owned',
+        deleteSpace: 'delete',
+      })
+      assert.equal(removed.status, 200, removed.text)
+      assert(
+        !spaces.buckets.has('mason-owned'),
+        'the owned Space is deleted with the host',
+      )
+      // A replacement key that never works leaves the old key working.
+      const first = await hostSpace.makeSpace(cloud, {
+        bucket: 'mason-keep',
+        region: 'sfo3',
+        keyName: 'keep-key',
+      })
+      refuse('keep-key', 1)
+      await assert.rejects(
+        hostSpace.makeSpace(cloud, {
+          bucket: 'mason-keep',
+          region: 'sfo3',
+          keyName: 'keep-key',
+        }),
+      )
+      assert(
+        spaces.keys.has(first.keyId),
+        'the old key survives a failed replacement',
+      )
+      assert.equal(
+        [...spaces.keys.values()].filter((key) => key.name === 'keep-key')
+          .length,
+        1,
+      )
+      cloud.createSpacesKey = create
+      spaces.newKeyRefusals = 0
+      const second = await hostSpace.makeSpace(cloud, {
+        bucket: 'mason-keep',
+        region: 'sfo3',
+        keyName: 'keep-key',
+      })
+      assert(!spaces.keys.has(first.keyId))
+      assert(spaces.keys.has(second.keyId))
+      // Make a new Space whose key never works: no bucket and no key are left.
+      refuse('mason-gone', 1)
+      const failed = await c.api('POST', '/api/v2/storage/space/new', {
+        account: 'do',
+        bucket: 'mason-gone',
+        region: 'sfo3',
+      })
+      assert.equal(failed.status, 400)
+      assert.match(failed.json.error, /^Nothing was saved: /)
+      assert(
+        !spaces.buckets.has('mason-gone'),
+        'the bucket made for it is deleted',
+      )
+      assert(
+        ![...spaces.keys.values()].some((key) =>
+          key.name.endsWith('mason-gone'),
+        ),
+      )
+      // An account with no stored key is refused by name.
+      const provider = c.master.master!.cloudHosts.provider.bind(
+        c.master.master!.cloudHosts,
+      )
+      c.master.master!.cloudHosts.provider = (): undefined => undefined
+      try {
+        assert.equal(
+          (
+            await c.api('POST', '/api/v2/storage/space/new', {
+              account: 'do',
+              bucket: 'mason-nokey',
+              region: 'sfo3',
+            })
+          ).json.error,
+          'do has no API key',
+        )
+      } finally {
+        c.master.master!.cloudHosts.provider = provider
+      }
+    } finally {
+      cloud.createSpacesKey = create
+      spaces.newKeyRefusals = 0
+    }
   })
 })

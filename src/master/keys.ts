@@ -60,12 +60,24 @@ function publicKey(row: ReturnType<typeof asRow>): MasterKey {
   }
 }
 
+/** App ids: a list, or the comma-separated string a page form's app checkboxes send. */
+const asApps = (value: unknown): number[] =>
+  asArray(integer(1))(
+    typeof value === 'string'
+      ? value
+          .split(',')
+          .map((item) => item.trim())
+          .filter((item) => item !== '')
+          .map(Number)
+      : value,
+  )
+
 export const asKeyRequest = asObject({
   name: asOptional(text(120)),
   role: asKeyRole,
   projects: asOptional(asArray(text(160)), []),
   branches: asOptional(asArray(text(200)), []),
-  apps: asOptional(asArray(integer(1)), []),
+  apps: asOptional(asApps, []),
   expiresAt: asOptional(integer()),
 })
 

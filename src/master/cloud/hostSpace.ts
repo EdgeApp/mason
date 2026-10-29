@@ -12,6 +12,21 @@ export interface SpaceStorage {
   secretAccessKey: string
 }
 
+/** A bucket and a key limited to it, as `makeSpace` leaves them. */
+export interface MadeSpace {
+  endpoint: string
+  bucket: string
+  region: string
+  /** Whether the bucket was made now, rather than adopted. */
+  made: boolean
+  /** The key's id, which is also its access key id. */
+  keyId: string
+  accessKeyId: string
+  secret: string
+  /** Whether the key was made now, rather than reused. */
+  keyMade: boolean
+}
+
 export interface HostSpaceOptions {
   master: MasterDatabase
   /** The master's `storage` area: its S3 settings when it holds a bucket. */
@@ -114,39 +129,38 @@ export class HostSpace implements CloudHostSpace {
       )
   }
 
-  async reconcile(
-    row: CloudHostRow,
+  /**
+   * Makes or adopts a bucket and a key limited to it, and returns them once
+   * the key works. A given key that the provider still has is reused. A new
+   * key replaces every other key of the same name unless `deleteOld` is
+   * false, for a caller that deletes the old key itself after switching.
+   */
+  async makeSpace(
     provider: CloudProvider,
-    keyName: string,
-  ): Promise<string | undefined> {
-    const bucket = row.space_bucket
-    const region = row.space_region
-    if (bucket == null || region == null) return undefined
+    options: {
+      bucket: string
+      region: string
+      keyName: string
+      key?: SpaceCredentials
+      deleteOld?: boolean
+      /** Told the moment the bucket is made, before the key step can fail. */
+      onMade?: () => void
+    },
+  ): Promise<MadeSpace> {
+    const { bucket, region, keyName } = options
     if (provider.spacesKeys == null)
-      return `The ${row.provider} provider has no Spaces`
-    const storage = this.options.storage.get()
-    const uses = storage != null && storage.bucket === bucket
-    // 1. The key: the one storage holds the secret of, if the provider still has it.
+      throw new SpaceError(
+        0,
+        'NoSpaces',
+        'This account’s provider has no Spaces',
+      )
     const keys = await provider.spacesKeys()
-    let credentials: SpaceCredentials | undefined
-    if (
-      uses &&
-      storage.accessKeyId === row.space_key_id &&
-      keys.some((key) => key.id === storage.accessKeyId)
-    )
-      credentials = {
-        accessKeyId: storage.accessKeyId,
-        secretAccessKey: storage.secretAccessKey,
-      }
-    else if (
-      row.space_secret != null &&
-      keys.some((key) => key.id === row.space_key_id)
-    )
-      credentials = {
-        accessKeyId: row.space_key_id!,
-        secretAccessKey: row.space_secret,
-      }
-    // 2. The bucket: seen with the key, or else adopted or made with a setup key.
+    let credentials =
+      options.key != null &&
+      keys.some((key) => key.id === options.key!.accessKeyId)
+        ? options.key
+        : undefined
+    // The bucket: seen with the key, or else adopted or made with a setup key.
     // A key limited to this bucket sees 403 for a name another account holds.
     const present =
       credentials != null &&
@@ -156,8 +170,9 @@ export class HostSpace implements CloudHostSpace {
           if (error instanceof SpaceError && error.status === 403) return false
           throw error
         }))
-    if (!present) {
-      const made = await this.withSetupKey(
+    let made = false
+    if (!present)
+      made = await this.withSetupKey(
         provider,
         keyName,
         region,
@@ -172,41 +187,106 @@ export class HostSpace implements CloudHostSpace {
           })
           if (exists) return false
           await this.settled(async () => await admin.create(bucket))
+          options.onMade?.()
           return true
         },
       )
-      if (made) this.update(row.name, { space_owned: 1 })
-    }
-    // 3. A key limited to the bucket, now that it exists, once it works.
+    // A key limited to the bucket, now that it exists, once it works.
+    let keyMade = false
     if (credentials == null) {
-      const made = await provider.createSpacesKey!(keyName, [
+      const fresh = await provider.createSpacesKey!(keyName, [
         { bucket, permission: 'readwrite' },
       ])
-      for (const old of keys.filter((key) => key.name === keyName))
-        await provider.deleteSpacesKey!(old.id)
-      const fresh = { accessKeyId: made.id, secretAccessKey: made.secret }
-      this.update(row.name, {
-        space_key_id: made.id,
-        space_key_owned: 1,
-        space_secret: made.secret,
-      })
+      credentials = { accessKeyId: fresh.id, secretAccessKey: fresh.secret }
+      keyMade = true
+      const checking = credentials
+      // A key that never starts to work is deleted, and the keys before it
+      // stay, so a failure leaves the old ones working and no new one behind.
       await this.settled(
-        async () => await this.client(region, fresh).check(bucket),
-      )
-      credentials = fresh
+        async () => await this.client(region, checking).check(bucket),
+      ).catch(async (error: unknown) => {
+        await provider.deleteSpacesKey!(fresh.id).catch(() => undefined)
+        throw error
+      })
+      if (options.deleteOld !== false)
+        for (const old of keys.filter((key) => key.name === keyName))
+          await provider.deleteSpacesKey!(old.id)
     }
-    // 4. Storage: switched when an administrator asked; kept working when its key was replaced.
-    const value: SpaceStorage = {
+    return {
       endpoint: this.endpoint(region),
       bucket,
       region,
+      made,
+      keyId: credentials.accessKeyId,
       accessKeyId: credentials.accessKeyId,
-      secretAccessKey: credentials.secretAccessKey,
+      secret: credentials.secretAccessKey,
+      keyMade,
+    }
+  }
+
+  /** Empties and deletes a bucket, with a setup key made for it. */
+  async destroyBucket(
+    provider: CloudProvider,
+    options: { bucket: string; region: string; keyName: string },
+  ): Promise<void> {
+    await this.withSetupKey(
+      provider,
+      options.keyName,
+      options.region,
+      async (admin) => {
+        await this.settled(async () => await admin.destroy(options.bucket))
+      },
+    )
+  }
+
+  async reconcile(
+    row: CloudHostRow,
+    provider: CloudProvider,
+    keyName: string,
+  ): Promise<string | undefined> {
+    const bucket = row.space_bucket
+    const region = row.space_region
+    if (bucket == null || region == null) return undefined
+    if (provider.spacesKeys == null)
+      return `The ${row.provider} provider has no Spaces`
+    const storage = this.options.storage.get()
+    const uses = storage != null && storage.bucket === bucket
+    // The key: the one storage holds the secret of, else the one the row keeps.
+    const key: SpaceCredentials | undefined =
+      uses && storage.accessKeyId === row.space_key_id
+        ? {
+            accessKeyId: storage.accessKeyId,
+            secretAccessKey: storage.secretAccessKey,
+          }
+        : row.space_secret != null && row.space_key_id != null
+          ? { accessKeyId: row.space_key_id, secretAccessKey: row.space_secret }
+          : undefined
+    const space = await this.makeSpace(provider, {
+      bucket,
+      region,
+      keyName,
+      ...(key == null ? {} : { key }),
+      // Recorded as soon as it exists, so removing the host can delete it even if the key step fails.
+      onMade: () => this.update(row.name, { space_owned: 1 }),
+    })
+    if (space.keyMade)
+      this.update(row.name, {
+        space_key_id: space.keyId,
+        space_key_owned: 1,
+        space_secret: space.secret,
+      })
+    // Storage: switched when an administrator asked; kept working when its key was replaced.
+    const value: SpaceStorage = {
+      endpoint: space.endpoint,
+      bucket,
+      region,
+      accessKeyId: space.accessKeyId,
+      secretAccessKey: space.secret,
     }
     if (row.space_pending === 1) {
       await this.options.storage.set(value)
       this.update(row.name, { space_pending: 0 })
-    } else if (uses && storage.accessKeyId !== credentials.accessKeyId)
+    } else if (uses && storage.accessKeyId !== space.accessKeyId)
       await this.options.storage.set(value)
     return undefined
   }
@@ -217,17 +297,12 @@ export class HostSpace implements CloudHostSpace {
     options: { deleteSpace: boolean; keyName: string },
   ): Promise<void> {
     if (row.space_bucket == null || row.space_region == null) return
-    if (options.deleteSpace && row.space_owned === 1) {
-      const bucket = row.space_bucket
-      await this.withSetupKey(
-        provider,
-        options.keyName,
-        row.space_region,
-        async (admin) => {
-          await this.settled(async () => await admin.destroy(bucket))
-        },
-      )
-    }
+    if (options.deleteSpace && row.space_owned === 1)
+      await this.destroyBucket(provider, {
+        bucket: row.space_bucket,
+        region: row.space_region,
+        keyName: options.keyName,
+      })
     if (row.space_key_owned === 1 && row.space_key_id != null)
       await provider.deleteSpacesKey?.(row.space_key_id)
     // Storage through the key just deleted, or in the Space just deleted,

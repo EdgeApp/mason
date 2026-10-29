@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 15
+export const MASTER_SCHEMA = 16
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -407,6 +407,40 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       FROM cloud_hosts;
     DROP TABLE cloud_hosts;
     ALTER TABLE cloud_hosts_15 RENAME TO cloud_hosts;
+    CREATE UNIQUE INDEX cloud_hosts_name ON cloud_hosts(name) WHERE state<>'removed';`)
+  },
+  // 16: permanent cloud nodes beside the host: each row's role, and a node's type and labels.
+  (db): void => {
+    db.exec(`
+    CREATE TABLE cloud_hosts_16 (
+      name TEXT NOT NULL, account TEXT NOT NULL, provider TEXT NOT NULL,
+      region TEXT NOT NULL, size TEXT NOT NULL, image TEXT NOT NULL,
+      dns_domain TEXT, dns_name TEXT, provider_id TEXT, address TEXT, port INTEGER,
+      dns_record_id TEXT, dns_owned INTEGER NOT NULL DEFAULT 0 CHECK(dns_owned IN (0,1)),
+      fingerprint TEXT, pairing_hash TEXT, pairing_secret TEXT, origin TEXT,
+      state TEXT NOT NULL CHECK(state IN ('creating','installing','pairing','ready','updating','error','removing','removed')),
+      error TEXT, version TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      certificate_at INTEGER,
+      space_bucket TEXT, space_region TEXT, space_key_id TEXT, space_secret TEXT,
+      space_owned INTEGER NOT NULL DEFAULT 0 CHECK(space_owned IN (0,1)),
+      space_key_owned INTEGER NOT NULL DEFAULT 0 CHECK(space_key_owned IN (0,1)),
+      space_pending INTEGER NOT NULL DEFAULT 0 CHECK(space_pending IN (0,1)),
+      role TEXT NOT NULL DEFAULT 'host' CHECK(role IN ('host','worker')),
+      node_type TEXT, labels TEXT NOT NULL DEFAULT '[]'
+    ) STRICT;
+    INSERT INTO cloud_hosts_16(name,account,provider,region,size,image,
+      dns_domain,dns_name,provider_id,address,port,dns_record_id,dns_owned,
+      fingerprint,pairing_hash,pairing_secret,origin,state,error,version,
+      created_at,updated_at,certificate_at,space_bucket,space_region,
+      space_key_id,space_secret,space_owned,space_key_owned,space_pending)
+      SELECT name,account,provider,region,size,image,
+      dns_domain,dns_name,provider_id,address,port,dns_record_id,dns_owned,
+      fingerprint,pairing_hash,pairing_secret,origin,state,error,version,
+      created_at,updated_at,certificate_at,space_bucket,space_region,
+      space_key_id,space_secret,space_owned,space_key_owned,space_pending
+      FROM cloud_hosts;
+    DROP TABLE cloud_hosts;
+    ALTER TABLE cloud_hosts_16 RENAME TO cloud_hosts;
     CREATE UNIQUE INDEX cloud_hosts_name ON cloud_hosts(name) WHERE state<>'removed';`)
   },
 ]

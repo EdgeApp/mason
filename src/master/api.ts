@@ -20,6 +20,7 @@ import { isRunAction, isRunRead, type Forwarder } from './forward.js'
 import type { NodeRegistry } from './nodes.js'
 import { allow } from './permissions.js'
 import { asRole, Forbidden, type Actor } from './roles.js'
+import { methodsOf } from './hostSettings.js'
 import { Settings, UnknownArea } from './settings.js'
 
 export class NotFound extends Error {}
@@ -190,6 +191,122 @@ export function masterApi(context: ApiContext): Router {
     json((req, res) =>
       context.settings.set(actorOf(res), String(req.params.area), req.body),
     ),
+  )
+  // Merge routes: a Settings card changes its part of an area, and the rest
+  // is kept as stored, read at the moment of the save.
+  const keepSecrets = (
+    methods: Array<Record<string, unknown>>,
+  ): Array<Record<string, unknown>> =>
+    methods.map((method) => ({ ...method, clientSecret: { keep: true } }))
+  router.put(
+    '/api/v2/settings/signIn/methods/:id',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      const id = String(req.params.id)
+      const stored = methodsOf(context.settings.value('signIn'))
+      const others = keepSecrets(
+        stored.filter((method) => method.id !== id) as unknown as Array<
+          Record<string, unknown>
+        >,
+      )
+      const at = stored.findIndex((entry) => entry.id === id)
+      const body = { ...(req.body as Record<string, unknown>) }
+      // The Add forms send create, so an existing method is not replaced by mistake.
+      if (body.create != null && at >= 0)
+        throw new Error(`A sign-in method named ${id} already exists`)
+      delete body.create
+      // Fields the card does not show (account switching) stay as stored, for the same type.
+      const kept: Record<string, unknown> =
+        at < 0 || stored[at]!.type !== body.type
+          ? {}
+          : { ...(stored[at] as unknown as Record<string, unknown>) }
+      delete kept.clientSecret
+      const method = { ...kept, ...body, id }
+      const methods = [...others]
+      methods.splice(at < 0 ? methods.length : at, 0, method)
+      return await context.settings.set(actorOf(res), 'signIn', { methods })
+    }),
+  )
+  router.delete(
+    '/api/v2/settings/signIn/methods/:id',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      const id = String(req.params.id)
+      const stored = methodsOf(context.settings.value('signIn'))
+      if (!stored.some((method) => method.id === id))
+        throw new NotFound(`No sign-in method ${id}`)
+      return await context.settings.set(actorOf(res), 'signIn', {
+        methods: keepSecrets(
+          stored.filter((method) => method.id !== id) as unknown as Array<
+            Record<string, unknown>
+          >,
+        ),
+      })
+    }),
+  )
+  // Node types: one type's card at a time. The validator takes licence
+  // acceptance as a boolean and keeps the stored { by, at } only on true, so
+  // every type that holds one is sent with true.
+  const storedTypes = (): Record<string, Record<string, unknown>> => {
+    const stored = (context.settings.value('nodeTypes') ?? {}) as Record<
+      string,
+      Record<string, unknown>
+    >
+    const out: Record<string, Record<string, unknown>> = {}
+    for (const [name, value] of Object.entries(stored)) {
+      const type: Record<string, unknown> = { ...value }
+      delete type.androidLicensesAccepted
+      if (value.androidLicensesAccepted != null)
+        type.androidLicensesAccepted = true
+      out[name] = type
+    }
+    return out
+  }
+  router.put(
+    '/api/v2/settings/nodeTypes/:type',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      const name = String(req.params.type)
+      const types = storedTypes()
+      const edited: Record<string, unknown> = {
+        ...(req.body as Record<string, unknown>),
+      }
+      // The Add form sends create, so an existing type is not replaced by mistake.
+      if (edited.create != null && types[name] != null)
+        throw new Error(`A node type named ${name} already exists`)
+      delete edited.create
+      delete edited.name
+      delete edited.androidLicensesAccepted
+      if (types[name]?.androidLicensesAccepted === true)
+        edited.androidLicensesAccepted = true
+      types[name] = edited
+      return await context.settings.set(actorOf(res), 'nodeTypes', types)
+    }),
+  )
+  router.delete(
+    '/api/v2/settings/nodeTypes/:type',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      const name = String(req.params.type)
+      const types = storedTypes()
+      if (types[name] == null) throw new NotFound(`No node type ${name}`)
+      delete types[name]
+      return await context.settings.set(actorOf(res), 'nodeTypes', types)
+    }),
+  )
+  router.put(
+    '/api/v2/settings/cloud/budget',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      const budget = (req.body as { monthlyBudget?: unknown } | undefined)
+        ?.monthlyBudget
+      if (typeof budget !== 'number' || !Number.isFinite(budget))
+        throw new Error('monthlyBudget is a number of dollars')
+      return await context.settings.set(actorOf(res), 'cloud', {
+        ...(context.settings.value('cloud') ?? {}),
+        monthlyBudget: budget,
+      })
+    }),
   )
 
   router.get(

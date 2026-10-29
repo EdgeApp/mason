@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, it } from 'mocha'
 import { MasterDatabase } from '../master/database.js'
-import { nodesView } from './admin.js'
+import { action, field, nodesView, settingsView } from './admin.js'
 import { artifactsView } from './artifacts.js'
 import {
   bytes,
@@ -725,10 +725,603 @@ describe('Nodes page', () => {
     })
     assert.match(
       fromGitHub,
-      /install Mason 1\.2\.3, the master’s version: .*https:\/\/github\.com\/example\/mason\/releases\/latest\/download\/install\.sh\)&quot; -- --version 1\.2\.3<\/pre>/,
+      /It installs Mason 1\.2\.3, the master’s version\.<\/small><div class="command"><pre class="mono">.*https:\/\/github\.com\/example\/mason\/releases\/latest\/download\/install\.sh\)&quot; -- --version 1\.2\.3<\/pre>/,
     )
     assert(!fromGitHub.includes('&lt;host&gt;'))
     assert.match(nodesView(base), /href="\/settings#host"/)
-    assert(!nodesView({ ...base, canChange: false }).includes('Add node'))
+    assert(!nodesView({ ...base, canChange: false }).includes('id="add-node"'))
+  })
+
+  it('U2.1 explains the host and the node steps: title above command, Copy right, pairing-key note, address and port', () => {
+    const html = nodesView({
+      ...base,
+      release: { repository: 'example/mason', version: '1.2.3' },
+      poolAccounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
+      ],
+    })
+    assert.match(
+      html,
+      /<h2>.*Host<\/h2><p>A Mason host holds the builds created by the Mason cluster and hosts a web interface for downloading iOS, Android, desktop, and other builds\. If it is internet accessible, it is also the proxy to communicate events back to the Mason master, such as GitHub repository change events\.<\/p>/,
+    )
+    const nodes = html.slice(html.indexOf('id="add-node"'))
+    assert.match(
+      nodes,
+      /<h2>.*Nodes<\/h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks\. Run the following commands to start Mason on a Linux or macOS computer \(Windows coming\)\.<\/p><ol class="howto">/,
+    )
+    // Each step: its title first, then the command box with Copy beside it.
+    assert.match(
+      nodes,
+      /<li><strong>Install Mason<\/strong><small class="hint">[^<]*<\/small><div class="command"><pre class="mono">[^<]*<\/pre><button type="button" class="secondary copy"/,
+    )
+    assert.match(
+      nodes,
+      /<li><strong>Start as a worker<\/strong><div class="command"><pre class="mono">sudo mason worker --install --link-port 9410<\/pre><button[^>]*class="secondary copy"[\s\S]*?<\/div><small class="hint">It prints its pairing key\.<\/small><\/li>/,
+    )
+    assert.match(
+      nodes,
+      /<li><strong>Pair it here<\/strong><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*<label for="node-address">Mason node address and port<\/label><input id="node-address" name="address" placeholder="192\.168\.1\.20:9410"[\s\S]*Pair node/,
+    )
+    // The host's two ways: on DigitalOcean, or by hand with the same steps.
+    assert.match(
+      html,
+      /<details class="action add-host" id="add-host-do"><summary class="button">.*Create a host on DigitalOcean<\/summary>/,
+    )
+    const byHand = html.slice(html.indexOf('id="add-host-command"'))
+    assert.match(
+      byHand,
+      /<summary class="button">.*Install a host yourself<\/summary>/,
+    )
+    assert.match(
+      byHand,
+      /<strong>Install Mason<\/strong><small class="hint">On a computer the internet can reach\./,
+    )
+    assert.match(
+      byHand,
+      /<strong>Start it as the host<\/strong><div class="command"><pre class="mono">sudo mason host --install<\/pre>/,
+    )
+    assert.match(
+      byHand,
+      /<strong>Pair it here<\/strong><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*placeholder="builds\.example\.com:9310"[\s\S]*Pair host/,
+    )
+  })
+
+  it('U2.3 pool fields say what they mean; DigitalOcean defaults are unchanged', () => {
+    const html = nodesView({
+      ...base,
+      poolAccounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
+      ],
+    })
+    const hint = (id: string, title: string, text: string): RegExp =>
+      new RegExp(
+        `<div class="field"><label for="new-do-${id}">${title}</label><small class="hint">${text.replace(/[.()]/g, '\\$&')}</small><input id="new-do-${id}"`,
+      )
+    assert.match(html, hint('name', 'Name', 'The pool’s name on this master.'))
+    assert.match(
+      html,
+      hint('type', 'Node type', 'Type of node as specified in the Masonfile.'),
+    )
+    assert.match(
+      html,
+      /id="new-do-type" name="type" value="" required[^>]*placeholder="linux-x86"/,
+    )
+    assert.match(
+      html,
+      hint(
+        'labels',
+        'Labels',
+        'Extra labels its machines carry, comma-separated, for stages that ask for them.',
+      ),
+    )
+    assert.match(
+      html,
+      hint(
+        'maxNodes',
+        'Max machines',
+        'Spin up no more than max machines concurrently.',
+      ),
+    )
+    assert.match(
+      html,
+      hint(
+        'slots',
+        'Stages per machine',
+        'How many stages one machine runs at the same time.',
+      ),
+    )
+    assert.match(
+      html,
+      hint(
+        'ttlMinutes',
+        'Retire after idle minutes',
+        'A machine with no stage to run for this many minutes is shut down and deleted.',
+      ),
+    )
+    assert.match(
+      html,
+      hint(
+        'maxHoursPerNode',
+        'Retire after hours up',
+        'A machine is replaced after this many hours in total, even if it keeps getting work, so none runs forever. Its current stage finishes first.',
+      ),
+    )
+    assert.match(html, /id="new-do-maxHoursPerNode"[^>]*value="24"/)
+    assert.match(html, /id="new-do-ttlMinutes"[^>]*value="60"/)
+    assert.doesNotMatch(html, /Machines at most|Node type its machines serve/)
+  })
+
+  it('U3.6 the Nodes card creates a permanent node on DigitalOcean and lists cloud nodes, also to read-only viewers', () => {
+    const cloudNode = {
+      name: 'linux-node',
+      state: 'ready',
+      account: 'do',
+      region: 'sfo3',
+      size: 's-1vcpu-1gb',
+      address: '203.0.113.20',
+      origin: null,
+      error: null,
+      version: '1.2.3',
+      nodeType: 'linux-x86',
+      labels: ['e2e'],
+    }
+    const html = nodesView({
+      ...base,
+      poolAccounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
+        { id: 'mac', name: 'NoMac', provider: 'nomac' },
+      ],
+      cloudNodes: [cloudNode],
+    })
+    const form = html.slice(html.indexOf('id="add-node-do"'))
+    assert.match(
+      form,
+      /<summary class="button">.*Create a node on DigitalOcean<\/summary>/,
+    )
+    assert.match(form, /only this master reaches it, on its link port/)
+    assert.match(
+      form,
+      /data-path="\/api\/v2\/cloud\/nodes" data-fields="account,name,type,labels,region,size,image"/,
+    )
+    for (const id of ['name', 'type', 'labels', 'region', 'size', 'image'])
+      assert.match(form, new RegExp(`id="node-do-${id}"`))
+    assert.doesNotMatch(
+      form.slice(0, form.indexOf('</details>')),
+      /dns\.|space\./,
+    )
+    assert.doesNotMatch(html, /id="add-node-mac"/)
+    assert.match(
+      html,
+      /id="cloud-node-linux-node" data-state="ready"[\s\S]*linux-x86 · e2e · sfo3/,
+    )
+    assert.match(
+      html,
+      /data-path="\/api\/v2\/cloud\/nodes\/linux-node" data-method="DELETE" data-fields="confirm"/,
+    )
+    const viewer = nodesView({
+      ...base,
+      canChange: false,
+      cloudNodes: [cloudNode],
+    })
+    assert.match(viewer, /<h2>.*Cloud nodes<\/h2>.*id="cloud-node-linux-node"/)
+    assert.doesNotMatch(viewer, /Remove node|Reconcile/)
+  })
+
+  it('U2.2 every disclosure on the page is a button: red to add or use, secondary for Edit and Remove', () => {
+    const html = nodesView({
+      ...base,
+      host: 'https://builds.example.test',
+      storage: { driver: 'disk' },
+      poolAccounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
+      ],
+      pools: [
+        {
+          name: 'linux-cloud',
+          type: 'linux-x86',
+          account: 'do',
+          region: 'sfo3',
+          size: 's-1vcpu-1gb',
+          image: 'ubuntu-24-04-x64',
+          labels: [],
+          maxNodes: 2,
+          slots: 1,
+          ttlMinutes: 60,
+          maxHoursPerNode: 24,
+          machines: [],
+        },
+      ],
+      cloudHosts: [
+        {
+          name: 'h',
+          state: 'ready',
+          account: 'do',
+          region: 'sfo3',
+          size: 's-1vcpu-1gb',
+          address: '203.0.113.9',
+          origin: null,
+          error: null,
+        },
+      ],
+    })
+    const summaries = [
+      ...html.matchAll(
+        /<details([^>]*)><summary([^>]*)>([\s\S]*?)<\/summary>/g,
+      ),
+    ]
+    assert(summaries.length >= 5, String(summaries.length))
+    for (const [, details, summary, label] of summaries) {
+      assert.match(details!, /class="action/)
+      if (/Edit|Remove/.test(label!))
+        assert.equal(summary, ' class="button secondary"')
+      else assert.equal(summary, ' class="button"')
+    }
+    for (const label of [
+      'Store builds in a new DigitalOcean Space',
+      'Remove',
+      'Use an existing Space',
+      'Edit',
+      'Add a pool on DigitalOcean',
+    ])
+      assert(
+        summaries.some(([, , , text]) => text!.includes(label)),
+        label,
+      )
+  })
+})
+
+describe('Form helpers', () => {
+  it('action() is a details whose summary is a full button; field() puts the description between title and control', () => {
+    assert.equal(
+      action('Add', '<p>form</p>', { id: 'a' }),
+      '<details class="action" id="a"><summary class="button">Add</summary><div class="action-body"><p>form</p></div></details>',
+    )
+    assert.match(
+      action('Edit', '', { kind: 'secondary', open: true, className: 'x' }),
+      /^<details class="action x" open><summary class="button secondary">Edit<\/summary>/,
+    )
+    assert.equal(
+      field('f', 'Max <machines>', '<input id="f">', 'At most & no more'),
+      '<div class="field"><label for="f">Max &lt;machines&gt;</label><small class="hint">At most &amp; no more</small><input id="f"></div>',
+    )
+    assert.equal(
+      field('g', 'Name', '<input id="g">'),
+      '<div class="field"><label for="g">Name</label><input id="g"></div>',
+    )
+    // The Apple panel's reveal keeps hiding its button once open.
+    assert.match(stylesheet, /details\.reveal\[open\]>summary\{display:none\}/)
+    assert.match(stylesheet, /details\.action>summary\{list-style:none\}/)
+    // A step keeps its number and stacks: its title above its command, not beside it as other panel list items are.
+    assert.match(
+      stylesheet,
+      /\.panel ol\.howto>li,ol\.howto>li\{display:list-item;/,
+    )
+  })
+})
+
+describe('Settings page', () => {
+  const base = {
+    apple: { signedIn: false, needsCode: false },
+    keys: [],
+    apps: [],
+    canChange: true,
+    canCreate: true,
+    canRevoke: true,
+  }
+  it('U5.1 API keys: what they are for, a create form, and each key by its prefix and creation day', () => {
+    const created = new Date(2026, 9, 3, 23, 30).getTime()
+    const html = settingsView({
+      ...base,
+      apps: [{ id: 3, name: 'Edge' }],
+      keys: [
+        {
+          id: 'abcdef0123456789abcdef0123456789',
+          name: 'ci',
+          role: 'developer',
+          createdAt: created,
+          revoked: false,
+          format: 'v1',
+        },
+        {
+          id: 'b1',
+          name: 'old builder',
+          role: 'upload',
+          createdAt: created,
+          revoked: true,
+          format: 'builder',
+        },
+      ],
+    })
+    const card = html.slice(html.indexOf('id="keys"'))
+    assert.match(
+      card,
+      /<h2>.*API keys<\/h2><p>Create API keys to access Mason from other apps and agents\.<\/p>/,
+    )
+    assert.match(card, /<summary class="button">.*Create API key<\/summary>/)
+    for (const role of ['developer', 'tester', 'manager', 'admin', 'upload'])
+      assert.match(card, new RegExp(`<option value="${role}">`))
+    assert.match(card, /<input type="checkbox" name="app" value="3"> Edge/)
+    assert.match(card, /data-then="token"/)
+    // Done loads the page again (a new query, not only a hash), so the new key is listed.
+    assert.match(card, /<a href="\/settings\?key=created#keys">Done<\/a>/)
+    assert.match(
+      card,
+      /cannot show it again\. If it is lost, revoke it and create a new one/,
+    )
+    assert.match(
+      card,
+      /<table class="list compact"><thead><tr><th>Name<\/th><th>Role<\/th><th>Created<\/th><th>State<\/th><th>Key<\/th>/,
+    )
+    assert.match(
+      card,
+      /<td>2026-10-03<\/td><td>active<\/td><td><button type="button" class="secondary copy icon-only" data-copy="mason_v1_abcde…"/,
+    )
+    assert.match(card, /<span class="mono">mason_v1_abcde…<\/span>/)
+    assert.match(
+      card,
+      /<td>revoked<\/td><td><small>builder key<\/small><\/td><td><\/td>/,
+    )
+    assert.doesNotMatch(card, /ago</)
+    // Without the right to create keys, no form.
+    assert.doesNotMatch(
+      settingsView({ ...base, canCreate: false }),
+      /Create API key<\/summary>/,
+    )
+  })
+
+  it('U6.1 GitHub: one form per way in, each with its kind and only its fields; secrets never shown', () => {
+    const html = settingsView({
+      ...base,
+      github: { kind: 'ssh', publicKey: 'ssh-ed25519 AAAA mason-master' },
+    })
+    const card = html.slice(
+      html.indexOf('id="github"'),
+      html.indexOf('id="host"'),
+    )
+    assert.match(card, /Now: an SSH deploy key\./)
+    assert.match(
+      card,
+      /<details class="action" id="github-token-form"><summary class="button">.*Personal access token/,
+    )
+    assert.match(
+      card,
+      /data-fields="kind,token"[^>]*>.*<input type="hidden" name="kind" value="token">.*name="token" type="password" data-kind="secret"[^>]* required/,
+    )
+    assert.match(card, /data-fields="kind,appId,installationId,privateKey"/)
+    assert.match(
+      card,
+      /name="appId" value="" required type="number" min="1" data-kind="number"/,
+    )
+    assert.match(card, /<details class="action" id="github-ssh-form" open>/)
+    assert.match(card, /data-copy="ssh-ed25519 AAAA mason-master"/)
+    assert.match(
+      card,
+      /data-fields="kind,privateKey"[^>]*><input type="hidden" name="kind" value="ssh"><input type="hidden" name="privateKey" data-kind="secret" value="">/,
+    )
+    assert.match(
+      card,
+      /Make a new deploy key<\/summary>.*data-fields="kind"[^>]*><input type="hidden" name="kind" value="ssh">/,
+    )
+    // A stored token is never in the page; its field keeps it when left empty.
+    const token = settingsView({ ...base, github: { kind: 'token' } })
+    assert.match(
+      token,
+      /name="token" type="password" data-kind="secret" autocomplete="off" placeholder="Leave empty to keep the stored token"/,
+    )
+  })
+
+  it('U6.3/U6.4/U6.5 sign-in methods, host, storage and budget as cards; no JSON or build numbers; errors inside the card', () => {
+    const html = settingsView({
+      ...base,
+      host: { origin: 'https://builds.example.test', offlineGraceHours: 72 },
+      storage: { driver: 'disk' },
+      storageAccounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
+      ],
+      monthlyBudget: 120,
+      signIn: [
+        {
+          id: 'google',
+          type: 'oidc',
+          name: 'Google',
+          issuer: 'https://accounts.google.com',
+          clientId: 'gid',
+          enabled: true,
+          signingAlgorithm: 'RS256',
+        },
+        {
+          id: 'gh',
+          type: 'oauth2',
+          name: 'GitHub',
+          issuer: 'https://github.com',
+          clientId: 'hid',
+          enabled: false,
+          authorizationEndpoint: 'https://github.com/a',
+          tokenEndpoint: 'https://github.com/t',
+          userinfoEndpoint: 'https://api.github.com/user',
+          scopes: ['read:user'],
+          claims: { subject: 'id' },
+        },
+      ],
+    })
+    assert.doesNotMatch(
+      html,
+      /<textarea id="setting-|data-json|buildNumbers|cloudAccounts/,
+    )
+    const host = html.slice(html.indexOf('id="host"'))
+    assert.match(
+      host,
+      /data-path="\/api\/v2\/settings\/host" data-method="PUT" data-fields="origin,workerOrigin,offlineGraceHours"/,
+    )
+    assert.match(host, /name="workerOrigin" value="" data-optional/)
+    assert.match(
+      host,
+      /name="offlineGraceHours" value="72" required type="number" min="1" max="720" data-kind="number"/,
+    )
+    assert.match(
+      host,
+      /How long the host keeps serving installs while it cannot reach the master\./,
+    )
+    assert.match(
+      html,
+      /<section class="panel" id="storage"><h2>.*Storage<\/h2>.*Make a new Space/,
+    )
+    const signIn = html.slice(
+      html.indexOf('id="signIn"'),
+      html.indexOf('id="cloud"'),
+    )
+    assert.match(
+      signIn,
+      /data-path="\/api\/v2\/settings\/signIn\/methods\/google" data-method="PUT" data-fields="type,enabled,name,issuer,clientId,clientSecret,authentication,signingAlgorithm"/,
+    )
+    assert.match(
+      signIn,
+      /data-path="\/api\/v2\/settings\/signIn\/methods\/gh" data-method="PUT" data-fields="type,enabled,name,issuer,clientId,clientSecret,authentication,authorizationEndpoint,tokenEndpoint,userinfoEndpoint,scopes,claims.subject,claims.name,claims.email,claims.emailVerified"/,
+    )
+    assert.match(signIn, /name="scopes" value="read:user" data-kind="list"/)
+    assert.match(
+      signIn,
+      /id="signin-edit-gh-enabled" name="enabled" type="checkbox" data-kind="checkbox">/,
+    )
+    assert.match(
+      signIn,
+      /data-path="\/api\/v2\/settings\/signIn\/methods\/google" data-method="DELETE"/,
+    )
+    assert.match(
+      signIn,
+      /<summary class="button">.*Add an OpenID Connect method<\/summary>.*data-path="\/api\/v2\/settings\/signIn\/methods\/\{id\}" data-method="PUT" data-fields="id,create,type,/,
+    )
+    assert.match(signIn, /Add an OAuth 2 method/)
+    assert.doesNotMatch(signIn, /name="clientSecret"[^>]*value="/)
+    const cloud = html.slice(html.indexOf('id="cloud"'))
+    assert.match(
+      cloud,
+      /data-path="\/api\/v2\/settings\/cloud\/budget" data-method="PUT" data-fields="monthlyBudget"/,
+    )
+    assert.match(cloud, /name="monthlyBudget" value="120"/)
+    assert.match(cloud, /href="\/nodes".*href="\/cloud"/)
+    // Each card's form has the status line a refused save is shown in, before its Save.
+    for (const id of ['github', 'host', 'signIn', 'cloud']) {
+      const section = html.slice(html.indexOf(`id="${id}"`))
+      assert.match(
+        section,
+        /<button>.*(Save|Add)<\/button><p class="notice" role="status" data-field="status" hidden><\/p><\/form>/,
+        id,
+      )
+    }
+    // Without the right to change settings, no cards.
+    assert.doesNotMatch(
+      settingsView({ ...base, canChange: false }),
+      /id="github"/,
+    )
+  })
+
+  it('U7.1/U7.3 one card per node type with typed fields and what each means; no JSON anywhere on Settings', () => {
+    const type = {
+      software: {
+        xcode: ['26.1', '16.4'],
+        xcodeDefault: '26.1',
+        allowBeta: false,
+        simulators: ['iOS 26.1'],
+        commandLineTools: true,
+        rosetta: false,
+        brew: { formulae: ['jq'], casks: [] },
+        apt: [],
+        dnf: [],
+        docker: false,
+        node: '24',
+        android: ['platform-tools'],
+      },
+      settings: {
+        noSleep: true,
+        devToolsSecurity: false,
+        automationMode: false,
+      },
+      diskThresholdGb: 40,
+      androidLicensesAccepted: { by: 'paul', at: Date.UTC(2026, 9, 1) },
+    }
+    const html = settingsView({ ...base, nodeTypes: { 'macos-arm64': type } })
+    const card = html.slice(html.indexOf('id="node-type-macos-arm64"'))
+    assert.match(
+      card,
+      /data-path="\/api\/v2\/settings\/nodeTypes\/macos-arm64" data-method="PUT" data-fields="software\.xcode,software\.xcodeDefault,software\.allowBeta,/,
+    )
+    assert.match(
+      card,
+      /name="software\.xcode" value="26\.1, 16\.4" data-kind="list"/,
+    )
+    assert.match(
+      card,
+      /name="software\.xcodeDefault" value="26\.1" data-optional/,
+    )
+    assert.match(
+      card,
+      /name="software\.commandLineTools" type="checkbox" data-kind="checkbox" checked>/,
+    )
+    assert.match(card, /name="software\.node" value="24" data-optional/)
+    assert.match(card, /name="software\.java" value="" data-optional/)
+    assert.match(
+      card,
+      /name="settings\.noSleep" type="checkbox" data-kind="checkbox" checked>/,
+    )
+    assert.match(
+      card,
+      /name="diskThresholdGb" value="40" required type="number" min="0" data-kind="number"/,
+    )
+    assert.match(
+      card,
+      /Unused Xcodes and runtimes are removed when free disk falls below this\./,
+    )
+    assert.match(card, /Android SDK licences accepted by paul on 2026-10-01\./)
+    assert.match(
+      card,
+      /data-path="\/api\/v2\/settings\/nodeTypes\/macos-arm64" data-method="DELETE"/,
+    )
+    assert.match(
+      html,
+      /<summary class="button">.*Add a node type<\/summary>.*data-path="\/api\/v2\/settings\/nodeTypes\/\{name\}" data-method="PUT" data-fields="name,create,software\.xcode/,
+    )
+    assert.doesNotMatch(html, /<textarea id="setting-|data-json/)
+    // A type named like the Add form's prefix or id collides with neither.
+    const tricky = settingsView({
+      ...base,
+      nodeTypes: { new: type, add: type },
+    })
+    const ids = [...tricky.matchAll(/ id="([^"]+)"/g)].map((m) => m[1])
+    assert.deepEqual(
+      ids.filter((id, i) => ids.indexOf(id) !== i),
+      [],
+    )
+    assert.match(tricky, /id="type-edit-new-software-node"/)
+    assert.match(tricky, /id="add-node-type"/)
+  })
+
+  it('U7.1b the Nodes page sums up each node type instead of showing its JSON', () => {
+    const html = nodesView({
+      nodes: [],
+      types: {
+        'macos-arm64': {
+          software: {
+            xcode: ['26.1'],
+            node: '24',
+            brew: { formulae: ['jq'], casks: [] },
+            android: [],
+          },
+        },
+        empty: {},
+      },
+      pools: [],
+      budget: { monthly: 0 },
+      canChange: true,
+    })
+    assert.match(
+      html,
+      /<span class="mono">macos-arm64<\/span> <small>Xcode 26\.1 · Node 24 · 1 Homebrew package<\/small>/,
+    )
+    assert.match(
+      html,
+      /<span class="mono">empty<\/span> <small>Nothing managed yet<\/small>/,
+    )
+    assert.doesNotMatch(html, /&quot;software&quot;/)
   })
 })

@@ -45,7 +45,7 @@ export async function clusterCheck(
   const revision = master.changes.revision()
   const nodes: NodeCheck[] = []
   const cloudHosts = new Map(
-    (master.cloudHosts?.list() ?? []).map((row) => [row.fingerprint, row]),
+    (master.cloudHosts?.list('all') ?? []).map((row) => [row.fingerprint, row]),
   )
   for (const node of master.registry.list()) {
     const link = master.registry.link(node.fingerprint)

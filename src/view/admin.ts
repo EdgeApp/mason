@@ -1,6 +1,7 @@
 import { bytes, platformChip, statusDot } from './dashboard.js'
 import { ago, escape } from './html.js'
 import { icon } from './icons.js'
+import { spacesRegions } from '../master/cloud/regions.js'
 
 const statusLine =
   '<p class="notice" role="status" data-field="status" hidden></p>'
@@ -8,6 +9,33 @@ const statusLine =
 /** A shell command with a button that copies it. */
 const command = (text: string): string =>
   `<div class="command"><pre class="mono">${escape(text)}</pre><button type="button" class="secondary copy" data-copy="${escape(text)}">${icon('content_copy')}<span data-copy-label>Copy</span></button></div>`
+
+/**
+ * A disclosure that is a full button: red for adding or using something,
+ * `secondary` for Edit and Remove. Open, the button stays as the form's heading.
+ */
+export function action(
+  label: string,
+  body: string,
+  options: {
+    id?: string
+    kind?: 'primary' | 'secondary'
+    open?: boolean
+    className?: string
+  } = {},
+): string {
+  return `<details class="action${options.className == null ? '' : ` ${options.className}`}"${options.id == null ? '' : ` id="${escape(options.id)}"`}${options.open === true ? ' open' : ''}><summary class="button${options.kind === 'secondary' ? ' secondary' : ''}">${label}</summary><div class="action-body">${body}</div></details>`
+}
+
+/** A form field: its title, an optional description in smaller text, then the control. */
+export function field(
+  id: string,
+  title: string,
+  control: string,
+  description?: string,
+): string {
+  return `<div class="field"><label for="${escape(id)}">${escape(title)}</label>${description == null ? '' : `<small class="hint">${escape(description)}</small>`}${control}</div>`
+}
 
 /**
  * A form the shell's script sends to the API as JSON: `fields` names the
@@ -93,8 +121,12 @@ function poolFields(
   pool: Partial<PoolRow>,
   editing: boolean,
 ): string {
-  const field = (name: string, label: string, input: string): string =>
-    `<label for="${prefix}-${name}">${label}</label>${input}`
+  const row = (
+    name: string,
+    label: string,
+    input: string,
+    description?: string,
+  ): string => field(`${prefix}-${name}`, label, input, description)
   const text = (name: string, value: string, extra = ''): string =>
     `<input id="${prefix}-${name}" name="${name}" value="${escape(value)}"${extra}>`
   const select = (
@@ -127,30 +159,32 @@ function poolFields(
     `<input type="hidden" name="account" value="${escape(account?.id ?? pool.account ?? '')}">`,
     editing
       ? ''
-      : field(
+      : row(
           'name',
           'Name',
           text(
             'name',
-            pool.name ?? '',
+            pool.name ?? (mac ? 'macos-cloud' : ''),
             ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-cloud"',
           ),
+          'The pool’s name on this master.',
         ),
-    field(
+    row(
       'type',
-      'Node type its machines serve',
+      'Node type',
       text(
         'type',
-        pool.type ?? '',
-        ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux"',
+        pool.type ?? (mac ? 'macos-arm64' : ''),
+        ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-x86"',
       ),
+      'Type of node as specified in the Masonfile.',
     ),
     mac
       ? '<p><small>NoMac runs one Apple silicon Mac with Xcode at a time, for up to eight hours.</small></p>'
       : '',
     mac
       ? ''
-      : field(
+      : row(
           'region',
           'Region',
           catalog == null
@@ -166,7 +200,7 @@ function poolFields(
         ),
     mac
       ? ''
-      : field(
+      : row(
           'size',
           'Size',
           catalog == null
@@ -186,7 +220,7 @@ function poolFields(
         ),
     mac
       ? ''
-      : field(
+      : row(
           'image',
           'Base image',
           catalog == null
@@ -200,27 +234,31 @@ function poolFields(
                 })),
               ),
         ),
-    field(
+    row(
       'labels',
-      'Labels (comma-separated)',
+      'Labels',
       text('labels', (pool.labels ?? []).join(', ')),
+      'Extra labels its machines carry, comma-separated, for stages that ask for them.',
     ),
-    field(
+    row(
       'maxNodes',
-      'Machines at most',
+      'Max machines',
       number('maxNodes', pool.maxNodes ?? 1, 1, mac ? 1 : 50),
+      'Spin up no more than max machines concurrently.',
     ),
-    field(
+    row(
       'slots',
-      'Stages at a time per machine',
+      'Stages per machine',
       number('slots', pool.slots ?? 1, 1, 64),
+      'How many stages one machine runs at the same time.',
     ),
-    field(
+    row(
       'ttlMinutes',
       'Retire after idle minutes',
       number('ttlMinutes', pool.ttlMinutes ?? 60, 1, 1440),
+      'A machine with no stage to run for this many minutes is shut down and deleted.',
     ),
-    field(
+    row(
       'maxHoursPerNode',
       'Retire after hours up',
       number(
@@ -229,6 +267,7 @@ function poolFields(
         1,
         mac ? 8 : 720,
       ),
+      'A machine is replaced after this many hours in total, even if it keeps getting work, so none runs forever. Its current stage finishes first.',
     ),
   ].join('')
 }
@@ -250,28 +289,22 @@ export interface CloudHostView {
   error: string | null
   /** The release it runs, or the one it is updating to. */
   version?: string | null
+  /** A permanent node's type and labels. */
+  nodeType?: string | null
+  labels?: string[]
 }
 
 /** DigitalOcean's Spaces regions. */
-const spacesRegions = [
-  'sfo3',
-  'nyc3',
-  'ams3',
-  'fra1',
-  'lon1',
-  'sgp1',
-  'syd1',
-  'blr1',
-  'tor1',
-  'atl1',
-]
 function spacesRegionSelect(id: string, value: string): string {
   return `<select id="${id}" name="space.region">${spacesRegions.map((region) => `<option${region === value ? ' selected' : ''}>${region}</option>`).join('')}</select>`
 }
 
-/** The Create host form's fields for one account. */
-function hostFields(account: PoolAccount): string {
-  const prefix = `host-${account.id}`
+/** The Create host (or permanent node) form's fields for one account. */
+function hostFields(
+  account: PoolAccount,
+  role: 'host' | 'worker' = 'host',
+): string {
+  const prefix = `${role === 'host' ? 'host' : 'node'}-${account.id}`
   const catalog = account.catalog
   const select = (
     name: string,
@@ -283,7 +316,9 @@ function hostFields(account: PoolAccount): string {
     `<input id="${prefix}-${name === 'dns.name' ? 'record' : name}" name="${name}" value="${escape(value)}"${extra}>`
   return [
     `<input type="hidden" name="account" value="${escape(account.id)}">`,
-    `<label for="${prefix}-name">Name</label>${text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="builds"')}`,
+    role === 'host'
+      ? `<label for="${prefix}-name">Name</label>${text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="builds"')}`
+      : `${field(`${prefix}-name`, 'Name', text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-node"'), 'The node’s name on this master and its droplet’s.')}${field(`${prefix}-type`, 'Node type', text('type', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-x86"'), 'Type of node as specified in the Masonfile.')}${field(`${prefix}-labels`, 'Labels', text('labels', ''), 'Extra labels it carries, comma-separated, for stages that ask for them.')}`,
     `<label for="${prefix}-region">Region</label>${
       catalog == null
         ? text('region', 'sfo3', ' required')
@@ -320,11 +355,56 @@ function hostFields(account: PoolAccount): string {
             })),
           )
     }`,
-    `<label for="${prefix}-domain">DNS domain</label>${select('dns.domain', '', [{ value: '', label: 'No DNS: serve the droplet’s address' }, ...(account.domains ?? []).map((domain) => ({ value: domain, label: domain }))])}`,
-    `<label for="${prefix}-record">Record name in the domain (or @)</label>${text('dns.name', '', ' placeholder="builds" pattern="@|[a-z0-9.-]{1,200}"')}`,
-    `<label for="${prefix}-space">Store builds in a new DigitalOcean Space named (empty: the host’s disk)</label><input id="${prefix}-space" name="space.bucket" placeholder="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">`,
-    `<label for="${prefix}-space-region">Space region</label>${spacesRegionSelect(`${prefix}-space-region`, 'sfo3')}`,
+    role === 'worker'
+      ? ''
+      : `<label for="${prefix}-domain">DNS domain</label>${select('dns.domain', '', [{ value: '', label: 'No DNS: serve the droplet’s address' }, ...(account.domains ?? []).map((domain) => ({ value: domain, label: domain }))])}`,
+    role === 'worker'
+      ? ''
+      : `<label for="${prefix}-record">Record name in the domain (or @)</label>${text('dns.name', '', ' placeholder="builds" pattern="@|[a-z0-9.-]{1,200}"')}`,
+    role === 'worker'
+      ? ''
+      : `<label for="${prefix}-space">Store builds in a new DigitalOcean Space named (empty: the host’s disk)</label><input id="${prefix}-space" name="space.bucket" placeholder="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">`,
+    role === 'worker'
+      ? ''
+      : `<label for="${prefix}-space-region">Space region</label>${spacesRegionSelect(`${prefix}-space-region`, 'sfo3')}`,
   ].join('')
+}
+
+/** Where the host keeps builds: a new Space Mason makes, an existing Space, or the host's disk. */
+function storageCard(options: {
+  storage?: { driver: 'disk' | 's3'; bucket?: string; endpoint?: string }
+  accounts: PoolAccount[]
+  heading: 'h2' | 'h3'
+}): string {
+  const spaceAccounts = options.accounts.filter(
+    (account) => account.provider !== 'nomac',
+  )
+  // Mason makes the Space and a key that can use only it, from a DigitalOcean account.
+  const newSpace =
+    spaceAccounts.length === 0
+      ? ''
+      : action(
+          `${icon('add')} Make a new Space`,
+          apiForm(
+            '/api/v2/storage/space/new',
+            `<p><small class="hint">A Space is DigitalOcean’s storage, billed by use from $5 a month for 250 GB, so there is no machine size to choose. Mason makes it and a key that can use only it, then stores new builds there.</small></p>${field('new-space-account', 'DigitalOcean account', `<select id="new-space-account" name="account">${spaceAccounts.map((account) => `<option value="${escape(account.id)}">${escape(account.name)}</option>`).join('')}</select>`)}${field('new-space-bucket', 'Space name', '<input id="new-space-bucket" name="bucket" required value="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">', '3 to 63 lowercase letters, digits and dashes; unique across DigitalOcean.')}${field('new-space-region', 'Region', spacesRegionSelect('new-space-region', 'sfo3').replace('name="space.region"', 'name="region"'))}`,
+            `${icon('storage')} Make the Space`,
+            { fields: ['account', 'bucket', 'region'], then: 'reload' },
+          ),
+          { id: 'storage-new' },
+        )
+  const storage = options.storage
+  const h = options.heading
+  return `<section class="panel" id="storage"><${h}>${icon('storage')}Storage</${h}><p>${storage?.driver === 's3' ? `Builds are stored in <span class="mono">${escape(storage.bucket ?? '')}</span> at <span class="mono">${escape(storage.endpoint ?? '')}</span>.` : 'Builds are stored on the host’s disk.'} New builds go to the storage chosen here; earlier ones are still served from where they were written.</p>${newSpace}${action(
+    `${icon('storage')} Use an existing Space`,
+    apiForm(
+      '/api/v2/storage/space',
+      '<label for="storage-url">Space URL</label><input id="storage-url" name="url" required placeholder="https://name.sfo3.digitaloceanspaces.com"><label for="storage-key">Access key</label><input id="storage-key" name="accessKeyId" required autocomplete="off"><label for="storage-secret">Secret</label><input id="storage-secret" name="secretAccessKey" type="password" required autocomplete="off"><p><small>Mason writes, reads and deletes a check object with the key before saving; a key that cannot is refused and nothing changes.</small></p>',
+      `${icon('check')} Check and save`,
+      { fields: ['url', 'accessKeyId', 'secretAccessKey'] },
+    ),
+    { id: 'storage-existing' },
+  )}${storage?.driver === 's3' ? apiForm('/api/v2/storage/disk', '', `${icon('storage')} Store on the host’s disk`, { className: 'secondary', then: 'reload' }) : ''}</section>`
 }
 
 const poolFieldNames = [
@@ -341,6 +421,36 @@ const poolFieldNames = [
   'maxHoursPerNode',
 ]
 
+/** A node type in a few words: what it installs, not its JSON. */
+function typeSummary(value: unknown): string {
+  const software =
+    ((value ?? {}) as { software?: Partial<NodeTypeView['software']> })
+      .software ?? {}
+  const count = (items: unknown[] | undefined, word: string): string[] =>
+    items == null || items.length === 0
+      ? []
+      : [`${items.length} ${word}${items.length === 1 ? '' : 's'}`]
+  const parts = [
+    ...(software.xcode == null || software.xcode.length === 0
+      ? []
+      : [`Xcode ${software.xcode.join(', ')}`]),
+    ...(software.node == null ? [] : [`Node ${software.node}`]),
+    ...(software.java == null ? [] : [`Java ${software.java}`]),
+    ...(software.rust == null ? [] : [`Rust ${software.rust}`]),
+    ...count(
+      [...(software.brew?.formulae ?? []), ...(software.brew?.casks ?? [])],
+      'Homebrew package',
+    ),
+    ...count(
+      [...(software.apt ?? []), ...(software.dnf ?? [])],
+      'Linux package',
+    ),
+    ...count(software.android, 'Android package'),
+    ...(software.docker === true ? ['Docker'] : []),
+  ]
+  return parts.length === 0 ? 'Nothing managed yet' : parts.join(' · ')
+}
+
 /** Nodes: status, type, current stage, inventory and checklist; node types; cloud pools and their budget; adding a node. */
 export function nodesView(data: {
   nodes: NodeRow[]
@@ -350,6 +460,8 @@ export function nodesView(data: {
   poolAccounts?: PoolAccount[]
   /** Hosts the master made on a cloud provider. */
   cloudHosts?: CloudHostView[]
+  /** Permanent worker nodes the master made on a cloud provider. */
+  cloudNodes?: CloudHostView[]
   /** Where the host keeps builds. */
   storage?: { driver: 'disk' | 's3'; bucket?: string; endpoint?: string }
   budget: { monthly: number; notice?: string }
@@ -389,56 +501,117 @@ export function nodesView(data: {
       }</article>`
     })
     .join('')
-  const install =
+  const installCommand =
     data.host != null
-      ? `install Mason from the host: ${command(`/bin/bash -c "$(curl -fsSL ${data.host}/install.sh)" -- --from ${data.host}`)}`
+      ? command(
+          `/bin/bash -c "$(curl -fsSL ${data.host}/install.sh)" -- --from ${data.host}`,
+        )
       : data.release != null
-        ? `install Mason ${escape(data.release.version)}, the master’s version: ${command(`/bin/bash -c "$(curl -fsSL https://github.com/${data.release.repository}/releases/latest/download/install.sh)" -- --version ${data.release.version}`)}`
-        : 'install Mason from a host: set the host\'s origin in <a href="/settings#host">Settings</a> to see its command.'
+        ? command(
+            `/bin/bash -c "$(curl -fsSL https://github.com/${data.release.repository}/releases/latest/download/install.sh)" -- --version ${data.release.version}`,
+          )
+        : '<p>Set the host’s origin in <a href="/settings#host">Settings</a> to see the install command.</p>'
+  const installFrom =
+    data.host != null
+      ? 'It installs Mason from the host.'
+      : data.release != null
+        ? `It installs Mason ${escape(data.release.version)}, the master’s version.`
+        : ''
+  /** A numbered step: its title on its own line, then what to do. */
+  const step = (title: string, body: string): string =>
+    `<li><strong>${title}</strong>${body}</li>`
+  const installStep = (where: string): string =>
+    step(
+      'Install Mason',
+      `<small class="hint">${where} ${installFrom}</small>${installCommand}`,
+    )
+  const pairForm = (
+    prefix: string,
+    placeholder: string,
+    button: string,
+  ): string =>
+    apiForm(
+      '/api/v2/nodes',
+      `${field(`${prefix}-address`, 'Mason node address and port', `<input id="${prefix}-address" name="address" placeholder="${placeholder}" required>`)}${field(`${prefix}-key`, 'Pairing key', `<input id="${prefix}-key" name="key" placeholder="mason1:…" required autocomplete="off">`)}`,
+      button,
+      { fields: ['address', 'key'], then: 'reload' },
+    )
   const cloudHosts = (data.cloudHosts ?? [])
     .map(
       (host) =>
         `<section class="panel cloud-host" id="host-${escape(host.name)}" data-state="${escape(host.state)}"><h3>${icon('cloud')}<span class="mono">${escape(host.name)}</span> <small>${escape(host.state)}</small></h3><p>${escape(host.region)} · ${escape(host.size)}${host.address == null ? '' : ` · <span class="mono">${escape(host.address)}</span>`}${host.dnsName == null ? '' : ` · <span class="mono">${escape(host.dnsName)}</span>`}${host.version == null || host.state === 'updating' ? '' : ` · Mason ${escape(host.version)}`}</p>${host.state === 'updating' && host.version != null ? `<p class="notice">Updating to Mason ${escape(host.version)}, as the master asked over its link; it reconnects on its own.</p>` : ''}${host.origin == null ? '' : `<p>Serves <a href="${escape(host.origin)}">${escape(host.origin)}</a></p>`}${host.certificate === 'waiting' ? '<p class="notice">Waiting for its certificate: Caddy asks Let’s Encrypt once the DNS name resolves.</p>' : ''}${host.space == null ? '' : `<p>Builds Space <span class="mono">${escape(host.space.bucket)}</span> (${escape(host.space.region)})</p>`}${host.error == null ? '' : `<p class="state-failed">${escape(host.error)}</p>`}${
           data.canChange
-            ? `${host.space == null ? `<details><summary>Store builds in a new DigitalOcean Space</summary>${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/space`, `<label for="space-${escape(host.name)}">Space name</label><input id="space-${escape(host.name)}" name="bucket" required value="mason-${escape(host.name)}" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"><label for="space-region-${escape(host.name)}">Space region</label>${spacesRegionSelect(`space-region-${escape(host.name)}`, host.region).replace('name="space.region"', 'name="region"')}<p><small>Mason makes the Space and a key that can use only it. New builds are stored there; earlier ones stay where they are.</small></p>`, `${icon('storage')} Make the Space`, { fields: ['bucket', 'region'] })}</details>` : ''}<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div><details><summary>Remove</summary>${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">${host.space == null ? '' : `<label for="remove-space-${escape(host.name)}">Its Space ${escape(host.space.bucket)}</label><select id="remove-space-${escape(host.name)}" name="deleteSpace"><option value="keep">Keep the Space and its builds</option><option value="delete">Also delete the Space and every build in it</option></select>`}`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: host.space == null ? ['confirm'] : ['confirm', 'deleteSpace'], className: 'secondary' })}</details>`
+            ? `${host.space == null ? action(`${icon('storage')} Store builds in a new DigitalOcean Space`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/space`, `<label for="space-${escape(host.name)}">Space name</label><input id="space-${escape(host.name)}" name="bucket" required value="mason-${escape(host.name)}" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"><label for="space-region-${escape(host.name)}">Space region</label>${spacesRegionSelect(`space-region-${escape(host.name)}`, host.region).replace('name="space.region"', 'name="region"')}<p><small>Mason makes the Space and a key that can use only it. New builds are stored there; earlier ones stay where they are.</small></p>`, `${icon('storage')} Make the Space`, { fields: ['bucket', 'region'] })) : ''}<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div>${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">${host.space == null ? '' : `<label for="remove-space-${escape(host.name)}">Its Space ${escape(host.space.bucket)}</label><select id="remove-space-${escape(host.name)}" name="deleteSpace"><option value="keep">Keep the Space and its builds</option><option value="delete">Also delete the Space and every build in it</option></select>`}`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: host.space == null ? ['confirm'] : ['confirm', 'deleteSpace'], className: 'secondary' }), { kind: 'secondary' })}`
             : ''
         }</section>`,
     )
     .join('')
-  const hostCommands = `<p>On the host’s computer, ${install}</p><p>Start it as the host: ${command('sudo mason host --install')} It prints its pairing key; pair it in Add node.</p>`
+  const hostCommands = `<ol class="howto">${installStep('On a computer the internet can reach.')}${step('Start it as the host', `${command('sudo mason host --install')}<small class="hint">It prints its pairing key. To put it behind TLS on port 443, see the README’s public-server command.</small>`)}${step('Pair it here', pairForm('host', 'builds.example.com:9310', `${icon('lan')} Pair host`))}</ol>`
   // Hosts run on DigitalOcean; a NoMac account makes only pool Macs.
   const hostAccounts = (data.poolAccounts ?? [])
     .filter((account) => account.provider !== 'nomac')
-    .map(
-      (account) =>
-        `<details class="add-host" id="add-host-${escape(account.id)}"><summary>On ${escape(account.name)}</summary>${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/hosts', hostFields(account), `${icon('add')} Create host`, { fields: ['account', 'name', 'region', 'size', 'image', 'dns.domain', 'dns.name', 'space.bucket', 'space.region'] })}</details>`,
+    .map((account) =>
+      action(
+        `${icon('cloud')} Create a host on ${escape(account.name)}`,
+        `${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/hosts', hostFields(account), `${icon('add')} Create host`, { fields: ['account', 'name', 'region', 'size', 'image', 'dns.domain', 'dns.name', 'space.bucket', 'space.region'] })}`,
+        { id: `add-host-${account.id}`, className: 'add-host' },
+      ),
     )
     .join('')
-  const storage = data.storage
   const storagePanel =
     !data.canChange || (data.host == null && cloudHosts === '')
       ? ''
-      : `<section class="panel" id="storage"><h3>${icon('storage')}Storage</h3><p>${storage?.driver === 's3' ? `Builds are stored in <span class="mono">${escape(storage.bucket ?? '')}</span> at <span class="mono">${escape(storage.endpoint ?? '')}</span>.` : 'Builds are stored on the host’s disk.'} New builds go to the storage chosen here; earlier ones are still served from where they were written.</p><details><summary>Use a DigitalOcean Space</summary>${apiForm(
-          '/api/v2/storage/space',
-          '<label for="storage-url">Space URL</label><input id="storage-url" name="url" required placeholder="https://name.sfo3.digitaloceanspaces.com"><label for="storage-key">Access key</label><input id="storage-key" name="accessKeyId" required autocomplete="off"><label for="storage-secret">Secret</label><input id="storage-secret" name="secretAccessKey" type="password" required autocomplete="off"><p><small>Mason writes, reads and deletes a check object with the key before saving; a key that cannot is refused and nothing changes.</small></p>',
-          `${icon('check')} Check and save`,
-          { fields: ['url', 'accessKeyId', 'secretAccessKey'] },
-        )}</details>${storage?.driver === 's3' ? apiForm('/api/v2/storage/disk', '', `${icon('storage')} Use the host’s disk`, { className: 'secondary' }) : ''}</section>`
+      : storageCard({
+          ...(data.storage == null ? {} : { storage: data.storage }),
+          accounts: data.poolAccounts ?? [],
+          heading: 'h3',
+        })
   const hostPanel =
     !data.canChange && cloudHosts === ''
       ? ''
-      : `<section class="panel" id="hosts"><h2>${icon('cloud')}Host</h2>${cloudHosts}${
+      : `<section class="panel" id="hosts"><h2>${icon('cloud')}Host</h2><p>A Mason host holds the builds created by the Mason cluster and hosts a web interface for downloading iOS, Android, desktop, and other builds. If it is internet accessible, it is also the proxy to communicate events back to the Mason master, such as GitHub repository change events.</p>${cloudHosts}${
           data.canChange && cloudHosts === '' && data.host == null
-            ? `<details class="add-host" open><summary>With a command</summary>${hostCommands}</details>${hostAccounts || '<p>Or add a DigitalOcean account on the <a href="/cloud">Cloud</a> page to make one there.</p>'}`
+            ? `${hostAccounts || '<p>Add a DigitalOcean account on the <a href="/cloud">Cloud</a> page to create a host there.</p>'}${action(`${icon('terminal')} Install a host yourself`, hostCommands, { id: 'add-host-command', className: 'add-host' })}`
             : ''
         }${storagePanel}</section>`
+  const cloudNodes = (data.cloudNodes ?? [])
+    .map(
+      (node) =>
+        `<section class="panel cloud-node" id="cloud-node-${escape(node.name)}" data-state="${escape(node.state)}"><h3>${icon('cloud')}<span class="mono">${escape(node.name)}</span> <small>${escape(node.state)}</small></h3><p>${[
+          node.nodeType ?? '',
+          ...(node.labels ?? []),
+        ]
+          .filter((part) => part !== '')
+          .map(escape)
+          .join(
+            ' · ',
+          )} · ${escape(node.region)} · ${escape(node.size)}${node.address == null ? '' : ` · <span class="mono">${escape(node.address)}</span>`}${node.version == null || node.state === 'updating' ? '' : ` · Mason ${escape(node.version)}`}</p>${node.state === 'updating' && node.version != null ? `<p class="notice">Updating to Mason ${escape(node.version)}, as the master asked over its link; it reconnects on its own.</p>` : ''}${node.error == null ? '' : `<p class="state-failed">${escape(node.error)}</p>`}${
+          data.canChange
+            ? `<div class="actions">${apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div>${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}`, `<label for="remove-node-${escape(node.name)}">Type ${escape(node.name)} to destroy its droplet and unpair it</label><input id="remove-node-${escape(node.name)}" name="confirm" required autocomplete="off">`, `${icon('delete')} Remove node`, { method: 'DELETE', fields: ['confirm'], className: 'secondary' }), { kind: 'secondary' })}`
+            : ''
+        }</section>`,
+    )
+    .join('')
+  // Permanent nodes run on DigitalOcean; NoMac Macs come only from pools.
+  const nodeAccounts = (data.poolAccounts ?? [])
+    .filter((account) => account.provider !== 'nomac')
+    .map((account) =>
+      action(
+        `${icon('cloud')} Create a node on ${escape(account.name)}`,
+        `<p>A DigitalOcean machine that stays a worker until you remove it. It needs no public address: only this master reaches it, on its link port.</p>${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/nodes', hostFields(account, 'worker'), `${icon('add')} Create node`, { fields: ['account', 'name', 'type', 'labels', 'region', 'size', 'image'], then: 'reload' })}`,
+        { id: `add-node-${account.id}`, className: 'add-node' },
+      ),
+    )
+    .join('')
   const add = data.canChange
-    ? `<section class="panel"><h2>${icon('add')}Add node</h2><ol><li>On the new computer, ${install}</li><li>Start it as a worker: ${command('sudo mason worker --install --link-port 9410')} It prints its pairing key.</li><li>Pair it here:</li></ol>${apiForm('/api/v2/nodes', '<label for="node-address">Address</label><input id="node-address" name="address" placeholder="192.168.1.20:9410" required><label for="node-key">Pairing key</label><input id="node-key" name="key" placeholder="mason1:…" required autocomplete="off">', `${icon('lan')} Pair node`, { fields: ['address', 'key'], then: 'reload' })}</section>`
-    : ''
+    ? `<section class="panel" id="add-node"><h2>${icon('add')}Nodes</h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks. Run the following commands to start Mason on a Linux or macOS computer (Windows coming).</p>${cloudNodes}<ol class="howto">${installStep('On the new computer.')}${step('Start as a worker', `${command('sudo mason worker --install --link-port 9410')}<small class="hint">It prints its pairing key.</small>`)}${step('Pair it here', pairForm('node', '192.168.1.20:9410', `${icon('lan')} Pair node`))}</ol>${nodeAccounts}</section>`
+    : cloudNodes === ''
+      ? ''
+      : `<section class="panel" id="add-node"><h2>${icon('cloud')}Cloud nodes</h2>${cloudNodes}</section>`
   const types = Object.entries(data.types)
     .map(
       ([name, value]) =>
-        `<li><span class="mono">${escape(name)}</span> <small class="mono">${escape(JSON.stringify(value).slice(0, 200))}</small></li>`,
+        `<li><span class="mono">${escape(name)}</span> <small>${escape(typeSummary(value))}</small></li>`,
     )
     .join('')
   const accounts = data.poolAccounts ?? []
@@ -453,7 +626,7 @@ export function nodesView(data: {
         .join('')
       return `<section class="panel pool" id="pool-${escape(pool.name)}"><h3>${icon('cloud')}<span class="mono">${escape(pool.name)}</span></h3><p>${escape(pool.type)} · ${escape(account?.name ?? pool.account)} · ${escape(pool.region)} · ${escape(pool.size)}${pool.labels.length === 0 ? '' : ` · ${escape(pool.labels.join(', '))}`}</p><p>${pool.machines.length} of at most ${pool.maxNodes} machine${pool.maxNodes === 1 ? '' : 's'} · ${pool.slots} stage${pool.slots === 1 ? '' : 's'} at a time · retire after ${pool.ttlMinutes} idle minutes or ${pool.maxHoursPerNode} hours</p>${machines === '' ? '' : `<ul class="plain">${machines}</ul>`}${
         data.canChange
-          ? `<details><summary>Edit</summary>${apiForm(`/api/v2/cloud/pools/${encodeURIComponent(pool.name)}`, poolFields(`pool-${pool.name}`, account, pool, true), `${icon('check')} Save`, { method: 'PUT', fields: poolFieldNames.filter((name) => name !== 'name') })}</details><div class="actions">${apiForm(`/api/v2/cloud/pools/${encodeURIComponent(pool.name)}`, '', `${icon('delete')} Remove`, { method: 'DELETE', className: 'secondary' })}</div>`
+          ? `${action(`${icon('edit')} Edit`, apiForm(`/api/v2/cloud/pools/${encodeURIComponent(pool.name)}`, poolFields(`pool-${pool.name}`, account, pool, true), `${icon('check')} Save`, { method: 'PUT', fields: poolFieldNames.filter((name) => name !== 'name') }), { kind: 'secondary' })}<div class="actions">${apiForm(`/api/v2/cloud/pools/${encodeURIComponent(pool.name)}`, '', `${icon('delete')} Remove`, { method: 'DELETE', className: 'secondary' })}</div>`
           : ''
       }</section>`
     })
@@ -463,9 +636,12 @@ export function nodesView(data: {
     : accounts.length === 0
       ? '<p>Add a DigitalOcean or NoMac account on the <a href="/cloud">Cloud</a> page to make pools.</p>'
       : accounts
-          .map(
-            (account) =>
-              `<details class="add-pool" id="add-pool-${escape(account.id)}"><summary>${icon('add')}Add a pool on ${escape(account.name)}</summary>${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/pools', poolFields(`new-${account.id}`, account, {}, false), `${icon('add')} Add pool`, { fields: poolFieldNames })}</details>`,
+          .map((account) =>
+            action(
+              `${icon('add')} Add a pool on ${escape(account.name)}`,
+              `${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/pools', poolFields(`new-${account.id}`, account, {}, false), `${icon('add')} Add pool`, { fields: poolFieldNames })}`,
+              { id: `add-pool-${account.id}`, className: 'add-pool' },
+            ),
           )
           .join('')
   const poolsPanel = `<section class="panel" id="pools"><h2>${icon('cloud')}Cloud pools</h2><p>Machines made on demand for a node type, reused like your own computers and retired when idle. Monthly budget: $${data.budget.monthly}.</p>${data.budget.notice == null ? '' : `<p class="notice">${escape(data.budget.notice)}</p>`}${pools || '<p>None yet.</p>'}${addPool}</section>`
@@ -497,7 +673,6 @@ function signing(
 }
 
 export function settingsView(data: {
-  areas: Array<{ name: string; value: unknown; error?: string }>
   apple: {
     signedIn: boolean
     appleId?: string
@@ -523,27 +698,32 @@ export function settingsView(data: {
     role: string
     createdAt: number
     revoked: boolean
+    /** `builder` for a key imported from the builder, whose token has no id in it. */
+    format?: 'v1' | 'builder'
   }>
+  /** Apps an upload key may be limited to. */
+  apps: Array<{ id: number; name: string }>
+  /** How Mason reaches GitHub, without its secrets. */
+  github?: {
+    kind?: string
+    appId?: number
+    installationId?: number
+    publicKey?: string
+  }
+  host?: { origin?: string; workerOrigin?: string; offlineGraceHours?: number }
+  storage?: { driver: 'disk' | 's3'; bucket?: string; endpoint?: string }
+  /** DigitalOcean accounts a new Space can be made in. */
+  storageAccounts?: PoolAccount[]
+  /** Sign-in methods, without their client secrets. */
+  signIn?: SignInMethodView[]
+  /** The cloud pools' monthly budget in dollars. */
+  monthlyBudget?: number
+  /** Node types: the software and settings every node of a type keeps. */
+  nodeTypes?: Record<string, NodeTypeView>
   canChange: boolean
+  canCreate: boolean
   canRevoke: boolean
 }): string {
-  const areas = data.areas
-    .map(
-      (area) =>
-        `<section class="panel" id="${escape(area.name)}"><h2>${icon('tune')}${escape(area.name)}</h2>${
-          area.error != null
-            ? `<p>${escape(area.error)}</p>`
-            : data.canChange
-              ? apiForm(
-                  `/api/v2/settings/${area.name}`,
-                  `<label for="setting-${escape(area.name)}">Value (JSON; a secret shows as {"set":true}; send {"keep":true} to keep it)</label><textarea id="setting-${escape(area.name)}" name="value" rows="8" class="mono">${escape(JSON.stringify(area.value ?? {}, null, 2))}</textarea>`,
-                  `${icon('check')} Save`,
-                  { method: 'PUT', json: 'value', then: 'reload' },
-                )
-              : `<pre class="mono">${escape(JSON.stringify(area.value ?? {}, null, 2))}</pre>`
-        }</section>`,
-    )
-    .join('')
   // Signed in, the form waits behind "Sign in again", the Apple ID filled in.
   const signInForm = apiForm(
     '/api/v2/apple/session',
@@ -570,15 +750,507 @@ export function settingsView(data: {
       ? `<h3>${icon('key')}Signing for a team</h3>${signing(data.apple.setup)}`
       : ''
   }</section>`
-  const keys = `<section class="panel" id="keys"><h2>${icon('key')}API keys</h2><table class="list"><thead><tr><th>Name</th><th>Role</th><th>Created</th><th>State</th><th></th></tr></thead><tbody>${
+  /** The key's creation day, in the master's time zone. */
+  const day = (ms: number): string => {
+    const date = new Date(ms)
+    const two = (n: number): string => String(n).padStart(2, '0')
+    return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`
+  }
+  // A v1 token is mason_v1_<id>.<secret>: its id's first characters name it without the secret.
+  const keyPrefix = (key: (typeof data.keys)[number]): string => {
+    if (key.format === 'builder') return '<small>builder key</small>'
+    const prefix = `mason_v1_${key.id.slice(0, 5)}…`
+    return `<button type="button" class="secondary copy icon-only" data-copy="${escape(prefix)}" aria-label="Copy ${escape(prefix)}">${icon('content_copy')}<span data-copy-label hidden>Copy</span></button><span class="mono">${escape(prefix)}</span>`
+  }
+  const roles = ['developer', 'tester', 'manager', 'admin', 'upload']
+  const createKey = data.canCreate
+    ? action(
+        `${icon('add')} Create API key`,
+        apiForm(
+          '/api/v2/keys',
+          `${field('key-name', 'Name', '<input id="key-name" name="name" required maxlength="120" placeholder="ci-uploads">', 'What uses it, so you can find it later.')}${field('key-role', 'Role', `<select id="key-role" name="role">${roles.map((role) => `<option value="${role}">${role}</option>`).join('')}</select>`, 'What it may do: the same as a person with that role. An upload key may only publish builds of the apps chosen below.')}${
+            data.apps.length === 0
+              ? ''
+              : `<fieldset><legend>Apps an upload key may publish</legend>${data.apps.map((app) => `<label><input type="checkbox" name="app" value="${app.id}"> ${escape(app.name)}</label>`).join('')}</fieldset>`
+          }<div data-field="token" hidden><p class="notice">Copy it now. Mason stores only a hash of it and cannot show it again. If it is lost, revoke it and create a new one.</p><div class="command"><pre class="mono"></pre><button type="button" class="secondary copy" data-copy="">${icon('content_copy')}<span data-copy-label>Copy</span></button></div><p><a href="/settings?key=created#keys">Done</a></p></div>`,
+          `${icon('key')} Create key`,
+          { fields: ['name', 'role'], then: 'token' },
+        ),
+        { id: 'create-key' },
+      )
+    : ''
+  const keys = `<section class="panel" id="keys"><h2>${icon('key')}API keys</h2><p>Create API keys to access Mason from other apps and agents.</p>${createKey}<table class="list compact"><thead><tr><th>Name</th><th>Role</th><th>Created</th><th>State</th><th>Key</th><th></th></tr></thead><tbody>${
     data.keys
       .map(
         (key) =>
-          `<tr><td class="mono">${escape(key.name)}</td><td>${escape(key.role)}</td><td>${escape(ago(key.createdAt, Date.now()))}</td><td>${key.revoked ? 'revoked' : 'active'}</td><td>${data.canRevoke ? apiForm(`/api/v2/keys/${encodeURIComponent(key.id)}`, '', 'Revoke', { method: 'DELETE', then: 'reload', className: 'danger' }) : ''}</td></tr>`,
+          `<tr><td class="mono">${escape(key.name)}</td><td>${escape(key.role)}</td><td>${day(key.createdAt)}</td><td>${key.revoked ? 'revoked' : 'active'}</td><td>${keyPrefix(key)}</td><td>${data.canRevoke && !key.revoked ? apiForm(`/api/v2/keys/${encodeURIComponent(key.id)}`, '', 'Revoke', { method: 'DELETE', then: 'reload', className: 'danger' }) : ''}</td></tr>`,
       )
-      .join('') || '<tr><td colspan="5">No keys.</td></tr>'
-  }</tbody></table><p>Create keys with <span class="mono">mason keys create</span> or <span class="mono">POST /api/v2/keys</span>; a key's token is shown once.</p></section>`
-  return `${head('Settings', 'How this master signs people in, reaches GitHub and Apple, keeps its backups and runs its nodes.', ['Settings'])}<p><a href="/people">People and groups</a> · <a href="/backups">Backups</a> · <a href="/nodes">Nodes</a></p>${apple}${keys}${areas}`
+      .join('') || '<tr><td colspan="6">No keys.</td></tr>'
+  }</tbody></table></section>`
+  const cards = data.canChange ? settingsCards(data) : ''
+  return `${head('Settings', 'How this master signs people in, reaches GitHub and Apple, keeps its backups and runs its nodes.', ['Settings'])}<p><a href="/people">People and groups</a> · <a href="/backups">Backups</a> · <a href="/nodes">Nodes</a></p>${apple}${keys}${cards}`
+}
+
+/** A sign-in method as Settings shows it: every field but the client secret. */
+export interface SignInMethodView {
+  id: string
+  type: 'oidc' | 'oauth2'
+  name: string
+  issuer: string
+  clientId: string
+  enabled: boolean
+  authentication?: 'post' | 'basic'
+  signingAlgorithm?: string
+  authorizationEndpoint?: string
+  tokenEndpoint?: string
+  userinfoEndpoint?: string
+  scopes?: string[]
+  claims?: {
+    subject?: string
+    name?: string
+    email?: string
+    emailVerified?: string
+  }
+}
+
+/** A text input; `extra` holds its attributes. */
+const input = (id: string, name: string, value: string, extra = ''): string =>
+  `<input id="${escape(id)}" name="${escape(name)}" value="${escape(value)}"${extra}>`
+const select = (
+  id: string,
+  name: string,
+  value: string,
+  options: Array<[string, string]>,
+): string =>
+  `<select id="${escape(id)}" name="${escape(name)}">${options.map(([option, label]) => `<option value="${escape(option)}"${option === value ? ' selected' : ''}>${escape(label)}</option>`).join('')}</select>`
+const checkbox = (id: string, name: string, checked: boolean): string =>
+  `<input id="${escape(id)}" name="${escape(name)}" type="checkbox" data-kind="checkbox"${checked ? ' checked' : ''}>`
+
+/** One sign-in method's form: only the fields its type takes. */
+function signInForm(
+  method: SignInMethodView | undefined,
+  type: 'oidc' | 'oauth2',
+): string {
+  // Existing methods and the Add forms use different prefixes, so no ID a person picks collides.
+  const p = method == null ? `signin-new-${type}` : `signin-edit-${method.id}`
+  const v = (value: string | undefined): string => value ?? ''
+  const fields = [
+    method == null
+      ? field(
+          `${p}-id`,
+          'ID',
+          input(
+            `${p}-id`,
+            'id',
+            '',
+            ' required pattern="[a-z][a-z0-9-]*" maxlength="64" placeholder="google"',
+          ),
+          'A short name in the sign-in URL: lowercase letters, digits and dashes.',
+        )
+      : '',
+    `<input type="hidden" name="type" value="${type}">${method == null ? '<input type="hidden" name="create" value="yes">' : ''}`,
+    field(
+      `${p}-enabled`,
+      'Enabled',
+      checkbox(`${p}-enabled`, 'enabled', method?.enabled ?? true),
+      'Offered on the sign-in page. A disabled method stays configured.',
+    ),
+    field(
+      `${p}-name`,
+      'Display name',
+      input(
+        `${p}-name`,
+        'name',
+        v(method?.name),
+        ' required maxlength="80" placeholder="Google"',
+      ),
+      'The button people see: Sign in with this.',
+    ),
+    field(
+      `${p}-issuer`,
+      'Issuer URL',
+      input(
+        `${p}-issuer`,
+        'issuer',
+        v(method?.issuer),
+        ' required type="url" pattern="https://.*" placeholder="https://accounts.google.com"',
+      ),
+      'The provider’s https address.',
+    ),
+    field(
+      `${p}-clientId`,
+      'Client ID',
+      input(
+        `${p}-clientId`,
+        'clientId',
+        v(method?.clientId),
+        ' required maxlength="256"',
+      ),
+      'From the app you registered with the provider.',
+    ),
+    field(
+      `${p}-clientSecret`,
+      'Client secret',
+      `<input id="${p}-clientSecret" name="clientSecret" type="password" data-kind="secret" autocomplete="off"${method == null ? ' required' : ' placeholder="Leave empty to keep the stored secret"'}>`,
+      'Write-only: it is never shown again.',
+    ),
+    field(
+      `${p}-authentication`,
+      'Client authentication',
+      select(
+        `${p}-authentication`,
+        'authentication',
+        method?.authentication ?? 'post',
+        [
+          ['post', 'In the request body (post)'],
+          ['basic', 'HTTP Basic (basic)'],
+        ],
+      ),
+      'How Mason sends the client secret to the token endpoint.',
+    ),
+    ...(type === 'oidc'
+      ? [
+          field(
+            `${p}-signingAlgorithm`,
+            'Signing algorithm',
+            select(
+              `${p}-signingAlgorithm`,
+              'signingAlgorithm',
+              method?.signingAlgorithm ?? 'RS256',
+              [
+                ['RS256', 'RS256'],
+                ['ES256', 'ES256'],
+                ['EdDSA', 'EdDSA'],
+              ],
+            ),
+            'How the provider signs its ID tokens.',
+          ),
+        ]
+      : [
+          field(
+            `${p}-authorizationEndpoint`,
+            'Authorization endpoint',
+            input(
+              `${p}-authorizationEndpoint`,
+              'authorizationEndpoint',
+              v(method?.authorizationEndpoint),
+              ' required type="url" pattern="https://.*"',
+            ),
+          ),
+          field(
+            `${p}-tokenEndpoint`,
+            'Token endpoint',
+            input(
+              `${p}-tokenEndpoint`,
+              'tokenEndpoint',
+              v(method?.tokenEndpoint),
+              ' required type="url" pattern="https://.*"',
+            ),
+          ),
+          field(
+            `${p}-userinfoEndpoint`,
+            'Userinfo endpoint',
+            input(
+              `${p}-userinfoEndpoint`,
+              'userinfoEndpoint',
+              v(method?.userinfoEndpoint),
+              ' required type="url" pattern="https://.*"',
+            ),
+          ),
+          field(
+            `${p}-scopes`,
+            'Scopes',
+            input(
+              `${p}-scopes`,
+              'scopes',
+              (method?.scopes ?? []).join(', '),
+              ' data-kind="list" placeholder="read:user, user:email"',
+            ),
+            'Comma-separated.',
+          ),
+          field(
+            `${p}-subject`,
+            'Subject claim',
+            input(
+              `${p}-subject`,
+              'claims.subject',
+              v(method?.claims?.subject),
+              ' required placeholder="id"',
+            ),
+            'The userinfo field that identifies a person.',
+          ),
+          field(
+            `${p}-claimName`,
+            'Name claim',
+            input(
+              `${p}-claimName`,
+              'claims.name',
+              v(method?.claims?.name),
+              ' data-optional placeholder="name"',
+            ),
+          ),
+          field(
+            `${p}-claimEmail`,
+            'Email claim',
+            input(
+              `${p}-claimEmail`,
+              'claims.email',
+              v(method?.claims?.email),
+              ' data-optional placeholder="email"',
+            ),
+          ),
+          field(
+            `${p}-claimVerified`,
+            'Email-verified claim',
+            input(
+              `${p}-claimVerified`,
+              'claims.emailVerified',
+              v(method?.claims?.emailVerified),
+              ' data-optional placeholder="email_verified"',
+            ),
+          ),
+        ]),
+  ].join('')
+  const names = [
+    ...(method == null ? ['id', 'create'] : []),
+    'type',
+    'enabled',
+    'name',
+    'issuer',
+    'clientId',
+    'clientSecret',
+    'authentication',
+    ...(type === 'oidc'
+      ? ['signingAlgorithm']
+      : [
+          'authorizationEndpoint',
+          'tokenEndpoint',
+          'userinfoEndpoint',
+          'scopes',
+          'claims.subject',
+          'claims.name',
+          'claims.email',
+          'claims.emailVerified',
+        ]),
+  ]
+  return apiForm(
+    method == null
+      ? '/api/v2/settings/signIn/methods/{id}'
+      : `/api/v2/settings/signIn/methods/${encodeURIComponent(method.id)}`,
+    fields,
+    `${icon('check')} ${method == null ? 'Add' : 'Save'}`,
+    { method: 'PUT', fields: names, then: 'reload' },
+  )
+}
+
+/** Settings cards: titled, explained fields and one Save each, never JSON. */
+function settingsCards(data: Parameters<typeof settingsView>[0]): string {
+  const github = data.github ?? {}
+  const kind = github.kind
+  const githubCard = `<section class="panel" id="github"><h2>${icon('link')}GitHub</h2><p>How Mason reads your repositories and reports runs on commits. ${kind == null ? 'Not set up yet.' : `Now: ${kind === 'token' ? 'a personal access token' : kind === 'app' ? 'a GitHub App' : 'an SSH deploy key'}.`}</p>${action(
+    `${icon('key')} Personal access token`,
+    apiForm(
+      '/api/v2/settings/github',
+      `<input type="hidden" name="kind" value="token">${field('github-token', 'Token', `<input id="github-token" name="token" type="password" data-kind="secret" autocomplete="off"${kind === 'token' ? ' placeholder="Leave empty to keep the stored token"' : ' required'}>`, 'A fine-grained token with read access to contents and write access to commit statuses. Write-only.')}`,
+      `${icon('check')} Save`,
+      { method: 'PUT', fields: ['kind', 'token'], then: 'reload' },
+    ),
+    { id: 'github-token-form', open: kind === 'token' },
+  )}${action(
+    `${icon('extension')} GitHub App`,
+    apiForm(
+      '/api/v2/settings/github',
+      `<input type="hidden" name="kind" value="app">${field('github-appId', 'App ID', input('github-appId', 'appId', github.appId == null ? '' : String(github.appId), ' required type="number" min="1" data-kind="number"'), 'On the app’s settings page in GitHub.')}${field('github-installationId', 'Installation ID', input('github-installationId', 'installationId', github.installationId == null ? '' : String(github.installationId), ' required type="number" min="1" data-kind="number"'), 'The number at the end of the installation’s settings URL.')}${field('github-privateKey', 'Private key', `<textarea id="github-privateKey" name="privateKey" data-kind="secret" rows="4" class="mono"${kind === 'app' ? ' placeholder="Leave empty to keep the stored key"' : ' required'}></textarea>`, 'The .pem file GitHub generated for the app. Write-only.')}`,
+      `${icon('check')} Save`,
+      {
+        method: 'PUT',
+        fields: ['kind', 'appId', 'installationId', 'privateKey'],
+        then: 'reload',
+      },
+    ),
+    { id: 'github-app-form', open: kind === 'app' },
+  )}${action(
+    `${icon('terminal')} SSH deploy key`,
+    `${kind === 'ssh' && github.publicKey != null ? `<p>Add this public key to each repository as a deploy key:</p>${command(github.publicKey)}` : '<p>Mason makes a key pair and shows its public half to add to each repository as a deploy key.</p>'}${apiForm(
+      '/api/v2/settings/github',
+      '<input type="hidden" name="kind" value="ssh"><input type="hidden" name="privateKey" data-kind="secret" value="">',
+      `${icon('check')} ${kind === 'ssh' ? 'Save' : 'Use a deploy key'}`,
+      { method: 'PUT', fields: ['kind', 'privateKey'], then: 'reload' },
+    )}${
+      kind === 'ssh'
+        ? action(
+            `${icon('refresh')} Make a new deploy key`,
+            `<p>Every repository then needs the new public key.</p>${apiForm('/api/v2/settings/github', '<input type="hidden" name="kind" value="ssh">', `${icon('refresh')} Make a new deploy key`, { method: 'PUT', fields: ['kind'], then: 'reload', className: 'secondary' })}`,
+            { kind: 'secondary' },
+          )
+        : ''
+    }`,
+    { id: 'github-ssh-form', open: kind === 'ssh' },
+  )}</section>`
+  const host = data.host ?? {}
+  const hostCard = `<section class="panel" id="host"><h2>${icon('cloud')}Host</h2><p>Where the host is served. A host the master makes on DigitalOcean fills this in.</p>${apiForm(
+    '/api/v2/settings/host',
+    `${field('host-origin', 'Host address', input('host-origin', 'origin', host.origin ?? '', ' required type="url" pattern="https://.*" placeholder="https://builds.example.com"'), 'The https address people, devices and webhooks use.')}${field('host-workerOrigin', 'Worker address', input('host-workerOrigin', 'workerOrigin', host.workerOrigin ?? '', ' data-optional type="url" pattern="https://.*"'), 'Only when cloud machines reach the host at another address; empty uses the host address.')}${field('host-grace', 'Offline grace hours', input('host-grace', 'offlineGraceHours', String(host.offlineGraceHours ?? 72), ' required type="number" min="1" max="720" data-kind="number"'), 'How long the host keeps serving installs while it cannot reach the master.')}`,
+    `${icon('check')} Save`,
+    {
+      method: 'PUT',
+      fields: ['origin', 'workerOrigin', 'offlineGraceHours'],
+      then: 'reload',
+    },
+  )}</section>`
+  const storage = storageCard({
+    ...(data.storage == null ? {} : { storage: data.storage }),
+    accounts: data.storageAccounts ?? [],
+    heading: 'h2',
+  })
+  const methods = data.signIn ?? []
+  const signInCard = `<section class="panel" id="signIn"><h2>${icon('login')}Sign-in</h2><p>Ways people sign in besides a username and password: OpenID Connect or OAuth 2 providers such as Google or GitHub.</p>${
+    methods
+      .map(
+        (method) =>
+          `<section class="panel"><h3>${escape(method.name)} <small class="mono">${escape(method.id)} · ${method.type === 'oidc' ? 'OpenID Connect' : 'OAuth 2'}${method.enabled ? '' : ' · disabled'}</small></h3>${signInForm(method, method.type)}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/settings/signIn/methods/${encodeURIComponent(method.id)}`, `<p>People who sign in with ${escape(method.name)} then use another method.</p>`, `${icon('delete')} Remove ${escape(method.name)}`, { method: 'DELETE', then: 'reload', className: 'secondary' }), { kind: 'secondary' })}</section>`,
+      )
+      .join('') || '<p>None yet.</p>'
+  }${action(`${icon('add')} Add an OpenID Connect method`, signInForm(undefined, 'oidc'), { id: 'signin-add-oidc' })}${action(`${icon('add')} Add an OAuth 2 method`, signInForm(undefined, 'oauth2'), { id: 'signin-add-oauth2' })}</section>`
+  const budgetCard = `<section class="panel" id="cloud"><h2>${icon('cloud')}Cloud budget</h2><p>Pools are edited on the <a href="/nodes">Nodes</a> page and cloud accounts on the <a href="/cloud">Cloud</a> page.</p>${apiForm(
+    '/api/v2/settings/cloud/budget',
+    field(
+      'cloud-budget',
+      'Monthly budget (dollars)',
+      input(
+        'cloud-budget',
+        'monthlyBudget',
+        String(data.monthlyBudget ?? ''),
+        ' required type="number" min="0" data-kind="number"',
+      ),
+      'Cloud pools stop making machines when this month’s spend would pass it.',
+    ),
+    `${icon('check')} Save`,
+    { method: 'PUT', fields: ['monthlyBudget'], then: 'reload' },
+  )}</section>`
+  return `${githubCard}${hostCard}${storage}${signInCard}${budgetCard}${nodeTypesCard(data.nodeTypes ?? {})}`
+}
+
+/** A node type as Settings shows it. */
+export interface NodeTypeView {
+  software: {
+    xcode: string[]
+    xcodeDefault?: string
+    allowBeta: boolean
+    simulators: string[]
+    commandLineTools: boolean
+    rosetta: boolean
+    brew: { formulae: string[]; casks: string[] }
+    apt: string[]
+    dnf: string[]
+    docker: boolean
+    node?: string
+    java?: string
+    rust?: string
+    android: string[]
+  }
+  settings: {
+    noSleep: boolean
+    devToolsSecurity: boolean
+    automationMode: boolean
+  }
+  diskThresholdGb: number
+  androidLicensesAccepted?: { by: string; at: number }
+}
+
+/** One card per node type, and a form to add one. */
+function nodeTypesCard(types: Record<string, NodeTypeView>): string {
+  const fields = (prefix: string, type: NodeTypeView | undefined): string => {
+    const sw = type?.software
+    const id = (name: string): string => `${prefix}-${name.replace(/\./g, '-')}`
+    const list = (
+      name: string,
+      title: string,
+      value: string[] | undefined,
+      description: string,
+      placeholder = '',
+    ): string =>
+      field(
+        id(name),
+        title,
+        input(
+          id(name),
+          name,
+          (value ?? []).join(', '),
+          ` data-kind="list"${placeholder === '' ? '' : ` placeholder="${placeholder}"`}`,
+        ),
+        description,
+      )
+    const flag = (
+      name: string,
+      title: string,
+      value: boolean | undefined,
+      description: string,
+    ): string =>
+      field(
+        id(name),
+        title,
+        checkbox(id(name), name, value ?? false),
+        description,
+      )
+    const ver = (
+      name: string,
+      title: string,
+      value: string | undefined,
+      description: string,
+      placeholder: string,
+    ): string =>
+      field(
+        id(name),
+        title,
+        input(
+          id(name),
+          name,
+          value ?? '',
+          ` data-optional pattern="[A-Za-z0-9][A-Za-z0-9._+-]{0,39}" placeholder="${placeholder}"`,
+        ),
+        description,
+      )
+    return `<h3>Software</h3>${list('software.xcode', 'Xcode versions', sw?.xcode, 'Kept installed side by side.', '26.1, 16.4')}${ver('software.xcodeDefault', 'Default Xcode', sw?.xcodeDefault, 'The Xcode a stage uses when it names none and the repository has no .xcode-version; one of the versions above.', '26.1')}${flag('software.allowBeta', 'Allow beta Xcodes', sw?.allowBeta, 'Whether latest-beta may pick a beta.')}${list('software.simulators', 'Simulator runtimes', sw?.simulators, 'Runtimes to keep, such as iOS 26.1.', 'iOS 26.1')}${flag('software.commandLineTools', 'Command Line Tools', sw?.commandLineTools, 'Apple’s command line developer tools.')}${flag('software.rosetta', 'Rosetta', sw?.rosetta, 'Runs Intel binaries on Apple silicon.')}${list('software.brew.formulae', 'Homebrew formulae', sw?.brew.formulae, 'Installed with brew install.')}${list('software.brew.casks', 'Homebrew casks', sw?.brew.casks, 'Installed with brew install --cask.')}${list('software.apt', 'apt packages', sw?.apt, 'On Debian and Ubuntu nodes.', 'jq, zip')}${list('software.dnf', 'dnf packages', sw?.dnf, 'On Fedora and Red Hat nodes.')}${flag('software.docker', 'Docker', sw?.docker, 'Docker Engine, for stages that run containers.')}${ver('software.node', 'Node.js version', sw?.node, 'Empty: Node.js is not managed.', '24')}${ver('software.java', 'Java version', sw?.java, 'Empty: Java is not managed.', '21')}${ver('software.rust', 'Rust version', sw?.rust, 'Empty: Rust is not managed.', 'stable')}${list('software.android', 'Android SDK packages', sw?.android, 'sdkmanager package names. Their licences are accepted on a node’s page.', 'platforms;android-35')}<h3>Settings</h3>${flag('settings.noSleep', 'Keep awake', type?.settings.noSleep, 'The node never sleeps while Mason runs.')}${flag('settings.devToolsSecurity', 'Developer tools security', type?.settings.devToolsSecurity, 'Lets tools debug and automate apps without a password prompt (macOS).')}${flag('settings.automationMode', 'Automation mode', type?.settings.automationMode, 'Lets UI tests drive the Mac without prompts (macOS).')}${field(id('diskThresholdGb'), 'Disk threshold (GB)', input(id('diskThresholdGb'), 'diskThresholdGb', String(type?.diskThresholdGb ?? 40), ' required type="number" min="0" data-kind="number"'), 'Unused Xcodes and runtimes are removed when free disk falls below this.')}`
+  }
+  const names = [
+    'software.xcode',
+    'software.xcodeDefault',
+    'software.allowBeta',
+    'software.simulators',
+    'software.commandLineTools',
+    'software.rosetta',
+    'software.brew.formulae',
+    'software.brew.casks',
+    'software.apt',
+    'software.dnf',
+    'software.docker',
+    'software.node',
+    'software.java',
+    'software.rust',
+    'software.android',
+    'settings.noSleep',
+    'settings.devToolsSecurity',
+    'settings.automationMode',
+    'diskThresholdGb',
+  ]
+  const cards = Object.entries(types)
+    .map(
+      ([name, type]) =>
+        `<section class="panel node-type" id="node-type-${escape(name)}"><h3><span class="mono">${escape(name)}</span></h3>${type.androidLicensesAccepted == null ? '' : `<p><small>Android SDK licences accepted by ${escape(type.androidLicensesAccepted.by)} on ${escape(new Date(type.androidLicensesAccepted.at).toISOString().slice(0, 10))}.</small></p>`}${apiForm(`/api/v2/settings/nodeTypes/${encodeURIComponent(name)}`, fields(`type-edit-${name}`, type), `${icon('check')} Save`, { method: 'PUT', fields: names, then: 'reload' })}${action(`${icon('delete')} Remove type`, apiForm(`/api/v2/settings/nodeTypes/${encodeURIComponent(name)}`, `<p>Nodes of type ${escape(name)} keep their software; Mason stops managing it.</p>`, `${icon('delete')} Remove ${escape(name)}`, { method: 'DELETE', then: 'reload', className: 'secondary' }), { kind: 'secondary' })}</section>`,
+    )
+    .join('')
+  const add = action(
+    `${icon('add')} Add a node type`,
+    apiForm(
+      '/api/v2/settings/nodeTypes/{name}',
+      `<input type="hidden" name="create" value="yes">${field('type-new-name', 'Name', input('type-new-name', 'name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="macos-arm64"'), 'As the Masonfile and pools name it.')}${fields('type-new', undefined)}`,
+      `${icon('add')} Add`,
+      { method: 'PUT', fields: ['name', 'create', ...names], then: 'reload' },
+    ),
+    { id: 'add-node-type' },
+  )
+  return `<section class="panel" id="nodeTypes"><h2>${icon('tune')}Node types</h2><p>The software and settings every node of a type keeps. Mason installs what is missing and reports what needs a person on the node’s page.</p>${cards || '<p>None yet.</p>'}${add}</section>`
 }
 
 /** People and groups: roles and per-method addresses; administrators change them. */

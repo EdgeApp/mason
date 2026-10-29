@@ -381,6 +381,21 @@ export async function build(ctx: Stage) {
       ]),
       [['nomac', 'nomac', 'standard', 1, 8]],
     )
+    // U2.4 the form's NoMac defaults make a valid pool.
+    const defaults = await settings.set(
+      { role: 'admin', label: 'paul' },
+      'cloud',
+      {
+        pools: [pool({ name: 'macos-cloud', type: 'macos-arm64' })],
+      },
+    )
+    assert.deepEqual(
+      (defaults.pools as Json[]).map((entry) => [entry.name, entry.type]),
+      [['macos-cloud', 'macos-arm64']],
+    )
+    await settings.set({ role: 'admin', label: 'paul' }, 'cloud', {
+      pools: [pool()],
+    })
     // The Nodes page offers a NoMac pool without region, size or image, and no NoMac host.
     const html = nodesView({
       nodes: [],
@@ -391,7 +406,13 @@ export async function build(ctx: Stage) {
       canChange: true,
       poolAccounts: [{ id: 'mac', name: 'NoMac', provider: 'nomac' }],
     })
-    assert.match(html, /<details class="add-pool" id="add-pool-mac">/)
+    assert.match(
+      html,
+      /<details class="action add-pool" id="add-pool-mac"><summary class="button">.*Add a pool on NoMac<\/summary>/,
+    )
+    // NoMac pools default to the macOS cloud type.
+    assert.match(html, /id="new-mac-name" name="name" value="macos-cloud"/)
+    assert.match(html, /id="new-mac-type" name="type" value="macos-arm64"/)
     assert.match(html, /one Apple silicon Mac with Xcode at a time/)
     assert.match(html, /id="new-mac-maxNodes"[^>]*max="1"/)
     assert.match(html, /id="new-mac-maxHoursPerNode"[^>]*value="8"[^>]*max="8"/)
