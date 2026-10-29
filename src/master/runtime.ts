@@ -198,6 +198,14 @@ function mergeMethods(a: MethodTable, b: MethodTable): MethodTable {
   }
 }
 
+/** A NoMac Mac runs its worker without root, so it never has a helper. */
+export const NOMAC_HELPER: ChecklistItem = {
+  id: 'helper',
+  title:
+    'NoMac Mac: no helper by design, so Mason cannot install Xcode, simulators or Homebrew packages here; stages use the Xcode NoMac provides',
+  blocks: ['system'],
+}
+
 /** The master role's parts, shared by its web listener and control socket. */
 export class Master {
   readonly database: MasterDatabase
@@ -898,8 +906,11 @@ export class Master {
   nodeDetails(fingerprint: string): Record<string, unknown> {
     const inventory = this.scheduler.inventoryOf(fingerprint)
     const update = this.updates.state(fingerprint)
+    const nomac = this.registry.get(fingerprint)?.host.startsWith('nomac:')
     const checklist = [
-      ...(inventory?.checklist ?? []),
+      ...(inventory?.checklist ?? []).map((item) =>
+        nomac === true && item.id === 'helper' ? NOMAC_HELPER : item,
+      ),
       ...masterChecklist(this.apple.status(), this.nodeStates.wantsXcode()),
     ]
     return {
