@@ -147,6 +147,8 @@ export interface WorkerOptions {
   masterKey?: () => KeyObject | undefined
   /** The privileged helper's socket. */
   helperSocket?: string
+  /** How often the worker checks whether its helper appeared. Default 15 s. */
+  helperWatchMs?: number
   /** How this Mason was installed; the running process's install by default. */
   install?: RunningInstall
   /** Restarts into a newly installed release; exits for the service manager by default. */
@@ -252,6 +254,8 @@ export class WorkerRuntime {
   private readonly busy = new Set<number>()
   private readonly workspaceLocks = new Map<string, Promise<void>>()
   private timer: NodeJS.Timeout | undefined
+  private helperTimer: NodeJS.Timeout | undefined
+  private helperSeen = false
   private flushing: Promise<void> | undefined
   private again = false
   private stopped = false
@@ -301,11 +305,30 @@ export class WorkerRuntime {
       this.flushSoon()
     }, this.options.flushMs ?? 250)
     this.timer.unref()
+    // `mason worker --install` starts the worker before its helper.
+    this.helperSeen = this.helperReady()
+    this.helperTimer = setInterval(() => {
+      this.watchHelper()
+    }, this.options.helperWatchMs ?? 15_000)
+    this.helperTimer.unref()
+  }
+
+  /**
+   * When the helper appears or goes, hands it the master's key and tells the
+   * master, so the node's checklist and placement follow at once.
+   */
+  watchHelper(): void {
+    const ready = this.helperReady()
+    if (ready === this.helperSeen || this.stopped) return
+    this.helperSeen = ready
+    if (ready) this.trustMaster()
+    void this.refreshSystem()
   }
 
   async stop(): Promise<void> {
     this.stopped = true
     clearInterval(this.timer)
+    clearInterval(this.helperTimer)
     for (const controller of this.controllers.values())
       controller.abort(new Error('The worker is stopping'))
     // Stopped runs finish writing their journal before the database closes.
