@@ -65,7 +65,15 @@ function inventory(extra: Partial<FullInventory> = {}): FullInventory {
     slots: 1,
     version: '0.1.0',
     xcodes: [],
-    tools: { node: [], rust: [], java: [], python: [], go: [], android: [] },
+    tools: {
+      node: [],
+      rust: [],
+      java: [],
+      python: [],
+      go: [],
+      ruby: [],
+      android: [],
+    },
     ...extra,
   }
 }
@@ -163,6 +171,7 @@ describe('Node software', () => {
             java: [],
             python: [],
             go: [],
+            ruby: [],
             android: [],
           },
         }),
@@ -372,6 +381,7 @@ describe('Node software', () => {
             java: [],
             python: [],
             go: [],
+            ruby: [],
             android: [],
           },
         }),

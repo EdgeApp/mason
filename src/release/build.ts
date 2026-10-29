@@ -164,6 +164,7 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
       android: '',
       python: '',
       go: '',
+      rubyBuild: '',
     },
     os: 'macos',
     arch: 'arm64',

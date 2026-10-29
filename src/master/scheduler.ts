@@ -251,6 +251,7 @@ const noTools = {
   java: [],
   python: [],
   go: [],
+  ruby: [],
   android: [],
 }
 

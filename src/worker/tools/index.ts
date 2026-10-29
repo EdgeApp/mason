@@ -13,6 +13,7 @@ import { installJava, javaEnvironment, javaHome } from './java.js'
 import { goEnvironment, installGo } from './go.js'
 import { installNode, nodeEnvironment } from './node.js'
 import { installPython, pythonEnvironment } from './python.js'
+import { installRuby, rubyEnvironment } from './ruby.js'
 import { installRust, rustEnvironment } from './rust.js'
 import { compareVersions, newestMatch } from './versions.js'
 
@@ -23,18 +24,26 @@ export const installable = [
   'java',
   'python',
   'go',
+  'ruby',
   'android',
 ] as const
 export type InstallableTool = (typeof installable)[number]
 
 /** Tools installed per version in the tools directory, side by side. */
-export const versioned = ['node', 'rust', 'java', 'python', 'go'] as const
+export const versioned = [
+  'node',
+  'rust',
+  'java',
+  'python',
+  'go',
+  'ruby',
+] as const
 export type VersionedTool = (typeof versioned)[number]
 
 export interface InstallRequest {
   /** A tools-directory installer, or a system install (`xcode`, `simulators`, `brew`, `apt`, `dnf`) the worker does through its helper. */
   tool: InstallableTool | 'xcode' | 'simulators' | 'brew' | 'apt' | 'dnf'
-  /** A version for node, rust, java, python, go and xcode; sdkmanager packages for android; names for the system tools. */
+  /** A version for node, rust, java, python, go, ruby and xcode; sdkmanager packages for android; names for the system tools. */
   version?: string
   packages?: string[]
   /** For android: whether the node's type records an administrator's licence acceptance. */
@@ -49,6 +58,7 @@ export interface InstalledTools {
   java: string[]
   python: string[]
   go: string[]
+  ruby: string[]
   android: string[]
 }
 
@@ -74,6 +84,7 @@ export function installedTools(toolsDir: string): InstalledTools {
     java: versions(toolsDir, 'java'),
     python: versions(toolsDir, 'python'),
     go: versions(toolsDir, 'go'),
+    ruby: versions(toolsDir, 'ruby'),
     android: installedPackages(sdkRoot(toolsDir)),
   }
 }
@@ -95,6 +106,8 @@ export async function install(
       return await installPython(version, context)
     case 'go':
       return await installGo(version, context)
+    case 'ruby':
+      return await installRuby(version, context)
     case 'android': {
       const java = installedTools(context.toolsDir).java.pop()
       await installAndroid(request.packages ?? [], {
@@ -165,6 +178,8 @@ export function toolEnvironment(
     add(pythonEnvironment(path.join(toolsDir, 'python', python)))
   const go = pick('go')
   if (go != null) add(goEnvironment(path.join(toolsDir, 'go', go)))
+  const ruby = pick('ruby')
+  if (ruby != null) add(rubyEnvironment(path.join(toolsDir, 'ruby', ruby)))
   if (tools.android != null) add(androidEnvironment(toolsDir))
   if ((tools.brew ?? []).length > 0 && brew != null)
     paths.push(path.dirname(brew))

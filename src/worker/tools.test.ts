@@ -33,6 +33,7 @@ import {
   missingTools,
   toolEnvironment,
 } from './tools/index.js'
+import { RUBY_BUILD } from './tools/ruby.js'
 import {
   compareVersions,
   newestMatch,
@@ -86,6 +87,7 @@ async function toolServer(dir: string): Promise<{
   server: Server
   base: string
   corrupt: Set<string>
+  rubyBuildDigest: string
 }> {
   const files = new Map<string, Buffer>()
   const corrupt = new Set<string>()
@@ -208,6 +210,19 @@ async function toolServer(dir: string): Promise<{
       ],
     })
   }
+  const rubyBuild = tarball('ruby-build', 'ruby-build-20261013', (top) => {
+    script(
+      path.join(top, 'bin', 'ruby-build'),
+      [
+        'if [ "$1" = --definitions ]; then printf "3.3.4\\n3.3.5\\n3.4.1\\njruby-9.4.8.0\\n"; exit 0; fi',
+        '[ -d "$TMPDIR" ] && [ -d "$RUBY_BUILD_CACHE_PATH" ] || { echo "no TMPDIR or cache"; exit 1; }',
+        '[ "$1" = 3.4.1 ] && { echo "BUILD FAILED (no libyaml)"; exit 1; }',
+        'mkdir -p "$2/bin" && printf "#!/bin/sh\\necho ruby $1 \\$GEM_HOME\\n" > "$2/bin/ruby" && chmod +x "$2/bin/ruby"',
+        'echo "Installed ruby-$1 to $2"',
+      ].join('\n'),
+    )
+  })
+  files.set('/ruby-build/v20261013.tar.gz', rubyBuild)
   let server!: Server
   const base = await new Promise<string>((resolve) => {
     server = createServer((req, res) => {
@@ -277,7 +292,12 @@ async function toolServer(dir: string): Promise<{
       resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)
     })
   })
-  return { server, base, corrupt }
+  return {
+    server,
+    base,
+    corrupt,
+    rubyBuildDigest: createHash('sha256').update(rubyBuild).digest('hex'),
+  }
 }
 
 describe('Worker tooling', function () {
@@ -293,6 +313,7 @@ describe('Worker tooling', function () {
       android: `${served.base}/android`,
       python: `${served.base}/python`,
       go: `${served.base}/go`,
+      rubyBuild: `${served.base}/ruby-build`,
     }
   })
   after(() => {
@@ -358,6 +379,7 @@ describe('Worker tooling', function () {
       java: [],
       python: [],
       go: [],
+      ruby: [],
       android: ['platform-tools', 'platforms;android-35'],
     })
     assert.deepEqual(
@@ -484,6 +506,49 @@ describe('Worker tooling', function () {
     assert.deepEqual(installedTools(fresh).go, [])
   })
 
+  it('U3.1 builds Ruby with the pinned ruby-build, once per version, and refuses another ruby-build', async () => {
+    const pinned = RUBY_BUILD.sha256
+    const tools = path.join(root(), 'tools')
+    const log: string[] = []
+    await assert.rejects(
+      install({ tool: 'ruby', version: '3.3' }, context(tools)),
+      ChecksumMismatch,
+    )
+    RUBY_BUILD.sha256 = served.rubyBuildDigest
+    try {
+      assert.equal(
+        await install({ tool: 'ruby', version: '3.3' }, context(tools, log)),
+        '3.3.5',
+      )
+      assert.equal(
+        await install({ tool: 'ruby', version: '3.3.4' }, context(tools)),
+        '3.3.4',
+      )
+      assert.match(
+        log.join(''),
+        /Installed ruby-3\.3\.5 to .*tools\/ruby\/3\.3\.5/,
+      )
+      assert.deepEqual(installedTools(tools).ruby, ['3.3.4', '3.3.5'])
+      const env = toolEnvironment({ ruby: '3.3' }, tools, '/usr/bin', null)
+      assert(env.PATH!.startsWith(path.join(tools, 'ruby', '3.3.5', 'bin')))
+      await assert.rejects(
+        install({ tool: 'ruby', version: '3.4' }, context(tools)),
+        /ruby-build exited/,
+      )
+      assert.equal(existsSync(path.join(tools, 'ruby', '3.4.1')), false)
+      await assert.rejects(
+        install({ tool: 'ruby', version: '3.2' }, context(tools)),
+        /defines no Ruby 3\.2/,
+      )
+      await assert.rejects(
+        install({ tool: 'ruby', version: 'jruby' }, context(tools)),
+        /Invalid Ruby version/,
+      )
+    } finally {
+      RUBY_BUILD.sha256 = pinned
+    }
+  })
+
   it('U8.3 installs Rust and Java after their checksums, and Android only where the node type accepted its licences', async () => {
     const tools = path.join(root(), 'tools')
     const log: string[] = []
@@ -552,6 +617,7 @@ describe('Worker tooling', function () {
       java: ['21.0.5'],
       python: [],
       go: [],
+      ruby: [],
       android: [
         'build-tools;35.0.0',
         'cmdline-tools;latest',
@@ -749,6 +815,7 @@ describe('Worker tooling', function () {
           rust: ['1.82.0'],
           python: [],
           go: [],
+          ruby: [],
           android: ['platforms;android-35'],
         },
       ),
@@ -761,6 +828,7 @@ describe('Worker tooling', function () {
         rust: [],
         python: [],
         go: [],
+        ruby: [],
         android: [],
       }),
       [],
@@ -795,6 +863,7 @@ describe('Worker tooling', function () {
         '.nvmrc': 'lts/*\n',
         'rust-toolchain.toml': '[toolchain]\nchannel = "1.82.0"\n',
         '.python-version': '3.13\n',
+        '.ruby-version': 'ruby-3.3.4\n',
         'go.mod': 'module example.com/x\n\ngo 1.22\n',
         'Masonfile.ts': `
 import type { Setup, Stage } from '@mason/types'
@@ -807,6 +876,7 @@ export function setup(m: Setup) {
     want === 'project' ? { node: 'project', rust: 'project' } :
     want === 'pygo' ? { python: 'project', go: 'project' } :
     want === 'py312' ? { python: '3.12' } :
+    want === 'ruby' ? { ruby: 'project' } :
     want === 'android' ? { android: ['platforms;android-35'] } :
     want === 'xcode' ? { xcode: '26.1' } :
     want === 'nox' ? { xcode: '99' } : {}
@@ -819,6 +889,7 @@ export async function use(ctx: Stage) {
     nodeVersion: await sh('node --version'),
     python: await sh('python3 --version'),
     go: await sh('go version'),
+    ruby: await sh('ruby'),
     nodeBinary: process.env.NODE_BINARY ?? null,
     cargo: process.env.CARGO_HOME ?? null,
     javaHome: process.env.JAVA_HOME ?? null,
@@ -921,6 +992,21 @@ export async function use(ctx: Stage) {
       assert.equal(other.status, 'succeeded')
       assert.equal(use(other).output.node, use(run).output.node)
       assert.equal(use(other).output.python, 'Python 3.12.7')
+    })
+
+    it('U3.2 a stage with ruby project builds and runs the Ruby the repository’s .ruby-version names', async () => {
+      const pinned = RUBY_BUILD.sha256
+      RUBY_BUILD.sha256 = served.rubyBuildDigest
+      try {
+        const run = await runWith('ruby')
+        const log = c.master.master!.scheduler.logs(run.id)!
+        assert.equal(run.status, 'succeeded', log)
+        assert.match(log, /ruby 3\.3\.4 from \.ruby-version/)
+        assert.match(log, /installing ruby 3\.3\.4/)
+        assert.match(use(run).output.ruby, /^ruby 3\.3\.4/)
+      } finally {
+        RUBY_BUILD.sha256 = pinned
+      }
     })
 
     it('U8.5 fails the stage with the installer log when an install fails', async () => {
@@ -1030,6 +1116,7 @@ export async function use(ctx: Stage) {
         'java',
         'python',
         'go',
+        'ruby',
         'android',
       ])
     })

@@ -72,6 +72,8 @@ export interface Tools {
   python?: string
   /** Minor or exact: `'1.23'`, `'1.23.4'`. */
   go?: string
+  /** CRuby, minor or exact: `'3.3'`, `'3.3.5'`; built once per node, gems per version. */
+  ruby?: string
   /** `sdkmanager` packages, `'platforms;android-35'`. */
   android?: string[]
   /** Exact version, range, Xcode build number, `'latest'` or `'latest-beta'`. */

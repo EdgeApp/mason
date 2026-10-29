@@ -763,12 +763,29 @@ describe('Devices across nodes', function () {
     }
     walk(path.resolve('src'))
     assert(!files.some((file) => file.endsWith('.rb')))
-    const offending = files.filter((file) =>
-      /['"`](ruby|bundle|fastlane)['"`]|bundle exec|apple-provision|bundle-profiles|Spaceship/.test(
-        readFileSync(file, 'utf8'),
-      ),
-    )
+    // `ruby` is also a tool a stage may ask Mason to install (built by
+    // ruby-build, a shell script): its name may appear, but nothing runs it.
+    const runsRuby =
+      /\b\w*(?:exec|spawn|run|step)\w*\(\s*['"`][^'"`]*\bruby['"`]|['"`]ruby['"`]\s*,\s*\[/i
+    const offending = files.filter((file) => {
+      const text = readFileSync(file, 'utf8')
+      return (
+        runsRuby.test(text) ||
+        /['"`](bundle|fastlane)['"`]|bundle exec|apple-provision|bundle-profiles|Spaceship/.test(
+          text,
+        )
+      )
+    })
     assert.deepEqual(offending, [])
+    // The Ruby installer runs only ruby-build.
+    const installer = readFileSync(
+      path.resolve('src/worker/tools/ruby.ts'),
+      'utf8',
+    )
+    assert.deepEqual(
+      [...installer.matchAll(/\b(?:run|step)\(\s*([\w.]+)/g)].map((m) => m[1]),
+      ['bin', 'bin'],
+    )
     assert.equal(createHash('sha256').update('').digest('hex').length, 64)
   })
 })

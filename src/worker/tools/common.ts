@@ -29,6 +29,8 @@ export interface ToolSources {
   /** python-build-standalone's `latest-release.json` directory. */
   python: string
   go: string
+  /** ruby-build release tarballs, by tag. */
+  rubyBuild: string
 }
 
 export const defaultSources: ToolSources = {
@@ -39,6 +41,7 @@ export const defaultSources: ToolSources = {
   python:
     'https://raw.githubusercontent.com/astral-sh/python-build-standalone/latest-release',
   go: 'https://go.dev/dl',
+  rubyBuild: 'https://github.com/rbenv/ruby-build/archive/refs/tags',
 }
 
 export interface InstallContext {
