@@ -19,12 +19,12 @@ export function action(
   body: string,
   options: {
     id?: string
-    kind?: 'primary' | 'secondary'
+    kind?: 'primary' | 'secondary' | 'danger'
     open?: boolean
     className?: string
   } = {},
 ): string {
-  return `<details class="action${options.className == null ? '' : ` ${options.className}`}"${options.id == null ? '' : ` id="${escape(options.id)}"`}${options.open === true ? ' open' : ''}><summary class="button${options.kind === 'secondary' ? ' secondary' : ''}">${label}</summary><div class="action-body">${body}</div></details>`
+  return `<details class="action${options.className == null ? '' : ` ${options.className}`}"${options.id == null ? '' : ` id="${escape(options.id)}"`}${options.open === true ? ' open' : ''}><summary class="button${options.kind === 'secondary' ? ' secondary' : options.kind === 'danger' ? ' danger-fill' : ''}">${label}</summary><div class="action-body">${body}</div></details>`
 }
 
 /** A form field: its title, an optional description in smaller text, then the control. */
@@ -371,14 +371,35 @@ function hostFields(
 }
 
 /** Where the host keeps builds: a new Space Mason makes, an existing Space, or the host's disk. */
+/** One place builds are stored, as the Storage card lists it. */
+export interface StorageLocationView {
+  id: string
+  kind: 'disk' | 'space'
+  active: boolean
+  bucket?: string
+  region?: string
+  origin?: 'made' | 'added' | 'host'
+  bucketOwned?: boolean
+  host?: string
+  usage?: { files: number; bytes: number }
+}
+
+/** Where the host keeps builds: a row per location, and adding a Space. */
 function storageCard(options: {
-  storage?: { driver: 'disk' | 's3'; bucket?: string; endpoint?: string }
+  storage?: {
+    driver: 'disk' | 's3'
+    bucket?: string
+    endpoint?: string
+    locations?: StorageLocationView[]
+  }
   accounts: PoolAccount[]
   heading: 'h2' | 'h3'
 }): string {
   const spaceAccounts = options.accounts.filter(
     (account) => account.provider !== 'nomac',
   )
+  const useField = (id: string): string =>
+    `<label class="check">${checkbox(id, 'use', true)} Use it for new builds</label>`
   // Mason makes the Space and a key that can use only it, from a DigitalOcean account.
   const newSpace =
     spaceAccounts.length === 0
@@ -387,24 +408,96 @@ function storageCard(options: {
           `${icon('add')} Make a new Space`,
           apiForm(
             '/api/v2/storage/space/new',
-            `<p><small class="hint">A Space is DigitalOcean’s storage, billed by use from $5 a month for 250 GB, so there is no machine size to choose. Mason makes it and a key that can use only it, then stores new builds there.</small></p>${field('new-space-account', 'DigitalOcean account', `<select id="new-space-account" name="account">${spaceAccounts.map((account) => `<option value="${escape(account.id)}">${escape(account.name)}</option>`).join('')}</select>`)}${field('new-space-bucket', 'Space name', '<input id="new-space-bucket" name="bucket" required value="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">', '3 to 63 lowercase letters, digits and dashes; unique across DigitalOcean.')}${field('new-space-region', 'Region', spacesRegionSelect('new-space-region', 'sfo3').replace('name="space.region"', 'name="region"'))}`,
+            `<p><small class="hint">A Space is DigitalOcean’s storage, billed by use from $5 a month for 250 GB, so there is no machine size to choose. Mason makes it and a key that can use only it; it becomes a row above, beside the others.</small></p>${field('new-space-account', 'DigitalOcean account', `<select id="new-space-account" name="account">${spaceAccounts.map((account) => `<option value="${escape(account.id)}">${escape(account.name)}</option>`).join('')}</select>`)}${field('new-space-bucket', 'Space name', '<input id="new-space-bucket" name="bucket" required value="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">', '3 to 63 lowercase letters, digits and dashes; unique across DigitalOcean.')}${field('new-space-region', 'Region', spacesRegionSelect('new-space-region', 'sfo3').replace('name="space.region"', 'name="region"'))}${useField('new-space-use')}`,
             `${icon('storage')} Make the Space`,
-            { fields: ['account', 'bucket', 'region'], then: 'reload' },
+            {
+              fields: ['account', 'bucket', 'region', 'use'],
+              then: 'reload',
+            },
           ),
           { id: 'storage-new' },
         )
-  const storage = options.storage
-  const h = options.heading
-  return `<section class="panel" id="storage"><${h}>${icon('storage')}Storage</${h}><p>${storage?.driver === 's3' ? `Builds are stored in <span class="mono">${escape(storage.bucket ?? '')}</span> at <span class="mono">${escape(storage.endpoint ?? '')}</span>.` : 'Builds are stored on the host’s disk.'} New builds go to the storage chosen here; earlier ones are still served from where they were written.</p>${newSpace}${action(
-    `${icon('storage')} Use an existing Space`,
+  const existing = action(
+    `${icon('storage')} Add an existing Space`,
     apiForm(
       '/api/v2/storage/space',
-      '<label for="storage-url">Space URL</label><input id="storage-url" name="url" required placeholder="https://name.sfo3.digitaloceanspaces.com"><label for="storage-key">Access key</label><input id="storage-key" name="accessKeyId" required autocomplete="off"><label for="storage-secret">Secret</label><input id="storage-secret" name="secretAccessKey" type="password" required autocomplete="off"><p><small>Mason writes, reads and deletes a check object with the key before saving; a key that cannot is refused and nothing changes.</small></p>',
-      `${icon('check')} Check and save`,
-      { fields: ['url', 'accessKeyId', 'secretAccessKey'] },
+      `<label for="storage-url">Space URL</label><input id="storage-url" name="url" required placeholder="https://name.sfo3.digitaloceanspaces.com"><label for="storage-key">Access key</label><input id="storage-key" name="accessKeyId" required autocomplete="off"><label for="storage-secret">Secret</label><input id="storage-secret" name="secretAccessKey" type="password" required autocomplete="off">${useField('storage-use')}<p><small>Mason writes, reads and deletes a check object with the key before saving; a key that cannot is refused and nothing changes.</small></p>`,
+      `${icon('check')} Check and add`,
+      {
+        fields: ['url', 'accessKeyId', 'secretAccessKey', 'use'],
+        then: 'reload',
+      },
     ),
     { id: 'storage-existing' },
-  )}${storage?.driver === 's3' ? apiForm('/api/v2/storage/disk', '', `${icon('storage')} Store on the host’s disk`, { className: 'secondary', then: 'reload' }) : ''}</section>`
+  )
+  const storage = options.storage
+  const locations: StorageLocationView[] = storage?.locations ?? [
+    { id: 'disk', kind: 'disk', active: storage?.driver !== 's3' },
+    ...(storage?.driver === 's3' && storage.bucket != null
+      ? [
+          {
+            id: 'current',
+            kind: 'space' as const,
+            active: true,
+            bucket: storage.bucket,
+          },
+        ]
+      : []),
+  ]
+  const origin = (location: StorageLocationView): string =>
+    location.origin === 'made'
+      ? 'made by Mason'
+      : location.origin === 'host'
+        ? location.host == null
+          ? 'made for a host'
+          : `made for host ${escape(location.host)}`
+        : 'added'
+  const rows = locations
+    .map((location) => {
+      const id = encodeURIComponent(location.id)
+      const name =
+        location.kind === 'disk'
+          ? 'Host’s disk'
+          : `<span class="mono">${escape(location.bucket ?? '')}</span>${location.region == null ? '' : ` · ${escape(location.region)}`} · ${origin(location)}`
+      const files = location.usage?.files
+      const use = location.active
+        ? `${icon('check_circle')} New builds go here`
+        : apiForm(
+            location.kind === 'disk'
+              ? '/api/v2/storage/disk'
+              : `/api/v2/storage/locations/${id}/use`,
+            '',
+            'Use for new builds',
+            { className: 'secondary', then: 'reload' },
+          )
+      const deletes = location.bucketOwned === true
+      const remove =
+        location.kind === 'disk' || location.active
+          ? ''
+          : action(
+              `${icon('delete')} ${deletes ? 'Delete' : 'Forget'}`,
+              apiForm(
+                `/api/v2/storage/locations/${id}`,
+                `<p><small>${
+                  deletes
+                    ? `Deletes the Space ${escape(location.bucket ?? '')} from DigitalOcean with its key, and its ${files ?? 'stored'} builds and artifacts leave Mason.`
+                    : `Mason stops using ${escape(location.bucket ?? '')}; the Space and its files stay in DigitalOcean, and its ${files ?? 'stored'} builds and artifacts leave Mason.`
+                }</small></p><label for="remove-location-${escape(location.id)}">Type ${escape(location.bucket ?? '')} to ${deletes ? 'delete' : 'forget'} it</label><input id="remove-location-${escape(location.id)}" name="confirm" required autocomplete="off">`,
+                `${icon('delete')} ${deletes ? 'Delete the Space' : 'Forget the Space'}`,
+                {
+                  method: 'DELETE',
+                  fields: ['confirm'],
+                  className: 'danger-fill',
+                  then: 'reload',
+                },
+              ),
+              { kind: 'danger' },
+            )
+      return `<tr data-location="${escape(location.id)}"><td>${name}</td><td>${use}</td><td>${files == null ? '—' : String(files)}</td><td>${location.usage == null ? '—' : escape(bytes(location.usage.bytes))}</td><td>${remove}</td></tr>`
+    })
+    .join('')
+  const h = options.heading
+  return `<section class="panel" id="storage"><${h}>${icon('storage')}Storage</${h}><p>Every place builds are stored. New builds go to one of them; each keeps serving the builds already in it.</p><table class="compact storage-locations"><thead><tr><th>Location</th><th>New builds</th><th>Files</th><th>Size</th><th></th></tr></thead><tbody>${rows}</tbody></table>${newSpace}${existing}</section>`
 }
 
 const poolFieldNames = [
@@ -466,7 +559,12 @@ export function nodesView(data: {
   /** Permanent worker nodes the master made on a cloud provider. */
   cloudNodes?: CloudHostView[]
   /** Where the host keeps builds. */
-  storage?: { driver: 'disk' | 's3'; bucket?: string; endpoint?: string }
+  storage?: {
+    driver: 'disk' | 's3'
+    bucket?: string
+    endpoint?: string
+    locations?: StorageLocationView[]
+  }
   budget: { monthly: number; notice?: string }
   host?: string
   /** The master's own release, installable from GitHub when no host serves one. */
@@ -549,7 +647,7 @@ export function nodesView(data: {
       (host) =>
         `<section class="panel cloud-host" id="host-${escape(host.name)}" data-state="${escape(host.state)}"><h3>${icon('cloud')}<span class="mono">${escape(host.name)}</span> <small>${escape(host.state)}</small></h3><p>${escape(host.region)} · ${escape(host.size)}${host.address == null ? '' : ` · <span class="mono">${escape(host.address)}</span>`}${host.dnsName == null ? '' : ` · <span class="mono">${escape(host.dnsName)}</span>`}${host.version == null || host.state === 'updating' ? '' : ` · Mason ${escape(host.version)}`}</p>${host.state === 'updating' && host.version != null ? `<p class="notice">Updating to Mason ${escape(host.version)}, as the master asked over its link; it reconnects on its own.</p>` : ''}${host.origin == null ? '' : `<p>Serves <a href="${escape(host.origin)}">${escape(host.origin)}</a></p>`}${host.certificate === 'waiting' ? '<p class="notice">Waiting for its certificate: Caddy asks Let’s Encrypt once the DNS name resolves.</p>' : ''}${host.space == null ? '' : `<p>Builds Space <span class="mono">${escape(host.space.bucket)}</span> (${escape(host.space.region)})</p>`}${host.error == null ? '' : `<p class="state-failed">${escape(host.error)}</p>`}${
           data.canChange
-            ? `${host.space == null ? action(`${icon('storage')} Store builds in a new DigitalOcean Space`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/space`, `<label for="space-${escape(host.name)}">Space name</label><input id="space-${escape(host.name)}" name="bucket" required value="mason-${escape(host.name)}" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"><label for="space-region-${escape(host.name)}">Space region</label>${spacesRegionSelect(`space-region-${escape(host.name)}`, host.region).replace('name="space.region"', 'name="region"')}<p><small>Mason makes the Space and a key that can use only it. New builds are stored there; earlier ones stay where they are.</small></p>`, `${icon('storage')} Make the Space`, { fields: ['bucket', 'region'] })) : ''}<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div>${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">${host.space == null ? '' : `<label for="remove-space-${escape(host.name)}">Its Space ${escape(host.space.bucket)}</label><select id="remove-space-${escape(host.name)}" name="deleteSpace"><option value="keep">Keep the Space and its builds</option><option value="delete">Also delete the Space and every build in it</option></select>`}`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: host.space == null ? ['confirm'] : ['confirm', 'deleteSpace'], className: 'secondary' }), { kind: 'secondary' })}`
+            ? `${host.space == null ? action(`${icon('storage')} Store builds in a new DigitalOcean Space`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/space`, `<label for="space-${escape(host.name)}">Space name</label><input id="space-${escape(host.name)}" name="bucket" required value="mason-${escape(host.name)}" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"><label for="space-region-${escape(host.name)}">Space region</label>${spacesRegionSelect(`space-region-${escape(host.name)}`, host.region).replace('name="space.region"', 'name="region"')}<p><small>Mason makes the Space and a key that can use only it. New builds are stored there; earlier ones stay where they are.</small></p>`, `${icon('storage')} Make the Space`, { fields: ['bucket', 'region'] })) : ''}<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">${host.space == null ? '' : `<label for="remove-space-${escape(host.name)}">Its Space ${escape(host.space.bucket)}</label><select id="remove-space-${escape(host.name)}" name="deleteSpace"><option value="keep">Keep the Space and its builds as a storage location</option><option value="delete">Also delete the Space and every build in it</option></select>`}`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: host.space == null ? ['confirm'] : ['confirm', 'deleteSpace'], className: 'danger-fill' }), { kind: 'danger' })}</div>`
             : ''
         }</section>`,
     )
@@ -595,7 +693,7 @@ export function nodesView(data: {
             ' · ',
           )} · ${escape(node.region)} · ${escape(node.size)}${node.address == null ? '' : ` · <span class="mono">${escape(node.address)}</span>`}${node.version == null || node.state === 'updating' ? '' : ` · Mason ${escape(node.version)}`}</p>${node.state === 'updating' && node.version != null ? `<p class="notice">Updating to Mason ${escape(node.version)}, as the master asked over its link; it reconnects on its own.</p>` : ''}${node.error == null ? '' : `<p class="state-failed">${escape(node.error)}</p>`}${
           data.canChange
-            ? `<div class="actions">${apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div>${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}`, `<label for="remove-node-${escape(node.name)}">Type ${escape(node.name)} to destroy its droplet and unpair it</label><input id="remove-node-${escape(node.name)}" name="confirm" required autocomplete="off">`, `${icon('delete')} Remove node`, { method: 'DELETE', fields: ['confirm'], className: 'secondary' }), { kind: 'secondary' })}`
+            ? `<div class="actions">${apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}`, `<label for="remove-node-${escape(node.name)}">Type ${escape(node.name)} to destroy its droplet and unpair it</label><input id="remove-node-${escape(node.name)}" name="confirm" required autocomplete="off">`, `${icon('delete')} Remove node`, { method: 'DELETE', fields: ['confirm'], className: 'danger-fill' }), { kind: 'danger' })}</div>`
             : ''
         }</section>`,
     )
@@ -719,7 +817,12 @@ export function settingsView(data: {
     publicKey?: string
   }
   host?: { origin?: string; workerOrigin?: string; offlineGraceHours?: number }
-  storage?: { driver: 'disk' | 's3'; bucket?: string; endpoint?: string }
+  storage?: {
+    driver: 'disk' | 's3'
+    bucket?: string
+    endpoint?: string
+    locations?: StorageLocationView[]
+  }
   /** DigitalOcean accounts a new Space can be made in. */
   storageAccounts?: PoolAccount[]
   /** Sign-in methods, without their client secrets. */

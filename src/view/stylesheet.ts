@@ -24,7 +24,7 @@ small{display:block;color:var(--color-text-muted);font-size:12px;line-height:18p
 .button:hover,button:hover{background:var(--color-primary-pressed);border-color:var(--color-primary-pressed)}
 .secondary,.button.secondary,button.secondary{background:var(--color-panel);color:var(--color-text);border-color:var(--color-border-strong)}
 .secondary:hover,button.secondary:hover{background:var(--color-panel-low);border-color:var(--color-border-strong)}
-.danger,button.danger{background:var(--color-panel);color:var(--color-error-text);border-color:var(--color-error-text)}
+.danger,button.danger{background:var(--color-panel);color:var(--color-error-text);border-color:var(--color-error-text)}.button.danger-fill,button.danger-fill{background:var(--color-error-text);color:var(--color-on-primary);border-color:var(--color-error-text)}.actions>details.action{margin:0}.actions>details.action[open]{flex-basis:100%}
 .register-device{background:var(--color-primary)}
 a:focus-visible,button:focus-visible,summary:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--color-accent);outline-offset:2px}
 form{margin:0}
