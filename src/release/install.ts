@@ -1,12 +1,16 @@
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { createHash, sign, verify, type KeyObject } from 'node:crypto'
 import {
   createReadStream,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
@@ -118,6 +122,111 @@ export function serviceProgram(
   return [path.join(install.prefix, 'current', 'mason')]
 }
 
+/** A release's directory under the install prefix, or a failed install of one. */
+const releaseDirectory = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\.partial)?$/
+/** A failed install younger than this may still be one in progress. */
+const PARTIAL_AGE_MS = 60 * 60 * 1000
+
+/** The command lines of this computer's processes, or none when `ps` fails. */
+export function processCommands(): string[] | undefined {
+  try {
+    return execFileSync('ps', ['axww', '-o', 'command='], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024 * 1024,
+    }).split('\n')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Removes installed releases under `prefix` but the last two: the ones in
+ * `keep` (the release now current and the one that ran before it), topped
+ * up with the most recently installed others when `keep` names fewer than
+ * two. A release a running process uses stays too, as does every release
+ * when the processes cannot be listed. Failed installs (`.partial`) go once
+ * they are an hour old. Only directories holding a release's `mason` and
+ * `.sha256` are touched. It never throws: what it cannot remove is listed
+ * as failed. Removed names are oldest first.
+ */
+export function pruneReleases(
+  prefix: string,
+  keep: string[],
+  options: { commands?: string[] | undefined; now?: number } = {},
+): { removed: string[]; failed: string[] } {
+  const removed: string[] = []
+  const failed: string[] = []
+  let entries
+  try {
+    entries = readdirSync(prefix, { withFileTypes: true })
+  } catch {
+    return { removed, failed }
+  }
+  const at = (name: string): number | undefined => {
+    try {
+      return statSync(path.join(prefix, name)).mtimeMs
+    } catch {
+      return undefined
+    }
+  }
+  const now = options.now ?? Date.now()
+  const candidates = entries
+    .filter((entry) => entry.isDirectory() && releaseDirectory.test(entry.name))
+    .map((entry) => ({ name: entry.name, at: at(entry.name) }))
+    .filter((entry): entry is { name: string; at: number } => entry.at != null)
+  const partials = candidates.filter(
+    (entry) =>
+      entry.name.endsWith('.partial') && now - entry.at > PARTIAL_AGE_MS,
+  )
+  const installed = candidates
+    .filter(
+      (entry) =>
+        !entry.name.endsWith('.partial') &&
+        existsSync(path.join(prefix, entry.name, 'mason')) &&
+        existsSync(path.join(prefix, entry.name, '.sha256')),
+    )
+    .sort((a, b) => b.at - a.at)
+  const commands = 'commands' in options ? options.commands : processCommands()
+  let real = prefix
+  try {
+    real = realpathSync(prefix)
+  } catch {}
+  const running = (name: string): boolean =>
+    commands == null ||
+    commands.some(
+      (line) =>
+        line.includes(`${real}/${name}/`) ||
+        line.includes(`${prefix}/${name}/`),
+    )
+  const kept = new Set(
+    keep.filter((name) => installed.some((entry) => entry.name === name)),
+  )
+  for (const release of installed) if (kept.size < 2) kept.add(release.name)
+  const old = [
+    ...partials,
+    ...installed.filter(
+      (entry) => !kept.has(entry.name) && !running(entry.name),
+    ),
+  ].sort((a, b) => a.at - b.at)
+  for (const { name } of old)
+    try {
+      rmSync(path.join(prefix, name), { recursive: true, force: true })
+      removed.push(name)
+    } catch {
+      failed.push(name)
+    }
+  return { removed, failed }
+}
+
+/** The release `<prefix>/current` points at, if any. */
+export function currentRelease(prefix: string): string | undefined {
+  try {
+    return path.basename(readlinkSync(path.join(prefix, 'current')))
+  } catch {
+    return undefined
+  }
+}
+
 /**
  * Installs a verified release tarball beside the running version in
  * `<prefix>/<version>` and repoints `<prefix>/current` and the `mason`
@@ -157,11 +266,18 @@ export async function installTarball(
     symlinkSync(target, temporary)
     renameSync(temporary, link)
   }
+  const previous = currentRelease(layout.prefix)
   relink(manifest.version, path.join(layout.prefix, 'current'))
   mkdirSync(layout.bindir, { recursive: true })
   relink(
     path.join(layout.prefix, 'current', 'mason'),
     path.join(layout.bindir, 'mason'),
   )
+  // Only the new release and the one before it stay installed; pruning
+  // never fails an install that is already live.
+  pruneReleases(layout.prefix, [
+    manifest.version,
+    ...(previous == null ? [] : [previous]),
+  ])
   return dest
 }
