@@ -7,6 +7,39 @@ import { allow } from './permissions.js'
 import type { Master } from './runtime.js'
 import type { StorageLocation } from './storageLocations.js'
 
+/** The storage locations with the files and bytes the host holds in each, when it answers. */
+export async function locationsWithUsage(
+  master: Master,
+): Promise<StorageLocation[]> {
+  const locations = master.storageLocations.list()
+  const usage = await master.hosts
+    .askHost<
+      Array<{
+        bucket?: string
+        endpoint?: string
+        files: number
+        bytes: number
+      }>
+    >('host.storeUsage', {}, 5_000)
+    .catch(() => undefined)
+  if (usage == null) return locations
+  return locations.map((location) => {
+    const entries = usage.filter((entry) =>
+      location.kind === 'disk'
+        ? entry.bucket == null
+        : entry.bucket === location.bucket &&
+          entry.endpoint === location.endpoint,
+    )
+    return {
+      ...location,
+      usage: {
+        files: entries.reduce((sum, entry) => sum + entry.files, 0),
+        bytes: entries.reduce((sum, entry) => sum + entry.bytes, 0),
+      },
+    }
+  })
+}
+
 /**
  * `/api/v2/storage`: where the host keeps builds. The host's disk and every
  * Space Mason knows are storage locations; one is where new builds go, and
@@ -35,39 +68,9 @@ export function storageApi(
     '/api/v2/storage',
     json(async (_req, res) => {
       const storage = master.settings.get(actorOf(res), 'storage')
-      return { ...storage, locations: await locationsWithUsage() }
+      return { ...storage, locations: await locationsWithUsage(master) }
     }),
   )
-  /** The locations with the files and bytes the host holds in each, when it answers. */
-  const locationsWithUsage = async (): Promise<StorageLocation[]> => {
-    const locations = master.storageLocations.list()
-    const usage = await master.hosts
-      .askHost<
-        Array<{
-          bucket?: string
-          endpoint?: string
-          files: number
-          bytes: number
-        }>
-      >('host.storeUsage', {}, 5_000)
-      .catch(() => undefined)
-    if (usage == null) return locations
-    return locations.map((location) => {
-      const entries = usage.filter((entry) =>
-        location.kind === 'disk'
-          ? entry.bucket == null
-          : entry.bucket === location.bucket &&
-            entry.endpoint === location.endpoint,
-      )
-      return {
-        ...location,
-        usage: {
-          files: entries.reduce((sum, entry) => sum + entry.files, 0),
-          bytes: entries.reduce((sum, entry) => sum + entry.bytes, 0),
-        },
-      }
-    })
-  }
   router.post(
     '/api/v2/storage/locations/:id/use',
     json(async (req, res) => {

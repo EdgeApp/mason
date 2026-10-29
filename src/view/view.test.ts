@@ -897,7 +897,137 @@ describe('Nodes page', () => {
     assert.doesNotMatch(viewer, /Remove node|Reconcile/)
   })
 
-  it('U2.2 every disclosure on the page is a button: red to add or use, secondary for Edit and Remove', () => {
+  it('U3.3 node and host cards keep Reconcile and a red Remove on one line', () => {
+    const html = nodesView({
+      ...base,
+      host: 'https://builds.example.test',
+      cloudNodes: [
+        {
+          name: 'linux-node',
+          state: 'ready',
+          account: 'do',
+          region: 'sfo3',
+          size: 's-1vcpu-1gb',
+          address: '203.0.113.20',
+          origin: null,
+          error: null,
+          nodeType: 'linux-x86',
+          labels: [],
+        },
+      ],
+      cloudHosts: [
+        {
+          name: 'h',
+          state: 'ready',
+          account: 'do',
+          region: 'sfo3',
+          size: 's-1vcpu-1gb',
+          address: '203.0.113.30',
+          origin: 'https://builds.example.test',
+          error: null,
+          space: { bucket: 'mason-h', region: 'sfo3' },
+        },
+      ],
+    })
+    for (const [kind, name] of [
+      ['nodes', 'linux-node'],
+      ['hosts', 'h'],
+    ] as const) {
+      const row = new RegExp(
+        `<div class="actions"><form data-mason="api" data-path="/api/v2/cloud/${kind}/${name}/reconcile"[\\s\\S]*?Reconcile</button>[\\s\\S]*?</form><details class="action"><summary class="button danger-fill">[^<]*<span[^>]*>[^<]*</span> Remove</summary>[\\s\\S]*?<button class="danger-fill">[\\s\\S]*?</details></div>`,
+      )
+      assert.match(html, row, kind)
+    }
+    assert.match(html, /Keep the Space and its builds as a storage location/)
+  })
+
+  it('U3.1 the Storage card lists every location: where new builds go, files and size, and Delete or Forget for the others', () => {
+    const html = nodesView({
+      ...base,
+      host: 'https://builds.example.test',
+      storage: {
+        driver: 's3',
+        bucket: 'mason-active',
+        endpoint: 'https://sfo3.digitaloceanspaces.com',
+        locations: [
+          {
+            id: 'disk',
+            kind: 'disk',
+            active: false,
+            usage: { files: 3, bytes: 2048 },
+          },
+          {
+            id: 'space-mason-active-sfo3',
+            kind: 'space',
+            active: true,
+            bucket: 'mason-active',
+            region: 'sfo3',
+            origin: 'made',
+            bucketOwned: true,
+            usage: { files: 7, bytes: 5 * 1024 * 1024 },
+          },
+          {
+            id: 'space-mason-old-nyc3',
+            kind: 'space',
+            active: false,
+            bucket: 'mason-old',
+            region: 'nyc3',
+            origin: 'host',
+            host: 'h1',
+            bucketOwned: true,
+          },
+          {
+            id: 'space-theirs-ams3',
+            kind: 'space',
+            active: false,
+            bucket: 'theirs',
+            region: 'ams3',
+            origin: 'added',
+            bucketOwned: false,
+            usage: { files: 2, bytes: 10 },
+          },
+        ],
+      },
+    })
+    const card = html.slice(html.indexOf('id="storage"'))
+    const row = (id: string): string => {
+      const start = card.indexOf(`<tr data-location="${id}">`)
+      return card.slice(start, card.indexOf('</tr>', start))
+    }
+    assert.match(
+      row('disk'),
+      /Host’s disk[\s\S]*data-path="\/api\/v2\/storage\/disk"[\s\S]*Use for new builds<\/button>[\s\S]*<td>3<\/td><td>2\.0 KB<\/td><td><\/td>/,
+    )
+    const active = row('space-mason-active-sfo3')
+    assert.match(active, /mason-active<\/span> · sfo3 · made by Mason/)
+    assert.match(active, /New builds go here/)
+    assert.doesNotMatch(active, /Delete|Forget/)
+    const old = row('space-mason-old-nyc3')
+    assert.match(old, /made for host h1/)
+    assert.match(
+      old,
+      /data-path="\/api\/v2\/storage\/locations\/space-mason-old-nyc3\/use"/,
+    )
+    assert.match(old, /<td>—<\/td><td>—<\/td>/)
+    assert.match(
+      old,
+      /Deletes the Space mason-old from DigitalOcean with its key/,
+    )
+    assert.match(
+      old,
+      /data-path="\/api\/v2\/storage\/locations\/space-mason-old-nyc3" data-method="DELETE" data-fields="confirm"/,
+    )
+    assert.match(old, /Type mason-old to delete it/)
+    const theirs = row('space-theirs-ams3')
+    assert.match(theirs, / Forget<\/summary>/)
+    assert.match(
+      theirs,
+      /the Space and its files stay in DigitalOcean, and its 2 builds and artifacts leave Mason/,
+    )
+    assert.match(theirs, /Type theirs to forget it/)
+  })
+
+  it('U2.2 every disclosure on the page is a button: red to add or use, secondary for Edit, filled red for Remove', () => {
     const html = nodesView({
       ...base,
       host: 'https://builds.example.test',
@@ -942,14 +1072,16 @@ describe('Nodes page', () => {
     assert(summaries.length >= 5, String(summaries.length))
     for (const [, details, summary, label] of summaries) {
       assert.match(details!, /class="action/)
-      if (/Edit|Remove/.test(label!))
+      if (/Remove/.test(label!))
+        assert.equal(summary, ' class="button danger-fill"')
+      else if (/Edit/.test(label!))
         assert.equal(summary, ' class="button secondary"')
       else assert.equal(summary, ' class="button"')
     }
     for (const label of [
       'Store builds in a new DigitalOcean Space',
       'Remove',
-      'Use an existing Space',
+      'Add an existing Space',
       'Edit',
       'Add a pool on DigitalOcean',
     ])

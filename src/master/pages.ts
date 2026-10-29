@@ -1,3 +1,4 @@
+import { locationsWithUsage } from './storageApi.js'
 import type express from 'express'
 import { cookie } from '../auth/routes.js'
 import {
@@ -589,22 +590,25 @@ export function masterPages(
         nodeType: row.node_type,
         labels: JSON.parse(row.labels) as string[],
       })),
-      storage: ((): {
-        driver: 'disk' | 's3'
-        bucket?: string
-        endpoint?: string
-      } => {
-        const value = master.settings.value('storage') as
-          | { driver?: string; s3?: { bucket: string; endpoint: string } }
-          | undefined
-        return value?.driver === 's3' && value.s3 != null
-          ? {
-              driver: 's3',
-              bucket: value.s3.bucket,
-              endpoint: value.s3.endpoint,
-            }
-          : { driver: 'disk' }
-      })(),
+      storage: {
+        ...((): {
+          driver: 'disk' | 's3'
+          bucket?: string
+          endpoint?: string
+        } => {
+          const value = master.settings.value('storage') as
+            | { driver?: string; s3?: { bucket: string; endpoint: string } }
+            | undefined
+          return value?.driver === 's3' && value.s3 != null
+            ? {
+                driver: 's3',
+                bucket: value.s3.bucket,
+                endpoint: value.s3.endpoint,
+              }
+            : { driver: 'disk' }
+        })(),
+        locations: await locationsWithUsage(master),
+      },
       poolAccounts: await Promise.all(
         master.cloudAccounts.all().map(async (account) => {
           // NoMac has no catalog or DNS: its pools take no region or size.
@@ -737,7 +741,9 @@ export function masterPages(
             .prepare('SELECT id,name FROM apps ORDER BY position,id')
             .all() as Array<{ id: number; name: string }>
         ).map((app) => ({ id: Number(app.id), name: String(app.name) })),
-        ...((): Partial<Parameters<typeof settingsView>[0]> => {
+        ...(await (async (): Promise<
+          Partial<Parameters<typeof settingsView>[0]>
+        > => {
           if (!can(actor, 'settings.change')) return {}
           const github = master.settings.get(actor, 'github')
           const host = master.settings.value('host') as
@@ -764,10 +770,10 @@ export function masterPages(
                 : {}),
             },
             ...(host == null ? {} : { host }),
-            storage:
-              storage?.driver === 's3'
+            storage: {
+              ...(storage?.driver === 's3'
                 ? {
-                    driver: 's3',
+                    driver: 's3' as const,
                     ...(storage.s3?.bucket == null
                       ? {}
                       : { bucket: storage.s3.bucket }),
@@ -775,7 +781,9 @@ export function masterPages(
                       ? {}
                       : { endpoint: storage.s3.endpoint }),
                   }
-                : { driver: 'disk' },
+                : { driver: 'disk' as const }),
+              locations: await locationsWithUsage(master),
+            },
             storageAccounts: master.cloudAccounts.all().map((account) => ({
               id: account.id,
               name: account.name,
@@ -805,7 +813,7 @@ export function masterPages(
               )?.monthlyBudget ?? DEFAULT_MONTHLY_BUDGET,
             ),
           }
-        })(),
+        })()),
         canChange: can(actor, 'settings.change'),
         canCreate: can(actor, 'keys.create'),
         canRevoke: can(actor, 'keys.revoke'),
