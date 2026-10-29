@@ -177,6 +177,102 @@ export class HostObjects {
     await this.driverOf(key).delete(key)
     this.cache.db.prepare('DELETE FROM host_objects WHERE key=?').run(key)
   }
+
+  /** The stores whose S3 settings name this bucket at this endpoint. */
+  private storesOf(store: { bucket: string; endpoint: string }): number[] {
+    return (
+      this.cache.db
+        .prepare('SELECT id,config FROM host_object_stores')
+        .all() as Array<{ id: number; config: string }>
+    )
+      .filter((row) => {
+        try {
+          const s3 = JSON.parse(row.config) as {
+            bucket?: unknown
+            endpoint?: unknown
+          }
+          return s3.bucket === store.bucket && s3.endpoint === store.endpoint
+        } catch {
+          return false
+        }
+      })
+      .map((row) => row.id)
+  }
+
+  /** The keys of the files written to a store. */
+  keys(store: { bucket: string; endpoint: string }): string[] {
+    const ids = this.storesOf(store)
+    if (ids.length === 0) return []
+    return (
+      this.cache.db
+        .prepare(
+          `SELECT key FROM host_objects WHERE store IN (${ids.map(() => '?').join(',')}) ORDER BY key`,
+        )
+        .all(...ids) as Array<{ key: string }>
+    ).map((row) => row.key)
+  }
+
+  /** Drops the records of a store's files and the store; the files themselves stay where they are. */
+  forget(store: { bucket: string; endpoint: string }): number {
+    const ids = this.storesOf(store)
+    let removed = 0
+    for (const id of ids) {
+      const keys = (
+        this.cache.db
+          .prepare('SELECT key FROM host_objects WHERE store=?')
+          .all(id) as Array<{ key: string }>
+      ).map((row) => row.key)
+      // Saved artifacts the host listed from that store go with it.
+      for (const key of keys)
+        try {
+          this.cache.db
+            .prepare('DELETE FROM host_artifacts WHERE storage_key=?')
+            .run(key)
+        } catch {}
+      removed += Number(
+        this.cache.db.prepare('DELETE FROM host_objects WHERE store=?').run(id)
+          .changes,
+      )
+      this.cache.db.prepare('DELETE FROM host_object_stores WHERE id=?').run(id)
+    }
+    return removed
+  }
+
+  /** Files and bytes per store, and on the host's disk. */
+  usage(): Array<{
+    bucket?: string
+    endpoint?: string
+    files: number
+    bytes: number
+  }> {
+    const rows = this.cache.db
+      .prepare(
+        'SELECT o.driver, s.config, count(*) AS files, coalesce(sum(o.size),0) AS bytes FROM host_objects o LEFT JOIN host_object_stores s ON s.id=o.store GROUP BY o.driver, s.config',
+      )
+      .all() as Array<{
+      driver: string
+      config: string | null
+      files: number
+      bytes: number
+    }>
+    // Files written before stores were recorded name no store: left out.
+    return rows
+      .filter((row) => row.driver !== 's3' || row.config != null)
+      .map((row) => {
+        if (row.driver !== 's3' || row.config == null)
+          return { files: Number(row.files), bytes: Number(row.bytes) }
+        const s3 = JSON.parse(row.config) as {
+          bucket: string
+          endpoint: string
+        }
+        return {
+          bucket: s3.bucket,
+          endpoint: s3.endpoint,
+          files: Number(row.files),
+          bytes: Number(row.bytes),
+        }
+      })
+  }
 }
 
 /** Streams a request body to a file, hashing it, up to a limit. */

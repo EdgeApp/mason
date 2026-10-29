@@ -504,6 +504,55 @@ export class Artifacts {
     }
   }
 
+  /**
+   * Files that left Mason with their storage location: the builds and saved
+   * artifacts stored in them are gone, on the master and, through the change
+   * log, on the host. A saved artifact's files live under
+   * `runs/<run>/<name>/`.
+   */
+  forgetFiles(keys: string[]): { builds: number; artifacts: number } {
+    let builds = 0
+    let artifacts = 0
+    const runs = new Set<string>()
+    const now = this.now()
+    this.options.master.transaction(() => {
+      for (const key of keys) {
+        const build = this.db
+          .prepare(
+            "SELECT id FROM builds WHERE file_key=? AND state<>'deleted'",
+          )
+          .get(key) as { id: number } | undefined
+        if (build != null) {
+          this.db
+            .prepare(
+              "UPDATE builds SET state='deleted',deleted_at=? WHERE id=?",
+            )
+            .run(now, build.id)
+          this.options.master.change('build', build.id, 'delete')
+          builds++
+        }
+        const match = /^runs\/([^/]+)\/([^/]+)\//.exec(key)
+        const owners = this.db
+          .prepare(
+            'SELECT job_id,name FROM run_artifacts WHERE storage_key=? OR (job_id=? AND name=?)',
+          )
+          .all(key, match?.[1] ?? '', match?.[2] ?? '') as Array<{
+          job_id: string
+          name: string
+        }>
+        for (const owner of owners) {
+          this.db
+            .prepare('DELETE FROM run_artifacts WHERE job_id=? AND name=?')
+            .run(owner.job_id, owner.name)
+          runs.add(owner.job_id)
+          artifacts++
+        }
+      }
+      for (const run of runs) this.options.master.change('job', run)
+    })
+    return { builds, artifacts }
+  }
+
   /** A stage's parsed test results, kept with the run. */
   tests(
     run: { job: string; stage: string; attempt: number },

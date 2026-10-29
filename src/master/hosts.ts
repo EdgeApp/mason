@@ -320,6 +320,22 @@ export class HostLinks {
       .run(account!, device!, build!, this.options.master.now())
   }
 
+  /**
+   * Asks the host something about its storage: undefined when the cluster has
+   * no host; an error when it has one that is not connected.
+   */
+  async askHost<T>(
+    method: string,
+    params: unknown,
+    timeoutMs = 30_000,
+  ): Promise<T | undefined> {
+    if (!this.options.registry.list().some((node) => node.role === 'host'))
+      return undefined
+    const host = this.connectedHost()
+    if (host == null) throw new Error('the host is not connected')
+    return (await host.link.request(method, params, timeoutMs)) as T
+  }
+
   /** A connected host and its link, for relaying an Xcode to its mirror. */
   private connectedHost(): { fingerprint: string; link: Link } | undefined {
     for (const node of this.options.registry.list()) {
