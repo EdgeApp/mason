@@ -17,23 +17,30 @@ The Masonfile reference, with every option and the stage API, is
 
 ## Installing
 
-A release needs no Node.js or npm. On each computer:
+A release needs no Node.js or npm. One command on each computer installs
+Mason and starts its role as a service:
 
 ```sh
-/bin/bash -c "$(curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh)"
-# or, once a host serves the current release:
-/bin/bash -c "$(curl -fsSL https://builds.example.test/install.sh)" -- --from https://builds.example.test
+curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh | bash -s -- master
+curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh | bash -s -- worker
+# a node joining a cluster can install the host's copy of the current release:
+curl -fsSL https://builds.example.test/install.sh | bash -s -- --from https://builds.example.test worker
+mason status        # role, state, version, fingerprint, web address
 ```
 
-Then start each role as a service (data in `~/.mason` unless `--data` says
-otherwise):
-
-```sh
-sudo mason master --install --port 9400      # with --worker, the master also runs stages
-sudo mason worker --install --link-port 9410
-sudo mason host --install --port 8443 --link-port 9420
-mason status                                  # role, state, version, fingerprint, web address
-```
+- It asks for your password once (or run it as `… | sudo bash -s -- master`).
+  The service runs as the account that ran the command, with its data in
+  that account's `~/.mason`. Run as root with no other account, Linux uses a
+  `mason` system user instead; on macOS the service needs a logged-in account
+  for Xcode and keychains.
+- Words after the role go to `mason <role> --install`: `master --worker` (the
+  master also runs stages), `master --port 9400`, `host --port 8443 --link-port 9420`.
+  The defaults are 9300 for the master, 9200 for the host's web and 9310 for
+  links.
+- `--version <x.y.z>` installs another release; without a role it installs only
+  the program, and `sudo mason <role> --install` starts it later.
+- `… | bash -s -- uninstall worker` stops the service and removes the program
+  (`/opt/mason`, `/usr/local/bin/mason`); the data directory is kept.
 
 A host on a public server can leave TLS to a terminator on the same machine,
 such as Caddy with `builds.example.test { reverse_proxy 127.0.0.1:9200 }`:
@@ -59,7 +66,7 @@ A new worker or host prints a pairing key when it first starts. Pair it from
 the master's Nodes page (**Add node**), or from the master's computer:
 
 ```sh
-mason nodes add --address 192.168.1.20:9410 --key mason1:…
+mason nodes add --address 192.168.1.20:9310 --key mason1:…
 mason nodes set second --type mac-xcode --label apple-signing --slots 2
 mason settings set host --file host.json     # {"origin": "https://builds.example.test"}
 ```
