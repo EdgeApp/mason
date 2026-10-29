@@ -21,6 +21,7 @@ import { artifactsView } from '../view/artifacts.js'
 import { fqdn } from './cloud/hosts.js'
 import { DEFAULT_MONTHLY_BUDGET } from './cloud/pools.js'
 import { methodsOf } from './hostSettings.js'
+import { storedNodeType } from './nodeTypes.js'
 import {
   dashboardData,
   dashboardView,
@@ -714,16 +715,6 @@ export function masterPages(
               }),
             )
       return settingsView({
-        areas: master.settings
-          .names()
-          .filter((name) => name !== 'backup')
-          .map((name) => {
-            try {
-              return { name, value: master.settings.get(actor, name) }
-            } catch (error) {
-              return { name, value: undefined, error: (error as Error).message }
-            }
-          }),
         apple: {
           signedIn: apple.state === 'signedIn',
           needsCode: apple.state === 'needsCode',
@@ -795,6 +786,17 @@ export function masterPages(
               delete view.clientSecret
               return view as unknown as SignInMethodView
             }),
+            nodeTypes: Object.fromEntries(
+              Object.entries(
+                (master.settings.value('nodeTypes') ?? {}) as Record<
+                  string,
+                  unknown
+                >,
+              ).flatMap(([name, value]) => {
+                const type = storedNodeType(value)
+                return type == null ? [] : [[name, type]]
+              }),
+            ),
             monthlyBudget: Number(
               (
                 master.settings.value('cloud') as

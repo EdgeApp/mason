@@ -421,6 +421,36 @@ const poolFieldNames = [
   'maxHoursPerNode',
 ]
 
+/** A node type in a few words: what it installs, not its JSON. */
+function typeSummary(value: unknown): string {
+  const software =
+    ((value ?? {}) as { software?: Partial<NodeTypeView['software']> })
+      .software ?? {}
+  const count = (items: unknown[] | undefined, word: string): string[] =>
+    items == null || items.length === 0
+      ? []
+      : [`${items.length} ${word}${items.length === 1 ? '' : 's'}`]
+  const parts = [
+    ...(software.xcode == null || software.xcode.length === 0
+      ? []
+      : [`Xcode ${software.xcode.join(', ')}`]),
+    ...(software.node == null ? [] : [`Node ${software.node}`]),
+    ...(software.java == null ? [] : [`Java ${software.java}`]),
+    ...(software.rust == null ? [] : [`Rust ${software.rust}`]),
+    ...count(
+      [...(software.brew?.formulae ?? []), ...(software.brew?.casks ?? [])],
+      'Homebrew package',
+    ),
+    ...count(
+      [...(software.apt ?? []), ...(software.dnf ?? [])],
+      'Linux package',
+    ),
+    ...count(software.android, 'Android package'),
+    ...(software.docker === true ? ['Docker'] : []),
+  ]
+  return parts.length === 0 ? 'Nothing managed yet' : parts.join(' · ')
+}
+
 /** Nodes: status, type, current stage, inventory and checklist; node types; cloud pools and their budget; adding a node. */
 export function nodesView(data: {
   nodes: NodeRow[]
@@ -581,7 +611,7 @@ export function nodesView(data: {
   const types = Object.entries(data.types)
     .map(
       ([name, value]) =>
-        `<li><span class="mono">${escape(name)}</span> <small class="mono">${escape(JSON.stringify(value).slice(0, 200))}</small></li>`,
+        `<li><span class="mono">${escape(name)}</span> <small>${escape(typeSummary(value))}</small></li>`,
     )
     .join('')
   const accounts = data.poolAccounts ?? []
@@ -643,7 +673,6 @@ function signing(
 }
 
 export function settingsView(data: {
-  areas: Array<{ name: string; value: unknown; error?: string }>
   apple: {
     signedIn: boolean
     appleId?: string
@@ -689,28 +718,12 @@ export function settingsView(data: {
   signIn?: SignInMethodView[]
   /** The cloud pools' monthly budget in dollars. */
   monthlyBudget?: number
+  /** Node types: the software and settings every node of a type keeps. */
+  nodeTypes?: Record<string, NodeTypeView>
   canChange: boolean
   canCreate: boolean
   canRevoke: boolean
 }): string {
-  const areas = data.areas
-    .filter((area) => area.name === 'nodeTypes')
-    .map(
-      (area) =>
-        `<section class="panel" id="${escape(area.name)}"><h2>${icon('tune')}${escape(area.name)}</h2>${
-          area.error != null
-            ? `<p>${escape(area.error)}</p>`
-            : data.canChange
-              ? apiForm(
-                  `/api/v2/settings/${area.name}`,
-                  `<label for="setting-${escape(area.name)}">Value (JSON; a secret shows as {"set":true}; send {"keep":true} to keep it)</label><textarea id="setting-${escape(area.name)}" name="value" rows="8" class="mono">${escape(JSON.stringify(area.value ?? {}, null, 2))}</textarea>`,
-                  `${icon('check')} Save`,
-                  { method: 'PUT', json: 'value', then: 'reload' },
-                )
-              : `<pre class="mono">${escape(JSON.stringify(area.value ?? {}, null, 2))}</pre>`
-        }</section>`,
-    )
-    .join('')
   // Signed in, the form waits behind "Sign in again", the Apple ID filled in.
   const signInForm = apiForm(
     '/api/v2/apple/session',
@@ -775,7 +788,7 @@ export function settingsView(data: {
       .join('') || '<tr><td colspan="6">No keys.</td></tr>'
   }</tbody></table></section>`
   const cards = data.canChange ? settingsCards(data) : ''
-  return `${head('Settings', 'How this master signs people in, reaches GitHub and Apple, keeps its backups and runs its nodes.', ['Settings'])}<p><a href="/people">People and groups</a> · <a href="/backups">Backups</a> · <a href="/nodes">Nodes</a></p>${apple}${keys}${cards}${areas}`
+  return `${head('Settings', 'How this master signs people in, reaches GitHub and Apple, keeps its backups and runs its nodes.', ['Settings'])}<p><a href="/people">People and groups</a> · <a href="/backups">Backups</a> · <a href="/nodes">Nodes</a></p>${apple}${keys}${cards}`
 }
 
 /** A sign-in method as Settings shows it: every field but the client secret. */
@@ -1115,7 +1128,129 @@ function settingsCards(data: Parameters<typeof settingsView>[0]): string {
     `${icon('check')} Save`,
     { method: 'PUT', fields: ['monthlyBudget'], then: 'reload' },
   )}</section>`
-  return `${githubCard}${hostCard}${storage}${signInCard}${budgetCard}`
+  return `${githubCard}${hostCard}${storage}${signInCard}${budgetCard}${nodeTypesCard(data.nodeTypes ?? {})}`
+}
+
+/** A node type as Settings shows it. */
+export interface NodeTypeView {
+  software: {
+    xcode: string[]
+    xcodeDefault?: string
+    allowBeta: boolean
+    simulators: string[]
+    commandLineTools: boolean
+    rosetta: boolean
+    brew: { formulae: string[]; casks: string[] }
+    apt: string[]
+    dnf: string[]
+    docker: boolean
+    node?: string
+    java?: string
+    rust?: string
+    android: string[]
+  }
+  settings: {
+    noSleep: boolean
+    devToolsSecurity: boolean
+    automationMode: boolean
+  }
+  diskThresholdGb: number
+  androidLicensesAccepted?: { by: string; at: number }
+}
+
+/** One card per node type, and a form to add one. */
+function nodeTypesCard(types: Record<string, NodeTypeView>): string {
+  const fields = (prefix: string, type: NodeTypeView | undefined): string => {
+    const sw = type?.software
+    const id = (name: string): string => `${prefix}-${name.replace(/\./g, '-')}`
+    const list = (
+      name: string,
+      title: string,
+      value: string[] | undefined,
+      description: string,
+      placeholder = '',
+    ): string =>
+      field(
+        id(name),
+        title,
+        input(
+          id(name),
+          name,
+          (value ?? []).join(', '),
+          ` data-kind="list"${placeholder === '' ? '' : ` placeholder="${placeholder}"`}`,
+        ),
+        description,
+      )
+    const flag = (
+      name: string,
+      title: string,
+      value: boolean | undefined,
+      description: string,
+    ): string =>
+      field(
+        id(name),
+        title,
+        checkbox(id(name), name, value ?? false),
+        description,
+      )
+    const ver = (
+      name: string,
+      title: string,
+      value: string | undefined,
+      description: string,
+      placeholder: string,
+    ): string =>
+      field(
+        id(name),
+        title,
+        input(
+          id(name),
+          name,
+          value ?? '',
+          ` data-optional pattern="[A-Za-z0-9][A-Za-z0-9._+-]{0,39}" placeholder="${placeholder}"`,
+        ),
+        description,
+      )
+    return `<h3>Software</h3>${list('software.xcode', 'Xcode versions', sw?.xcode, 'Kept installed side by side.', '26.1, 16.4')}${ver('software.xcodeDefault', 'Default Xcode', sw?.xcodeDefault, 'The Xcode a stage uses when it names none and the repository has no .xcode-version; one of the versions above.', '26.1')}${flag('software.allowBeta', 'Allow beta Xcodes', sw?.allowBeta, 'Whether latest-beta may pick a beta.')}${list('software.simulators', 'Simulator runtimes', sw?.simulators, 'Runtimes to keep, such as iOS 26.1.', 'iOS 26.1')}${flag('software.commandLineTools', 'Command Line Tools', sw?.commandLineTools, 'Apple’s command line developer tools.')}${flag('software.rosetta', 'Rosetta', sw?.rosetta, 'Runs Intel binaries on Apple silicon.')}${list('software.brew.formulae', 'Homebrew formulae', sw?.brew.formulae, 'Installed with brew install.')}${list('software.brew.casks', 'Homebrew casks', sw?.brew.casks, 'Installed with brew install --cask.')}${list('software.apt', 'apt packages', sw?.apt, 'On Debian and Ubuntu nodes.', 'jq, zip')}${list('software.dnf', 'dnf packages', sw?.dnf, 'On Fedora and Red Hat nodes.')}${flag('software.docker', 'Docker', sw?.docker, 'Docker Engine, for stages that run containers.')}${ver('software.node', 'Node.js version', sw?.node, 'Empty: Node.js is not managed.', '24')}${ver('software.java', 'Java version', sw?.java, 'Empty: Java is not managed.', '21')}${ver('software.rust', 'Rust version', sw?.rust, 'Empty: Rust is not managed.', 'stable')}${list('software.android', 'Android SDK packages', sw?.android, 'sdkmanager package names. Their licences are accepted on a node’s page.', 'platforms;android-35')}<h3>Settings</h3>${flag('settings.noSleep', 'Keep awake', type?.settings.noSleep, 'The node never sleeps while Mason runs.')}${flag('settings.devToolsSecurity', 'Developer tools security', type?.settings.devToolsSecurity, 'Lets tools debug and automate apps without a password prompt (macOS).')}${flag('settings.automationMode', 'Automation mode', type?.settings.automationMode, 'Lets UI tests drive the Mac without prompts (macOS).')}${field(id('diskThresholdGb'), 'Disk threshold (GB)', input(id('diskThresholdGb'), 'diskThresholdGb', String(type?.diskThresholdGb ?? 40), ' required type="number" min="0" data-kind="number"'), 'Unused Xcodes and runtimes are removed when free disk falls below this.')}`
+  }
+  const names = [
+    'software.xcode',
+    'software.xcodeDefault',
+    'software.allowBeta',
+    'software.simulators',
+    'software.commandLineTools',
+    'software.rosetta',
+    'software.brew.formulae',
+    'software.brew.casks',
+    'software.apt',
+    'software.dnf',
+    'software.docker',
+    'software.node',
+    'software.java',
+    'software.rust',
+    'software.android',
+    'settings.noSleep',
+    'settings.devToolsSecurity',
+    'settings.automationMode',
+    'diskThresholdGb',
+  ]
+  const cards = Object.entries(types)
+    .map(
+      ([name, type]) =>
+        `<section class="panel node-type" id="node-type-${escape(name)}"><h3><span class="mono">${escape(name)}</span></h3>${type.androidLicensesAccepted == null ? '' : `<p><small>Android SDK licences accepted by ${escape(type.androidLicensesAccepted.by)} on ${escape(new Date(type.androidLicensesAccepted.at).toISOString().slice(0, 10))}.</small></p>`}${apiForm(`/api/v2/settings/nodeTypes/${encodeURIComponent(name)}`, fields(`type-edit-${name}`, type), `${icon('check')} Save`, { method: 'PUT', fields: names, then: 'reload' })}${action(`${icon('delete')} Remove type`, apiForm(`/api/v2/settings/nodeTypes/${encodeURIComponent(name)}`, `<p>Nodes of type ${escape(name)} keep their software; Mason stops managing it.</p>`, `${icon('delete')} Remove ${escape(name)}`, { method: 'DELETE', then: 'reload', className: 'secondary' }), { kind: 'secondary' })}</section>`,
+    )
+    .join('')
+  const add = action(
+    `${icon('add')} Add a node type`,
+    apiForm(
+      '/api/v2/settings/nodeTypes/{name}',
+      `<input type="hidden" name="create" value="yes">${field('type-new-name', 'Name', input('type-new-name', 'name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="macos-arm64"'), 'As the Masonfile and pools name it.')}${fields('type-new', undefined)}`,
+      `${icon('add')} Add`,
+      { method: 'PUT', fields: ['name', 'create', ...names], then: 'reload' },
+    ),
+    { id: 'add-node-type' },
+  )
+  return `<section class="panel" id="nodeTypes"><h2>${icon('tune')}Node types</h2><p>The software and settings every node of a type keeps. Mason installs what is missing and reports what needs a person on the node’s page.</p>${cards || '<p>None yet.</p>'}${add}</section>`
 }
 
 /** People and groups: roles and per-method addresses; administrators change them. */

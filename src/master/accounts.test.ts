@@ -968,6 +968,81 @@ describe('Master sign-in, setup, people and permissions', function () {
     await master.settings.set(localOperator, 'buildNumbers', { countBase: 0 })
   })
 
+  it('U7.2 a node type card saves only its type, keeps every licence acceptance, and adds or removes one type', async () => {
+    const master = c.master.master!
+    await master.settings.set(localOperator, 'nodeTypes', {
+      mac: {
+        software: { android: ['platform-tools'] },
+        androidLicensesAccepted: true,
+      },
+      linux: { software: { apt: ['jq'] }, androidLicensesAccepted: true },
+    })
+    const stored = (): Json => master.settings.value('nodeTypes')
+    const macAccepted = stored().mac.androidLicensesAccepted
+    assert.equal(macAccepted.by, localOperator.label)
+    let reconciled = 0
+    const reconcileAll = master.nodeStates.reconcileAll.bind(master.nodeStates)
+    master.nodeStates.reconcileAll = (): void => {
+      reconciled++
+    }
+    try {
+      const saved = await c.api('PUT', '/api/v2/settings/nodeTypes/linux', {
+        software: { apt: ['jq', 'zip'], node: '24' },
+        settings: { noSleep: true },
+        diskThresholdGb: 30,
+      })
+      assert.equal(saved.status, 200, saved.text)
+      assert.equal(reconciled, 1)
+    } finally {
+      master.nodeStates.reconcileAll = reconcileAll
+    }
+    assert.deepEqual(stored().linux.software.apt, ['jq', 'zip'])
+    assert.equal(stored().linux.software.node, '24')
+    assert.equal(stored().linux.settings.noSleep, true)
+    assert.equal(stored().linux.diskThresholdGb, 30)
+    // The edited type and its neighbour keep their acceptance.
+    assert.equal(stored().linux.androidLicensesAccepted.by, localOperator.label)
+    assert.deepEqual(stored().mac.androidLicensesAccepted, macAccepted)
+    assert.deepEqual(stored().mac.software.android, ['platform-tools'])
+    assert.match(
+      (
+        await c.api('PUT', '/api/v2/settings/nodeTypes/linux', {
+          software: { node: 'bad version!' },
+        })
+      ).json.error,
+      /software\.node is a version/,
+    )
+    // Add: a new type with defaults; an existing name is refused.
+    const added = await c.api('PUT', '/api/v2/settings/nodeTypes/e2e-type', {
+      name: 'e2e-type',
+      create: 'yes',
+      software: { apt: ['jq'] },
+    })
+    assert.equal(added.status, 200, added.text)
+    assert.equal(stored()['e2e-type'].diskThresholdGb, 40)
+    assert.equal(stored()['e2e-type'].name, undefined)
+    assert.match(
+      (
+        await c.api('PUT', '/api/v2/settings/nodeTypes/mac', {
+          name: 'mac',
+          create: 'yes',
+        })
+      ).json.error,
+      /A node type named mac already exists/,
+    )
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/settings/nodeTypes/e2e-type')).status,
+      200,
+    )
+    assert.deepEqual(Object.keys(stored()).sort(), ['linux', 'mac'])
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/settings/nodeTypes/e2e-type')).status,
+      404,
+    )
+    assert.deepEqual(stored().mac.androidLicensesAccepted, macAccepted)
+    await master.settings.set(localOperator, 'nodeTypes', {})
+  })
+
   it('U13.13 every API route is checked against the policy table for every role', async () => {
     // Open routes: sign-in and first-run setup.
     const open = [
@@ -1009,6 +1084,8 @@ describe('Master sign-in, setup, people and permissions', function () {
       'PUT /api/v2/settings/signIn/methods/:id': 'settings.change',
       'DELETE /api/v2/settings/signIn/methods/:id': 'settings.change',
       'PUT /api/v2/settings/cloud/budget': 'settings.change',
+      'PUT /api/v2/settings/nodeTypes/:type': 'settings.change',
+      'DELETE /api/v2/settings/nodeTypes/:type': 'settings.change',
       'POST /api/v2/storage/disk': 'settings.change',
       'GET /api/v2/people': 'people.read',
       'POST /api/v2/people': 'people.change',

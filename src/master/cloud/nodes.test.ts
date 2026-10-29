@@ -4,8 +4,10 @@ import { existsSync, mkdtempSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { after, before, describe, it } from 'mocha'
 import { nodeMain, type MainIO } from '../../node/main.js'
+import { pinnedFetch } from '../../node/pinnedFetch.js'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeCloud } from '../../test/fakeCloud.js'
+import { MASTER_SESSION_COOKIE } from '../auth.js'
 import { localOperator } from '../roles.js'
 import type { CloudHostRow } from './hosts.js'
 
@@ -182,6 +184,101 @@ describe('Permanent cloud nodes on DigitalOcean', function () {
       ['linux-node', 'second-node'],
     )
     assert.deepEqual((await c.api('GET', '/api/v2/cloud/hosts')).json, [])
+  })
+
+  /** A page as a signed-in administrator sees it. */
+  const page = async (route: string): Promise<string> => {
+    const master = c.master.master!
+    const admin = master.database.db
+      .prepare("SELECT id FROM accounts WHERE role='admin' ORDER BY id LIMIT 1")
+      .get() as { id: number }
+    const { token } = master.auth.start(admin.id, '127.0.0.1')
+    const response = await pinnedFetch(
+      c.master.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') + route,
+      { headers: { cookie: `${MASTER_SESSION_COOKIE}=${token}` } },
+      c.master.identity.pin,
+    )
+    return await response.text()
+  }
+
+  it('U3.6b/U6.4b the Nodes and Settings pages render cloud nodes and every card from what is stored', async () => {
+    const master = c.master.master!
+    // A host row as one made with a DNS name and a Space leaves it.
+    master.database.db
+      .prepare(
+        "INSERT INTO cloud_hosts(name,account,provider,region,size,image,dns_domain,dns_name,address,origin,state,version,space_bucket,space_region,created_at,updated_at) VALUES('page-host','do','digitalocean','sfo3','s-1vcpu-1gb','ubuntu-24-04-x64','example.test','builds','203.0.113.30','https://builds.example.test','ready','0.1.0','mason-page','sfo3',1,1)",
+      )
+      .run()
+    await master.settings.set(localOperator, 'storage', {
+      driver: 's3',
+      s3: {
+        endpoint: 'https://sfo3.digitaloceanspaces.com',
+        bucket: 'mason-page',
+        region: 'sfo3',
+        accessKeyId: 'PAGEKEY123',
+        secretAccessKey: 'page-secret-123',
+      },
+    })
+    const nodes = await page('/nodes')
+    master.database.db
+      .prepare("DELETE FROM cloud_hosts WHERE name='page-host'")
+      .run()
+    assert.match(
+      nodes,
+      /id="host-page-host"[\s\S]*?builds\.example\.test[\s\S]*?Builds Space <span class="mono">mason-page<\/span>/,
+    )
+    assert.match(nodes, /Waiting for its certificate/)
+    assert.match(
+      nodes,
+      /<section class="panel" id="storage"><h3>.*Builds are stored in <span class="mono">mason-page<\/span>/,
+    )
+    assert.match(
+      nodes,
+      /id="cloud-node-linux-node" data-state="ready"[\s\S]*?linux-x86 · e2e · fast · sfo3/,
+    )
+    assert.match(nodes, /id="cloud-node-second-node"/)
+    assert.match(nodes, /id="add-node-do"/)
+    await master.settings.set(localOperator, 'signIn', {
+      methods: [
+        {
+          id: 'google',
+          type: 'oidc',
+          name: 'Google',
+          issuer: 'https://accounts.google.com',
+          clientId: 'gid',
+          clientSecret: 'g-secret-value',
+        },
+      ],
+    })
+    await master.settings.set(localOperator, 'nodeTypes', {
+      'linux-x86': { software: { apt: ['jq'], node: '24' } },
+    })
+    try {
+      const settings = await page('/settings')
+      assert.match(
+        settings,
+        /data-path="\/api\/v2\/settings\/signIn\/methods\/google" data-method="PUT"/,
+      )
+      assert(!settings.includes('g-secret-value'))
+      assert(!settings.includes('page-secret-123'))
+      assert.match(
+        settings,
+        /id="node-type-linux-x86"[\s\S]*?name="software\.node" value="24"/,
+      )
+      assert.match(
+        settings,
+        /Builds are stored in <span class="mono">mason-page<\/span>/,
+      )
+      assert.match(
+        settings,
+        /<select id="new-space-account" name="account"><option value="do">DigitalOcean<\/option><\/select>/,
+      )
+      assert.match(settings, /name="monthlyBudget" value="200"/)
+    } finally {
+      await master.settings.set(localOperator, 'signIn', { methods: [] })
+      await master.settings.set(localOperator, 'nodeTypes', {})
+      await master.settings.set(localOperator, 'storage', { driver: 'disk' })
+    }
   })
 
   it('U3.4 a node on another release is left to the worker updater: never sent node.update, it stays ready on the release it runs', async () => {

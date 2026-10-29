@@ -244,6 +244,56 @@ export function masterApi(context: ApiContext): Router {
       })
     }),
   )
+  // Node types: one type's card at a time. The validator takes licence
+  // acceptance as a boolean and keeps the stored { by, at } only on true, so
+  // every type that holds one is sent with true.
+  const storedTypes = (): Record<string, Record<string, unknown>> => {
+    const stored = (context.settings.value('nodeTypes') ?? {}) as Record<
+      string,
+      Record<string, unknown>
+    >
+    const out: Record<string, Record<string, unknown>> = {}
+    for (const [name, value] of Object.entries(stored)) {
+      const type: Record<string, unknown> = { ...value }
+      delete type.androidLicensesAccepted
+      if (value.androidLicensesAccepted != null)
+        type.androidLicensesAccepted = true
+      out[name] = type
+    }
+    return out
+  }
+  router.put(
+    '/api/v2/settings/nodeTypes/:type',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      const name = String(req.params.type)
+      const types = storedTypes()
+      const edited: Record<string, unknown> = {
+        ...(req.body as Record<string, unknown>),
+      }
+      // The Add form sends create, so an existing type is not replaced by mistake.
+      if (edited.create != null && types[name] != null)
+        throw new Error(`A node type named ${name} already exists`)
+      delete edited.create
+      delete edited.name
+      delete edited.androidLicensesAccepted
+      if (types[name]?.androidLicensesAccepted === true)
+        edited.androidLicensesAccepted = true
+      types[name] = edited
+      return await context.settings.set(actorOf(res), 'nodeTypes', types)
+    }),
+  )
+  router.delete(
+    '/api/v2/settings/nodeTypes/:type',
+    json(async (req, res) => {
+      allow(actorOf(res), 'settings.change')
+      const name = String(req.params.type)
+      const types = storedTypes()
+      if (types[name] == null) throw new NotFound(`No node type ${name}`)
+      delete types[name]
+      return await context.settings.set(actorOf(res), 'nodeTypes', types)
+    }),
+  )
   router.put(
     '/api/v2/settings/cloud/budget',
     json(async (req, res) => {

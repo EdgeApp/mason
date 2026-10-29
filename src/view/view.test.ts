@@ -1001,7 +1001,6 @@ describe('Form helpers', () => {
 
 describe('Settings page', () => {
   const base = {
-    areas: [],
     apple: { signedIn: false, needsCode: false },
     keys: [],
     apps: [],
@@ -1114,12 +1113,6 @@ describe('Settings page', () => {
   it('U6.3/U6.4/U6.5 sign-in methods, host, storage and budget as cards; no JSON or build numbers; errors inside the card', () => {
     const html = settingsView({
       ...base,
-      areas: [
-        { name: 'buildNumbers', value: { countBase: 0 } },
-        { name: 'cloudAccounts', value: {} },
-        { name: 'apple', value: {} },
-        { name: 'github', value: {} },
-      ],
       host: { origin: 'https://builds.example.test', offlineGraceHours: 72 },
       storage: { driver: 'disk' },
       storageAccounts: [
@@ -1221,5 +1214,114 @@ describe('Settings page', () => {
       settingsView({ ...base, canChange: false }),
       /id="github"/,
     )
+  })
+
+  it('U7.1/U7.3 one card per node type with typed fields and what each means; no JSON anywhere on Settings', () => {
+    const type = {
+      software: {
+        xcode: ['26.1', '16.4'],
+        xcodeDefault: '26.1',
+        allowBeta: false,
+        simulators: ['iOS 26.1'],
+        commandLineTools: true,
+        rosetta: false,
+        brew: { formulae: ['jq'], casks: [] },
+        apt: [],
+        dnf: [],
+        docker: false,
+        node: '24',
+        android: ['platform-tools'],
+      },
+      settings: {
+        noSleep: true,
+        devToolsSecurity: false,
+        automationMode: false,
+      },
+      diskThresholdGb: 40,
+      androidLicensesAccepted: { by: 'paul', at: Date.UTC(2026, 9, 1) },
+    }
+    const html = settingsView({ ...base, nodeTypes: { 'macos-arm64': type } })
+    const card = html.slice(html.indexOf('id="node-type-macos-arm64"'))
+    assert.match(
+      card,
+      /data-path="\/api\/v2\/settings\/nodeTypes\/macos-arm64" data-method="PUT" data-fields="software\.xcode,software\.xcodeDefault,software\.allowBeta,/,
+    )
+    assert.match(
+      card,
+      /name="software\.xcode" value="26\.1, 16\.4" data-kind="list"/,
+    )
+    assert.match(
+      card,
+      /name="software\.xcodeDefault" value="26\.1" data-optional/,
+    )
+    assert.match(
+      card,
+      /name="software\.commandLineTools" type="checkbox" data-kind="checkbox" checked>/,
+    )
+    assert.match(card, /name="software\.node" value="24" data-optional/)
+    assert.match(card, /name="software\.java" value="" data-optional/)
+    assert.match(
+      card,
+      /name="settings\.noSleep" type="checkbox" data-kind="checkbox" checked>/,
+    )
+    assert.match(
+      card,
+      /name="diskThresholdGb" value="40" required type="number" min="0" data-kind="number"/,
+    )
+    assert.match(
+      card,
+      /Unused Xcodes and runtimes are removed when free disk falls below this\./,
+    )
+    assert.match(card, /Android SDK licences accepted by paul on 2026-10-01\./)
+    assert.match(
+      card,
+      /data-path="\/api\/v2\/settings\/nodeTypes\/macos-arm64" data-method="DELETE"/,
+    )
+    assert.match(
+      html,
+      /<summary class="button">.*Add a node type<\/summary>.*data-path="\/api\/v2\/settings\/nodeTypes\/\{name\}" data-method="PUT" data-fields="name,create,software\.xcode/,
+    )
+    assert.doesNotMatch(html, /<textarea id="setting-|data-json/)
+    // A type named like the Add form's prefix or id collides with neither.
+    const tricky = settingsView({
+      ...base,
+      nodeTypes: { new: type, add: type },
+    })
+    const ids = [...tricky.matchAll(/ id="([^"]+)"/g)].map((m) => m[1])
+    assert.deepEqual(
+      ids.filter((id, i) => ids.indexOf(id) !== i),
+      [],
+    )
+    assert.match(tricky, /id="type-edit-new-software-node"/)
+    assert.match(tricky, /id="add-node-type"/)
+  })
+
+  it('U7.1b the Nodes page sums up each node type instead of showing its JSON', () => {
+    const html = nodesView({
+      nodes: [],
+      types: {
+        'macos-arm64': {
+          software: {
+            xcode: ['26.1'],
+            node: '24',
+            brew: { formulae: ['jq'], casks: [] },
+            android: [],
+          },
+        },
+        empty: {},
+      },
+      pools: [],
+      budget: { monthly: 0 },
+      canChange: true,
+    })
+    assert.match(
+      html,
+      /<span class="mono">macos-arm64<\/span> <small>Xcode 26\.1 · Node 24 · 1 Homebrew package<\/small>/,
+    )
+    assert.match(
+      html,
+      /<span class="mono">empty<\/span> <small>Nothing managed yet<\/small>/,
+    )
+    assert.doesNotMatch(html, /&quot;software&quot;/)
   })
 })
