@@ -688,8 +688,8 @@ await ctx.tests('junit', 'reports/**/*.xml')
 
 ### Published builds
 
-`ctx.publish` is how a build's output reaches testers on the host. It replaces
-the Zealot-compatible upload API for pipeline Masonfiles: the stage needs no
+`ctx.publish` is how a build's output reaches testers on the host, and the
+only way: the cluster has no Zealot-compatible upload API. The stage needs no
 API token, no channel key and no upload configuration.
 
 ```ts fragment
@@ -709,7 +709,7 @@ and becomes installable once the master confirms it. `publish` resolves when
 the host has the file with `{ buildId, url, installUrl, visible }`; the run
 page shows when it became visible to testers.
 
-| Zealot upload API | `ctx.publish` |
+| Zealot upload API (gone from the cluster) | `ctx.publish` |
 | --- | --- |
 | API token and channel key in the build's private config | Nothing: the stage's upload token is issued by the master with the stage |
 | Channel chosen by `channel_key` | Channel chosen by `app` and `platform`; the master creates it for the project's app ID |
@@ -718,8 +718,9 @@ page shows when it became visible to testers.
 | `branch`, `git_commit`, `ci_url` fields | Filled in from the run |
 | `changelog` field | `changelog` argument; defaults to the commit subjects since the last published build of that app and branch |
 
-The Zealot-compatible API stays on the host for script Masonfiles and for
-builds made outside Mason.
+A script Masonfile cannot publish: move the project to a pipeline Masonfile
+and call `ctx.publish`. A build made outside Mason is published by a pipeline
+stage that runs it.
 
 ### Build numbers
 
@@ -1009,7 +1010,9 @@ runs: `keep.stashes` (default 3 runs) in the workflow options.
 Existing Masonfiles keep working. A project whose format is `script` runs
 `Masonfile.ts` (or `.js`) as one stage named `build` on a node matching the
 project's script selector, with every project secret and file injected into
-the environment and the `MASON_*` variables of today, exactly as now.
+the environment and the `MASON_*` variables of today, exactly as now. It
+cannot publish builds: the cluster has no upload API, so a project that
+publishes moves to a pipeline Masonfile and `ctx.publish`.
 
 ## 11. Versions
 

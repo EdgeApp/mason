@@ -396,84 +396,26 @@ describe('Artifacts and publication', function () {
     )
   })
 
-  it('U12.5/U12.6 publishes Zealot uploads through the master, conflicts on a duplicate number, and answers 503 offline', async () => {
-    const master = c.master.master!
-    const appId = (
-      db().prepare('SELECT id FROM apps WHERE slug=?').get(APP) as Json
-    ).id
-    const key = master.keys.create(admin, {
-      role: 'upload',
-      apps: [appId],
-      name: 'zealot',
-    })
-    master.database.change('api_key', key.id)
-    const channelKey = (
-      db()
-        .prepare(
-          "SELECT channel_key FROM channels WHERE app_id=? AND platform='macos'",
-        )
-        .get(appId) as Json
-    ).channel_key
-    await c.until(
-      () =>
-        host
-          .host!.cache.db.prepare('SELECT 1 FROM api_keys WHERE id=?')
-          .get(key.id),
-      2000,
-      'the key on the host',
-    )
-    const upload = async (file: Buffer, build: string): Promise<Response> => {
-      const form = new FormData()
-      form.set('token', key.token)
-      form.set('channel_key', channelKey)
-      form.set('branch', 'release')
-      form.set('git_commit', 'a'.repeat(40))
-      form.set(
-        'custom_fields',
-        JSON.stringify({
-          mason: { bundleId: APP, version: '2.0.0', buildNumber: build },
-        }),
-      )
-      form.set('file', new Blob([new Uint8Array(file)]), 'app.dmg')
-      return await fetch(`${host.web!.url}/api/apps/upload`, {
-        method: 'POST',
-        body: form,
-        // @ts-expect-error undici's dispatcher option
+  it('U12.5 the host has no Zealot upload API: publishing goes only through ctx.publish', async () => {
+    for (const [method, route] of [
+      ['POST', '/api/apps/upload?token=x&channel_key=y'],
+      [
+        'GET',
+        '/api/apps/version_exist?token=x&channel_key=y&bundle_id=a&git_commit=b',
+      ],
+    ] as const) {
+      const response = await fetch(host.web!.url + route, {
+        method,
         dispatcher: insecure,
-      })
+      } as RequestInit)
+      assert.equal(response.status, 404, `${method} ${route}`)
     }
-    const ok = await upload(dmg, '700')
-    assert.equal(ok.status, 201, await ok.clone().text())
-    const published = db()
-      .prepare(
-        "SELECT * FROM builds WHERE branch='release' AND build_number='700'",
-      )
-      .get() as Json
-    assert.equal(published.state, 'ready')
-    assert.equal((await upload(dmg2, '700')).status, 409)
-    const exists = await fetch(
-      `${host.web!.url}/api/apps/version_exist?token=${key.token}&channel_key=${channelKey}&bundle_id=${APP}&release_version=2.0.0&build_version=700&branch=release`,
-      {
-        // @ts-expect-error undici's dispatcher option
-        dispatcher: insecure,
-      },
+    // Nor does the master take one.
+    assert.equal(
+      (await c.api('POST', '/api/v2/keys', { name: 'zealot', role: 'upload' }))
+        .status,
+      400,
     )
-    await c.until(
-      () =>
-        host
-          .host!.cache.db.prepare(
-            "SELECT 1 FROM builds WHERE build_number='700'",
-          )
-          .get(),
-      2000,
-      'the build cached',
-    )
-    assert([200, 404].includes(exists.status))
-    await c.drop('host', 1500, async () => {
-      await c.until(() => !host.host!.online(), 2000, 'offline')
-      assert.equal((await upload(dmg, '701')).status, 503)
-    })
-    await c.until(() => host.host!.online(), 10_000, 'online')
   })
 
   it('U12.7 stages an upload by the stage token while the master is away and publishes it on reconnect', async () => {

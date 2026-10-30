@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 19
+export const MASTER_SCHEMA = 20
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -571,6 +571,10 @@ const migrations: Array<(db: DatabaseSync) => void> = [
         db.exec(
           `ALTER TABLE ${table} ADD COLUMN block INTEGER NOT NULL DEFAULT 1`,
         )
+  },
+  // 20: the Zealot upload API left the cluster, and its upload keys with it.
+  (db): void => {
+    db.exec("DELETE FROM api_keys WHERE role='upload'")
   },
 ]
 

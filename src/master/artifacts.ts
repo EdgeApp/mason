@@ -387,68 +387,6 @@ export class Artifacts {
       .run(build.id, JSON.stringify(p.devices), Number(p.expiresAt), p.team)
   }
 
-  /** A Zealot-API upload the host staged: published like the standalone server, through the master. */
-  zealot(payload: {
-    channelId: number
-    keyId: string
-    branch: string
-    commit: string
-    bundleId: string
-    version: string
-    buildNumber: string
-    format: Format
-    size: number
-    digest: string
-    fileKey: string
-    changelog: string
-    source: string
-    customFields: string
-  }): Build {
-    return this.options.master.transaction(() => {
-      const key = this.db
-        .prepare('SELECT apps,revoked,expires_at,role FROM api_keys WHERE id=?')
-        .get(payload.keyId) as
-        | {
-            apps: string
-            revoked: number
-            expires_at: number | null
-            role: string
-          }
-        | undefined
-      const channel = this.db
-        .prepare('SELECT app_id FROM channels WHERE id=?')
-        .get(payload.channelId) as { app_id: number } | undefined
-      if (
-        key == null ||
-        key.revoked === 1 ||
-        (key.expires_at != null && key.expires_at <= this.now()) ||
-        channel == null
-      )
-        throw new Error('Valid token and channel_key must precede the file')
-      const scope = JSON.parse(key.apps) as 'all' | number[]
-      if (
-        !['upload', 'admin'].includes(key.role) ||
-        (scope !== 'all' && !scope.includes(channel.app_id))
-      )
-        throw new Error('Valid token and channel_key must precede the file')
-      const { keyId: _key, fileKey, ...input } = payload
-      void _key
-      const now = this.now()
-      const build =
-        checkPublication(this.db, input, now) ??
-        insertBuild(this.db, input, fileKey, {
-          now,
-          retentionDays: this.options.retentionDays(),
-        })
-      this.recordProvisioning(
-        build,
-        (payload as { provisioning?: unknown }).provisioning,
-      )
-      this.options.master.change('build', build.id)
-      return build
-    })
-  }
-
   /** A saved artifact the host stored for a run. */
   saved(payload: {
     run: string

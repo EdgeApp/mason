@@ -144,7 +144,7 @@ const usage = `Usage:
   mason import --distribution <db> --builder <db> [--data <dir>]
   mason host import --distribution <db> [--storage <dir>] [--data <dir>]
   mason host trust-root --file <pem> [--data <dir>]   a test Profile Service root (--test-endpoints only)
-  mason keys create --role <role> [--name <n>] [--project <slug>]… [--branch <glob>]… [--app <id>]… --out <file>
+  mason keys create --role <role> [--name <n>] [--project <slug>]… [--branch <glob>]… --out <file>
   mason keys list | mason keys revoke <id>
   mason settings get <area> | mason settings set <area> --file <json>
   mason cloud accounts list [--json] | add --provider <digitalocean|nomac> --name <n> [--id <id>] --key-stdin | check <id> | remove <id>
@@ -336,7 +336,7 @@ async function keysCommand(argv: string[], io: MainIO): Promise<number> {
   const [action, ...rest] = argv
   const args = parseArgs(
     rest,
-    ['--data', '--role', '--name', '--project', '--branch', '--app', '--out'],
+    ['--data', '--role', '--name', '--project', '--branch', '--out'],
     ['--json'],
   )
   const data = resolveDataDir(single(args, '--data'))
@@ -352,7 +352,6 @@ async function keysCommand(argv: string[], io: MainIO): Promise<number> {
       ...(name == null ? {} : { name }),
       projects: args.values.get('--project') ?? [],
       branches: args.values.get('--branch') ?? [],
-      apps: (args.values.get('--app') ?? []).map(Number),
     })) as MasterKey & { token: string }
     writePrivate(out, key.token + '\n')
     io.out(

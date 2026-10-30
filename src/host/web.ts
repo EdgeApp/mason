@@ -35,7 +35,6 @@ import { escape } from '../view/html.js'
 import { stylesheet } from '../view/stylesheet.js'
 import type { HostRuntime } from './runtime.js'
 import { hostLogin } from './sessions.js'
-import { uploadRoutes } from '../upload/routes.js'
 
 const OFFLINE_BANNER =
   '<p class="notice" role="status">The Mason master is unreachable. You are seeing the last synced builds.</p>'
@@ -505,7 +504,6 @@ export function hostApp(
   // stages upload and fetch artifacts by their tokens and grants.
   app.use(host.webhooks.routes())
   app.use(host.artifacts.routes(host.accounts))
-  app.use(uploadRoutes(host.cache.store, host.artifacts.uploadHooks()))
   app.use(forwardRoutes(host))
   app.use((_req, res, next) => {
     if (host.cache.host() == null) {

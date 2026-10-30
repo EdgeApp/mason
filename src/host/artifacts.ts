@@ -27,7 +27,6 @@ import type { StorageSetting } from '../master/hostSettings.js'
 import { digest } from '../store.js'
 import { packageIdentity } from '../upload/metadata.js'
 import { inspectProvisioning } from '../devices/provisioning.js'
-import type { UploadHooks } from '../upload/routes.js'
 import type { Build, Format } from '../validation.js'
 import type { HostCache } from './cache.js'
 import type { Outbox } from './outbox.js'
@@ -225,8 +224,8 @@ export interface ArtifactRoutesOptions {
 }
 
 /**
- * Uploads from stages and the Zealot API, downloads by grant, saved
- * artifacts and the report viewer.
+ * Uploads from stages, downloads by grant, saved artifacts and the report
+ * viewer.
  */
 export class HostArtifacts {
   constructor(private readonly options: ArtifactRoutesOptions) {
@@ -685,40 +684,6 @@ export class HostArtifacts {
       }),
     )
     return router
-  }
-
-  /**
-   * The Zealot API on the host: keys and channels from the cache, the file
-   * into storage, the build published by the master; 503 while it is away.
-   */
-  uploadHooks(): UploadHooks {
-    return {
-      channelKey: (raw): string => digest(Buffer.from(raw)),
-      available: (): boolean => this.options.online(),
-      publish: async (reservation, input): Promise<Build> => {
-        const link = this.options.link()
-        if (link == null || !this.options.online())
-          throw new Error('The master is unreachable')
-        const publication = input.publication as {
-          format: Format
-          digest: string
-        }
-        const fileKey = `${reservation}.${publication.format}`
-        await this.options.objects.put(fileKey, input.file, publication.digest)
-        try {
-          return (await link.request('artifacts.zealot', {
-            ...publication,
-            keyId: input.keyId,
-            fileKey,
-          })) as Build
-        } catch (error) {
-          await this.options.objects.delete(fileKey).catch(() => undefined)
-          if ((error as Error).message === 'Build publication conflict')
-            throw new Error('Build publication conflict')
-          throw error
-        }
-      },
-    }
   }
 
   /** Builds the master marked `deleting` and saved artifacts it expired: the files go, then the outbox says so once. */

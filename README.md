@@ -142,11 +142,13 @@ mason host import --distribution distribution.sqlite --storage /srv/mason/storag
 Where a build-number sequence should continue from numbers issued elsewhere,
 set its last number on the project's page (or `POST /api/v2/build-numbers/seed`).
 
-Existing sessions, devices, keys, builds and upload keys carry over, and the
-Zealot upload API (`version_exist`, `POST /api/apps/upload`) answers as
-before. Script-format Masonfiles keep working; a project moves to a pipeline
-Masonfile when it is ready. The sections below document the standalone
-builder and distribution server, which the cluster replaces.
+Existing sessions, devices, keys and builds carry over; upload keys do not,
+since the cluster has no Zealot upload API (`mason import` reports how many it
+skipped). Builds are published only by pipeline stages, through `ctx.publish`.
+Script-format Masonfiles keep running but cannot publish; a project moves to
+a pipeline Masonfile when it is ready. The sections below document the
+standalone builder and distribution server, which the cluster replaces; their
+upload API and keys are theirs alone.
 
 ## Builder role
 
