@@ -162,8 +162,20 @@ export interface StageOptions {
   needs?: StageRef[]
   when?: When
   tools?: Tools
-  /** Names of project secrets this stage may read. */
+  /**
+   * Names of project secrets this stage may read. Values are read with
+   * `ctx.secret` and are also set as environment variables of the stage's
+   * commands (except names the build environment sets, such as PATH); files
+   * are written with `ctx.writeSecretFile`, or read through `ctx.secretFile`.
+   */
   secrets?: string[]
+  /**
+   * Build configs, in order: at most 20, each letters, digits, dashes and
+   * underscores. Each secret the stage declares is the variant of the latest
+   * config that has one, else the secret's default variant (the one for all
+   * configs). A secret with neither cannot be declared.
+   */
+  configs?: string[]
   /** Non-secret environment for this stage. */
   env?: Record<string, string>
   /** Stage limit, enforced by the worker. Default `'2h'`. */
@@ -323,7 +335,7 @@ export interface Setup extends WorkflowBuilder {
 export interface CommandOptions {
   /** Relative to the workspace. */
   cwd?: string
-  /** Added for this command only; secrets reach a command only this way. */
+  /** Added for this command only. Declared value secrets are already set. */
   env?: Record<string, string>
   timeout?: Duration
   /** Standard input. */
@@ -478,10 +490,24 @@ export interface Stage {
     options?: CommandOptions,
   ): Promise<CommandResult>
 
-  /** A secret the stage declared; anything else throws. */
+  /** A value secret the stage declared, the variant its configs choose; anything else throws. */
   secret(name: string): string
-  /** Path of a declared secret file, deleted after the stage. */
+  /** Path of a declared secret file (the variant the stage's configs choose), in the stage's private directory, deleted after the stage. */
   secretFile(name: string): string
+  /**
+   * Writes a declared secret file to `<directory>/<name>` inside the
+   * checkout (`'.'` is its root) and returns the path. The directory is
+   * created; a file or symlink already at the target is set aside and put
+   * back when the stage ends, and a directory there is refused. The secret
+   * file is removed when the stage ends, however it ends. `mode` defaults to
+   * owner-only (0o600); a file the build ships, such as a resource copied
+   * into an app bundle, needs a readable one (0o644).
+   */
+  writeSecretFile(
+    name: string,
+    directory: string,
+    options?: { mode?: number },
+  ): Promise<string>
 
   /** The value another stage (or an approval) returned. */
   output<T extends Json = Json>(stage: string): Promise<T>

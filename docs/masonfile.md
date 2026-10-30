@@ -408,6 +408,7 @@ other nodes; this keeps every stage able to finish without the master.
 | `when` | Condition evaluated before a node is chosen (below). False → `skipped`. |
 | `tools` | Tool versions the stage needs (section 7). |
 | `secrets` | Names of project secrets the stage may read. Nothing else is delivered. |
+| `configs` | Build configs, in order (`['develop', 'maestro']`), at most 20, each letters, digits, dashes and underscores: which variant of each declared secret the stage gets (below). Default none. |
 | `env` | Non-secret environment for this stage. |
 | `timeout` | Stage limit, enforced by the worker. Default 2 h. |
 | `activityTimeout` | Fail the stage as `timed_out` when it prints nothing for this long (`'20m'`), catching hung simulators and prompts waiting for input. Default none. |
@@ -553,21 +554,74 @@ export async function buildIos(ctx: Stage) {
   unless `allowFailure: true`, and resolve with `{ code, stdout, stderr }`
   (captured output is capped; the full output is in the log).
 - Options: `cwd` (relative to the workspace), `env` (added for that command
-  only), `timeout`, `input` (stdin), `quiet` (log the command line only, and its last 40 lines
-  of output when it fails).
+  only, over the stage's declared values), `timeout`, `input` (stdin), `quiet`
+  (log the command line only, and its last 40 lines of output when it fails).
 - Every process a stage starts belongs to the stage. Cancel, timeout and
   failure stop the whole process tree (the existing guardian).
 
 ### Secrets
 
-- `ctx.secret(name)` returns a secret the stage declared in `secrets`;
-  anything else throws. `ctx.secretFile(name)` returns the path of a declared
-  secret file, written owner-only into the stage's private directory and
-  deleted afterwards.
-- Secrets are **not** in `process.env`. A command sees one only when the stage
-  passes it in `env`, so tools the stage runs do not inherit every secret.
+A project's secrets are on its **Secrets** tab: values and files, each with
+build configs. A secret with no configs is the default variant, for every
+config; the same name can have other variants for other configs, with other
+values. No config is in two variants of one name.
+
+- A stage lists `configs` in order. For each secret it declares, it gets the
+  variant holding the latest of those configs that some variant holds, else
+  the default variant. A declared secret with neither for the stage refuses
+  the graph before the run starts, and a stage whose variant was deleted
+  after its graph was made fails with the same reason.
+- `ctx.secret(name)` returns a declared value; anything else throws. Declared
+  values are also the environment of the stage's `ctx.sh` and `ctx.exec`
+  commands, under their names, so a build tool reads `$API_TOKEN` directly; a
+  command's own `env` wins. A name the build environment sets (PATH, HOME,
+  GIT_*, SSH_*, …) is left out of it and read only with `ctx.secret`. The
+  stage function's own `process.env` holds none.
+- `await ctx.writeSecretFile(name, directory)` writes a declared file to
+  `<directory>/<name>` inside the checkout (`'.'` is its root), owner-only
+  unless `{ mode }` says otherwise (a resource the build ships into an app
+  needs a readable 0o644), creating the directory, and returns the path. The
+  directory may be reached through a symlink that stays in the checkout, but
+  never one that leads out; a file or symlink already at the target is set
+  aside, not written through. When the stage ends, however it ends, the
+  secret file is removed and what it replaced is put back. If the worker
+  itself dies mid-stage, that happens before the next checkout in that
+  workspace.
+- Token-like string values inside a declared JSON file (16 characters or
+  more, no spaces, letters and digits, not a URL: a token in a keys.json,
+  say) are masked like the file itself, so a script that prints one field
+  does not reveal it, while a config file's URLs and names stay readable.
+  A path with letters and digits is masked too: a base64 token may start
+  with a slash.
+- `ctx.secretFile(name)` returns the path of a declared file written
+  owner-only into the stage's private directory instead, for a tool that
+  takes a path.
 - Secret values, and their base64 and URL-encoded forms, are masked in the log
   and in returned values.
+
+```ts
+import type { Setup, Stage } from '@mason/types'
+
+const CONFIGS = ['develop', 'beta']
+
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('android', {
+    on: 'linux',
+    // develop and beta get their own google-services.json; any other branch the default.
+    configs: CONFIGS.includes(m.branch) ? [m.branch] : [],
+    secrets: ['API_KEY', 'google-services.json', 'release.jks'],
+    run: android,
+  })
+}
+
+export async function android(ctx: Stage) {
+  await ctx.writeSecretFile('google-services.json', 'android/app')
+  await ctx.writeSecretFile('release.jks', 'keystores')
+  // API_KEY is in the command's environment already.
+  await ctx.sh('./gradlew assembleRelease', { cwd: 'android' })
+}
+```
 
 ### Values between stages
 

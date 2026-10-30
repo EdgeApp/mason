@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
@@ -35,6 +39,8 @@ import {
 import { runSetup, SetupFailed } from './setup.js'
 import {
   maskValue,
+  recoverSecretFiles,
+  secretFilesPaths,
   runStage,
   secretForms,
   type StageOptions,
@@ -410,6 +416,18 @@ describe('pipeline graph', () => {
       m.apiVersion(1)
       m.stage('x', { on: 'linux', run: fn, env: { MASON_APP: 'x' } })
     }, /env must map/)
+    fails((m) => {
+      m.apiVersion(1)
+      m.stage('x', { on: 'linux', run: fn, configs: ['a b'] })
+    }, /configs must be at most 20 names/)
+    fails((m) => {
+      m.apiVersion(1)
+      m.stage('x', {
+        on: 'linux',
+        run: fn,
+        configs: Array.from({ length: 21 }, (_, i) => `c${i}`),
+      })
+    }, /configs must be at most 20 names/)
 
     const fixed = record(
       (m) => {
@@ -442,6 +460,26 @@ describe('pipeline graph', () => {
     const secret = copy()
     secret.workflows[0]!.stages[0]!.secrets = ['ROOT_PASSWORD']
     invalid(secret, /secret ROOT_PASSWORD, which the project does not have/)
+    // A stage's configs are checked, and a graph from an older node gets none.
+    const noConfigs = copy()
+    delete (noConfigs.workflows[0]!.stages[0] as { configs?: string[] }).configs
+    assert.deepEqual(
+      validateGraph(noConfigs, project).workflows[0]!.stages[0]!.configs,
+      [],
+    )
+    const badConfigs = copy()
+    ;(badConfigs.workflows[0]!.stages[0] as { configs: unknown }).configs =
+      'develop'
+    invalid(badConfigs, /Stage a configs must be at most 20 names/)
+    const withConfigs = copy()
+    withConfigs.workflows[0]!.stages[0]!.configs = ['develop']
+    assert.equal(
+      validateGraph(withConfigs, {
+        ...project,
+        secrets: [{ name: 'API_TOKEN', configs: ['develop'] }],
+      }).workflows[0]!.stages[0]!.configs[0],
+      'develop',
+    )
     // A secret with variants for some configs only resolves to nothing for a stage without them.
     invalid(
       copy(),
@@ -1119,7 +1157,13 @@ async function stage(
   const logFile = path.join(dir, 'stage.log')
   const log = new MaskedLog(
     logFile,
-    secretForms([...Object.values(snap.secrets), ...Object.values(snap.files)]),
+    // As the worker does: files are masked by their decoded contents.
+    secretForms([
+      ...Object.values(snap.secrets),
+      ...Object.values(snap.files).map((contents) =>
+        Buffer.from(contents, 'base64').toString(),
+      ),
+    ]),
   )
   const steps: StepRecord[] = []
   const descriptions: string[] = []
@@ -1158,7 +1202,7 @@ export async function main(ctx: Stage) {
   const token = ctx.secret('API_TOKEN')
   const results: Record<string, unknown> = {}
   results.inEnv = Object.values(process.env).includes(token)
-  results.childWithout = (await ctx.sh('echo "[$API_TOKEN]"', { quiet: true })).stdout.trim()
+  results.childDeclared = (await ctx.sh('echo "[$API_TOKEN]"', { quiet: true })).stdout.trim()
   results.childWith = (await ctx.sh('printf %s "$API_TOKEN" | wc -c', { env: { API_TOKEN: token } })).stdout.trim()
   await ctx.sh('echo "token=$T b64=$(printf %s "$T" | base64)"', { env: { T: token } })
   try { ctx.secret('OTHER') } catch (error) { results.undeclared = (error as Error).message }
@@ -1190,7 +1234,8 @@ export async function main(ctx: Stage) {
     assert.equal(out.result.status, 'succeeded', out.log)
     const value = out.result.value as Record<string, Json>
     assert.equal(value.inEnv, false)
-    assert.equal(value.childWithout, '[]')
+    // A declared value is the commands' environment; returned, it is masked.
+    assert.equal(value.childDeclared, '[[redacted]]')
     assert.equal(value.childWith, '12')
     assert.match(String(value.undeclared), /did not declare the secret OTHER/)
     assert.equal(
@@ -1248,6 +1293,476 @@ export async function main(ctx: Stage) {
         (step) => step.kind === 'exec' && step.status === 'succeeded',
       ),
     )
+  })
+
+  it('U6.10 declared values are the commands’ environment; writeSecretFile writes into the checkout, refuses to leave it, and is cleaned up', async () => {
+    const key = Buffer.from([0, 1, 2, 250])
+    const out = await stage(
+      `
+import type { Stage } from '@mason/types'
+import { existsSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+
+export async function main(ctx: Stage) {
+  const r: Record<string, unknown> = {}
+  r.length = (await ctx.sh('printf %s "$API_TOKEN" | wc -c')).stdout.trim()
+  r.override = (await ctx.sh('printf %s "$API_TOKEN"', { env: { API_TOKEN: 'mine' } })).stdout
+  r.own = process.env.API_TOKEN === undefined
+  const root = await ctx.writeSecretFile('config.json', '.')
+  r.root = [root === ctx.workspace + '/config.json', readFileSync(root, 'utf8') === '{"k":1}', statSync(root).mode & 0o777]
+  const nested = await ctx.writeSecretFile('config.json', 'android/app')
+  r.nested = nested.endsWith('/android/app/config.json') && existsSync(nested)
+  const named = await ctx.writeSecretFile('master/key.jks', 'keystores')
+  r.named = [named.endsWith('/keystores/master/key.jks'), readFileSync(named).length]
+  const shipped = await ctx.writeSecretFile('config.json', 'res', { mode: 0o644 })
+  r.shipped = statSync(shipped).mode & 0o777
+  r.badMode = await (async () => {
+    try {
+      await ctx.writeSecretFile('config.json', 'res', { mode: 0o7777 })
+      return 'wrote'
+    } catch (error) {
+      return (error as Error).message
+    }
+  })()
+  r.reserved = [(await ctx.sh('printf %s "[$GIT_SSH_COMMAND]"')).stdout, ctx.secret('GIT_SSH_COMMAND').length]
+  mkdirSync('replace')
+  writeFileSync('replace/config.json', 'old')
+  await ctx.writeSecretFile('config.json', 'replace')
+  r.replaced = readFileSync('replace/config.json', 'utf8') === '{"k":1}'
+  const refused = async (name: string, directory: string): Promise<string> => {
+    try {
+      await ctx.writeSecretFile(name, directory)
+      return 'wrote'
+    } catch (error) {
+      return (error as Error).message
+    }
+  }
+  r.up = await refused('config.json', '..')
+  r.absolute = await refused('config.json', '/tmp')
+  r.undeclared = await refused('NOPE', '.')
+  r.inherited = await refused('constructor', '.')
+  r.empty = await refused('config.json', '')
+  // A symlink at the target itself is replaced, never followed, even within the checkout.
+  writeFileSync('real.json', 'orig')
+  mkdirSync('d1')
+  symlinkSync('../real.json', 'd1/config.json')
+  const replacedLink = await ctx.writeSecretFile('config.json', 'd1')
+  r.link = [replacedLink.endsWith('/d1/config.json'), readFileSync('real.json', 'utf8')]
+  symlinkSync(tmpdir(), 'out')
+  r.linkedDirectory = await refused('config.json', 'out')
+  mkdirSync('linked')
+  symlinkSync(tmpdir(), 'linked/master')
+  r.linkedName = await refused('master/key.jks', 'linked')
+  return r
+}
+`,
+      {
+        secrets: { API_TOKEN: 's3cr3t-value', GIT_SSH_COMMAND: 'ssh -evil' },
+        files: {
+          'config.json': Buffer.from('{"k":1}').toString('base64'),
+          'master/key.jks': key.toString('base64'),
+        },
+      },
+    )
+    assert.equal(out.result.status, 'succeeded', out.log)
+    const value = out.result.value as Record<string, Json>
+    assert.equal(value.length, '12')
+    assert.equal(value.override, 'mine')
+    assert.equal(value.own, true)
+    assert.deepEqual(value.root, [true, true, 0o600])
+    assert.equal(value.nested, true)
+    assert.deepEqual(value.named, [true, 4])
+    assert.equal(value.shipped, 0o644)
+    assert.match(String(value.badMode), /file mode from 0o400 to 0o777/)
+    // A secret named like a variable the build environment sets is read only through ctx.secret.
+    assert.deepEqual(value.reserved, ['[]', 9])
+    assert.match(
+      String(value.inherited),
+      /did not declare the secret file constructor/,
+    )
+    assert.equal(value.replaced, true)
+    assert.deepEqual(value.link, [true, 'orig'])
+    for (const name of ['up', 'absolute', 'linkedDirectory', 'linkedName'])
+      assert.match(String(value[name]), /outside the workspace/, name)
+    assert.match(
+      String(value.undeclared),
+      /did not declare the secret file NOPE/,
+    )
+    assert.match(String(value.empty), /takes a directory inside the checkout/)
+    // Every file the stage wrote is gone, and so is the manifest.
+    for (const file of [
+      'config.json',
+      'android/app/config.json',
+      'keystores/master/key.jks',
+    ])
+      assert.equal(existsSync(path.join(out.dir, file)), false, file)
+    // What the checkout had at a target is put back: the file and the symlink.
+    assert.equal(
+      readFileSync(path.join(out.dir, 'replace/config.json'), 'utf8'),
+      'old',
+    )
+    assert.equal(
+      readlinkSync(path.join(out.dir, 'd1/config.json')),
+      '../real.json',
+    )
+    // The file the link pointed at is untouched.
+    assert.equal(readFileSync(path.join(out.dir, 'real.json'), 'utf8'), 'orig')
+    assert.deepEqual(
+      readdirSync(out.dir).filter((name) => name.startsWith('secret-files-')),
+      [],
+    )
+    assert(
+      out.steps.some(
+        (step) =>
+          step.kind === 'secret' &&
+          step.title === 'write secret file config.json to android/app' &&
+          step.status === 'succeeded',
+      ),
+    )
+    assert(!out.log.includes('s3cr3t-value'), out.log)
+  })
+
+  it('U6.10 a stage that times out or is cancelled leaves no secret file, and one a dead worker left is removed', async () => {
+    const files = { 'config.json': Buffer.from('{"k":1}').toString('base64') }
+    const slow = `
+import type { Stage } from '@mason/types'
+export async function main(ctx: Stage) {
+  await ctx.writeSecretFile('config.json', 'deep/dir')
+  await ctx.sh('sleep 30')
+}
+`
+    // Each stop comes only after the file was written, so "no file left" means removed.
+    const wrote = (step: StepRecord): boolean =>
+      step.kind === 'secret' && step.status === 'succeeded'
+    let written = false
+    const timedOut = await stage(
+      slow,
+      { files },
+      {
+        timeout: 3,
+        onStep: (step) => {
+          written ||= wrote(step)
+        },
+      },
+    )
+    assert.equal(timedOut.result.status, 'timed_out', timedOut.log)
+    assert.equal(written, true)
+    assert.equal(
+      existsSync(path.join(timedOut.dir, 'deep/dir/config.json')),
+      false,
+    )
+    const abort = new AbortController()
+    const cancelled = await stage(
+      slow,
+      { files },
+      {
+        signal: abort.signal,
+        onStep: (step) => {
+          if (wrote(step)) abort.abort()
+        },
+      },
+    )
+    assert.equal(cancelled.result.status, 'cancelled', cancelled.log)
+    assert.equal(
+      existsSync(path.join(cancelled.dir, 'deep/dir/config.json')),
+      false,
+    )
+    // A stage function that throws after writing: the common failed build.
+    const thrown = await stage(
+      `
+import type { Stage } from '@mason/types'
+export async function main(ctx: Stage) {
+  await ctx.writeSecretFile('config.json', '.')
+  throw new Error('the build broke')
+}
+`,
+      { files },
+    )
+    assert.equal(thrown.result.status, 'failed')
+    assert.equal(existsSync(path.join(thrown.dir, 'config.json')), false)
+    // A manifest a dead worker left: the worker's recovery, before the next
+    // checkout, removes its files and puts back what they replaced.
+    const { dir, masonfile } = checkout(`
+import type { Stage } from '@mason/types'
+import { existsSync } from 'node:fs'
+export async function main(ctx: Stage) {
+  const left = existsSync('left.json')
+  try { await ctx.writeSecretFile('config.json', '.') } catch (error) { return { left, refused: (error as Error).message } }
+  return { left }
+}
+`)
+    const snap = snapshot(dir, masonfile, { files })
+    writeFileSync(path.join(dir, 'left.json'), 'secret')
+    const { manifest, originals } = secretFilesPaths(
+      snap.workspace,
+      snap.privateDir,
+    )
+    // What it replaced: a tracked file (its copy kept) and a symlink.
+    mkdirSync(`${originals}`, { recursive: true })
+    writeFileSync(`${originals}/1`, 'tracked placeholder')
+    writeFileSync(path.join(dir, 'tracked.json'), 'secret too')
+    writeFileSync(path.join(dir, 'linked.json'), 'secret three')
+    writeFileSync(
+      manifest,
+      JSON.stringify([
+        { target: path.join(dir, 'left.json') },
+        {
+          target: path.join(dir, 'tracked.json'),
+          original: `${originals}/1`,
+          mode: 0o644,
+        },
+        { target: path.join(dir, 'linked.json'), link: 'left.json' },
+      ]),
+    )
+    const recovered: string[] = []
+    recoverSecretFiles(dir, snap.privateDir, (text) => recovered.push(text))
+    assert.equal(recovered.length, 0)
+    assert.equal(existsSync(manifest), false)
+    assert.equal(existsSync(`${originals}`), false)
+    assert.equal(existsSync(path.join(dir, 'left.json')), false)
+    assert.equal(
+      readFileSync(path.join(dir, 'tracked.json'), 'utf8'),
+      'tracked placeholder',
+    )
+    assert.equal(statSync(path.join(dir, 'tracked.json')).mode & 0o777, 0o644)
+    assert.equal(readlinkSync(path.join(dir, 'linked.json')), 'left.json')
+    rmSync(path.join(dir, 'linked.json'))
+    rmSync(path.join(dir, 'tracked.json'))
+    const run = async (
+      name: string,
+    ): Promise<{ value: unknown; log: string }> => {
+      const log = new MaskedLog(path.join(dir, name), [])
+      const result = await runStage({
+        snapshot: snapshot(dir, masonfile, { files }),
+        log,
+        timeout: 60,
+      })
+      log.write('', true)
+      assert.equal(result.status, 'succeeded')
+      return {
+        value: result.value,
+        log: readFileSync(path.join(dir, name), 'utf8'),
+      }
+    }
+    // With nothing left, the next stage writes and cleans as usual.
+    assert.deepEqual((await run('stage1.log')).value, { left: false })
+    assert.equal(existsSync(manifest), false)
+    // An entry whose put-back fails stays listed, with the originals, and no
+    // stage writes a secret file there until it is cleaned.
+    writeFileSync(path.join(dir, 'kept.json'), 'secret four')
+    mkdirSync(`${originals}`, { recursive: true })
+    writeFileSync(`${originals}/2`, 'kept original')
+    const keptEntry = {
+      target: path.join(dir, 'kept.json'),
+      original: `${originals}/missing`,
+      mode: 0o644,
+    }
+    writeFileSync(
+      manifest,
+      JSON.stringify([{ target: path.join(dir, 'left.json') }, keptEntry]),
+    )
+    recoverSecretFiles(dir, snap.privateDir, (text) => recovered.push(text))
+    assert.match(
+      recovered.join(''),
+      /Could not remove the secret file .*kept\.json and put back what it replaced/,
+    )
+    assert.deepEqual(JSON.parse(readFileSync(manifest, 'utf8')), [keptEntry])
+    assert.equal(readFileSync(`${originals}/2`, 'utf8'), 'kept original')
+    const blocked = await run('stage2.log')
+    assert.match(
+      (blocked.value as { refused: string }).refused,
+      /Secret files cannot be written here until the files listed in .*, left by an earlier stage, are put back or removed and that list is deleted/,
+    )
+    // The stage's own clean leaves the earlier stage's manifest alone.
+    assert.deepEqual(JSON.parse(readFileSync(manifest, 'utf8')), [keptEntry])
+    // An unreadable manifest is reported and kept, and blocks writes the same way.
+    writeFileSync(manifest, 'not json')
+    recovered.length = 0
+    recoverSecretFiles(dir, snap.privateDir, (text) => recovered.push(text))
+    assert.match(
+      recovered.join(''),
+      /Could not read the secret files an earlier stage left/,
+    )
+    const unreadable = await run('stage3.log')
+    assert.match(
+      (unreadable.value as { refused: string }).refused,
+      /cannot be written here until/,
+    )
+    assert.equal(readFileSync(manifest, 'utf8'), 'not json')
+  })
+
+  it('U6.10 a file or symlink the checkout had at the target is put back; a directory there is refused; cleanup goes on past a file it cannot remove', async () => {
+    const out = await stage(
+      `
+import type { Stage } from '@mason/types'
+import { chmodSync, mkdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+export async function main(ctx: Stage) {
+  writeFileSync('tracked.json', 'placeholder', { mode: 0o644 })
+  const mode = statSync('tracked.json').mode & 0o777
+  await ctx.writeSecretFile('tracked.json', '.')
+  // Written twice: what is put back is still the checkout's own file.
+  await ctx.writeSecretFile('tracked.json', '.')
+  writeFileSync('elsewhere.json', 'x')
+  symlinkSync('elsewhere.json', 'linked.json')
+  await ctx.writeSecretFile('linked.json', '.')
+  mkdirSync('dir.json')
+  let refused = ''
+  try { await ctx.writeSecretFile('dir.json', '.') } catch (error) { refused = (error as Error).message }
+  // A file the stage swapped for a directory is removed all the same.
+  await ctx.writeSecretFile('swapped.json', '.')
+  rmSync('swapped.json')
+  mkdirSync('swapped.json/inside', { recursive: true })
+  // A file whose directory the stage removed is put back, directory and all.
+  mkdirSync('gen')
+  writeFileSync('gen/out.json', 'generated')
+  await ctx.writeSecretFile('out.json', 'gen')
+  rmSync('gen', { recursive: true })
+  // One the stage made unremovable stays listed, with the checkout's own file.
+  mkdirSync('locked')
+  writeFileSync('locked/mine.json', 'mine')
+  await ctx.writeSecretFile('mine.json', 'locked')
+  chmodSync('locked', 0o555)
+  return { refused, mode }
+}
+`,
+      {
+        files: {
+          'tracked.json': Buffer.from('{"t":1}').toString('base64'),
+          'linked.json': Buffer.from('{"l":1}').toString('base64'),
+          'dir.json': Buffer.from('{}').toString('base64'),
+          'swapped.json': Buffer.from('{}').toString('base64'),
+          'mine.json': Buffer.from('{"m":1}').toString('base64'),
+          'out.json': Buffer.from('{"o":1}').toString('base64'),
+        },
+      },
+    )
+    assert.equal(out.result.status, 'succeeded', out.log)
+    const value = out.result.value as { refused: string; mode: number }
+    assert.match(value.refused, /dir\.json is a directory/)
+    assert.equal(
+      readFileSync(path.join(out.dir, 'tracked.json'), 'utf8'),
+      'placeholder',
+    )
+    assert.equal(
+      statSync(path.join(out.dir, 'tracked.json')).mode & 0o777,
+      value.mode,
+    )
+    assert.equal(
+      readlinkSync(path.join(out.dir, 'linked.json')),
+      'elsewhere.json',
+    )
+    assert.equal(
+      readFileSync(path.join(out.dir, 'elsewhere.json'), 'utf8'),
+      'x',
+    )
+    assert.equal(existsSync(path.join(out.dir, 'swapped.json')), false)
+    assert.equal(
+      readFileSync(path.join(out.dir, 'gen/out.json'), 'utf8'),
+      'generated',
+    )
+    chmodSync(path.join(out.dir, 'locked'), 0o755)
+    assert.doesNotMatch(
+      out.log,
+      /Could not remove the secret file .*(swapped|out)\.json/,
+    )
+    assert.match(out.log, /Could not remove the secret file .*mine\.json/)
+    // It stays listed for the next try, with the copy of the checkout's file.
+    const { manifest } = secretFilesPaths(
+      out.dir,
+      path.join(out.dir, '.private'),
+    )
+    const left = JSON.parse(readFileSync(manifest, 'utf8')) as Array<{
+      target: string
+      original?: string
+    }>
+    assert.deepEqual(
+      left.map((file) => path.basename(file.target)),
+      ['mine.json'],
+    )
+    assert.equal(readFileSync(left[0]?.original ?? '', 'utf8'), 'mine')
+  })
+
+  it('U6.10 strings inside a JSON secret are masked where a build prints them alone', async () => {
+    const token = 'sntrys_abcdef0123456789'
+    assert(
+      secretForms([JSON.stringify({ SENTRY: token, short: 'abc' })]).includes(
+        token,
+      ),
+    )
+    assert(!secretForms([JSON.stringify({ short: 'abc' })]).includes('abc'))
+    // A config file's URLs, names and words are not secrets, and keys are never masked.
+    const config = {
+      url: 'https://info1.edge.app/v1/abc123def456',
+      bundleId: 'co.edgesecure.app',
+      header: 'authorization',
+      path: '/var/lib/mason/workspace',
+      sentence: 'not a token 1234567890 at all',
+      sk_live_0123456789abcdefgh: 'x',
+    }
+    const forms = secretForms([JSON.stringify(config)])
+    for (const kept of [
+      config.url,
+      config.bundleId,
+      config.header,
+      config.path,
+      config.sentence,
+      'sk_live_0123456789abcdefgh',
+    ])
+      assert(!forms.includes(kept), kept)
+    assert(!secretForms(['{not json']).includes('not json'))
+    // At any depth, and inside arrays, as Edge's keys.json keeps most of them.
+    const nested = 'nested_0123456789ab'
+    const listed = 'listed_0123456789ab'
+    const nestedForms = secretForms([
+      JSON.stringify({
+        corePlugins: { ethereum: { apiKey: nested } },
+        rampPlugins: [{ keys: ['short1', listed] }],
+      }),
+    ])
+    assert(nestedForms.includes(nested))
+    assert(nestedForms.includes(listed))
+    // Sixteen characters is a token; fifteen is not.
+    const lengths = secretForms([
+      JSON.stringify({ a: 'abcdefghij12345', b: 'abcdefghij123456' }),
+    ])
+    assert(!lengths.includes('abcdefghij12345'))
+    assert(lengths.includes('abcdefghij123456'))
+    // A base64 token that starts with a slash is still a token, with or
+    // without the + and = that would set it apart from a path.
+    for (const slashed of [
+      '/Zm9vYmFy+YmF6cXV4MTIz/NDU2==',
+      '/Zm9vYmFy/YmF6cXV4MTIz',
+      '/aGVsbG8w/d29ybGQx/Zm9vYmFy',
+    ])
+      assert(
+        secretForms([JSON.stringify({ k: slashed })]).includes(slashed),
+        slashed,
+      )
+    const out = await stage(
+      `
+import type { Stage } from '@mason/types'
+import { readFileSync } from 'node:fs'
+export async function main(ctx: Stage) {
+  const path = await ctx.writeSecretFile('keys.json', '.')
+  const keys = JSON.parse(readFileSync(path, 'utf8'))
+  console.log('token', keys.SENTRY)
+  console.log('server', keys.server)
+  return { server: keys.server }
+}
+`,
+      {
+        files: {
+          'keys.json': Buffer.from(
+            JSON.stringify({ SENTRY: token, server: 'https://info1.edge.app' }),
+          ).toString('base64'),
+        },
+      },
+    )
+    assert.equal(out.result.status, 'succeeded', out.log)
+    assert.match(out.log, /token \[redacted\]/)
+    assert(!out.log.includes(token))
+    assert.match(out.log, /server https:\/\/info1\.edge\.app/)
+    assert.deepEqual(out.result.value, { server: 'https://info1.edge.app' })
   })
 
   it('U6.4 fails a missing export and a throwing stage with the error in the log', async () => {

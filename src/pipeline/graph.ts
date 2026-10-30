@@ -24,7 +24,7 @@ import type {
 } from '../../types/mason/index.js'
 import { asScheme, type BuildNumberScheme } from '../master/buildNumbers.js'
 import { matches } from '../master/rules.js'
-import { unresolvedSecret } from './variants.js'
+import { isConfig, MAX_CONFIGS, unresolvedSecret } from './variants.js'
 
 /** The Masonfile API versions this Mason major version runs. */
 export const apiVersions = [1]
@@ -60,6 +60,8 @@ export interface GraphStage {
   when?: When
   tools?: Tools
   secrets: string[]
+  /** Build configs, in order: each declared secret is the variant of the latest one that has a variant, else the default. */
+  configs: string[]
   env: Record<string, string>
   /** Seconds. */
   timeout: number
@@ -148,6 +150,20 @@ function strings(value: unknown, what: string): string[] {
   )
     throw new GraphError(`${what} must be a list of names`)
   return list as string[]
+}
+
+/** A stage's build configs: at most MAX_CONFIGS tokens of letters, digits, dashes and underscores. */
+function buildConfigs(value: unknown, what: string): string[] {
+  if (value == null) return []
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_CONFIGS ||
+    !value.every(isConfig)
+  )
+    throw new GraphError(
+      `${what} must be at most ${MAX_CONFIGS} names of letters, digits, dashes and underscores`,
+    )
+  return value as string[]
 }
 
 function environment(value: unknown, what: string): Record<string, string> {
@@ -962,6 +978,7 @@ export class Recorder {
       ...(options.when == null ? {} : { when: when(options.when, what) }),
       ...(options.tools == null ? {} : { tools: tools(options.tools, what) }),
       secrets: strings(options.secrets, `${what} secrets`),
+      configs: buildConfigs(options.configs, `${what} configs`),
       env: environment(options.env, `${what} env`),
       timeout:
         options.timeout == null
@@ -999,6 +1016,7 @@ function defaults(name: string, failFast: boolean): GraphStage {
     kind: 'stage',
     needs: [],
     secrets: [],
+    configs: [],
     env: {},
     timeout: 2 * 3600,
     retry: { attempts: 1, on: ['failed', 'interrupted', 'timed_out'] },
@@ -1082,6 +1100,11 @@ export function validateGraph(value: unknown, project: ProjectFacts): Graph {
         throw new GraphError(`Stage ${stage.name} is declared twice`)
       stageNames.add(stage.name)
       const what = `Stage ${stage.name}`
+      // A graph from a node on an older release has no configs.
+      stage.configs = buildConfigs(
+        (stage as { configs?: unknown }).configs,
+        `${what} configs`,
+      )
       if (stage.kind === 'approval') continue
       selector(stage.on, what)
       tools(stage.tools, what)
@@ -1098,7 +1121,7 @@ export function validateGraph(value: unknown, project: ProjectFacts): Graph {
           stage.name,
           secret,
           project.secrets,
-          [],
+          stage.configs,
         )
         if (refused != null) throw new GraphError(refused)
       }

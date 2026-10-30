@@ -58,7 +58,7 @@ import { matches, ruleFor } from './rules.js'
 import type { Stashes } from './stash.js'
 import { cronMatches, masterTimeZone, parseCron } from './triggers.js'
 import { projectFiles, projectTools } from '../worker/tools/projectTools.js'
-import { resolveSecrets } from '../pipeline/variants.js'
+import { resolveSecrets, unresolvedSecret } from '../pipeline/variants.js'
 import { storedVariants } from './secrets.js'
 
 type Row = Record<string, unknown>
@@ -1588,9 +1588,13 @@ export class Scheduler {
           })),
       }
     }
-    const resolved = [
-      ...resolveSecrets(stored, stage.secrets, stageConfigs(stage)).values(),
-    ]
+    const configs = stageConfigs(stage)
+    const chosen = resolveSecrets(stored, stage.secrets, configs)
+    for (const name of stage.secrets) {
+      const refused = unresolvedSecret(stage.name, name, stored, configs)
+      if (refused != null) throw new Error(refused)
+    }
+    const resolved = [...chosen.values()]
     return {
       env: {},
       secrets: Object.fromEntries(
@@ -1705,7 +1709,10 @@ export class Scheduler {
     const token = randomBytes(24).toString('hex')
     const graph = this.workflowOf(job)!.graph
     const buildNumbers: Record<string, string> = {}
+    let secrets: ReturnType<Scheduler['secretFacts']>
     try {
+      // A graph cached by commit was checked when it was made; a variant may have gone since.
+      secrets = this.secretFacts(project, stage)
       // An app ID listed in a sequence's `apps` takes its number from that sequence.
       const sequenceOf = (key: string): string =>
         Object.entries(graph.buildNumbers).find(([, scheme]) =>
@@ -1743,7 +1750,6 @@ export class Scheduler {
               {},
           )
       }
-    const secrets = this.secretFacts(project, stage)
     const node = this.options.registry.get(worker.node.fingerprint)!
     const request = JSON.parse(String(job.request)) as {
       platforms?: string[]

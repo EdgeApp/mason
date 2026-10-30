@@ -15,6 +15,7 @@ import type {
 import { globExpression } from '../master/rules.js'
 import { seconds } from './graph.js'
 import type { StepChannel } from './steps.js'
+import { isReservedName, NEEDS_DIRECTORY } from './variants.js'
 
 /** Everything a stage run needs, sent to the runner over the step channel. */
 export interface StageSnapshot {
@@ -103,8 +104,9 @@ export interface ContextResult {
 /**
  * The `Stage` context a stage function receives. Commands stream into the
  * runner's stdout and stderr, which the worker's masked log records; secrets
- * are handed out only by `secret` and `secretFile`, never through
- * `process.env`; worker services go over the step channel.
+ * are handed out by `secret`, `secretFile` and `writeSecretFile`, and declared
+ * values are the environment of the stage's commands, never the stage
+ * process's own `process.env`; worker services go over the step channel.
  */
 export function createContext(
   snapshot: StageSnapshot,
@@ -179,9 +181,17 @@ export function createContext(
   ): Promise<CommandResult> => {
     if (signal.aborted) throw abortError(signal)
     const cwd = inside(snapshot.workspace, options.cwd ?? '.')
+    // Declared values are the commands' environment; the stage process never
+    // holds them in its own. A name the build environment sets (a migrated
+    // GIT_SSH_COMMAND, say) stays reachable only through ctx.secret.
     const env = {
       ...process.env,
       ...(options.color === false ? {} : colour),
+      ...Object.fromEntries(
+        Object.entries(snapshot.secrets).filter(
+          ([name]) => !isReservedName(name),
+        ),
+      ),
       ...(options.env ?? {}),
     }
     write(`$ ${shown}`)
@@ -265,7 +275,7 @@ export function createContext(
     names: Record<string, string>,
     name: string,
   ): string => {
-    const value = names[name]
+    const value = Object.hasOwn(names, name) ? names[name] : undefined
     if (value == null)
       throw new Error(
         `Stage ${snapshot.stage.name} did not declare the ${kind} ${name}`,
@@ -301,6 +311,21 @@ export function createContext(
         secretFiles.set(name, file)
       }
       return file
+    },
+    writeSecretFile: async (name, directory, options) => {
+      declared('secret file', snapshot.files, name)
+      if (typeof directory !== 'string' || directory === '')
+        throw new Error(NEEDS_DIRECTORY)
+      return await step(
+        'secret',
+        `write secret file ${name} to ${directory}`,
+        async () =>
+          await channel.request<string>('writeSecretFile', {
+            name,
+            directory,
+            ...(options?.mode == null ? {} : { mode: options.mode }),
+          }),
+      )
     },
     output: async <T extends Json = Json>(name: string): Promise<T> => {
       if (name in snapshot.outputs) return snapshot.outputs[name] as T
