@@ -104,7 +104,12 @@ const components = `.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,
 .panel li:last-child{border:0}
 .panel li div{min-width:0}
 .panel li .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
-.project{background:var(--color-panel);border:1px solid var(--color-border);border-radius:var(--radius-panel);margin-bottom:16px;overflow:hidden}
+.project{background:var(--color-panel);border:1px solid var(--color-border);border-radius:var(--radius-panel);margin-bottom:16px;overflow:hidden;position:relative}
+.project:hover{border-color:var(--color-border-strong)}
+/* The title's link covers the card; the run chips sit above it and open their runs. */
+.project .card-link::after{content:'';position:absolute;inset:0}
+.project .card-link:focus-visible{outline:none}.project:has(.card-link:focus-visible){outline:2px solid var(--color-accent);outline-offset:2px}
+.project a.run-chip{position:relative;z-index:1}
 .project header{display:flex;align-items:flex-start;gap:12px;padding:16px;border-bottom:1px solid var(--color-border)}
 .project header > div{flex:1;min-width:0}
 .project header h2{margin:0;font-size:18px;overflow-wrap:anywhere}

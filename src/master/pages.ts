@@ -10,6 +10,7 @@ import {
   masonfileView,
   nodesView,
   peopleView,
+  projectRunsView,
   projectView,
   secretsView,
   cloudView,
@@ -18,7 +19,7 @@ import {
   wizardView,
   type NodeRow,
 } from '../view/admin.js'
-import { artifactsView } from '../view/artifacts.js'
+import { artifactsView, runsTable } from '../view/artifacts.js'
 import { fqdn } from './cloud/hosts.js'
 import { DEFAULT_MONTHLY_BUDGET } from './cloud/pools.js'
 import { methodsOf } from './hostSettings.js'
@@ -950,6 +951,42 @@ export function masterPages(
           })),
         canSeed: can(actor, 'buildNumbers.seed'),
       }),
+      current,
+      200,
+      'dashboard',
+    )
+  })
+  app.get('/projects/:slug/runs', (req, res) => {
+    const found = projectFor(req, res, 'Runs and builds')
+    if (found == null) return
+    const { current, project } = found
+    const branch =
+      typeof req.query.branch === 'string' && req.query.branch !== ''
+        ? req.query.branch
+        : undefined
+    const origin = (
+      (master.settings.value('host') ?? {}) as { origin?: string }
+    ).origin
+    send(
+      res,
+      `${project.name} · Runs and builds`,
+      projectRunsView(
+        {
+          slug: project.slug,
+          name: project.name,
+          ...(branch == null ? {} : { branch }),
+        },
+        runsTable(
+          {
+            db: master.database.db,
+            viewer: viewerOf(current),
+            now: master.database.now(),
+            appVisible: appVisible(master, current),
+            artifactBase: origin ?? '',
+          },
+          { project: project.slug, ...(branch == null ? {} : { branch }) },
+        ),
+      ),
       current,
       200,
       'dashboard',

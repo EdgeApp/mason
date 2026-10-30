@@ -781,6 +781,46 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       (await request(c.master, 'GET', '/projects/wizard/secrets')).status,
       303,
     )
+    // Runs and builds is a project tab: the project's runs, under the same tabs.
+    const runsTab = await request(
+      c.master,
+      'GET',
+      '/projects/wizard/runs',
+      signIn('developer'),
+    )
+    assert.equal(runsTab.status, 200)
+    assert.match(runsTab.text, /aria-current="page">Runs and builds</)
+    assert.match(runsTab.text, /<table class="list">|No runs yet/)
+    assert.match(
+      (
+        await request(
+          c.master,
+          'GET',
+          '/projects/wizard/runs?branch=master',
+          signIn('developer'),
+        )
+      ).text,
+      /The latest runs on master/,
+    )
+    assert.equal(
+      (
+        await request(
+          c.master,
+          'GET',
+          '/projects/wizard/runs',
+          signIn('tester'),
+        )
+      ).status,
+      403,
+    )
+    assert.equal(
+      (await request(c.master, 'GET', '/projects/nope/runs', manager2)).status,
+      404,
+    )
+    assert.equal(
+      (await request(c.master, 'GET', '/projects/wizard/runs')).status,
+      303,
+    )
     assert.doesNotMatch(projectPage, /src="\/assets\/secrets\.js"/)
     assert.match(projectPage, /aria-current="page">Overview</)
     const bundle = await request(c.master, 'GET', '/assets/secrets.js')

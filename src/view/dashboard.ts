@@ -376,11 +376,8 @@ function query(filter: DashboardFilter, change: DashboardFilter): string {
 /** A run's page. */
 export const runHref = (id: string): string => `/runs/${encodeURIComponent(id)}`
 
-function projectCard(
-  card: ProjectCard,
-  now: number,
-  masonfile: boolean,
-): string {
+/** A project's card; all of it opens the project's page, but for its run chips, which open their runs. */
+function projectCard(card: ProjectCard, now: number): string {
   const runs = card.runs
     .map(
       (run) =>
@@ -400,11 +397,11 @@ function projectCard(
         }</div></div>`,
     )
     .join('')
-  return `<article class="project" id="project-${escape(card.slug)}"><header>${icon('folder')}<div><h2><a href="${query({}, { project: card.slug })}">${escape(card.name)}</a></h2>${
+  return `<article class="project" id="project-${escape(card.slug)}"><header>${icon('folder')}<div><h2><a class="card-link" href="/projects/${encodeURIComponent(card.slug)}">${escape(card.name)}</a></h2>${
     card.repository == null
       ? ''
       : `<small class="mono">${escape(card.repository)}</small>`
-  }${masonfile ? `<a class="meta-link" href="/projects/${encodeURIComponent(card.slug)}">${icon('tune')} Project</a> <a class="meta-link" href="/projects/${encodeURIComponent(card.slug)}/masonfile">${icon('description')} Masonfile</a>` : ''}<div class="meta">${card.defaultBranch == null ? '' : `<span>${icon('fork_right')} Default: <span class="mono">${escape(card.defaultBranch)}</span></span>`}${
+  }<div class="meta">${card.defaultBranch == null ? '' : `<span>${icon('fork_right')} Default: <span class="mono">${escape(card.defaultBranch)}</span></span>`}${
     card.webhook == null
       ? ''
       : `<span>${statusDot(card.webhook ? 'succeeded' : 'queued')} Webhook ${card.webhook ? 'active' : 'not set up'}</span>`
@@ -466,8 +463,7 @@ export function dashboardView(
     )
     .join('')
   return `<div class="page-head"><div><div class="breadcrumbs"><span>Mason</span><span>/</span><span>${viewer.node === 'master' ? 'Master' : 'Builds'}</span></div><h1>Projects &amp; apps</h1><p>Every project's app IDs, their latest builds and runs.</p></div>${viewer.node === 'master' && (viewer.role === 'admin' || viewer.role === 'manager') ? `<a class="button" href="/projects/new">${icon('add')} Add project</a>` : ''}</div><div class="tiles">${tile('folder', 'Projects', String(data.tiles.projects))}${tile('apps', 'App IDs', String(data.tiles.apps))}${tile('speed', 'Success rate', rate, data.tiles.finished === 0 ? 'No finished runs in 30 days' : `${data.tiles.finished} runs in 30 days`)}${tile('storage', 'Artifact storage', bytes(data.tiles.storage))}</div><nav class="chips" aria-label="Platforms">${chips}</nav><div class="columns"><div>${
-    data.projects
-      .map((card) => projectCard(card, now, viewer.node === 'master'))
-      .join('') || '<p class="empty-state">No projects match.</p>'
+    data.projects.map((card) => projectCard(card, now)).join('') ||
+    '<p class="empty-state">No projects match.</p>'
   }</div><aside><section class="panel" data-queue><h2>${icon('hourglass_top')}Queue</h2><ul>${queue || '<li>Nothing is running.</li>'}</ul></section>${nodes}<section class="panel"><h2>${icon('deployed_code')}Recent builds</h2><ul>${builds || '<li>No builds yet.</li>'}</ul></section></aside></div>`
 }
