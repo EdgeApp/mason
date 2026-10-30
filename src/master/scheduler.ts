@@ -57,6 +57,8 @@ import type { Project, Projects } from './projects.js'
 import { matches, ruleFor } from './rules.js'
 import type { Stashes } from './stash.js'
 import { cronMatches, masterTimeZone, parseCron } from './triggers.js'
+import { resolveSecrets } from '../pipeline/variants.js'
+import { storedVariants } from './secrets.js'
 
 type Row = Record<string, unknown>
 
@@ -212,6 +214,11 @@ interface Fit {
   developerDir?: string
   /** The checklist item that keeps the stage off this node for now. */
   blocked?: string
+}
+
+/** A stage's build configs; graphs recorded before stages had them have none. */
+export function stageConfigs(stage: GraphStage): string[] {
+  return (stage as { configs?: string[] }).configs ?? []
 }
 
 const noTools = { node: [], rust: [], java: [], android: [] }
@@ -687,10 +694,10 @@ export class Scheduler {
             .filter((app) => app.apple != null)
             .map((app) => [app.bundleId, app.apple!.bundleIds]),
         ),
-        secrets: [
-          ...project.env.map((entry) => entry.name),
-          ...project.files.map((file) => file.env ?? file.destination),
-        ],
+        secrets: project.secrets.map((variant) => ({
+          name: variant.name,
+          configs: variant.configs,
+        })),
       })
       // A discovery's graph is never run, so its schemes are not declared.
       if (!discover)
@@ -1498,38 +1505,47 @@ export class Scheduler {
     env: Record<string, string>
     inject: NonNullable<StageAssignment['inject']>
   } {
-    const stored = this.options.projects.secrets(project.id)
-    if (stage.kind === 'script')
+    const stored = storedVariants(this.options.projects.master.db, project.id)
+    if (stage.kind === 'script') {
+      // Script stages have no configs: they take every default variant, values
+      // as environment and files injected at their destination, as before.
+      const defaults = stored.filter((variant) => variant.configs.length === 0)
+      const values = defaults.filter((variant) => variant.kind === 'value')
       return {
         env: Object.fromEntries(
-          stored.env
-            .filter((entry) => !entry.secret)
-            .map((entry) => [entry.name, entry.value]),
+          values
+            .filter((variant) => !variant.masked)
+            .map((variant) => [variant.name, variant.contents]),
         ),
         secrets: Object.fromEntries(
-          stored.env
-            .filter((entry) => entry.secret)
-            .map((entry) => [entry.name, entry.value]),
+          values
+            .filter((variant) => variant.masked)
+            .map((variant) => [variant.name, variant.contents]),
         ),
         files: {},
-        inject: stored.files.map((file) => ({
-          destination: file.destination,
-          contents: file.contents,
-          ...(file.env == null ? {} : { env: file.env }),
-        })),
+        inject: defaults
+          .filter((variant) => variant.kind === 'file')
+          .map((variant) => ({
+            destination: variant.destination ?? variant.name,
+            contents: variant.contents,
+            ...(variant.pathEnv == null ? {} : { env: variant.pathEnv }),
+          })),
       }
-    const declared = new Set(stage.secrets)
+    }
+    const resolved = [
+      ...resolveSecrets(stored, stage.secrets, stageConfigs(stage)).values(),
+    ]
     return {
       env: {},
       secrets: Object.fromEntries(
-        stored.env
-          .filter((entry) => declared.has(entry.name))
-          .map((entry) => [entry.name, entry.value]),
+        resolved
+          .filter((variant) => variant.kind === 'value')
+          .map((variant) => [variant.name, variant.contents]),
       ),
       files: Object.fromEntries(
-        stored.files
-          .filter((file) => declared.has(file.env ?? file.destination))
-          .map((file) => [file.env ?? file.destination, file.contents]),
+        resolved
+          .filter((variant) => variant.kind === 'file')
+          .map((variant) => [variant.name, variant.contents]),
       ),
       inject: [],
     }

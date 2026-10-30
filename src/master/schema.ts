@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 17
+export const MASTER_SCHEMA = 18
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -448,6 +448,116 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     const columns = db.prepare('PRAGMA table_info(backup_runs)').all()
     if (!columns.some((column) => column.name === 'auth'))
       db.exec('ALTER TABLE backup_runs ADD COLUMN auth TEXT')
+  },
+  // 18: secrets become variants (values or files, each limited to build
+  // configs), with an audit of every view and change.
+  (db): void => {
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS project_secrets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('value','file')),
+      configs TEXT NOT NULL DEFAULT '', contents TEXT NOT NULL,
+      text INTEGER NOT NULL CHECK(text IN (0,1)),
+      masked INTEGER NOT NULL DEFAULT 1 CHECK(masked IN (0,1)),
+      path_env TEXT, destination TEXT, bytes INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      UNIQUE(project_id, name, configs)
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS secret_audit (
+      id INTEGER PRIMARY KEY,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, configs TEXT NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('viewed','added','edited','replaced','deleted','configs changed','refused')),
+      account_id INTEGER REFERENCES accounts(id), key_id TEXT, via TEXT NOT NULL,
+      address TEXT NOT NULL, at INTEGER NOT NULL, detail TEXT
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS secret_audit_project ON secret_audit(project_id, id);`)
+    const legacy = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='project_env'",
+      )
+      .get()
+    if (legacy == null) return
+    // This step keeps its own copy of the legacy mapping (secrets.ts
+    // legacyRows does the same for mason import): a migration must do what it
+    // did when it shipped, whatever later changes make to the live code.
+    const now = Date.now()
+    const insert = db.prepare(
+      "INSERT INTO project_secrets(project_id,name,kind,configs,contents,text,masked,path_env,destination,bytes,updated_at) VALUES(?,?,?,'',?,?,?,?,?,?,?)",
+    )
+    for (const project of db.prepare('SELECT id,format FROM projects').all()) {
+      const id = Number(project.id)
+      // Values keep their names. A pipeline file is named by its variable,
+      // else its destination, as stages declared it; a script file by its
+      // destination, which it keeps to be injected at. A name that is not a
+      // safe relative path has its other characters replaced, and a taken
+      // name falls back to the destination, then gains .file until free.
+      const taken = new Set<string>()
+      for (const row of db
+        .prepare(
+          'SELECT name,value,secret FROM project_env WHERE project_id=? ORDER BY name',
+        )
+        .all(id)) {
+        taken.add(String(row.name))
+        insert.run(
+          id,
+          String(row.name),
+          'value',
+          String(row.value),
+          1,
+          row.secret === 1 ? 1 : 0,
+          null,
+          null,
+          Buffer.byteLength(String(row.value)),
+          now,
+        )
+      }
+      const safe = (name: string): string =>
+        name
+          .split('/')
+          .map((part) =>
+            part.toLowerCase() === '.git'
+              ? '_git'
+              : part === '.' || part === '..' || part === ''
+                ? '_'
+                : part.replace(/[^A-Za-z0-9_.-]/g, '_'),
+          )
+          .join('/')
+      for (const row of db
+        .prepare(
+          'SELECT destination,contents,env FROM project_files WHERE project_id=? ORDER BY env IS NULL, destination',
+        )
+        .all(id)) {
+        const destination = String(row.destination)
+        const env = row.env == null ? null : String(row.env)
+        let name = safe(
+          project.format === 'script' ? destination : (env ?? destination),
+        )
+        if (taken.has(name)) name = safe(destination)
+        while (taken.has(name)) name += '.file'
+        taken.add(name)
+        const bytes = Buffer.from(String(row.contents), 'base64')
+        let text = !bytes.includes(0)
+        try {
+          new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+        } catch {
+          text = false
+        }
+        insert.run(
+          id,
+          name,
+          'file',
+          String(row.contents),
+          text ? 1 : 0,
+          1,
+          env,
+          project.format === 'script' ? destination : null,
+          bytes.length,
+          now,
+        )
+      }
+    }
+    db.exec('DROP TABLE project_env; DROP TABLE project_files;')
   },
 ]
 

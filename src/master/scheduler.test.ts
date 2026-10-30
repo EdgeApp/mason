@@ -15,6 +15,8 @@ import { Journal } from '../worker/journal.js'
 import { WorkerRuntime } from '../worker/stage.js'
 import { cronMatches, parseCron } from './triggers.js'
 import { localOperator } from './roles.js'
+import { seedLegacySecrets } from '../test/secrets.js'
+import type { LegacySecrets } from './secrets.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -72,6 +74,9 @@ describe('Scheduler, workers and stashes', function () {
   ): Promise<string> {
     const repo = c.repo(`fixtures/${slug}`)
     const commit = repo.commit(files)
+    const { secrets, ...rest } = extra as {
+      secrets?: Partial<LegacySecrets>
+    }
     c.master.master!.saveProject({ role: 'admin', label: 'test' }, slug, {
       repository: repo.url,
       format: 'pipeline',
@@ -82,8 +87,10 @@ describe('Scheduler, workers and stashes', function () {
       apps: [
         { bundleId: `app.example.${slug}`, name: slug, platforms: ['ios'] },
       ],
-      ...extra,
+      ...rest,
     })
+    if (secrets != null)
+      seedLegacySecrets(c.master.master!.database.db, slug, secrets)
     return commit
   }
 
@@ -1869,19 +1876,19 @@ if (e.MASON_BRANCH === 'feature/fail') process.exit(3)
         { pattern: 'master', mode: 'request' },
         { pattern: 'feature/**', mode: 'request' },
       ],
-      secrets: {
-        env: [
-          { name: 'PLAIN', value: 'visible', secret: false },
-          { name: 'SCRIPT_SECRET', value: 'shh-secret-value', secret: true },
-        ],
-        files: [
-          {
-            destination: 'config/app.json',
-            contents: Buffer.from('{"k":1}').toString('base64'),
-            env: 'CONFIG_FILE',
-          },
-        ],
-      },
+    })
+    seedLegacySecrets(c.master.master!.database.db, 'script', {
+      env: [
+        { name: 'PLAIN', value: 'visible', secret: false },
+        { name: 'SCRIPT_SECRET', value: 'shh-secret-value', secret: true },
+      ],
+      files: [
+        {
+          destination: 'config/app.json',
+          contents: Buffer.from('{"k":1}').toString('base64'),
+          env: 'CONFIG_FILE',
+        },
+      ],
     })
     const created = await c.api('POST', '/api/jobs', {
       app: 'script',

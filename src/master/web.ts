@@ -17,6 +17,7 @@ import { projectsApi } from './projectsApi.js'
 import { wizardApi } from './wizard.js'
 import { runsApi } from './runsApi.js'
 import type { Master } from './runtime.js'
+import { secretsApi } from './secretsApi.js'
 
 export interface MasterWebContext extends WebAppContext {
   configured: () => boolean
@@ -57,6 +58,8 @@ export function masterApp(context: MasterWebContext): express.Express {
   app.use(storageApi(master, master.spacesOptions))
   app.use(cloudApi(master))
   app.use(appleApi(master))
+  // Before the wizard's and the projects' routes: its larger body limit parses first.
+  app.use(secretsApi(master))
   app.use(wizardApi(master))
   app.use(projectsApi(master))
   app.use(runsApi(master))

@@ -29,6 +29,7 @@ import {
   DEFAULT_PASSWORD_COSTS,
 } from '../auth/passwordProtocol.js'
 import { xcodeRoutes } from './web.js'
+import { seedLegacySecrets } from '../test/secrets.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -53,8 +54,14 @@ const secrets = (c: Cluster): string[] => {
     )
     .all())
     values.push(String(row.webhook_secret))
-  for (const row of db.prepare('SELECT value FROM project_env').all())
-    values.push(String(row.value))
+  for (const row of db
+    .prepare('SELECT kind,contents FROM project_secrets')
+    .all())
+    values.push(
+      row.kind === 'file'
+        ? Buffer.from(String(row.contents), 'base64').toString()
+        : String(row.contents),
+    )
   for (const row of db
     .prepare('SELECT password FROM accounts WHERE password IS NOT NULL')
     .all())
@@ -223,10 +230,9 @@ describe('Host cache, sign-in and offline serving', function () {
         { pattern: 'develop', mode: 'automatic' },
         { pattern: 'feature/*', mode: 'request' },
       ],
-      secrets: {
-        env: [{ name: 'API_TOKEN', value: 'env-secret-value' }],
-        files: [],
-      },
+    })
+    seedLegacySecrets(master.database.db, 'edge', {
+      env: [{ name: 'API_TOKEN', value: 'env-secret-value', secret: true }],
     })
     master.database.db.exec(
       "INSERT INTO project_apps(app_id,project_id) SELECT 1,id FROM projects WHERE slug='edge'",

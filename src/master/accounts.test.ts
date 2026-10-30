@@ -23,6 +23,7 @@ import { asForwardRequest, isRunAction } from './forward.js'
 import { policy, type Action } from './permissions.js'
 import { localOperator, roles, type Role } from './roles.js'
 import { masterApp } from './web.js'
+import { seedSecret } from '../test/secrets.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1102,7 +1103,14 @@ describe('Master sign-in, setup, people and permissions', function () {
       'DELETE /api/v2/projects/:slug': 'projects.change',
       'POST /api/v2/projects/:slug/apps': 'projects.change',
       'DELETE /api/v2/projects/:slug/apps/:bundleId': 'projects.change',
-      'PUT /api/v2/projects/:slug/secrets': 'secrets.change',
+      'GET /api/v2/projects/:slug/secrets': 'projects.read',
+      'GET /api/v2/projects/:slug/secrets/audit': 'secrets.read',
+      'GET /api/v2/projects/:slug/secrets/:id': 'secrets.read',
+      'POST /api/v2/projects/:slug/secrets': 'secrets.change',
+      'PUT /api/v2/projects/:slug/secrets/:id': 'secrets.change',
+      'PUT /api/v2/projects/:slug/secrets/:id/file': 'secrets.change',
+      'PUT /api/v2/projects/:slug/secrets/:id/configs': 'secrets.change',
+      'DELETE /api/v2/projects/:slug/secrets/:id': 'secrets.change',
       'PUT /api/v2/projects/:slug/rules': 'projects.change',
       'POST /api/v2/build-numbers/seed': 'buildNumbers.seed',
       'POST /api/jobs': 'runs.request',
@@ -1473,6 +1481,62 @@ export async function one(ctx: Stage) { return 1 }
         503,
       )
     })
+  })
+
+  it('U18.12 a secret viewed through the host is audited with the client address the host saw, and the host keeps its own body limit', async () => {
+    master().saveProject(admin, 'forward-secrets', {
+      repository: 'https://github.com/a/forward-secrets',
+    })
+    const id = seedSecret(master().database.db, 'forward-secrets', {
+      name: 'HOST_TOKEN',
+      kind: 'value',
+      value: 'host-token-value',
+    })
+    const managerKey = master().keys.create(admin, { role: 'manager' }).token
+    const seen = await request(
+      host,
+      'GET',
+      `/api/v2/projects/forward-secrets/secrets/${id}`,
+      { bearer: managerKey },
+    )
+    assert.equal(seen.status, 200, seen.text)
+    assert.deepEqual(seen.json, { value: 'host-token-value' })
+    const last = (): { address: string } =>
+      master()
+        .database.db.prepare(
+          'SELECT address FROM secret_audit ORDER BY id DESC LIMIT 1',
+        )
+        .get() as { address: string }
+    assert.equal(last().address, '127.0.0.1 via host')
+    // A direct client cannot claim an address: the header counts only on the API socket.
+    const direct = await pinnedFetch(
+      c.master.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') +
+        `/api/v2/projects/forward-secrets/secrets/${id}`,
+      {
+        headers: {
+          authorization: `Bearer ${managerKey}`,
+          'x-mason-forwarded-for': '10.9.9.9',
+        },
+      },
+      c.master.identity.pin,
+    )
+    assert.equal(direct.status, 200)
+    assert.equal(last().address, '127.0.0.1')
+    // Through a host a body is at most 512 KB: a larger file goes to the master directly.
+    const large = await request(
+      host,
+      'POST',
+      '/api/v2/projects/forward-secrets/secrets',
+      {
+        bearer: managerKey,
+        body: {
+          name: 'large.bin',
+          kind: 'file',
+          contents: Buffer.alloc(600 * 1024).toString('base64'),
+        },
+      },
+    )
+    assert.equal(large.status, 413)
   })
 
   it('U13.5 forwarded requests are limited to the API paths and the four run actions', () => {

@@ -153,8 +153,8 @@ describe('Master database, setup and import', function () {
       'api_keys',
       'projects',
       'project_apps',
-      'project_env',
-      'project_files',
+      'project_secrets',
+      'secret_audit',
       'branch_rules',
       'settings',
       'change_log',
@@ -249,6 +249,72 @@ describe('Master database, setup and import', function () {
       { commit_sha: 'c', auth: null },
     )
     db.exec("UPDATE backup_runs SET auth='github'")
+    db.close()
+  })
+
+  it('U18.10 schema 18 turns project_env and project_files into default variants and drops them', () => {
+    const db = new DatabaseSync(path.join(root, 'variants.sqlite'))
+    migrateMaster(db)
+    const b64 = (text: string): string => Buffer.from(text).toString('base64')
+    db.exec(`
+    CREATE TABLE project_env (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, value TEXT NOT NULL, secret INTEGER NOT NULL DEFAULT 1 CHECK(secret IN (0,1)),
+      PRIMARY KEY(project_id, name)
+    ) STRICT;
+    CREATE TABLE project_files (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      destination TEXT NOT NULL, contents TEXT NOT NULL, env TEXT,
+      PRIMARY KEY(project_id, destination)
+    ) STRICT;
+    INSERT INTO projects(id,slug,name,repository,format,timeout_seconds,created_at)
+      VALUES(1,'pipe','Pipe','https://github.com/a/pipe','pipeline',60,0),
+            (2,'scr','Scr','https://github.com/a/scr','script',60,0);
+    INSERT INTO project_env VALUES(1,'API_TOKEN','tok',1),(2,'CONFIG','v',1),(2,'PLAIN','p',0);
+    INSERT INTO project_files VALUES
+      (1,'master/config.json','${b64('{"a":1}')}',NULL),
+      (1,'keystore.jks','${Buffer.from([0, 255]).toString('base64')}','ANDROID_KEYSTORE'),
+      (1,'API_TOKEN','${b64('x')}',NULL),
+      (1,'X.file','${b64('y')}',NULL),
+      (1,'a.json','${b64('{}')}','X'),
+      (1,'X','${b64('z')}',NULL),
+      (1,'me@x.json','${b64('{}')}',NULL),
+      (1,'.git/hooks','${Buffer.from([0, 1]).toString('base64')}',NULL),
+      (2,'CONFIG','${b64('{}')}','CONFIG_FILE');
+    UPDATE meta SET value='17' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      db
+        .prepare(
+          'SELECT project_id,name,kind,configs,text,masked,path_env,destination,bytes FROM project_secrets ORDER BY project_id,name',
+        )
+        .all()
+        .map((row) => Object.values(row)),
+      [
+        [1, 'ANDROID_KEYSTORE', 'file', '', 0, 1, 'ANDROID_KEYSTORE', null, 2],
+        [1, 'API_TOKEN', 'value', '', 1, 1, null, null, 3],
+        [1, 'API_TOKEN.file', 'file', '', 1, 1, null, null, 1],
+        // Files with a variable first: a.json takes X, so the file named X gains .file,
+        // past X.file, which a file already holds.
+        [1, 'X', 'file', '', 1, 1, 'X', null, 2],
+        [1, 'X.file', 'file', '', 1, 1, null, null, 1],
+        [1, 'X.file.file', 'file', '', 1, 1, null, null, 1],
+        [1, '_git/hooks', 'file', '', 0, 1, null, null, 2],
+        [1, 'master/config.json', 'file', '', 1, 1, null, null, 7],
+        [1, 'me_x.json', 'file', '', 1, 1, null, null, 2],
+        [2, 'CONFIG', 'value', '', 1, 1, null, null, 1],
+        [2, 'CONFIG.file', 'file', '', 1, 1, 'CONFIG_FILE', 'CONFIG', 2],
+        [2, 'PLAIN', 'value', '', 1, 0, null, null, 1],
+      ],
+    )
+    assert.equal(
+      db
+        .prepare(
+          "SELECT COUNT(*) n FROM sqlite_master WHERE name IN ('project_env','project_files')",
+        )
+        .get()!.n,
+      0,
+    )
     db.close()
   })
 
@@ -421,26 +487,31 @@ describe('Master database, setup and import', function () {
         { workspace: 'git-worktrees', platforms: ['ios', 'android'] },
       ],
     )
+    // The app's environment and files become the script project's default variants.
     assert.deepEqual(
       db
         .prepare(
-          'SELECT name,value,secret FROM project_env WHERE project_id=? ORDER BY name',
+          "SELECT name,contents,masked FROM project_secrets WHERE project_id=? AND kind='value' ORDER BY name",
         )
         .all(project.id as number)
-        .map((row) => [row.name, row.value, row.secret]),
+        .map((row) => [row.name, row.contents, row.masked]),
       [
         ['APP_SERVER_URL', 'https://example.test', 0],
         ['SIGNING_TOKEN', 'tok=en/+value', 1],
       ],
     )
     const file = db
-      .prepare('SELECT * FROM project_files WHERE project_id=?')
+      .prepare(
+        "SELECT * FROM project_secrets WHERE project_id=? AND kind='file'",
+      )
       .get(project.id as number)!
     assert.equal(
       Buffer.from(String(file.contents), 'base64').toString(),
       '{"secret":1}',
     )
-    assert.equal(file.env, 'DEPLOY_CONFIG_FILE')
+    assert.equal(file.path_env, 'DEPLOY_CONFIG_FILE')
+    assert.equal(file.destination, file.name)
+    assert.equal(file.configs, '')
     assert.deepEqual(
       db
         .prepare(
