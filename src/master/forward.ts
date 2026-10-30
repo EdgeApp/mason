@@ -21,6 +21,13 @@ const RUN_ACTIONS = [
   /^\/api\/v2\/runs\/[^/]+\/(cancel|restart|approve)$/,
 ]
 const MAX_BODY = 512 * 1024
+/** Where a request came from: its socket's address, without the IPv4-mapped prefix. */
+export function clientAddress(req: Request): string {
+  return (req.ip ?? req.socket.remoteAddress ?? '').replace(/^::ffff:/, '')
+}
+
+/** The header that carries a forwarded request's client address; believed only on the API socket. */
+export const FORWARDED_FOR = 'x-mason-forwarded-for'
 
 /** A request the host forwards over its link. */
 export interface ForwardRequest {
@@ -33,6 +40,8 @@ export interface ForwardRequest {
   body?: string
   /** A host session's account and the permission version it was made under. */
   account?: { id: number; permissionVersion: number }
+  /** The address the host's client connected from, for the master's audit. */
+  address?: string
 }
 
 export function asForwardRequest(value: unknown): ForwardRequest {
@@ -72,12 +81,14 @@ export function asForwardRequest(value: unknown): ForwardRequest {
     throw new Error('Invalid account')
   const authorization = text('authorization', 512)
   const contentType = text('contentType', 200)
+  const address = text('address', 100)
   return {
     method,
     path: target,
     ...(authorization == null ? {} : { authorization }),
     ...(contentType == null ? {} : { contentType }),
     ...(body == null ? {} : { body }),
+    ...(address == null ? {} : { address }),
     ...(account == null
       ? {}
       : {
@@ -201,6 +212,7 @@ export class Forwarder {
       if (request.contentType != null)
         headers['content-type'] = request.contentType
       if (body != null) headers['content-length'] = String(body.length)
+      if (request.address != null) headers[FORWARDED_FOR] = request.address
       if (request.account != null) {
         headers[INTERNAL] = this.secret
         headers[ACCOUNT] = String(request.account.id)

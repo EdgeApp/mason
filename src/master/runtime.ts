@@ -87,6 +87,7 @@ import {
 import { StorageLocations } from './storageLocations.js'
 import { Artifacts } from './artifacts.js'
 import type { Graph } from '../pipeline/graph.js'
+import { Secrets } from './secrets.js'
 
 const sshUtils = ssh2.utils
 
@@ -251,6 +252,8 @@ export class Master {
   readonly artifacts: Artifacts
   readonly storageLocations: StorageLocations
   readonly backups: Backups
+  /** Project secrets: variants, their audit, and changes gated on a pushed backup. */
+  readonly secrets: Secrets
   private expiry: NodeJS.Timeout | undefined
   private backupTimer: NodeJS.Timeout | undefined
   private stopped = false
@@ -501,6 +504,7 @@ export class Master {
         ? {}
         : { attempts: options.backupAttempts }),
     })
+    this.secrets = new Secrets(this.database, this.backups)
     this.settings.register('backup', {
       ...backupArea,
       changed: (): void => {
@@ -815,8 +819,9 @@ export class Master {
   }
 
   /**
-   * Saves a project from one document: its fields, and optionally `apps`,
-   * `rules` and `secrets`, as `mason projects set` sends it.
+   * Saves a project from one document: its fields, and optionally `apps`
+   * and `rules`, as `mason projects set` sends it. Secrets are not part of
+   * it: each variant is its own change, backed up before it is saved.
    */
   saveProject(
     actor: typeof localOperator,
@@ -828,10 +833,13 @@ export class Master {
       rules?: unknown
       secrets?: unknown
     }
+    if (secrets != null)
+      throw new Error(
+        "Set secrets one variant at a time: the project's Secrets tab or /api/v2/projects/:slug/secrets",
+      )
     this.projects.save(actor, slug, fields)
     for (const app of apps ?? []) this.projects.addApp(actor, slug, app)
     if (rules != null) this.projects.setRules(actor, slug, rules)
-    if (secrets != null) this.projects.setSecrets(actor, slug, secrets)
     return this.projects.get(slug)
   }
 

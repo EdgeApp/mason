@@ -6,6 +6,7 @@ import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
 import { MASTER_SESSION_COOKIE, SetupGate, SignInRefused } from './auth.js'
 import { Forbidden } from './roles.js'
 import type { Master } from './runtime.js'
+import { clientAddress } from './forward.js'
 
 const cookieOptions = (expires: number): express.CookieOptions => ({
   httpOnly: true,
@@ -28,9 +29,6 @@ const errors: express.ErrorRequestHandler = (error, req, res, next) => {
     return apiErrors(new NotFound(error.message), req, res, next)
   apiErrors(error, req, res, next)
 }
-
-const address = (req: express.Request): string =>
-  (req.ip ?? req.socket.remoteAddress ?? '').replace(/^::ffff:/, '')
 
 /**
  * Master sign-in (`/api/v2/session`), first-run setup (`/api/setup`, gated
@@ -92,7 +90,7 @@ export function accountsApi(
       options.onConfigured?.()
       const { token, session } = master.auth.start(
         created.accountId,
-        address(req),
+        clientAddress(req),
       )
       signedIn(res, token, session.expiresAt)
       res.status(201)
@@ -139,7 +137,7 @@ export function accountsApi(
     json(async (req, res) => {
       const { token, session } = await master.auth.signIn(
         req.body,
-        address(req),
+        clientAddress(req),
       )
       signedIn(res, token, session.expiresAt)
       return { name: session.name, role: session.role, csrf: session.csrf }

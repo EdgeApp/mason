@@ -1584,11 +1584,8 @@ export function projectView(data: {
     apple?: { team: string }
   }>
   rules: Array<{ pattern: string; mode: string }>
-  env: Array<{ name: string; secret: boolean }>
-  files: Array<{ destination: string; env?: string }>
   webhook: boolean
   signingLabel?: string
-  canChangeSecrets: boolean
   buildNumbers: Array<{
     key: string
     format: string
@@ -1597,14 +1594,7 @@ export function projectView(data: {
   }>
   canSeed: boolean
 }): string {
-  const keep = {
-    env: data.env.map((entry) => ({ name: entry.name, keep: true })),
-    files: data.files.map((file) => ({
-      destination: file.destination,
-      keep: true,
-    })),
-  }
-  return `${head(data.name, data.repository, ['Projects', data.slug])}<p><a href="/?project=${encodeURIComponent(data.slug)}">Runs and builds</a> · <a href="/projects/${encodeURIComponent(data.slug)}/masonfile">Masonfile</a></p><div class="columns"><div><section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
+  return `${head(data.name, data.repository, ['Projects', data.slug])}<p><a href="/?project=${encodeURIComponent(data.slug)}">Runs and builds</a> · <a href="/projects/${encodeURIComponent(data.slug)}/masonfile">Masonfile</a></p><section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
     data.apps
       .map(
         (app) =>
@@ -1618,32 +1608,7 @@ export function projectView(data: {
           `<tr><td class="mono">${escape(rule.pattern)}</td><td>${escape(rule.mode)}</td></tr>`,
       )
       .join('') || '<tr><td>No rules: nothing builds.</td></tr>'
-  }</tbody></table><p>Default branch <span class="mono">${escape(data.defaultBranch)}</span> · ${escape(data.format)} Masonfile · webhook ${data.webhook ? 'set' : 'not set'}${data.signingLabel == null ? '' : ` · signs on nodes labelled <span class="mono">${escape(data.signingLabel)}</span>`}</p></section>${buildNumbersPanel(data)}</div><aside><section class="panel"><h2>${icon('key')}Secrets</h2><ul class="plain">${
-    [
-      ...data.env.map(
-        (entry) =>
-          `<li><span class="mono">${escape(entry.name)}</span> <small>${entry.secret ? 'secret' : 'environment'} · set</small></li>`,
-      ),
-      ...data.files.map(
-        (file) =>
-          `<li><span class="mono">${escape(file.env ?? file.destination)}</span> <small>file · set</small></li>`,
-      ),
-    ].join('') || '<li>None.</li>'
-  }</ul>${
-    data.canChangeSecrets
-      ? apiForm(
-          `/api/v2/projects/${data.slug}/secrets`,
-          `<label for="secrets">Secrets (JSON). Stored values are never shown: keep one with {"keep": true}, replace it with a new "value" or "contents".</label><textarea id="secrets" name="value" rows="8" class="mono">${escape(JSON.stringify(keep, null, 2))}</textarea>`,
-          `${icon('lock')} Save secrets`,
-          {
-            method: 'PUT',
-            json: 'value',
-            then: 'reload',
-            className: 'secondary',
-          },
-        )
-      : ''
-  }</section></aside></div>`
+  }</tbody></table><p>Default branch <span class="mono">${escape(data.defaultBranch)}</span> · ${escape(data.format)} Masonfile · webhook ${data.webhook ? 'set' : 'not set'}${data.signingLabel == null ? '' : ` · signs on nodes labelled <span class="mono">${escape(data.signingLabel)}</span>`}</p></section>${buildNumbersPanel(data)}`
 }
 
 /** One cloud account on the Cloud page: its provider, what its last check found, and its actions. */

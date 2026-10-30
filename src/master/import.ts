@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { asDefinition } from '../builder/config.js'
 import type { MasterDatabase } from './database.js'
+import { insertRows, legacyRows } from './secrets.js'
 
 export interface ImportSummary {
   accounts: number
@@ -264,14 +265,16 @@ export function importDeployment(
         db.prepare(
           'INSERT INTO project_apps(app_id,project_id) VALUES(?,?)',
         ).run(app, project)
-        for (const env of definition.env)
-          db.prepare(
-            'INSERT INTO project_env(project_id,name,value,secret) VALUES(?,?,?,?)',
-          ).run(project, env.name, env.value, Number(env.secret))
-        for (const file of definition.files)
-          db.prepare(
-            'INSERT INTO project_files(project_id,destination,contents,env) VALUES(?,?,?,?)',
-          ).run(project, file.destination, file.contents, file.env ?? null)
+        // An old Mason app's environment and files, as a script project's default variants.
+        insertRows(
+          db,
+          project,
+          legacyRows('script', {
+            env: definition.env,
+            files: definition.files,
+          }),
+          now,
+        )
         // Automatic branches build on new commits; any other branch can still be requested.
         const automatic = builder
           .prepare(

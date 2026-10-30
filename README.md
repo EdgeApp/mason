@@ -107,6 +107,14 @@ Branch rules are globs, first match wins: `automatic` builds every new
 commit (at most 20 automatic branches per project), `request` builds only
 when someone asks. Deleted branches stop polling; forks never build.
 
+A project's secrets are named values and files, each limited to build
+configs, changed one variant at a time through
+`/api/v2/projects/<slug>/secrets` (a file up to 5 MiB). Every change is
+pushed in an encrypted backup before it is saved, so changing secrets
+needs backups configured; every view and change is audited. A host
+forwards an API request of at most 512 KB, so send a larger file to the
+master directly.
+
 ## Pipelines
 
 A pipeline Masonfile declares workflows of stages, each with the node it

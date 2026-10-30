@@ -914,13 +914,10 @@ export function masterPages(
           pattern: rule.pattern,
           mode: rule.mode,
         })),
-        env: project.env,
-        files: project.files,
         webhook: project.webhookSecret.set,
         ...(project.signingLabel == null
           ? {}
           : { signingLabel: project.signingLabel }),
-        canChangeSecrets: can(actor, 'secrets.change'),
         buildNumbers: master.buildNumbers
           .sequences(project.id)
           .map((sequence) => ({

@@ -24,6 +24,7 @@ import type {
 } from '../../types/mason/index.js'
 import { asScheme, type BuildNumberScheme } from '../master/buildNumbers.js'
 import { matches } from '../master/rules.js'
+import { unresolvedSecret } from './variants.js'
 
 /** The Masonfile API versions this Mason major version runs. */
 export const apiVersions = [1]
@@ -1045,8 +1046,8 @@ export interface ProjectFacts {
   apps: string[]
   /** Bundle IDs each app ID signs (the app and its extensions). */
   signs?: Record<string, string[]>
-  /** Names a stage may declare in `secrets`: environment values and injected files. */
-  secrets: string[]
+  /** The project's secret variants a stage may declare by name, and the configs each is for. */
+  secrets: Array<{ name: string; configs: string[] }>
   /** Known node type names; omitted means any name is accepted. */
   nodeTypes?: string[]
   /**
@@ -1092,11 +1093,15 @@ export function validateGraph(value: unknown, project: ProjectFacts): Graph {
         !project.nodeTypes.includes(stage.on)
       )
         throw new GraphError(`${what} runs on unknown node type ${stage.on}`)
-      for (const secret of stage.secrets)
-        if (!project.secrets.includes(secret))
-          throw new GraphError(
-            `${what} declares secret ${secret}, which the project does not have`,
-          )
+      for (const secret of stage.secrets) {
+        const refused = unresolvedSecret(
+          stage.name,
+          secret,
+          project.secrets,
+          [],
+        )
+        if (refused != null) throw new GraphError(refused)
+      }
       const apps = [
         ...stage.publishes,
         ...(stage.apple?.app == null ? [] : [stage.apple.app]),

@@ -10,6 +10,7 @@ import { cluster, type Cluster } from '../test/cluster.js'
 import { FakeS3 } from '../test/fakeS3.js'
 import { desktop, manifest, zip } from '../upload/fixtures.test.js'
 import { signClaims, verifyClaims, type GrantClaims } from './artifacts.js'
+import { seedLegacySecrets } from '../test/secrets.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -128,13 +129,12 @@ describe('Artifacts and publication', function () {
       apps: [
         { bundleId: APP, name: 'Example', platforms: ['android', 'macos'] },
       ],
-      secrets: {
-        env: [
-          { name: 'FIXTURE_APK', value: apk.toString('base64'), secret: false },
-          { name: 'FIXTURE_DMG', value: dmg.toString('base64'), secret: false },
-        ],
-        files: [],
-      },
+    })
+    seedLegacySecrets(master.database.db, 'ship', {
+      env: [
+        { name: 'FIXTURE_APK', value: apk.toString('base64'), secret: false },
+        { name: 'FIXTURE_DMG', value: dmg.toString('base64'), secret: false },
+      ],
     })
     master.saveProject(admin, 'other', {
       repository: c.repo('fixtures/other').url,

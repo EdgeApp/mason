@@ -85,7 +85,10 @@ function memoryLog(): { write: (text: string) => void; text: () => string } {
 
 const project: ProjectFacts = {
   apps: ['app.example.one'],
-  secrets: ['API_TOKEN', 'SIGNING_KEY'],
+  secrets: [
+    { name: 'API_TOKEN', configs: [] },
+    { name: 'SIGNING_KEY', configs: [] },
+  ],
 }
 
 describe('pipeline graph', () => {
@@ -439,6 +442,12 @@ describe('pipeline graph', () => {
     const secret = copy()
     secret.workflows[0]!.stages[0]!.secrets = ['ROOT_PASSWORD']
     invalid(secret, /secret ROOT_PASSWORD, which the project does not have/)
+    // A secret with variants for some configs only resolves to nothing for a stage without them.
+    invalid(
+      copy(),
+      /secret API_TOKEN, which has no variant for configs \(none\) and no default/,
+      { ...project, secrets: [{ name: 'API_TOKEN', configs: ['develop'] }] },
+    )
     const app = copy()
     app.workflows[0]!.stages[0]!.publishes = ['com.someone.else']
     invalid(app, /app ID com.someone.else, which this project does not own/)
@@ -911,13 +920,7 @@ export async function build(ctx: Stage) {
       new URL('../../test/masonfile-examples/', import.meta.url),
     )
     const shapes: Record<string, string> = {}
-    for (const name of [
-      'eddy',
-      'nightly',
-      'release',
-      'matrix',
-      'app',
-    ]) {
+    for (const name of ['eddy', 'nightly', 'release', 'matrix', 'app']) {
       const dir = root()
       copyFileSync(
         path.join(examples, `${name}.masonfile.ts`),

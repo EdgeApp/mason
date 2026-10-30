@@ -9,6 +9,7 @@ import { cluster, type Cluster } from '../test/cluster.js'
 import { MASTER_SESSION_COOKIE } from './auth.js'
 import { localOperator } from './roles.js'
 import { declaredApps, slugFor } from './wizard.js'
+import { seedSecret } from '../test/secrets.js'
 
 // Rows and replies are read field by field.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -681,17 +682,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     assert.match(managerPeople, /tester person/)
     // A project's page names its secrets and never shows their values.
     const manager2 = signIn('manager')
-    assert.equal(
-      (
-        await request(c.master, 'PUT', '/api/v2/projects/wizard/secrets', {
-          ...manager2,
-          body: {
-            env: [{ name: 'SIGNING_TOKEN', value: 'secret-value-fixture' }],
-          },
-        })
-      ).status,
-      200,
-    )
+    seedSecret(c.master.master!.database.db, 'wizard', {
+      name: 'SIGNING_TOKEN',
+      kind: 'value',
+      value: 'secret-value-fixture',
+    })
     // Build numbers: each sequence and its last number; a manager sets where one stands.
     const wizard = c.master.master!.projects.get('wizard')
     c.master.master!.buildNumbers.declare(wizard.id, 'app.example.ui', {
@@ -718,8 +713,9 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     assert.match(projectPage, /app\.example\.ui<\/td><td class="mono">YYMMDDCC/)
     assert.match(projectPage, /master<\/span> 26102107/)
     assert.match(projectPage, /data-path="\/api\/v2\/build-numbers\/seed"/)
-    assert.match(projectPage, /SIGNING_TOKEN/)
-    assert.match(
+    // Secrets are not on the overview, nor is the JSON form that changed them.
+    assert.doesNotMatch(projectPage, /SIGNING_TOKEN/)
+    assert.doesNotMatch(
       projectPage,
       /data-path="\/api\/v2\/projects\/wizard\/secrets"/,
     )

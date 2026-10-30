@@ -31,6 +31,7 @@ import { MAX_AUTOMATIC_BRANCHES, Poller } from './poller.js'
 import { Projects } from './projects.js'
 import { localOperator, type Actor } from './roles.js'
 import { asRules, globExpression, matches, ruleFor } from './rules.js'
+import { seedLegacySecrets, seedSecret } from '../test/secrets.js'
 
 let root: string
 // API responses are read field by field in assertions.
@@ -342,63 +343,39 @@ describe('Projects, branch rules and build numbers', function () {
     )
   })
 
-  it('keeps secrets write-only, reuses kept values and removes what is left out', () => {
-    const projects = new Projects(database())
+  it('U18.9 a project lists its secret variants by name, kind and configs, never their contents', () => {
+    const master = database()
+    const projects = new Projects(master)
     projects.save(localOperator, 'p', { repository: 'https://github.com/a/b' })
-    const file = Buffer.from('{"k":1}').toString('base64')
-    const set = projects.setSecrets(localOperator, 'p', {
-      env: [
-        { name: 'TOKEN', value: 't0k' },
-        { name: 'SERVER', value: 'https://x', secret: false },
-      ],
-      files: [
-        {
-          destination: 'config/deploy.json',
-          contents: file,
-          env: 'DEPLOY_FILE',
-        },
-      ],
+    seedSecret(master.db, 'p', { name: 'TOKEN', kind: 'value', value: 't0k' })
+    seedSecret(master.db, 'p', {
+      name: 'config.json',
+      kind: 'file',
+      configs: 'develop,beta',
+      contents: Buffer.from('{"k":1}').toString('base64'),
     })
-    assert.deepEqual(set.env, [
-      { name: 'SERVER', secret: false },
-      { name: 'TOKEN', secret: true },
-    ])
-    assert.deepEqual(set.files, [
-      { destination: 'config/deploy.json', env: 'DEPLOY_FILE' },
-    ])
-    assert(!JSON.stringify(set).includes('t0k'))
-    const kept = projects.setSecrets(localOperator, 'p', {
-      env: [{ name: 'TOKEN', keep: true }],
-      files: [{ destination: 'config/deploy.json', keep: true }],
-    })
-    assert.deepEqual(kept.env, [{ name: 'TOKEN', secret: true }])
-    assert.deepEqual(projects.secrets(set.id).env, [
-      { name: 'TOKEN', value: 't0k', secret: true },
-    ])
-    assert.equal(projects.secrets(set.id).files[0]!.contents, file)
-    for (const [value, message] of [
-      [{ env: [{ name: 'NEW', keep: true }] }, /No stored value/],
-      [{ files: [{ destination: 'x.json', keep: true }] }, /No stored file/],
-      [{ env: [{ name: 'A' }] }, /Invalid value/],
-      [{ files: [{ destination: 'y', contents: '***' }] }, /base64/],
+    const listed = projects.get('p').secrets
+    assert.deepEqual(
+      listed.map(({ name, kind, configs, text, bytes }) => ({
+        name,
+        kind,
+        configs,
+        text,
+        bytes,
+      })),
       [
+        { name: 'TOKEN', kind: 'value', configs: [], text: true, bytes: 3 },
         {
-          env: [
-            { name: 'A', value: '1' },
-            { name: 'A', value: '2' },
-          ],
+          name: 'config.json',
+          kind: 'file',
+          configs: ['beta', 'develop'],
+          text: true,
+          bytes: 7,
         },
-        /Duplicate/,
-      ],
-      [{ env: [{ name: 'MASON_X', value: '1' }] }, /Reserved/],
-      [{ files: [{ destination: '../etc', contents: file }] }, /Unsafe/],
-    ] as const)
-      assert.throws(
-        () => projects.setSecrets(localOperator, 'p', value),
-        message,
-      )
-    assert.deepEqual(projects.setSecrets(localOperator, 'p', {}).env, [])
-    assert.throws(() => projects.setSecrets(developer, 'p', {}), /Not allowed/)
+      ].sort((a, b) => (a.name < b.name ? -1 : 1)),
+    )
+    assert(!JSON.stringify(listed).includes('t0k'))
+    assert(!JSON.stringify(listed).includes('contents'))
   })
 
   it('matches branch rules: exact, * within a segment, ** across, first match wins', () => {
@@ -761,7 +738,7 @@ describe('Projects, branch rules and build numbers', function () {
       await api(node, 'PUT', '/api/v2/projects/script/rules', admin, [
         { pattern: '**', mode: 'request' },
       ])
-      await api(node, 'PUT', '/api/v2/projects/script/secrets', admin, {
+      seedLegacySecrets(node.master!.database.db, 'script', {
         files: [
           { destination: 'c.json', contents: 'e30=', env: 'CONFIG_FILE' },
         ],
@@ -1232,13 +1209,27 @@ describe('Projects, branch rules and build numbers', function () {
           .status,
         200,
       )
+      // Secrets are changed one variant at a time, and only with backups configured.
+      const unbacked = await api(
+        node,
+        'POST',
+        '/api/v2/projects/p/secrets',
+        admin,
+        {
+          name: 'X',
+          kind: 'value',
+          value: '1',
+        },
+      )
+      assert.equal(unbacked.status, 409)
+      assert.match(
+        unbacked.json.error,
+        /Configure backups before changing secrets/,
+      )
       assert.equal(
-        (
-          await api(node, 'PUT', '/api/v2/projects/p/secrets', admin, {
-            env: [{ name: 'X', value: '1' }],
-          })
-        ).json.env.length,
-        1,
+        (await api(node, 'PUT', '/api/v2/projects/p/secrets', admin, {}))
+          .status,
+        404,
       )
       assert.equal(
         (
@@ -1273,7 +1264,6 @@ describe('Projects, branch rules and build numbers', function () {
         'project.app',
         'project.create',
         'project.app.remove',
-        'project.secrets',
         'project.rules',
         'project.remove',
       ])
@@ -1286,8 +1276,25 @@ describe('Projects, branch rules and build numbers', function () {
           format: 'script',
           apps: [{ bundleId: 'c.d', name: 'C', platforms: ['android'] }],
           rules: [{ pattern: 'master', mode: 'automatic' }],
-          secrets: { env: [{ name: 'TOKEN', value: 'x' }] },
         }),
+      )
+      // A project document cannot carry secrets: each variant is its own backed-up change.
+      const withSecrets = path.join(root, 'secrets.json')
+      writeFileSync(
+        withSecrets,
+        JSON.stringify({ secrets: { env: [{ name: 'TOKEN', value: 'x' }] } }),
+      )
+      const refused = io()
+      assert.notEqual(
+        await nodeMain(
+          ['projects', 'set', 'cli', '--file', withSecrets, '--data', node.dir],
+          refused,
+        ),
+        0,
+      )
+      assert.match(
+        refused.errors.join('\n'),
+        /Set secrets one variant at a time/,
       )
       const set = io()
       assert.equal(
@@ -1316,7 +1323,7 @@ describe('Projects, branch rules and build numbers', function () {
         await nodeMain(['projects', 'get', 'cli', '--data', node.dir], got),
         0,
       )
-      assert.equal(JSON.parse(got.lines.join('\n')).env[0].name, 'TOKEN')
+      assert.deepEqual(JSON.parse(got.lines.join('\n')).secrets, [])
       assert.equal(
         await nodeMain(['projects', 'remove', 'cli', '--data', node.dir], io()),
         0,
