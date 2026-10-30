@@ -87,6 +87,7 @@ export class HostRuntime {
       link: (): Link | undefined => this.options.link(),
       online: (): boolean => this.online(),
       masterKey: (): KeyObject | undefined => this.options.masterKey?.(),
+      log: (line): void => this.options.log?.(line),
     })
     this.webhooks = new Webhooks({
       db: this.cache.db,

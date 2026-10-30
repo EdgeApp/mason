@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { createHash, createHmac } from 'node:crypto'
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -29,9 +30,11 @@ import {
   DEFAULT_PASSWORD_COSTS,
 } from '../auth/passwordProtocol.js'
 import { xcodeRoutes } from './web.js'
-import { seedLegacySecrets } from '../test/secrets.js'
 import { HostRuntime } from './runtime.js'
 import { DatabaseSync } from 'node:sqlite'
+import { LinkError, type Link } from '../link/link.js'
+import { Outbox } from './outbox.js'
+import { seedLegacySecrets } from '../test/secrets.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -185,6 +188,111 @@ describe('Host Xcode mirror', () => {
     } finally {
       server.close()
     }
+  })
+})
+
+describe('Host staged uploads', () => {
+  it('U12.17 a host’s uploads staged before variants become its default variants', async () => {
+    const dir = mkdtempSync(
+      path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'staged-'),
+    )
+    const first = new HostRuntime({ dir, link: (): undefined => undefined })
+    await first.stop()
+    const old = new DatabaseSync(path.join(dir, 'host-cache.sqlite'))
+    old.exec(`DROP TABLE host_staged;
+    CREATE TABLE host_staged(reservation TEXT PRIMARY KEY, digest TEXT NOT NULL, staged_at INTEGER NOT NULL) STRICT;
+    INSERT INTO host_staged VALUES('${'a'.repeat(32)}','d',1);`)
+    old.close()
+    const again = new HostRuntime({ dir, link: (): undefined => undefined })
+    try {
+      assert.deepEqual(
+        again.cache.db
+          .prepare(
+            'SELECT reservation,variant,digest,staged_at FROM host_staged',
+          )
+          .all()
+          .map((row) => ({ ...row })),
+        [
+          {
+            reservation: 'a'.repeat(32),
+            variant: '',
+            digest: 'd',
+            staged_at: 1,
+          },
+        ],
+      )
+    } finally {
+      await again.stop()
+    }
+  })
+})
+
+describe('Host outbox', () => {
+  it('sets a refused message aside with its code, and a listener that throws stops nothing', async () => {
+    const lines: string[] = []
+    const outbox = new Outbox(new DatabaseSync(':memory:'), Date.now, (line) =>
+      lines.push(line),
+    )
+    const heard: Array<[string, string, string]> = []
+    outbox.onSetAside(() => {
+      throw new Error('cannot undo')
+    })
+    outbox.onSetAside((kind, payload, code) =>
+      heard.push([kind, payload, code]),
+    )
+    const link = {
+      closed: false,
+      request: async (): Promise<never> =>
+        await Promise.reject(new LinkError('Unknown reservation', 'refused')),
+    } as unknown as Link
+    const id = outbox.enqueue('artifact', { action: 'staged' })
+    for (let attempt = 0; attempt < 3; attempt++) await outbox.flush(link)
+    assert.deepEqual(
+      outbox.refused().map((entry) => entry.id),
+      [id],
+    )
+    assert.deepEqual(heard, [
+      ['artifact', JSON.stringify({ action: 'staged' }), 'refused'],
+    ])
+    assert(
+      lines.some((line) =>
+        line.startsWith(
+          `Undoing the artifact message ${id} failed: cannot undo`,
+        ),
+      ),
+      lines.join('\n'),
+    )
+  })
+})
+
+describe('Host outbox failures', () => {
+  it('keeps retrying a message the master fails on, and sets aside one it refuses', async () => {
+    const lines: string[] = []
+    const outbox = new Outbox(new DatabaseSync(':memory:'), Date.now, (line) =>
+      lines.push(line),
+    )
+    let answer = new LinkError('database is locked', 'failed')
+    const link = {
+      closed: false,
+      request: async (): Promise<never> => await Promise.reject(answer),
+    } as unknown as Link
+    const id = outbox.enqueue('artifact', { action: 'staged' })
+    for (let attempt = 0; attempt < 5; attempt++) await outbox.flush(link)
+    assert.deepEqual(outbox.refused(), [])
+    assert.equal(
+      lines.filter((line) =>
+        line.startsWith(
+          `Delivering the artifact message ${id} failed: database is locked; it stays queued`,
+        ),
+      ).length,
+      5,
+    )
+    answer = new LinkError('Unknown reservation', 'refused')
+    await outbox.flush(link)
+    assert.deepEqual(
+      outbox.refused().map((entry) => entry.id),
+      [id],
+    )
   })
 })
 
@@ -1033,6 +1141,21 @@ describe('Host cache, sign-in and offline serving', function () {
       storage,
     })
     assert.deepEqual(summary, { sessions: 1, identities: 1, files: 1 })
+    // A deployment still at schema 7 (no build variants) imports too.
+    const seven = path.join(dir, 'seven.sqlite')
+    copyFileSync(path.join(dir, 'distribution.sqlite'), seven)
+    const sevenDb = new DatabaseSync(seven)
+    // Schema 7's builds table: no variant or run columns.
+    sevenDb.exec(`PRAGMA foreign_keys=OFF;
+      CREATE TABLE builds_v7 AS SELECT id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,deleted_at,changelog,source,custom_fields FROM builds;
+      DROP TABLE builds;
+      ALTER TABLE builds_v7 RENAME TO builds;
+      PRAGMA user_version=7`)
+    sevenDb.close()
+    assert.deepEqual(
+      importHost(path.join(c.root, 'imported-seven'), { distribution: seven }),
+      { sessions: 1, identities: 1, files: 0 },
+    )
     const imported = await c.startHost('imported', {
       hostOptions: { transport: env.transport },
     })

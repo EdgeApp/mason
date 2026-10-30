@@ -27,7 +27,13 @@ import type { StageAssignment } from '../pipeline/assignment.js'
 import { inside } from '../pipeline/context.js'
 import { parseTests, type TestFormat } from '../pipeline/tests.js'
 import { packageIdentity } from '../upload/metadata.js'
-import { asFormat, text, type Format } from '../validation.js'
+import {
+  asFormat,
+  asVariant,
+  outsideBlock,
+  text,
+  type Format,
+} from '../validation.js'
 
 const run = promisify(execFile)
 
@@ -115,6 +121,7 @@ export async function publish(
     checkoutFile(checkoutPath(context.dir, options.path)),
   )
   const format: Format = asFormat(path.extname(file).slice(1).toLowerCase())
+  const variant = asVariant(options.variant)
   const reservation = uploads.reservations.find(
     (entry) => entry.app === options.app && entry.platform === options.platform,
   )
@@ -125,10 +132,26 @@ export async function publish(
   const size = statSync(file).size
   const digest = await sha256(file)
   let version = options.version
-  if (format === 'ipa' || format === 'apk')
-    version = (await packageIdentity(file, format, {})).version
+  // An IPA's or APK's own number is its publication's; a desktop file's is given.
+  let packageNumber: string | undefined
+  if (format === 'ipa' || format === 'apk') {
+    const identity = await packageIdentity(file, format, {})
+    version = identity.version
+    packageNumber = identity.buildNumber
+    if (options.buildNumber != null && options.buildNumber !== packageNumber)
+      throw new Error(
+        `${path.basename(file)} is build ${packageNumber}, not ${options.buildNumber}`,
+      )
+  }
   if (version == null) throw new Error(`A ${format} needs its version`)
-  const buildNumber = options.buildNumber ?? reservation.buildNumber
+  const buildNumber =
+    packageNumber ?? options.buildNumber ?? reservation.buildNumber
+  const outside = outsideBlock(
+    buildNumber,
+    reservation.buildNumber,
+    reservation.block ?? 1,
+  )
+  if (outside != null) throw new Error(outside)
   const changelog: Record<string, string> =
     options.changelog == null
       ? {}
@@ -152,6 +175,7 @@ export async function publish(
       size,
       version,
       buildNumber,
+      variant,
     })
     answer = await upload(
       grant.url,
@@ -173,6 +197,7 @@ export async function publish(
         'X-Mason-Format': format,
         'X-Mason-Version': version,
         'X-Mason-Build-Number': buildNumber,
+        ...(variant === '' ? {} : { 'X-Mason-Variant': variant }),
         ...changelog,
       },
       uploads.pin,
@@ -185,6 +210,7 @@ export async function publish(
         reservation: reservation.id,
         app: options.app,
         platform: options.platform,
+        variant,
         digest,
       }),
     )
@@ -193,6 +219,7 @@ export async function publish(
       url: String(answer.body.url ?? uploads.origin),
       installUrl: String(answer.body.url ?? uploads.origin),
       visible: false,
+      variant,
     }
   }
   if (answer.status !== 201)
@@ -200,13 +227,14 @@ export async function publish(
       `The host refused ${path.basename(file)}: ${String(answer.body.error ?? answer.status)}`,
     )
   context.log(
-    `Published ${options.app} ${version} (${buildNumber}) for ${options.platform}\n`,
+    `Published ${options.app} ${version} (${buildNumber}) for ${options.platform}${variant === '' ? '' : `, variant ${variant}`}\n`,
   )
   return {
     buildId: Number(answer.body.buildId),
     url: String(answer.body.url),
     installUrl: String(answer.body.installUrl),
     visible: answer.body.visible === true,
+    variant,
   }
 }
 

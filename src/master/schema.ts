@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 20
+export const MASTER_SCHEMA = 21
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -575,6 +575,21 @@ const migrations: Array<(db: DatabaseSync) => void> = [
   // 20: the Zealot upload API left the cluster, and its upload keys with it.
   (db): void => {
     db.exec("DELETE FROM api_keys WHERE role='upload'")
+  },
+  // 21: a reservation may publish several variants; each is recorded here.
+  // A staged publication from before has no digest yet; its confirm sets it.
+  // build_reservations.build_id and staged_at stay in the table but are no
+  // longer read or written.
+  (db): void => {
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS build_publications (
+      reservation_id TEXT NOT NULL REFERENCES build_reservations(id) ON DELETE CASCADE,
+      variant TEXT NOT NULL, digest TEXT, build_id INTEGER, staged_at INTEGER,
+      PRIMARY KEY(reservation_id, variant)
+    ) STRICT;
+    INSERT OR IGNORE INTO build_publications(reservation_id,variant,digest,build_id,staged_at)
+      SELECT r.id,'',b.digest,r.build_id,r.staged_at FROM build_reservations r LEFT JOIN builds b ON b.id=r.build_id
+      WHERE r.build_id IS NOT NULL OR r.staged_at IS NOT NULL;`)
   },
 ]
 

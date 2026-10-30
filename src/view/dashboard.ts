@@ -5,6 +5,15 @@ import type { Viewer } from './shell.js'
 
 export const platforms = ['ios', 'android', 'macos', 'windows'] as const
 export type Platform = (typeof platforms)[number]
+/**
+ * Whether builds row `b` stands for its build: a run's variants are one
+ * build, shown as its default variant, or, when the run published only
+ * named ones, its first by name (SQLite's byte order, as the branch page
+ * and the run pages sort them).
+ */
+const leadsItsBuild = (b: string): string =>
+  `(${b}.variant='' OR NOT EXISTS (SELECT 1 FROM builds d WHERE d.run=${b}.run AND d.app_id=${b}.app_id AND d.platform=${b}.platform AND d.state='ready' AND d.deleted_at IS NULL AND (d.variant='' OR d.variant<${b}.variant)))`
+
 const platformNames: Record<Platform, string> = {
   ios: 'iOS',
   android: 'Android',
@@ -141,7 +150,8 @@ export function dashboardData(
     'SELECT DISTINCT platform FROM channels WHERE app_id=? AND enabled=1 ORDER BY platform',
   )
   const buildsOf = db.prepare(
-    "SELECT branch,build_number,published_at FROM builds WHERE app_id=? AND state='ready' AND deleted_at IS NULL AND id IN (SELECT MAX(id) FROM builds WHERE app_id=? AND state='ready' AND deleted_at IS NULL GROUP BY branch) ORDER BY published_at DESC LIMIT 3",
+    // One row per build: a build's other variants never displace it.
+    `SELECT branch,build_number,published_at FROM builds WHERE app_id=? AND state='ready' AND deleted_at IS NULL AND id IN (SELECT MAX(h.id) FROM builds h WHERE h.app_id=? AND h.state='ready' AND h.deleted_at IS NULL AND ${leadsItsBuild('h')} GROUP BY h.branch) ORDER BY published_at DESC LIMIT 3`,
   )
   const runsOf = db.prepare(
     "SELECT id,branch,number,status,workflow,commit_sha,description,created FROM (SELECT *,ROW_NUMBER() OVER (PARTITION BY branch ORDER BY created DESC) AS place FROM jobs WHERE project_id=? AND workflow NOT LIKE '@%') WHERE place=1 ORDER BY created DESC LIMIT 4",
@@ -298,7 +308,7 @@ export function dashboardData(
   const builds = (
     db
       .prepare(
-        "SELECT b.id,b.app_id,a.name,b.platform,b.build_number,b.version,b.branch,b.published_at,b.size FROM builds b JOIN apps a ON a.id=b.app_id WHERE b.state='ready' AND b.deleted_at IS NULL AND a.enabled=1 ORDER BY b.published_at DESC,b.id DESC LIMIT 20",
+        `SELECT b.id,b.app_id,a.name,b.platform,b.build_number,b.version,b.branch,b.published_at,b.size FROM builds b JOIN apps a ON a.id=b.app_id WHERE b.state='ready' AND b.deleted_at IS NULL AND ${leadsItsBuild('b')} AND a.enabled=1 ORDER BY b.published_at DESC,b.id DESC LIMIT 20`,
       )
       .all() as Array<{
       id: number

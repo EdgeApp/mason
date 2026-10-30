@@ -444,6 +444,103 @@ describe('Design system and views', () => {
     assert.deepEqual(phones.apps[0]!.builds, [
       { branch: 'main', buildNumber: '26102011', at: NOW - 29 * HOUR },
     ])
+    // A newer variant never displaces its build as the branch's latest.
+    db.prepare("UPDATE builds SET run='run-1' WHERE id=2").run()
+    db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(43,1,2,'android','main',?,'1.0','26102012','app.example.phone','apk','d43',1000,'f43',?,?,'ready','','pipeline','{}','arm64-v8a','run-1')",
+    ).run('a'.repeat(40), NOW - HOUR, NOW + HOUR)
+    const withVariant = dashboardData({
+      db,
+      viewer: viewer('developer'),
+      now: NOW,
+      appVisible: all,
+      nodes: [],
+      repositories: new Map(),
+    })
+    assert.deepEqual(withVariant.projects[0]!.apps[0]!.builds, [
+      { branch: 'main', buildNumber: '26102011', at: NOW - 29 * HOUR },
+    ])
+    assert(!withVariant.builds.some((build) => build.id === 43))
+    // A run that published only named variants shows as its first by name,
+    // as the branch page heads it, not as the one published first.
+    db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(?,1,2,'android','main',?,'1.0',?,'app.example.phone','apk',?,1000,?,?,?,'ready','','pipeline','{}',?,'run-2')",
+    ).run(
+      44,
+      'b'.repeat(40),
+      '26102013',
+      'd44',
+      'f44',
+      NOW - 30 * 60_000,
+      NOW + HOUR,
+      'macos-arm64',
+    )
+    db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(?,1,2,'android','main',?,'1.0',?,'app.example.phone','apk',?,1000,?,?,?,'ready','','pipeline','{}',?,'run-2')",
+    ).run(
+      45,
+      'b'.repeat(40),
+      '26102014',
+      'd45',
+      'f45',
+      NOW - 30 * 60_000,
+      NOW + HOUR,
+      'linux-x64',
+    )
+    const onlyVariants = dashboardData({
+      db,
+      viewer: viewer('developer'),
+      now: NOW,
+      appVisible: all,
+      nodes: [],
+      repositories: new Map(),
+    })
+    assert.deepEqual(onlyVariants.projects[0]!.apps[0]!.builds, [
+      { branch: 'main', buildNumber: '26102014', at: NOW - 30 * 60_000 },
+    ])
+    assert.deepEqual(
+      onlyVariants.builds
+        .filter((build) => build.id === 44 || build.id === 45)
+        .map((build) => build.id),
+      [45],
+    )
+    // Byte order, not locale order: `Zed` leads `arm`, as on the branch page.
+    db.prepare('DELETE FROM builds WHERE id IN (44,45)').run()
+    const variantRow = db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(?,1,2,'android','main',?,'1.0',?,'app.example.phone','apk',?,1000,?,?,?,'ready','','pipeline','{}',?,'run-3')",
+    )
+    variantRow.run(
+      46,
+      'c'.repeat(40),
+      '26102015',
+      'd46',
+      'f46',
+      NOW - 20 * 60_000,
+      NOW + HOUR,
+      'arm',
+    )
+    variantRow.run(
+      47,
+      'c'.repeat(40),
+      '26102016',
+      'd47',
+      'f47',
+      NOW - 20 * 60_000,
+      NOW + HOUR,
+      'Zed',
+    )
+    const mixedCase = dashboardData({
+      db,
+      viewer: viewer('developer'),
+      now: NOW,
+      appVisible: all,
+      nodes: [],
+      repositories: new Map(),
+    })
+    assert.deepEqual(mixedCase.projects[0]!.apps[0]!.builds, [
+      { branch: 'main', buildNumber: '26102016', at: NOW - 20 * 60_000 },
+    ])
+    db.prepare('DELETE FROM builds WHERE id IN (46,47)').run()
     // The running stage shows its progress against its usual duration; setup and approvals are not queue entries.
     assert.deepEqual(
       data.queue.map((entry) => [
@@ -656,7 +753,35 @@ describe('Design system and views', () => {
       appVisible: (): boolean => true,
       artifactBase: '',
     }
+    // A variant this run published, and a build another run made of the same commit.
+    const variant = db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(?,1,2,'android','main',?,'1.0',?,'app.example.phone','apk',?,1000,?,?,?,'ready','','pipeline','{}',?,?)",
+    )
+    variant.run(
+      41,
+      'a'.repeat(40),
+      '26102013',
+      'd41',
+      'f41',
+      NOW,
+      NOW + HOUR,
+      'arm64-v8a',
+      'run-1',
+    )
+    variant.run(
+      42,
+      'a'.repeat(40),
+      '26102014',
+      'd42',
+      'f42',
+      NOW,
+      NOW + HOUR,
+      '',
+      'run-other',
+    )
     const run = artifactsView(source, { run: 'run-1' })
+    assert.match(run, /Phone 1\.0 \(26102013\) arm64-v8a</)
+    assert.doesNotMatch(run, /26102014/)
     assert.match(run, /<h1>build #1<\/h1>/)
     assert.match(run, /Version 1\.0 \(11\)/)
     assert.match(run, /12 passed/)
@@ -671,7 +796,7 @@ describe('Design system and views', () => {
     const list = artifactsView(source, { project: 'phones', branch: 'main' })
     assert.match(list, /phones · main/)
     assert.match(list, /2 · 1\.5 MB/)
-    assert.match(list, /<td class="mono">26102011 · 2 files<\/td>/)
+    assert.match(list, /<td class="mono">26102011, 26102013 · 3 files<\/td>/)
     assert.doesNotMatch(list, /feature\/login/)
     assert.match(artifactsView(source, { project: 'nothing' }), /No runs yet/)
     const master = artifactsView(

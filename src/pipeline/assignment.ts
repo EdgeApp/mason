@@ -75,6 +75,8 @@ export interface StageAssignment {
       app: string
       platform: string
       buildNumber: string
+      /** The run holds buildNumber to buildNumber+block−1; absent means 1. */
+      block?: number
     }>
   }
 }

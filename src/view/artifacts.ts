@@ -62,7 +62,7 @@ function artifactLinks(source: ArtifactsSource, run: string): string {
     .join('')}</tbody></table>`
 }
 
-/** A run's published builds the viewer may see, by the run's commit and branch. */
+/** A run's published builds the viewer may see; one published before builds named their run is found by its commit and branch. */
 function runBuilds(
   source: ArtifactsSource,
   run: RunRow,
@@ -74,13 +74,14 @@ function runBuilds(
   version: string
   build_number: string
   size: number
+  variant: string
 }> {
   return (
     source.db
       .prepare(
-        "SELECT b.id,b.app_id,a.name,b.platform,b.version,b.build_number,b.size FROM builds b JOIN apps a ON a.id=b.app_id WHERE b.commit_hash=? AND b.branch=? AND b.state='ready' AND b.deleted_at IS NULL ORDER BY b.id",
+        "SELECT b.id,b.app_id,a.name,b.platform,b.version,b.build_number,b.size,b.variant FROM builds b JOIN apps a ON a.id=b.app_id WHERE (b.run=? OR (b.run IS NULL AND b.commit_hash=? AND b.branch=?)) AND b.state='ready' AND b.deleted_at IS NULL ORDER BY b.app_id,b.platform,b.variant<>'',b.variant",
       )
-      .all(run.commit_sha ?? '', run.branch) as Array<{
+      .all(run.id, run.commit_sha ?? '', run.branch) as Array<{
       id: number
       app_id: number
       name: string
@@ -88,6 +89,7 @@ function runBuilds(
       version: string
       build_number: string
       size: number
+      variant: string
     }>
   ).filter((build) => source.appVisible(build.app_id))
 }
@@ -136,7 +138,7 @@ function runDetail(source: ArtifactsSource, run: RunRow): string {
     builds
       .map(
         (build) =>
-          `<li><div><span class="mono">${escape(build.name)} ${escape(build.version)} (${escape(build.build_number)})</span><small>${platformChip(build.platform)} · ${escape(bytes(build.size))}</small></div>${
+          `<li><div><span class="mono">${escape(build.name)} ${escape(build.version)} (${escape(build.build_number)})${build.variant === '' ? '' : ` ${escape(build.variant)}`}</span><small>${platformChip(build.platform)} · ${escape(bytes(build.size))}</small></div>${
             source.viewer.node === 'host'
               ? `<a href="/apps/${build.app_id}">Install</a>`
               : ''

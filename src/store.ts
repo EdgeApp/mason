@@ -29,6 +29,7 @@ import {
   asFileKey,
   asFormat,
   asPublication,
+  fileKeyPattern,
   formats,
   integer,
   type Build,
@@ -383,7 +384,7 @@ export class Store {
           if (
             staging
               ? !/^[a-f0-9]{32}\.part$/.test(name)
-              : !/^[a-f0-9]{32}\.(ipa|apk|dmg|exe|msi)$/.test(name)
+              : !fileKeyPattern.test(name)
           )
             throw new Error('Unexpected storage file')
           const present = staging
@@ -428,31 +429,46 @@ export function cleanBuild(row: unknown): Build {
   return result
 }
 
+/** A publication as callers give it: the default variant and no run unless named. */
+export type PublicationInput = Omit<Publication, 'variant' | 'run'> & {
+  variant?: string
+  run?: string
+}
+
 /**
- * Checks a publication against its channel and the branch's builds: the
- * format must suit the channel and the package its app. An identical earlier
- * publication is returned; any other build of that number or digest on the
- * branch conflicts.
+ * A publication the store refuses for what it is, not for how the store is
+ * doing: the wrong format or app, or another build of its file or number.
+ * The same publication is refused the same way however often it is sent.
+ */
+export class PublicationConflict extends Error {}
+
+/**
+ * Checks a publication against its channel and the branch's builds of its
+ * variant: the format must suit the channel and the package its app. An
+ * identical earlier publication is returned; any other build of that number
+ * or digest in that variant on the branch conflicts. Other variants never do.
  */
 export function checkPublication(
   db: DatabaseSync,
-  input: Publication,
+  input: PublicationInput,
   now: number,
 ): Build | undefined {
+  const variant = input.variant ?? ''
   const channel = asChannel(
     db.prepare('SELECT * FROM channels WHERE id=?').get(input.channelId),
   )
   if (!asArray(asFormat)(JSON.parse(channel.formats)).includes(input.format))
-    throw new Error('Format does not match channel')
+    throw new PublicationConflict('Format does not match channel')
   const app = asApp(
     db.prepare('SELECT * FROM apps WHERE id=?').get(channel.app_id),
   )
-  if (input.bundleId !== app.slug) throw new Error('Package does not match app')
+  if (input.bundleId !== app.slug)
+    throw new PublicationConflict('Package does not match app')
   const prior = db
     .prepare(
-      'SELECT * FROM builds WHERE channel_id=? AND branch=? AND (digest=? OR build_number=?)',
+      'SELECT * FROM builds WHERE channel_id=? AND branch=? AND variant=? AND (digest=? OR build_number=?)',
     )
-    .all(channel.id, input.branch, input.digest, input.buildNumber)
+    .all(channel.id, input.branch, variant, input.digest, input.buildNumber)
     .map(cleanBuild)
   if (prior.length === 0) return undefined
   const match = prior.find(
@@ -467,24 +483,38 @@ export function checkPublication(
     match.expires_at <= now ||
     match.state !== 'ready'
   )
-    throw new Error('Build publication conflict')
+    throw new PublicationConflict('Build publication conflict')
   return match
 }
 
-/** Inserts a `ready` build for a checked publication. */
+/**
+ * Inserts a `ready` build for a checked publication. A variant of a run
+ * whose builds already exist takes their expiry, so a build's variants
+ * expire, and are deleted, together.
+ */
 export function insertBuild(
   db: DatabaseSync,
-  input: Publication,
+  input: PublicationInput,
   fileKey: string,
   options: { now: number; retentionDays: number },
 ): Build {
   const channel = asChannel(
     db.prepare('SELECT * FROM channels WHERE id=?').get(input.channelId),
   )
+  const sibling =
+    input.run == null
+      ? undefined
+      : (db
+          .prepare(
+            "SELECT expires_at FROM builds WHERE app_id=? AND platform=? AND branch=? AND run=? AND state='ready' ORDER BY id LIMIT 1",
+          )
+          .get(channel.app_id, channel.platform, input.branch, input.run) as
+          | { expires_at: number }
+          | undefined)
   const result = db
     .prepare(
-      `INSERT INTO builds(app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ready',?,?,?)`,
+      `INSERT INTO builds(app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ready',?,?,?,?,?)`,
     )
     .run(
       channel.app_id,
@@ -500,10 +530,12 @@ export function insertBuild(
       input.size,
       fileKey,
       options.now,
-      options.now + options.retentionDays * DAY,
+      sibling?.expires_at ?? options.now + options.retentionDays * DAY,
       input.changelog,
       input.source,
       input.customFields,
+      input.variant ?? '',
+      input.run ?? null,
     )
   return cleanBuild(
     db.prepare('SELECT * FROM builds WHERE id=?').get(result.lastInsertRowid),

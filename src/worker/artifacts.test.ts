@@ -6,7 +6,7 @@ import path from 'node:path'
 import { after, before, describe, it } from 'mocha'
 import { LinkError } from '../link/link.js'
 import type { StageAssignment } from '../pipeline/assignment.js'
-import { desktop } from '../upload/fixtures.test.js'
+import { desktop, manifest, zip } from '../upload/fixtures.test.js'
 import {
   checkoutFile,
   checkoutPath,
@@ -120,6 +120,69 @@ describe('Worker artifact calls', function () {
     }
   }
 
+  it('U12.16 publishes a variant with its package’s own number inside the run’s block, and refuses one outside it before uploading', async () => {
+    const reservation = {
+      id: 'b'.repeat(32),
+      app: 'test.example.app',
+      platform: 'android',
+      buildNumber: '100',
+      block: 3,
+    }
+    const ctx = context(
+      {},
+      {
+        token: 'stage-token',
+        origin: host.origin,
+        reservations: [reservation],
+      },
+    )
+    const apk = (code: number): Buffer =>
+      zip([['AndroidManifest.xml', manifest(false, false, code)]])
+    writeFileSync(path.join(ctx.dir, 'arm64.apk'), apk(102))
+    writeFileSync(path.join(ctx.dir, 'past.apk'), apk(103))
+    const uploads = host.headers.length
+    host.replies.push({ status: 202, body: JSON.stringify({ staged: true }) })
+    const result = await publish(ctx, {
+      app: 'test.example.app',
+      platform: 'android',
+      path: 'arm64.apk',
+      variant: 'arm64-v8a',
+    })
+    assert.equal(result.variant, 'arm64-v8a')
+    const sent = host.headers.at(-1)!
+    assert.equal(sent['x-mason-build-number'], '102')
+    assert.equal(sent['x-mason-variant'], 'arm64-v8a')
+    assert.match(ctx.journalled.at(-1)![1], /"variant":"arm64-v8a"/)
+    // Refused before anything is sent: past the block, a mismatched number, a bad name.
+    await assert.rejects(
+      publish(ctx, {
+        app: 'test.example.app',
+        platform: 'android',
+        path: 'past.apk',
+      }),
+      /103 is outside the run's block 100–102/,
+    )
+    await assert.rejects(
+      publish(ctx, {
+        app: 'test.example.app',
+        platform: 'android',
+        path: 'arm64.apk',
+        buildNumber: '101',
+      }),
+      /arm64\.apk is build 102, not 101/,
+    )
+    await assert.rejects(
+      publish(ctx, {
+        app: 'test.example.app',
+        platform: 'android',
+        path: 'arm64.apk',
+        variant: 'not a name',
+      }),
+      /A variant is 1 to 32 letters/,
+    )
+    assert.equal(host.headers.length, uploads + 1)
+  })
+
   it('U12.7 publishes by the stage token while the master is away and journals the staged publication once', async () => {
     const ctx = context()
     writeFileSync(path.join(ctx.dir, 'app.dmg'), desktop('dmg'))
@@ -139,6 +202,7 @@ describe('Worker artifact calls', function () {
       url: 'https://host/',
       installUrl: 'https://host/',
       visible: false,
+      variant: '',
     })
     const sent = host.headers.at(-1)!
     assert.equal(sent['x-mason-token'], 'stage-token')
