@@ -330,6 +330,24 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       } as never),
       [],
     )
+    // A stage that may run on Windows, alone or in a list, publishes for windows.
+    for (const on of [{ os: 'windows' }, ['linux', { os: 'windows' }]])
+      assert.deepEqual(
+        declaredApps({
+          apiVersion: 1,
+          workflows: [
+            {
+              stages: [
+                { on, publishes: ['app.example.win'], buildNumbers: [] },
+              ],
+              post: [],
+            },
+          ],
+          buildNumbers: {},
+          warnings: [],
+        } as never),
+        [{ bundleId: 'app.example.win', platforms: ['windows'] }],
+      )
     // A build-number sequence keyed by an app ID names that app ID.
     assert.deepEqual(
       declaredApps({

@@ -57,6 +57,7 @@ import {
   cloudArea,
   Pools,
   type CloudSetting,
+  type PoolAnswer,
   type PoolsOptions,
 } from './cloud/pools.js'
 import {
@@ -417,7 +418,7 @@ export class Master {
       masterChecklist: (): ChecklistItem[] =>
         masterChecklist(this.apple.status(), this.nodeStates.wantsXcode()),
       cloud: {
-        demand: (type): string | undefined => this.pools.demand(type),
+        demand: (type): PoolAnswer | undefined => this.pools.demand(type),
         draining: (fingerprint): boolean => this.pools.draining(fingerprint),
         setupDemand: (): string | undefined => this.pools.setupDemand(),
       },

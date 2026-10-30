@@ -55,7 +55,8 @@ export interface GraphStage {
   group?: string
   /** The export the stage run calls. */
   run?: string
-  on?: NodeSelector
+  /** A list means any of them. */
+  on?: NodeSelector | NodeSelector[]
   needs: string[]
   when?: When
   tools?: Tools
@@ -316,6 +317,24 @@ function selector(value: unknown, what: string): NodeSelector {
 
 export const asNodeSelector = (value: unknown): NodeSelector =>
   selector(value, 'The node selector')
+
+/** A stage's `on`: one selector, or a list of them, any of which will do. */
+function nodeChoice(
+  value: unknown,
+  what: string,
+): NodeSelector | NodeSelector[] {
+  if (!Array.isArray(value)) return selector(value, what)
+  if (value.length === 0 || value.length > 8)
+    throw new GraphError(`${what}: a list of node selectors has 1 to 8 entries`)
+  return value.map((entry) => selector(entry, what))
+}
+
+/** The selectors a stage may run on; none means any node. */
+export function alternatives(
+  on: NodeSelector | NodeSelector[] | undefined,
+): NodeSelector[] {
+  return on == null ? [] : Array.isArray(on) ? on : [on]
+}
 
 function tools(value: unknown, what: string): Tools | undefined {
   if (value == null) return undefined
@@ -973,7 +992,7 @@ export class Recorder {
       ...defaults(stageName, extra.failFast ?? workflow.failFast),
       ...(extra.group == null ? {} : { group: extra.group }),
       run,
-      on: selector(options.on, what),
+      on: nodeChoice(options.on, what),
       needs,
       ...(options.when == null ? {} : { when: when(options.when, what) }),
       ...(options.tools == null ? {} : { tools: tools(options.tools, what) }),
@@ -1106,16 +1125,17 @@ export function validateGraph(value: unknown, project: ProjectFacts): Graph {
         `${what} configs`,
       )
       if (stage.kind === 'approval') continue
-      selector(stage.on, what)
+      nodeChoice(stage.on, what)
       tools(stage.tools, what)
       if (project.structureOnly === true) continue
-      if (
-        typeof stage.on === 'string' &&
-        stage.on !== 'master' &&
-        project.nodeTypes != null &&
-        !project.nodeTypes.includes(stage.on)
-      )
-        throw new GraphError(`${what} runs on unknown node type ${stage.on}`)
+      for (const on of alternatives(stage.on))
+        if (
+          typeof on === 'string' &&
+          on !== 'master' &&
+          project.nodeTypes != null &&
+          !project.nodeTypes.includes(on)
+        )
+          throw new GraphError(`${what} runs on unknown node type ${on}`)
       for (const secret of stage.secrets) {
         const refused = unresolvedSecret(
           stage.name,

@@ -20,8 +20,11 @@ import {
 import {
   applyXcodeVersion,
   needsXcode,
+  stageDemand,
+  withSigningLabel,
   xcodeSpec,
 } from '../../master/scheduler.js'
+import type { PoolAnswer } from '../../master/cloud/pools.js'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { RuntimeStore } from '../../master/runtimes.js'
 import { NOMAC_HELPER } from '../../master/runtime.js'
@@ -701,6 +704,115 @@ describe('Node software', () => {
     )
   })
 
+  it('U7.28 a stage listing node selectors asks one pool for one machine, and signs on each with the label', () => {
+    const stage = (extra: Partial<GraphStage>): GraphStage =>
+      ({ name: 's', ...extra }) as GraphStage
+    const asked: string[] = []
+    // A pool answers with its reason; a pool that cannot serve says so.
+    const cannot = (reason: string): PoolAnswer => ({ reason, serving: false })
+    const demand =
+      (pools: Record<string, string | PoolAnswer>) =>
+      (type: string): PoolAnswer | undefined => {
+        asked.push(type)
+        const answer = pools[type]
+        return typeof answer === 'string'
+          ? { reason: answer, serving: true }
+          : answer
+      }
+    // The first type a pool backs starts the machine; the rest are not asked.
+    assert.equal(
+      stageDemand(
+        stage({
+          on: ['master', { os: 'linux' }, 'mac', { type: 'linux-x86' }],
+        }),
+        demand({
+          'linux-x86': 'Starting a linux machine',
+          mac: 'Starting a mac machine',
+        }),
+      ),
+      'Starting a mac machine',
+    )
+    assert.deepEqual(asked, ['mac'])
+    asked.length = 0
+    assert.equal(
+      stageDemand(
+        stage({ on: [{ type: 'none' }, 'linux'] }),
+        demand({ linux: 'Starting a linux machine' }),
+      ),
+      'Starting a linux machine',
+    )
+    assert.deepEqual(asked, ['none', 'linux'])
+    // A pool that cannot start one now passes to the next type; a waiting or
+    // full one serves the stage; with none able, the first reason stands.
+    asked.length = 0
+    assert.equal(
+      stageDemand(
+        stage({ on: ['linux-x86', 'macos-arm64'] }),
+        demand({
+          'linux-x86': cannot(
+            "The linux pool's cloud account do is gone: add it on the Cloud page",
+          ),
+          'macos-arm64': 'Starting a mac machine',
+        }),
+      ),
+      'Starting a mac machine',
+    )
+    assert.deepEqual(asked, ['linux-x86', 'macos-arm64'])
+    asked.length = 0
+    for (const serving of [
+      'Waiting for a linux machine to start',
+      'The linux pool is at its 2-machine limit',
+    ]) {
+      assert.equal(
+        stageDemand(
+          stage({ on: ['linux-x86', 'macos-arm64'] }),
+          demand({
+            'linux-x86': serving,
+            'macos-arm64': 'Starting a mac machine',
+          }),
+        ),
+        serving,
+      )
+    }
+    assert.deepEqual(asked, ['linux-x86', 'linux-x86'])
+    assert.equal(
+      stageDemand(
+        stage({ on: ['linux-x86', 'macos-arm64'] }),
+        demand({
+          'linux-x86': cannot('Backing off after provider errors'),
+          'macos-arm64': cannot('No installer'),
+        }),
+      ),
+      'Backing off after provider errors',
+    )
+    assert.equal(stageDemand(stage({}), demand({})), undefined)
+    assert.equal(stageDemand(stage({ on: 'gone' }), demand({})), undefined)
+    // A signing stage's label goes on every selector of a list.
+    const project = { signingLabel: 'signer' } as never
+    assert.deepEqual(
+      withSigningLabel(
+        stage({
+          apple: {} as never,
+          on: ['mac', { os: 'macos', labels: ['x'] }, 'master'],
+        }),
+        project,
+      ).on,
+      [
+        { type: 'mac', labels: ['signer'] },
+        { os: 'macos', labels: ['x', 'signer'] },
+        'master',
+      ],
+    )
+    assert.deepEqual(
+      withSigningLabel(stage({ apple: {} as never }), project).on,
+      { labels: ['signer'] },
+    )
+    assert.deepEqual(
+      withSigningLabel(stage({ apple: {} as never, on: 'mac' }), project).on,
+      { type: 'mac', labels: ['signer'] },
+    )
+  })
+
   it('U9.11 resolves the Xcode a stage asks for: its own, .xcode-version, the type default, betas only where allowed', () => {
     const stage = (extra: Partial<GraphStage>): GraphStage =>
       ({ name: 's', on: { os: 'macos' }, ...extra }) as GraphStage
@@ -709,6 +821,14 @@ describe('Node software', () => {
       software: { xcode: ['26.1'], xcodeDefault: '26.1', allowBeta: true },
     })
     assert.equal(needsXcode(stage({ on: 'linux' })), false)
+    // A list needs Xcode only when every entry asks for macOS.
+    assert.equal(needsXcode(stage({ on: ['linux', { os: 'macos' }] })), false)
+    assert.equal(
+      needsXcode(
+        stage({ on: [{ os: 'macos' }, { os: 'macos', arch: 'arm64' }] }),
+      ),
+      true,
+    )
     assert.equal(
       needsXcode(stage({ on: 'mac-xcode', apple: {} as never })),
       true,
