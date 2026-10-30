@@ -743,11 +743,6 @@ export function masterPages(
               format: key.format,
             }))
           : [],
-        apps: (
-          master.database.db
-            .prepare('SELECT id,name FROM apps ORDER BY position,id')
-            .all() as Array<{ id: number; name: string }>
-        ).map((app) => ({ id: Number(app.id), name: String(app.name) })),
         ...(await (async (): Promise<
           Partial<Parameters<typeof settingsView>[0]>
         > => {

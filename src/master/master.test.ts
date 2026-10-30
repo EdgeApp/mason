@@ -311,6 +311,46 @@ describe('Master database, setup and import', function () {
     db.close()
   })
 
+  it('U5.7/U12.5 schemas 20 and 21 give reservations a block and drop upload keys', () => {
+    const db = new DatabaseSync(path.join(root, 'blocks.sqlite'))
+    migrateMaster(db)
+    db.exec(`ALTER TABLE build_number_reservations DROP COLUMN block;
+    ALTER TABLE build_reservations DROP COLUMN block;
+    INSERT INTO projects(id,slug,name,repository,format,timeout_seconds,created_at)
+      VALUES(1,'p','P','https://github.com/a/p','pipeline',60,0);
+    INSERT INTO build_number_reservations(project_id,key,reservation,value,created_at) VALUES(1,'app','run1','7',0);
+    INSERT INTO api_keys(id,hash,name,apps,created_at,role) VALUES
+      ('u','${'a'.repeat(64)}','zealot','[1]',0,'upload'),
+      ('d','${'b'.repeat(64)}','ci','"all"',0,'developer');
+    UPDATE meta SET value='19' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      {
+        ...(db
+          .prepare('SELECT value,block FROM build_number_reservations')
+          .get() as object),
+      },
+      { value: '7', block: 1 },
+    )
+    assert(
+      db
+        .prepare('PRAGMA table_info(build_reservations)')
+        .all()
+        .some((column) => column.name === 'block'),
+    )
+    assert.deepEqual(
+      db
+        .prepare('SELECT id FROM api_keys ORDER BY id')
+        .all()
+        .map((row) => row.id),
+      ['d'],
+    )
+    // Again: nothing to add, nothing to delete.
+    db.exec("UPDATE meta SET value='19' WHERE key='master_schema'")
+    migrateMaster(db)
+    db.close()
+  })
+
   it('U18.10 schema 19 turns project_env and project_files into default variants and drops them', () => {
     const db = new DatabaseSync(path.join(root, 'variants.sqlite'))
     migrateMaster(db)
@@ -422,7 +462,7 @@ describe('Master database, setup and import', function () {
         channels: 2,
         builds: 3,
         devices: 1,
-        keys: { upload: 1, admin: 1, developer: 1 },
+        keys: { admin: 1, developer: 1, uploadSkipped: 1 },
         projects: 2,
         branchRules: 4,
         adminKeys: 1,
@@ -515,10 +555,11 @@ describe('Master database, setup and import', function () {
         .name,
       'My iPhone',
     )
-    // Imported keys keep their digests, so each still authenticates.
+    // Imported keys keep their digests, so each still authenticates; upload
+    // keys stay behind, since the cluster publishes only through ctx.publish.
     const keys = new MasterKeys(database)
-    const upload = keys.authenticate(fixture.tokens.upload)!
-    assert.deepEqual([upload.role, upload.apps], ['upload', [fixture.apps.app]])
+    assert.equal(keys.authenticate(fixture.tokens.upload), undefined)
+    assert.equal(summary.keys.uploadSkipped, 1)
     assert.equal(keys.authenticate(fixture.tokens.admin)!.role, 'admin')
     const builder = keys.authenticate(fixture.tokens.builder)!
     assert.deepEqual(
@@ -949,29 +990,12 @@ describe('Master database, setup and import', function () {
         (await api(node, 'GET', '/api/v2/keys', developer.json.token)).status,
         403,
       )
-      // Upload keys publish only through the upload API.
-      assert.equal((await create(admin!, { role: 'upload' })).status, 400)
-      const appId = Number(
-        node.databases
-          .get('master.sqlite')!
-          .prepare(
-            "INSERT INTO apps(slug,name,position,enabled) VALUES('a','A',0,1)",
-          )
-          .run().lastInsertRowid,
-      )
-      const upload = await create(admin!, { role: 'upload', apps: [appId] })
-      assert.equal(upload.status, 201)
-      assert.equal(
-        (await api(node, 'GET', '/api/v2/keys', upload.json.token)).status,
-        403,
-      )
-      assert.equal(
-        (await create(admin!, { role: 'upload', apps: [999] })).status,
-        400,
-      )
-      assert.equal(
-        (await create(admin!, { role: 'developer', apps: [appId] })).status,
-        400,
+      // The cluster has no upload keys: publishing goes through ctx.publish.
+      const refused = await create(admin!, { role: 'upload' })
+      assert.equal(refused.status, 400)
+      assert.match(
+        JSON.stringify(refused.json),
+        /Expected a role: admin, manager, developer or tester/,
       )
       assert.equal(
         (await create(admin!, { role: 'developer', expiresAt: 1 })).status,

@@ -13,7 +13,8 @@ export interface ImportSummary {
   channels: number
   builds: number
   devices: number
-  keys: { upload: number; admin: number; developer: number }
+  /** Upload keys are skipped: the cluster publishes only through `ctx.publish`. */
+  keys: { admin: number; developer: number; uploadSkipped: number }
   projects: number
   branchRules: number
   /** Distribution admin keys, now admin keys on /api/v2; their callers move. */
@@ -61,7 +62,8 @@ function openReadOnly(file: string): DatabaseSync {
 
 /**
  * Builds a master database from the current deployment's distribution and
- * builder databases, preserving IDs, key digests, channel keys and devices.
+ * builder databases, preserving IDs, the key digests of admin and builder
+ * keys (upload keys are skipped and counted), channel keys and devices.
  * Each account takes the role its flags imply; each verified identity becomes
  * the account's address for that provider; each builder app becomes a script
  * project. The sources are opened read-only.
@@ -106,7 +108,7 @@ export function importDeployment(
         channels: copy(distribution, db, 'channels'),
         builds: copy(distribution, db, 'builds'),
         devices: copy(distribution, db, 'devices'),
-        keys: { upload: 0, admin: 0, developer: 0 },
+        keys: { admin: 0, developer: 0, uploadSkipped: 0 },
         projects: 0,
         branchRules: 0,
         adminKeys: [],
@@ -169,6 +171,10 @@ export function importDeployment(
       for (const key of distribution
         .prepare('SELECT * FROM api_keys ORDER BY id')
         .all()) {
+        if (key.role !== 'admin') {
+          summary.keys.uploadSkipped++
+          continue
+        }
         db.prepare(
           "INSERT INTO api_keys(id,hash,name,apps,created_at,expires_at,revoked,role,format) VALUES(?,?,?,?,?,?,?,?,'v1')",
         ).run(
@@ -181,13 +187,11 @@ export function importDeployment(
           key.revoked as number,
           key.role as string,
         )
-        if (key.role === 'admin') {
-          summary.keys.admin++
-          summary.adminKeys.push({
-            id: key.id as string,
-            name: key.name as string,
-          })
-        } else summary.keys.upload++
+        summary.keys.admin++
+        summary.adminKeys.push({
+          id: key.id as string,
+          name: key.name as string,
+        })
       }
       for (const key of builder
         .prepare('SELECT * FROM builder_keys ORDER BY id')

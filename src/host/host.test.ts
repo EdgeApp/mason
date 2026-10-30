@@ -30,6 +30,8 @@ import {
 } from '../auth/passwordProtocol.js'
 import { xcodeRoutes } from './web.js'
 import { seedLegacySecrets } from '../test/secrets.js'
+import { HostRuntime } from './runtime.js'
+import { DatabaseSync } from 'node:sqlite'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -186,6 +188,47 @@ describe('Host Xcode mirror', () => {
   })
 })
 
+describe('Host cache schema', () => {
+  it('host schema 4 forgets the keys a schema 3 cache replicated, and keeps its step log columns', async () => {
+    const dir = mkdtempSync(
+      path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'schema-'),
+    )
+    const first = new HostRuntime({ dir, link: (): undefined => undefined })
+    await first.stop()
+    const old = new DatabaseSync(path.join(dir, 'host-cache.sqlite'))
+    old.exec(`INSERT INTO api_keys(id,hash,name,apps,created_at,role) VALUES('k1','h1','upload','"all"',1,'upload');
+    UPDATE host_meta SET value='3' WHERE key='host_schema';`)
+    old.close()
+    const again = new HostRuntime({ dir, link: (): undefined => undefined })
+    try {
+      const db = again.cache.db
+      assert.equal(
+        (db.prepare('SELECT COUNT(*) n FROM api_keys').get() as { n: number })
+          .n,
+        0,
+      )
+      assert.equal(
+        (
+          db
+            .prepare("SELECT value FROM host_meta WHERE key='host_schema'")
+            .get() as { value: string }
+        ).value,
+        '4',
+      )
+      assert.deepEqual(
+        db
+          .prepare('PRAGMA table_info(job_steps)')
+          .all()
+          .map((column) => column.name)
+          .filter((name) => name === 'log_start' || name === 'log_end'),
+        ['log_start', 'log_end'],
+      )
+    } finally {
+      await again.stop()
+    }
+  })
+})
+
 describe('Host cache, sign-in and offline serving', function () {
   this.timeout(120_000)
   let c: Cluster
@@ -327,18 +370,21 @@ describe('Host cache, sign-in and offline serving', function () {
     )
     assert(Date.now() - started < 1000)
     assert(host.status().sync!.syncedAt! >= started)
-    // Keys of every role replicate as digests.
+    // Keys stay on the master: nothing on the host reads them.
     const key = c.master.master!.keys.create(admin, {
       role: 'developer',
       name: 'ci',
     })
+    c.master.master!.projects.save(admin, 'edge', { name: 'Edge' })
+    const after = c.master.master!.changes.revision()
     await c.until(
-      () =>
-        runtime()
-          .cache.db.prepare('SELECT role FROM api_keys WHERE id=?')
-          .get(key.id) != null,
+      () => host.status().sync?.revision === after,
       1000,
-      'the developer key on the host',
+      'the next change on the host',
+    )
+    assert.equal(
+      runtime().cache.db.prepare('SELECT COUNT(*) n FROM api_keys').get()!.n,
+      0,
     )
     assert(
       !readFileSync(path.join(host.dir, 'host-cache.sqlite')).includes(

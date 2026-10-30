@@ -1,13 +1,10 @@
 /** Account roles, lowest first; each includes everything below it. */
 export const roles = ['tester', 'developer', 'manager', 'admin'] as const
 export type Role = (typeof roles)[number]
-/** API keys carry an account role, or `upload` for the Zealot upload API only. */
-export type KeyRole = Role | 'upload'
-export const keyRoles: readonly KeyRole[] = [...roles, 'upload']
 
 export const rank = (role: Role): number => roles.indexOf(role)
-export const atLeast = (role: KeyRole, minimum: Role): boolean =>
-  role !== 'upload' && rank(role) >= rank(minimum)
+export const atLeast = (role: Role, minimum: Role): boolean =>
+  rank(role) >= rank(minimum)
 
 export function asRole(value: unknown): Role {
   if (
@@ -16,10 +13,6 @@ export function asRole(value: unknown): Role {
   )
     throw new Error('Expected a role: admin, manager, developer or tester')
   return value as Role
-}
-export function asKeyRole(value: unknown): KeyRole {
-  if (value === 'upload') return 'upload'
-  return asRole(value)
 }
 
 /** Who did something, for authorization and the audit log. */

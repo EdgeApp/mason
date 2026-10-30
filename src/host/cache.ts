@@ -50,7 +50,6 @@ const tables: Record<
     },
   },
   device: { table: 'devices', key: 'id' },
-  api_key: { table: 'api_keys', key: 'id' },
   job: {
     table: 'jobs',
     key: 'id',
@@ -73,11 +72,10 @@ const order = [
   'group',
   'device',
   'build',
-  'api_key',
   'job',
 ]
 
-const HOST_SCHEMA = 3
+const HOST_SCHEMA = 4
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -94,10 +92,16 @@ function migrateHost(db: DatabaseSync): void {
   if (current < 1) migrateHostV1(db)
   if (current < 2) migrateHostV2(db)
   // Where each step's lines are in its stage log, replicated with the step.
-  db.exec(`BEGIN IMMEDIATE;
+  if (current < 3)
+    db.exec(`BEGIN IMMEDIATE;
     ALTER TABLE job_steps ADD COLUMN log_start INTEGER;
     ALTER TABLE job_steps ADD COLUMN log_end INTEGER;
     INSERT INTO host_meta(key,value) VALUES('host_schema','3') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  // The host no longer serves the Zealot upload API, the only reader of keys.
+  db.exec(`BEGIN IMMEDIATE;
+    DELETE FROM api_keys;
+    INSERT INTO host_meta(key,value) VALUES('host_schema','4') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
 }
 

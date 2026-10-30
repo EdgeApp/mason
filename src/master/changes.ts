@@ -187,19 +187,6 @@ export function entities(setting: SettingProjection): Record<string, Entity> {
         return row == null ? undefined : { row }
       },
     },
-    api_key: {
-      keys: (db): string[] =>
-        all(db, 'SELECT id FROM api_keys').map((row) => String(row.id)),
-      project: (db, id): Projected | undefined => {
-        // `hash` is already a digest of the token; the token itself is never stored.
-        const row = one(
-          db,
-          'SELECT id,hash,name,apps,created_at,expires_at,revoked,role,projects,branches,format FROM api_keys WHERE id=?',
-          id,
-        )
-        return row == null ? undefined : { row }
-      },
-    },
     job: {
       keys: (db): string[] =>
         all(db, 'SELECT id FROM jobs').map((row) => String(row.id)),

@@ -801,8 +801,6 @@ export function settingsView(data: {
     /** `builder` for a key imported from the builder, whose token has no id in it. */
     format?: 'v1' | 'builder'
   }>
-  /** Apps an upload key may be limited to. */
-  apps: Array<{ id: number; name: string }>
   /** How Mason reaches GitHub, without its secrets. */
   github?: {
     kind?: string
@@ -867,17 +865,13 @@ export function settingsView(data: {
     const prefix = `mason_v1_${key.id.slice(0, 5)}…`
     return `<button type="button" class="secondary copy icon-only" data-copy="${escape(prefix)}" aria-label="Copy ${escape(prefix)}">${icon('content_copy')}<span data-copy-label hidden>Copy</span></button><span class="mono">${escape(prefix)}</span>`
   }
-  const roles = ['developer', 'tester', 'manager', 'admin', 'upload']
+  const roles = ['developer', 'tester', 'manager', 'admin']
   const createKey = data.canCreate
     ? action(
         `${icon('add')} Create API key`,
         apiForm(
           '/api/v2/keys',
-          `${field('key-name', 'Name', '<input id="key-name" name="name" required maxlength="120" placeholder="ci-uploads">', 'What uses it, so you can find it later.')}${field('key-role', 'Role', `<select id="key-role" name="role">${roles.map((role) => `<option value="${role}">${role}</option>`).join('')}</select>`, 'What it may do: the same as a person with that role. An upload key may only publish builds of the apps chosen below.')}${
-            data.apps.length === 0
-              ? ''
-              : `<fieldset><legend>Apps an upload key may publish</legend>${data.apps.map((app) => `<label><input type="checkbox" name="app" value="${app.id}"> ${escape(app.name)}</label>`).join('')}</fieldset>`
-          }<div data-field="token" hidden><p class="notice">Copy it now. Mason stores only a hash of it and cannot show it again. If it is lost, revoke it and create a new one.</p><div class="command"><pre class="mono"></pre><button type="button" class="secondary copy" data-copy="">${icon('content_copy')}<span data-copy-label>Copy</span></button></div><p><a href="/settings?key=created#keys">Done</a></p></div>`,
+          `${field('key-name', 'Name', '<input id="key-name" name="name" required maxlength="120" placeholder="ci-uploads">', 'What uses it, so you can find it later.')}${field('key-role', 'Role', `<select id="key-role" name="role">${roles.map((role) => `<option value="${role}">${role}</option>`).join('')}</select>`, 'What it may do: the same as a person with that role.')}<div data-field="token" hidden><p class="notice">Copy it now. Mason stores only a hash of it and cannot show it again. If it is lost, revoke it and create a new one.</p><div class="command"><pre class="mono"></pre><button type="button" class="secondary copy" data-copy="">${icon('content_copy')}<span data-copy-label>Copy</span></button></div><p><a href="/settings?key=created#keys">Done</a></p></div>`,
           `${icon('key')} Create key`,
           { fields: ['name', 'role'], then: 'token' },
         ),

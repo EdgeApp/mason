@@ -1127,7 +1127,6 @@ describe('Settings page', () => {
   const base = {
     apple: { signedIn: false, needsCode: false },
     keys: [],
-    apps: [],
     canChange: true,
     canCreate: true,
     canRevoke: true,
@@ -1136,7 +1135,6 @@ describe('Settings page', () => {
     const created = new Date(2026, 9, 3, 23, 30).getTime()
     const html = settingsView({
       ...base,
-      apps: [{ id: 3, name: 'Edge' }],
       keys: [
         {
           id: 'abcdef0123456789abcdef0123456789',
@@ -1149,7 +1147,7 @@ describe('Settings page', () => {
         {
           id: 'b1',
           name: 'old builder',
-          role: 'upload',
+          role: 'developer',
           createdAt: created,
           revoked: true,
           format: 'builder',
@@ -1162,9 +1160,10 @@ describe('Settings page', () => {
       /<h2>.*API keys<\/h2><p>Create API keys to access Mason from other apps and agents\.<\/p>/,
     )
     assert.match(card, /<summary class="button">.*Create API key<\/summary>/)
-    for (const role of ['developer', 'tester', 'manager', 'admin', 'upload'])
+    for (const role of ['developer', 'tester', 'manager', 'admin'])
       assert.match(card, new RegExp(`<option value="${role}">`))
-    assert.match(card, /<input type="checkbox" name="app" value="3"> Edge/)
+    // Keys publish nothing: the upload role and its app scopes are gone.
+    assert.doesNotMatch(card, /value="upload"|name="app"/)
     assert.match(card, /data-then="token"/)
     // Done loads the page again (a new query, not only a hash), so the new key is listed.
     assert.match(card, /<a href="\/settings\?key=created#keys">Done<\/a>/)

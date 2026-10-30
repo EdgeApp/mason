@@ -12,7 +12,6 @@ import { repositoryName } from './mirrors.js'
 import type { NodeRegistry } from './nodes.js'
 import type { Projects } from './projects.js'
 import type { Artifacts, HostAccess } from './artifacts.js'
-import type { Format } from '../validation.js'
 import { ruleFor } from './rules.js'
 
 /** The only writes a host makes to the master. */
@@ -532,19 +531,6 @@ export class HostLinks {
           try {
             return this.options.artifacts.staged(
               params as Parameters<Artifacts['staged']>[0],
-            )
-          } catch (error) {
-            throw new LinkError((error as Error).message, 'failed')
-          }
-        },
-        /** A Zealot-API upload the host staged, published through the master. */
-        'artifacts.zealot': (params, link): unknown => {
-          this.host(link)
-          if (this.options.artifacts == null)
-            throw new LinkError('Artifacts are unavailable', 'failed')
-          try {
-            return this.options.artifacts.zealot(
-              params as Parameters<Artifacts['zealot']>[0] & { format: Format },
             )
           } catch (error) {
             throw new LinkError((error as Error).message, 'failed')

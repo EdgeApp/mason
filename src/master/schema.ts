@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 19
+export const MASTER_SCHEMA = 21
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -575,7 +575,7 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     }
     db.exec('DROP TABLE project_env; DROP TABLE project_files;')
   },
-  // 19: a run's build number may be a block of numbers, N to N+block−1.
+  // 20: a run's build number may be a block of numbers, N to N+block−1.
   (db): void => {
     for (const table of ['build_number_reservations', 'build_reservations'])
       if (
@@ -587,6 +587,10 @@ const migrations: Array<(db: DatabaseSync) => void> = [
         db.exec(
           `ALTER TABLE ${table} ADD COLUMN block INTEGER NOT NULL DEFAULT 1`,
         )
+  },
+  // 21: the Zealot upload API left the cluster, and its upload keys with it.
+  (db): void => {
+    db.exec("DELETE FROM api_keys WHERE role='upload'")
   },
 ]
 
