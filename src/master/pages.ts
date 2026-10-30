@@ -173,7 +173,7 @@ function backupsPage(master: Master, session: MasterSession): string {
     deployKey?: { publicKey: string }
   }
   const state = backups.backedUp
-    ? `<p>Last backup ${escape(new Date(backups.lastSuccess!.at).toISOString())} (${escape(backups.lastSuccess!.commit.slice(0, 12))}).</p>`
+    ? `<p>Last backup ${escape(new Date(backups.lastSuccess!.at).toISOString())} (${escape(backups.lastSuccess!.commit.slice(0, 12))})${backups.lastSuccess!.auth == null ? '' : `, pushed with ${backups.lastSuccess!.auth === 'github' ? 'the GitHub connection' : 'the deploy key'}`}.</p>`
     : backups.lastFailure != null
       ? `<p>The last backup failed: ${escape(backups.lastFailure.error)}</p>`
       : '<p>No backup has run yet.</p>'

@@ -21,7 +21,7 @@ import { promisify } from 'node:util'
 import { privateDirectory } from '../config.js'
 import { restoreIdentity } from './identity.js'
 import type { MasterDatabase } from './database.js'
-import { generateSshKey } from './github.js'
+import { generateSshKey, githubRepositoryName, gitReason } from './github.js'
 import { MASTER_SCHEMA } from './schema.js'
 import type { SettingsArea, SettingValue } from './settings.js'
 
@@ -151,12 +151,42 @@ type Git = (
   args: string[],
   options: { cwd: string; env: NodeJS.ProcessEnv },
 ) => Promise<string>
+/** A git run its timeout killed; execFile's own error names only the command. */
+class GitTimedOut extends Error {
+  override name = 'GitTimedOut'
+}
+const gitVerb = (args: string[]): string =>
+  args.find((arg) => /^[a-z][a-z-]*$/.test(arg)) ?? ''
+/**
+ * Minutes a git run may take. A transfer grows with the backups (a new
+ * backup repository fetches the month's history), and its stalls are caught
+ * by ssh keep-alives and the HTTP low-speed limit, so it gets an hour; the
+ * rest are local and get ten minutes. Either way a run that hangs cannot
+ * hold the backup queue, and every secret change in it, for good.
+ */
+export const gitMinutes = (args: string[]): number =>
+  ['fetch', 'push', 'clone', 'ls-remote'].includes(gitVerb(args)) ? 60 : 10
+/** `git`, with a run its timeout killed reported as timed out. */
+const timed =
+  (git: Git): Git =>
+  async (args, options) => {
+    try {
+      return await git(args, options)
+    } catch (error) {
+      if ((error as { killed?: unknown }).killed !== true) throw error
+      throw new GitTimedOut(
+        `git ${gitVerb(args)} timed out after ${gitMinutes(args)} minutes`,
+      )
+    }
+  }
 const realGit: Git = async (args, options) =>
   (
     await run('git', args, {
       cwd: options.cwd,
       env: options.env,
       maxBuffer: 16 * 1024 * 1024,
+      timeout: gitMinutes(args) * 60 * 1000,
+      killSignal: 'SIGKILL',
     })
   ).stdout
 
@@ -164,8 +194,46 @@ export interface BackupStatus {
   configured: boolean
   /** Whether the latest backup succeeded. */
   backedUp: boolean
-  lastSuccess?: { at: number; commit: string; kind: string }
+  /** `auth` is what pushed it: the deploy key or the GitHub connection. */
+  lastSuccess?: {
+    at: number
+    commit: string
+    kind: string
+    auth?: 'deployKey' | 'github'
+  }
   lastFailure?: { at: number; error: string }
+}
+
+/** A change a backup carries: applied to the snapshot copy before it is sealed. */
+export type BackupMutation = (db: DatabaseSync) => void
+
+/**
+ * Whether the remote refused this credential, so the next one may be
+ * tried, as opposed to a failure on the way there. git ends an ssh failure
+ * of either kind with "Could not read from remote repository", so a host
+ * that could not be reached is never taken for a refusal.
+ */
+function refusedByRemote(error: unknown): boolean {
+  const text = `${(error as Error)?.message ?? ''}\n${String((error as { stderr?: unknown })?.stderr ?? '')}`
+  if (
+    /Could not resolve host|Connection timed out|Operation timed out|Network is unreachable|Connection refused|No route to host|Connection reset|Connection closed by|closed by remote host|Connection to \S+ closed|Broken pipe|kex_exchange_identification/i.test(
+      text,
+    )
+  )
+    return false
+  return /Permission denied|denied to|Repository not found|Could not read from remote repository|Authentication failed|returned error: 40[13]|Write access/i.test(
+    text,
+  )
+}
+
+/** A backup carrying a change that was not pushed; its message is git's reason. */
+export class BackupFailed extends Error {}
+
+/** A change that failed on the snapshot copy, before anything was pushed. */
+class MutationFailed extends Error {
+  constructor(override readonly cause: unknown) {
+    super('The change failed on the snapshot copy')
+  }
 }
 
 /**
@@ -178,7 +246,12 @@ export interface BackupStatus {
  * the data directory.
  */
 export class Backups {
-  private running: Promise<BackupStatus> | undefined
+  /** Every backup and every change waits here for the one before it. */
+  private queue: Promise<unknown> = Promise.resolve()
+  /** A plain backup queued or running, which later `backup()` calls share. */
+  private shared: Promise<BackupStatus> | undefined
+  /** Set by `stop`: every backup from then on is refused. */
+  private stopping = false
   constructor(
     private readonly options: {
       master: MasterDatabase
@@ -189,13 +262,15 @@ export class Backups {
       setting: () => BackupSetting | undefined
       /** The master's identity in its commits. */
       fingerprint: string
-      /** Git access through the GitHub connection, for `auth: 'github'`. */
+      /** Git access through the GitHub connection, for `auth: 'github'` and when the deploy key is refused. */
       github?: (repository: string) => Promise<{
         url: string
         env: NodeJS.ProcessEnv
       }>
+      /** Whether the master has a GitHub connection; without one a refused deploy key has no fallback. */
+      hasGitHub?: () => boolean
       git?: Git
-      /** Push attempts before a backup fails. */
+      /** Push attempts with each credential (the deploy key, then the GitHub connection) before it is given up. */
       attempts?: number
     },
   ) {}
@@ -249,10 +324,15 @@ export class Backups {
   status(): BackupStatus {
     const success = this.db
       .prepare(
-        "SELECT finished_at,commit_sha,kind FROM backup_runs WHERE status='succeeded' ORDER BY id DESC LIMIT 1",
+        "SELECT finished_at,commit_sha,kind,auth FROM backup_runs WHERE status='succeeded' ORDER BY id DESC LIMIT 1",
       )
       .get() as
-      | { finished_at: number; commit_sha: string; kind: string }
+      | {
+          finished_at: number
+          commit_sha: string
+          kind: string
+          auth: string | null
+        }
       | undefined
     const failure = this.db
       .prepare(
@@ -275,6 +355,9 @@ export class Backups {
               at: success.finished_at,
               commit: success.commit_sha,
               kind: success.kind,
+              ...(success.auth === 'deployKey' || success.auth === 'github'
+                ? { auth: success.auth }
+                : {}),
             },
           }),
       ...(failure == null
@@ -311,17 +394,68 @@ export class Backups {
     return notice
   }
 
-  /** Takes, encrypts, commits and pushes a backup; one at a time. */
-  async backup(): Promise<BackupStatus> {
-    this.running ??= this.once().finally(() => {
-      this.running = undefined
-    })
-    return await this.running
+  /**
+   * Refuses every backup from now on, so a change still queued is refused
+   * rather than pushed, and resolves once the queue is empty: the database
+   * stays open until the change in progress is applied.
+   */
+  async stop(): Promise<void> {
+    this.stopping = true
+    for (let tail = this.queue; ; tail = this.queue) {
+      await tail
+      if (tail === this.queue) return
+    }
   }
 
-  private async once(): Promise<BackupStatus> {
+  /** Runs `work` once everything queued before it has finished. */
+  private exclusive<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(work, work)
+    this.queue = result.catch(() => undefined)
+    return result
+  }
+
+  /** Takes, encrypts, commits and pushes a backup; one at a time, after any change in progress. */
+  async backup(): Promise<BackupStatus> {
+    this.shared ??= this.exclusive(async () => {
+      await this.once()
+      return this.status()
+    }).finally(() => {
+      this.shared = undefined
+    })
+    return await this.shared
+  }
+
+  /**
+   * Runs `work` with the queue to itself: no backup and no other change
+   * starts until it settles. `push(mutate)` backs up the database with
+   * `mutate` applied to the snapshot copy only, and rejects when that
+   * backup is not pushed; the live database is `work`'s to change after.
+   */
+  async change<T>(
+    work: (push: (mutate: BackupMutation) => Promise<void>) => Promise<T>,
+  ): Promise<T> {
+    return await this.exclusive(
+      async () =>
+        await work(async (mutate) => {
+          const error = await this.once(mutate)
+          if (error != null) throw new BackupFailed(gitReason(error))
+        }),
+    )
+  }
+
+  /**
+   * One backup, recorded in `backup_runs`; resolves with why it failed, if
+   * it did. When the master is stopping it throws `BackupFailed`, recording
+   * nothing, so a change is refused as one whose backup was not pushed. When
+   * backups are not configured, or `mutate` fails on the snapshot copy, it
+   * throws that error itself, recording nothing: neither is a failed backup.
+   */
+  private async once(mutate?: BackupMutation): Promise<Error | undefined> {
+    if (this.stopping) throw new BackupFailed('the master is stopping')
     const setting = this.options.setting()
     if (setting == null) throw new Error('Backups are not configured')
+    privateDirectory(this.options.scratch)
+    const work = mkdtempSync(path.join(this.options.scratch, 'backup-'))
     const id = Number(
       this.db
         .prepare(
@@ -329,38 +463,35 @@ export class Backups {
         )
         .run(this.now()).lastInsertRowid,
     )
-    privateDirectory(this.options.scratch)
-    const work = mkdtempSync(path.join(this.options.scratch, 'backup-'))
     let attempts = 0
+    let failure: Error | undefined
     try {
-      const sealed = this.snapshot(work)
-      const { url, env } = await this.access(setting, work)
-      const tries = this.options.attempts ?? 3
-      let kind = 'commit'
-      let commit = ''
-      for (;;) {
-        attempts++
-        try {
-          ;({ kind, commit } = await this.commit(setting, url, env, sealed))
-          break
-        } catch (error) {
-          if (attempts >= tries || (error as Error).name === 'ForeignCommit')
-            throw error
-        }
-      }
+      const sealed = this.snapshot(work, mutate)
+      const pushed = await this.pushSealed(
+        setting,
+        work,
+        sealed,
+        () => attempts++,
+      )
       this.db
         .prepare(
-          "UPDATE backup_runs SET status='succeeded',finished_at=?,kind=?,commit_sha=?,attempts=? WHERE id=?",
+          "UPDATE backup_runs SET status='succeeded',finished_at=?,kind=?,commit_sha=?,attempts=?,auth=? WHERE id=?",
         )
-        .run(this.now(), kind, commit, attempts, id)
+        .run(this.now(), pushed.kind, pushed.commit, attempts, pushed.auth, id)
     } catch (error) {
+      // The change failed on the copy: not a failed backup, so no run is kept.
+      if (error instanceof MutationFailed) {
+        this.db.prepare('DELETE FROM backup_runs WHERE id=?').run(id)
+        throw error.cause
+      }
+      failure = error as Error
       this.db
         .prepare(
           "UPDATE backup_runs SET status='failed',finished_at=?,error=?,attempts=? WHERE id=?",
         )
         .run(
           this.now(),
-          String((error as Error).message).slice(0, 1000),
+          String(failure.message).slice(0, 1000),
           Math.max(attempts, 1),
           id,
         )
@@ -373,44 +504,136 @@ export class Backups {
         )
         .run()
     }
-    return this.status()
+    return failure
   }
 
-  /** A consistent snapshot, sealed; the plaintext file is removed at once. */
-  private snapshot(work: string): Buffer {
+  /**
+   * Commits and pushes with the deploy key, falling back to the GitHub
+   * connection when GitHub refuses the key; or with the connection alone.
+   */
+  private async pushSealed(
+    setting: BackupSetting,
+    work: string,
+    sealed: Buffer,
+    attempt: () => void,
+  ): Promise<{ kind: string; commit: string; auth: 'deployKey' | 'github' }> {
+    const withAccess = async (access: {
+      url: string
+      env: NodeJS.ProcessEnv
+    }): Promise<{ kind: string; commit: string }> => {
+      const tries = this.options.attempts ?? 3
+      for (let tried = 1; ; tried++) {
+        attempt()
+        try {
+          return await this.commit(setting, access.url, access.env, sealed)
+        } catch (error) {
+          // A refused credential is not retried: the next one is tried at once.
+          // Nor is a timeout, which held the queue for its whole limit already.
+          if (
+            tried >= tries ||
+            (error as Error).name === 'ForeignCommit' ||
+            error instanceof GitTimedOut ||
+            refusedByRemote(error)
+          )
+            throw error
+        }
+      }
+    }
+    if (setting.auth === 'github')
+      return {
+        ...(await withAccess(await this.githubAccess(setting))),
+        auth: 'github',
+      }
+    try {
+      return {
+        ...(await withAccess(this.deployKeyAccess(setting, work))),
+        auth: 'deployKey',
+      }
+    } catch (error) {
+      if (!refusedByRemote(error)) throw error
+      const first = gitReason(error)
+      if (this.options.hasGitHub?.() !== true)
+        throw new Error(
+          `The deploy key was refused (${first}), and the master has no GitHub connection`,
+        )
+      if (githubRepositoryName(setting.repository) == null)
+        throw new Error(
+          `The deploy key was refused (${first}), and ${setting.repository} is not on GitHub`,
+        )
+      try {
+        return {
+          ...(await withAccess(await this.githubAccess(setting))),
+          auth: 'github',
+        }
+      } catch (fallback) {
+        if ((fallback as Error).name === 'ForeignCommit') throw fallback
+        throw new Error(
+          refusedByRemote(fallback)
+            ? `The deploy key was refused (${first}); the GitHub connection was refused too (${gitReason(fallback)})`
+            : `The deploy key was refused (${first}); the GitHub connection failed (${gitReason(fallback)})`,
+        )
+      }
+    }
+  }
+
+  /** A consistent snapshot, with `mutate` applied to the copy, sealed; the plaintext file is removed at once. */
+  private snapshot(work: string, mutate?: BackupMutation): Buffer {
     const file = path.join(work, 'snapshot.sqlite')
     this.db.prepare('VACUUM INTO ?').run(file)
     try {
+      if (mutate != null) {
+        const copy = new DatabaseSync(file)
+        try {
+          copy.exec('BEGIN')
+          try {
+            mutate(copy)
+          } catch (error) {
+            throw new MutationFailed(error)
+          }
+          copy.exec('COMMIT')
+        } finally {
+          copy.close()
+        }
+      }
       return seal(this.key(), readFileSync(file))
     } finally {
       rmSync(file, { force: true })
     }
   }
 
-  private async access(
-    setting: BackupSetting,
-    work: string,
-  ): Promise<{ url: string; env: NodeJS.ProcessEnv }> {
-    const base: NodeJS.ProcessEnv = {
+  private gitBase(): NodeJS.ProcessEnv {
+    return {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
       GIT_TERMINAL_PROMPT: '0',
       GIT_CONFIG_NOSYSTEM: '1',
+      // An HTTPS transfer slower than 1 KB/s for a minute is given up.
+      GIT_HTTP_LOW_SPEED_LIMIT: '1000',
+      GIT_HTTP_LOW_SPEED_TIME: '60',
     }
-    if (setting.auth === 'github') {
-      if (this.options.github == null)
-        throw new Error('The master has no GitHub connection')
-      const access = await this.options.github(setting.repository)
-      return { url: access.url, env: { ...base, ...access.env } }
-    }
+  }
+
+  private async githubAccess(
+    setting: BackupSetting,
+  ): Promise<{ url: string; env: NodeJS.ProcessEnv }> {
+    if (this.options.github == null)
+      throw new Error('The master has no GitHub connection')
+    const access = await this.options.github(setting.repository)
+    return { url: access.url, env: { ...this.gitBase(), ...access.env } }
+  }
+
+  private deployKeyAccess(
+    setting: BackupSetting,
+    work: string,
+  ): { url: string; env: NodeJS.ProcessEnv } {
     const keyFile = path.join(work, 'deploy_key')
     writeFileSync(keyFile, setting.deployKey!.privateKey, { mode: 0o600 })
     const knownHosts = path.join(this.options.dir, 'backup_known_hosts')
     return {
       url: setting.repository,
       env: {
-        ...base,
-        GIT_SSH_COMMAND: `ssh -i '${keyFile}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile='${knownHosts}'`,
+        ...this.gitBase(),
+        GIT_SSH_COMMAND: `ssh -i '${keyFile}' -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile='${knownHosts}' -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=4`,
       },
     }
   }
@@ -421,7 +644,7 @@ export class Backups {
     env: NodeJS.ProcessEnv,
     sealed: Buffer,
   ): Promise<{ kind: string; commit: string }> {
-    const git = this.options.git ?? realGit
+    const git = timed(this.options.git ?? realGit)
     const repo = path.join(this.options.dir, 'backup-repo')
     if (!existsSync(path.join(repo, '.git'))) {
       rmSync(repo, { recursive: true, force: true })
@@ -452,6 +675,7 @@ export class Backups {
       )
       remote = (await g('rev-parse', 'refs/remotes/backup/head')).trim()
     } catch (error) {
+      if (error instanceof GitTimedOut) throw error
       // A branch that does not exist yet starts with the first backup.
       const listed = await g('ls-remote', '--heads', url, setting.branch)
       if (listed.trim() !== '') throw error
@@ -528,7 +752,7 @@ export async function restoreBackup(options: {
   const branch = asBranch(options.branch ?? 'master')
   if (options.date != null && !/^\d{4}-\d{2}-\d{2}$/.test(options.date))
     throw new Error('The date is YYYY-MM-DD')
-  const git = options.git ?? realGit
+  const git = timed(options.git ?? realGit)
   privateDirectory(options.scratch)
   const work = mkdtempSync(path.join(options.scratch, 'restore-'))
   try {

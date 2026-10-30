@@ -19,8 +19,10 @@ import { cluster, type Cluster } from '../test/cluster.js'
 import {
   applyPendingRestore,
   backupArea,
+  BackupFailed,
   Backups,
   formatBackupKey,
+  gitMinutes,
   open,
   parseBackupKey,
   PENDING_RESTORE,
@@ -202,7 +204,7 @@ describe('Encrypted git backups', function () {
       .prepare('SELECT attempts FROM backup_runs ORDER BY id DESC LIMIT 1')
       .get()!.attempts
     assert.equal(attempts, 1)
-    // An unreachable repository is retried, then the failure is recorded.
+    // A repository that does not exist refuses the key: recorded at once, not retried.
     await settings.set(localOperator, 'backup', {
       repository: path.join(dir, 'missing.git'),
     })
@@ -212,7 +214,7 @@ describe('Encrypted git backups', function () {
       database.db
         .prepare('SELECT attempts FROM backup_runs ORDER BY id DESC LIMIT 1')
         .get()!.attempts,
-      2,
+      1,
     )
     await settings.set(localOperator, 'backup', { repository: bare })
     // A GitHub-connection backup needs that connection.
@@ -334,6 +336,523 @@ describe('Encrypted git backups', function () {
   })
 })
 
+describe('Backups one at a time, carrying changes, and falling back to the GitHub connection', function () {
+  this.timeout(120_000)
+  const clock = Date.UTC(2026, 9, 1, 12)
+  /** Git that runs for real unless `refuse` names a URL or the run, as GitHub would refuse it. */
+  type Rule = (args: string[]) => Error | undefined
+  const refusal = (): Error =>
+    Object.assign(new Error('Command failed: git push'), {
+      stderr:
+        'git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.\n',
+    })
+  const setup = async (
+    options: {
+      repository?: (bare: string) => string
+      auth?: 'deployKey' | 'github'
+      rule?: Rule
+      github?: boolean
+      hasGitHub?: boolean
+      githubRule?: Rule
+    } = {},
+  ): Promise<{
+    dir: string
+    bare: string
+    database: MasterDatabase
+    backups: Backups
+    calls: string[]
+    clone: () => string
+  }> => {
+    const dir = root('backup-change-')
+    const bare = path.join(dir, 'backup.git')
+    git(dir, 'init', '-q', '--bare', bare)
+    mkdirSync(path.join(dir, 'master'), { mode: 0o700 })
+    const database = new MasterDatabase(
+      new DatabaseSync(path.join(dir, 'master', 'master.sqlite')),
+      () => clock,
+    )
+    const settings = new Settings(database)
+    const calls: string[] = []
+    const githubUrl = `file://${bare}`
+    const backups = new Backups({
+      master: database,
+      dir: path.join(dir, 'master'),
+      scratch: path.join(dir, 'master', 'scratch'),
+      setting: (): BackupSetting | undefined =>
+        settings.value('backup') as BackupSetting | undefined,
+      fingerprint: 'mldsa65:test',
+      attempts: 2,
+      ...(options.github === false
+        ? {}
+        : {
+            github: async (): Promise<{
+              url: string
+              env: NodeJS.ProcessEnv
+            }> => {
+              calls.push('github-access')
+              return { url: githubUrl, env: { MASON_TEST_ACCESS: 'github' } }
+            },
+          }),
+      hasGitHub: (): boolean => options.hasGitHub ?? true,
+      git: async (args, { cwd, env }): Promise<string> => {
+        const github = env.MASON_TEST_ACCESS === 'github'
+        calls.push(
+          `${github ? 'github' : 'key'}:${args.find((arg) => /^(fetch|push|ls-remote)$/.test(arg)) ?? args[args.length - 1]}`,
+        )
+        const refused = (github ? options.githubRule : options.rule)?.(args)
+        if (refused != null) throw refused
+        return execFileSync('git', args, {
+          cwd,
+          env,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+      },
+    })
+    settings.register('backup', {
+      ...backupArea,
+      changed: () => {
+        backups.key()
+      },
+    })
+    await settings.set(localOperator, 'backup', {
+      repository: options.repository?.(bare) ?? bare,
+      branch: 'backups',
+      auth: options.auth ?? 'deployKey',
+    })
+    return {
+      dir,
+      bare,
+      database,
+      backups,
+      calls,
+      clone: (): string => {
+        const out = mkdtempSync(path.join(dir, 'clone-'))
+        git(out, 'clone', '-q', '--branch', 'backups', bare, 'repo')
+        return path.join(out, 'repo')
+      },
+    }
+  }
+  const latest = (t: {
+    backups: Backups
+    clone: () => string
+  }): DatabaseSync => {
+    const file = path.join(t.clone(), 'restored.sqlite')
+    writeFileSync(
+      file,
+      open(
+        parseBackupKey(t.backups.keyText()),
+        readFileSync(path.join(path.dirname(file), 'latest.enc')),
+      ),
+    )
+    return new DatabaseSync(file)
+  }
+  const runs = (database: MasterDatabase): Json[] =>
+    database.db
+      .prepare('SELECT status,auth,error FROM backup_runs ORDER BY id')
+      .all()
+      .map((row) => ({ ...row }))
+
+  it('U13.14 backups calls made while one is queued or running share it, and a change waits for the backup before it', async () => {
+    const t = await setup()
+    const [a, b] = [t.backups.backup(), t.backups.backup()]
+    let before: Json[] = []
+    const change = t.backups.change(async (push) => {
+      // The backup asked for first has finished before the change starts.
+      before = runs(t.database).map((run) => run.status)
+      await push((db) => db.exec("INSERT INTO meta(key,value) VALUES('x','1')"))
+    })
+    assert.deepEqual(await a, await b)
+    await change
+    assert.deepEqual(before, ['succeeded'])
+    assert.deepEqual(
+      runs(t.database).map((run) => run.status),
+      ['succeeded', 'succeeded'],
+    )
+    // A change holds the queue: a backup asked for meanwhile runs after it.
+    const later: string[] = []
+    const slow = t.backups.change(async (push) => {
+      await push(() => undefined)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      later.push('change applied')
+    })
+    const after = t.backups.backup().then(() => later.push('backup'))
+    await Promise.all([slow, after])
+    assert.deepEqual(later, ['change applied', 'backup'])
+  })
+
+  it('U13.14 a change is in the pushed snapshot and not in the live database; a failed push rejects and records the failure', async () => {
+    const t = await setup()
+    await t.backups.change(async (push) => {
+      await push((db) =>
+        db.exec("INSERT INTO meta(key,value) VALUES('carried','yes')"),
+      )
+    })
+    const pushed = latest(t)
+    assert.equal(
+      (
+        pushed.prepare("SELECT value FROM meta WHERE key='carried'").get() as {
+          value: string
+        }
+      ).value,
+      'yes',
+    )
+    pushed.close()
+    assert.equal(
+      t.database.db.prepare("SELECT value FROM meta WHERE key='carried'").get(),
+      undefined,
+    )
+    assert.equal(t.backups.status().lastSuccess!.auth, 'deployKey')
+    // A push that fails: the change rejects with git's error, and the run is failed.
+    const broken = await setup({
+      rule: (args) =>
+        args.includes('push') ? new Error('network is down') : undefined,
+    })
+    let ran = false
+    await assert.rejects(
+      broken.backups.change(async (push) => {
+        await push((db) =>
+          db.exec("INSERT INTO meta(key,value) VALUES('lost','yes')"),
+        )
+        ran = true
+      }),
+      /network is down/,
+    )
+    assert.equal(ran, false)
+    assert.equal(runs(broken.database).at(-1)!.status, 'failed')
+    assert.equal(
+      broken.database.db
+        .prepare("SELECT value FROM meta WHERE key='lost'")
+        .get(),
+      undefined,
+    )
+    // The queue goes on after a failed change.
+    assert.equal((await broken.backups.backup()).backedUp, false)
+  })
+
+  it('U13.15 a deploy key GitHub refuses falls back to the GitHub connection', async () => {
+    const t = await setup({
+      repository: () => 'git@github.com:EdgeApp/backup-test.git',
+      rule: (args) =>
+        args.includes('git@github.com:EdgeApp/backup-test.git')
+          ? refusal()
+          : undefined,
+    })
+    const status = await t.backups.backup()
+    assert.equal(status.backedUp, true, JSON.stringify(status))
+    assert.equal(status.lastSuccess!.auth, 'github')
+    assert(t.calls.includes('github-access'))
+    assert.equal(git(t.clone(), 'rev-list', '--count', 'HEAD').trim(), '1')
+  })
+
+  it('U13.15 the fallback needs a connection and a GitHub repository, and says why when it has neither', async () => {
+    const refusing: Rule = (args) =>
+      args.some((arg) => /github\.com|gitlab\.com/.test(arg))
+        ? refusal()
+        : undefined
+    const none = await setup({
+      repository: () => 'git@github.com:EdgeApp/backup-test.git',
+      rule: refusing,
+      hasGitHub: false,
+    })
+    const noConnection = await none.backups.backup()
+    assert.match(
+      noConnection.lastFailure!.error,
+      /^The deploy key was refused \(git@github\.com: Permission denied \(publickey\)\. fatal: Could not read from remote repository\.\), and the master has no GitHub connection$/,
+    )
+    assert(!none.calls.includes('github-access'))
+    const gitlab = await setup({
+      repository: () => 'git@gitlab.com:org/backup.git',
+      rule: refusing,
+    })
+    assert.match(
+      (await gitlab.backups.backup()).lastFailure!.error,
+      /and git@gitlab\.com:org\/backup\.git is not on GitHub$/,
+    )
+    assert(!gitlab.calls.includes('github-access'))
+    // ssh:// is not a form the connection gives credentials to.
+    const sshUrl = await setup({
+      repository: () => 'ssh://git@github.com/EdgeApp/backup-test.git',
+      rule: refusing,
+    })
+    assert.match(
+      (await sshUrl.backups.backup()).lastFailure!.error,
+      /is not on GitHub$/,
+    )
+    // Both refused.
+    const both = await setup({
+      repository: () => 'git@github.com:EdgeApp/backup-test.git',
+      rule: refusing,
+      githubRule: (args) => (args.includes('push') ? refusal() : undefined),
+    })
+    assert.match(
+      (await both.backups.backup()).lastFailure!.error,
+      /^The deploy key was refused \(.*\); the GitHub connection was refused too \(git@github\.com: Permission denied/,
+    )
+    // The connection failing some other way says so.
+    const flaky = await setup({
+      repository: () => 'git@github.com:EdgeApp/backup-test.git',
+      rule: refusing,
+      githubRule: (args) =>
+        args.includes('push') ? new Error('connection reset') : undefined,
+    })
+    assert.match(
+      (await flaky.backups.backup()).lastFailure!.error,
+      /the GitHub connection failed \(connection reset\)$/,
+    )
+  })
+
+  it('U13.15 only a refusal falls back: other failures, a foreign commit and auth github do not try the other credential', async () => {
+    const network = await setup({
+      repository: () => 'git@github.com:EdgeApp/backup-test.git',
+      rule: (args) =>
+        args.includes('git@github.com:EdgeApp/backup-test.git')
+          ? new Error('Could not resolve host: github.com')
+          : undefined,
+    })
+    assert.match(
+      (await network.backups.backup()).lastFailure!.error,
+      /^Could not resolve host/,
+    )
+    assert(!network.calls.includes('github-access'))
+    const foreign = await setup()
+    await foreign.backups.backup()
+    const repo = foreign.clone()
+    writeFileSync(path.join(repo, 'note.txt'), 'someone else')
+    git(repo, 'add', '.')
+    git(
+      repo,
+      '-c',
+      'user.name=Someone',
+      '-c',
+      'user.email=someone@example.test',
+      'commit',
+      '-qm',
+      'Not a backup',
+    )
+    git(repo, 'push', '-q', 'origin', 'backups')
+    assert.match(
+      (await foreign.backups.backup()).lastFailure!.error,
+      /did not write/,
+    )
+    assert(!foreign.calls.includes('github-access'))
+    const viaGitHub = await setup({
+      auth: 'github',
+      repository: () => 'git@github.com:EdgeApp/backup-test.git',
+    })
+    const status = await viaGitHub.backups.backup()
+    assert.equal(status.lastSuccess!.auth, 'github', JSON.stringify(status))
+    assert(viaGitHub.calls.every((call) => !call.startsWith('key:')))
+  })
+
+  it('U13.15 a host that cannot be reached is not a refusal, and a refused key is not retried', async () => {
+    // As execFile reports it: the command line, then git's stderr.
+    const unreachable = (): Error => {
+      const stderr =
+        'ssh: connect to host github.com port 22: Connection timed out\nfatal: Could not read from remote repository.\n'
+      return Object.assign(new Error(`Command failed: git fetch\n${stderr}`), {
+        stderr,
+      })
+    }
+    const offline = await setup({
+      repository: () => 'git@github.com:EdgeApp/backup-test.git',
+      rule: (args) =>
+        args.includes('git@github.com:EdgeApp/backup-test.git')
+          ? unreachable()
+          : undefined,
+    })
+    assert.match(
+      (await offline.backups.backup()).lastFailure!.error,
+      /Connection timed out/,
+    )
+    assert(!offline.calls.includes('github-access'))
+    // Two attempts are allowed, and the unreachable host gets both.
+    assert.equal(offline.calls.filter((call) => call === 'key:fetch').length, 2)
+    // OpenSSH's other ways of saying the connection dropped.
+    for (const dropped of [
+      'Connection closed by 140.82.112.3 port 22',
+      'Connection to github.com closed by remote host.',
+      'client_loop: send disconnect: Broken pipe',
+    ]) {
+      const t = await setup({
+        repository: () => 'git@github.com:EdgeApp/backup-test.git',
+        rule: (args) =>
+          args.includes('git@github.com:EdgeApp/backup-test.git')
+            ? Object.assign(
+                new Error(`Command failed: git fetch\n${dropped}`),
+                {
+                  stderr: `${dropped}\nfatal: Could not read from remote repository.\n`,
+                },
+              )
+            : undefined,
+      })
+      await t.backups.backup()
+      assert(!t.calls.includes('github-access'), dropped)
+      assert.equal(t.calls.filter((call) => call === 'key:fetch').length, 2)
+    }
+    const refused = await setup({
+      repository: () => 'git@github.com:EdgeApp/backup-test.git',
+      rule: (args) =>
+        args.includes('git@github.com:EdgeApp/backup-test.git')
+          ? refusal()
+          : undefined,
+    })
+    assert.equal((await refused.backups.backup()).lastSuccess!.auth, 'github')
+    assert.equal(refused.calls.filter((call) => call === 'key:fetch').length, 1)
+    // A git its timeout killed, as execFile reports it: no stderr, so the
+    // reason says it timed out, and it is neither retried nor followed by ls-remote.
+    const stalled = await setup({
+      repository: () => 'git@github.com:EdgeApp/backup-test.git',
+      rule: (args) =>
+        args.includes('git@github.com:EdgeApp/backup-test.git')
+          ? Object.assign(new Error('Command failed: git -c x=y fetch -q'), {
+              killed: true,
+              signal: 'SIGKILL',
+              stderr: '',
+            })
+          : undefined,
+    })
+    assert.equal(
+      (await stalled.backups.backup()).lastFailure!.error,
+      'git fetch timed out after 60 minutes',
+    )
+    // Transfers get an hour, local commands ten minutes.
+    assert.equal(gitMinutes(['-c', 'a=b', 'fetch', '-q', 'url']), 60)
+    assert.equal(gitMinutes(['push', 'url']), 60)
+    assert.equal(gitMinutes(['clone', 'url', 'dir']), 60)
+    assert.equal(gitMinutes(['ls-remote', '--heads', 'url']), 60)
+    assert.equal(gitMinutes(['-c', 'a=b', 'commit', '-qm', 'x']), 10)
+    // `git init -q`, then the one fetch.
+    assert.deepEqual(
+      stalled.calls.filter((call) => call.startsWith('key:')),
+      ['key:-q', 'key:fetch'],
+    )
+    assert(!stalled.calls.includes('github-access'))
+    await assert.rejects(
+      stalled.backups.change(async (push) => {
+        await push(() => undefined)
+      }),
+      (error: Error) =>
+        error instanceof BackupFailed &&
+        error.message === 'git fetch timed out after 60 minutes',
+    )
+  })
+
+  it('U13.14 a plain backup that cannot take its snapshot is recorded as failed', async () => {
+    const t = await setup()
+    await t.backups.backup()
+    const keyFile = path.join(t.dir, 'master', 'backup.key')
+    const key = readFileSync(keyFile, 'utf8')
+    writeFileSync(keyFile, 'not a key\n')
+    try {
+      const status = await t.backups.backup()
+      assert.equal(status.backedUp, false)
+      assert.match(status.lastFailure!.error, /not a Mason backup key/)
+      assert.match(t.backups.notice()!, /The last backup failed/)
+    } finally {
+      writeFileSync(keyFile, key)
+    }
+  })
+
+  it('U13.15 git runs with the stall limits: ssh keep-alives and a timeout on the deploy key, a low-speed limit on every access', async () => {
+    const seen: NodeJS.ProcessEnv[] = []
+    const t = await setup({
+      rule: () => undefined,
+    })
+    ;(t.backups as unknown as { options: { git: unknown } }).options.git =
+      async (
+        args: string[],
+        options: { cwd: string; env: NodeJS.ProcessEnv },
+      ): Promise<string> => {
+        seen.push(options.env)
+        return execFileSync('git', args, {
+          cwd: options.cwd,
+          env: options.env,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+      }
+    await t.backups.backup()
+    const env = seen[0]!
+    assert.match(String(env.GIT_SSH_COMMAND), /ConnectTimeout=20/)
+    assert.match(String(env.GIT_SSH_COMMAND), /ServerAliveInterval=15/)
+    assert.equal(env.GIT_HTTP_LOW_SPEED_LIMIT, '1000')
+    assert.equal(env.GIT_HTTP_LOW_SPEED_TIME, '60')
+  })
+
+  it('U13.14 a change that fails on the snapshot copy rejects with its own error and records no backup', async () => {
+    const t = await setup()
+    await assert.rejects(
+      t.backups.change(async (push) => {
+        await push(() => {
+          throw new Error('no such column: nope')
+        })
+      }),
+      (error: Error) =>
+        error.message === 'no such column: nope' &&
+        error.name !== 'BackupFailed',
+    )
+    assert.deepEqual(runs(t.database), [])
+    assert.equal(t.backups.notice(), 'This master is not backed up')
+  })
+
+  it('U13.15 with real git: a GitHub URL the deploy key cannot reach falls back to the connection', async () => {
+    const dir = root('backup-real-')
+    const bare = path.join(dir, 'backup.git')
+    git(dir, 'init', '-q', '--bare', bare)
+    const home = path.join(dir, 'home')
+    mkdirSync(home)
+    // The deploy key's git reaches a repository that does not exist, as GitHub answers a key it refuses.
+    writeFileSync(
+      path.join(home, '.gitconfig'),
+      `[url "file://${path.join(dir, 'missing.git')}"]\n\tinsteadOf = git@github.com:EdgeApp/backup-test.git\n`,
+    )
+    mkdirSync(path.join(dir, 'master'), { mode: 0o700 })
+    const database = new MasterDatabase(
+      new DatabaseSync(path.join(dir, 'master', 'master.sqlite')),
+      () => clock,
+    )
+    const settings = new Settings(database)
+    const backups = new Backups({
+      master: database,
+      dir: path.join(dir, 'master'),
+      scratch: path.join(dir, 'master', 'scratch'),
+      setting: (): BackupSetting | undefined =>
+        settings.value('backup') as BackupSetting | undefined,
+      fingerprint: 'mldsa65:test',
+      attempts: 1,
+      github: async (): Promise<{ url: string; env: NodeJS.ProcessEnv }> => ({
+        url: `file://${bare}`,
+        env: {},
+      }),
+      hasGitHub: (): boolean => true,
+    })
+    settings.register('backup', {
+      ...backupArea,
+      changed: () => {
+        backups.key()
+      },
+    })
+    await settings.set(localOperator, 'backup', {
+      repository: 'git@github.com:EdgeApp/backup-test.git',
+      branch: 'backups',
+    })
+    const saved = process.env.HOME
+    process.env.HOME = home
+    try {
+      const status = await backups.backup()
+      assert.equal(status.backedUp, true, JSON.stringify(status))
+      assert.equal(status.lastSuccess!.auth, 'github')
+    } finally {
+      process.env.HOME = saved
+    }
+    assert.match(
+      git(dir, '--git-dir', bare, 'log', '--format=%s', 'backups'),
+      /^Mason backup /,
+    )
+  })
+})
+
 describe('Backups on a running master', function () {
   this.timeout(180_000)
   let c: Cluster
@@ -350,7 +869,9 @@ describe('Backups on a running master', function () {
 
   it('U13.8/U13.11 the backup settings API shows the key to administrators only and records each confirmation', async () => {
     const master = c.master.master!
-    const manager = master.keys.create(localOperator, { role: 'manager' }).token
+    const manager = master.keys.create(localOperator, {
+      role: 'manager',
+    }).token
     const paul = master.people
       .list(localOperator)
       .find((p) => p.username === 'paul')!
@@ -490,6 +1011,22 @@ describe('Backups on a running master', function () {
       1,
     )
     assert.match(running.lines.join('\n'), /Stop the master/)
+  })
+
+  it('U13.15 the running master offers the GitHub fallback only once a GitHub connection is saved', async () => {
+    const master = c.master.master!
+    const { hasGitHub } = (
+      master.backups as unknown as { options: { hasGitHub: () => boolean } }
+    ).options
+    assert.equal(hasGitHub(), false)
+    // Stored as the settings API stores a checked connection.
+    master.database.db
+      .prepare(
+        "INSERT INTO settings(area,value,updated_at,updated_by) VALUES('github',?,0,'test')",
+      )
+      .run(JSON.stringify({ kind: 'token', token: 'ghp_fixture' }))
+    assert.equal(hasGitHub(), true)
+    master.database.db.prepare("DELETE FROM settings WHERE area='github'").run()
   })
 
   it('U13.9 restores through the first-run page, which takes effect on the next start', async () => {
