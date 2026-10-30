@@ -1521,17 +1521,17 @@ export function masonfileView(data: {
   }`
 }
 
-/** The tabs of a project's pages; Runs and builds is the dashboard, filtered to the project. */
+/** The tabs of a project's pages. */
 export function projectTabs(
   slug: string,
-  current: 'overview' | 'masonfile' | 'secrets',
+  current: 'overview' | 'runs' | 'masonfile' | 'secrets',
 ): string {
   const path = `/projects/${encodeURIComponent(slug)}`
   const tab = (key: string, href: string, label: string): string =>
     `<a href="${escape(href)}"${key === current ? ' aria-current="page"' : ''}>${label}</a>`
   return `<nav class="tabs" aria-label="Project">${[
     tab('overview', path, 'Overview'),
-    tab('runs', `/?project=${encodeURIComponent(slug)}`, 'Runs and builds'),
+    tab('runs', `${path}/runs`, 'Runs and builds'),
     tab('masonfile', `${path}/masonfile`, 'Masonfile'),
     tab('secrets', `${path}/secrets`, 'Secrets'),
   ].join('')}</nav>`
@@ -1703,6 +1703,18 @@ function buildNumbersPanel(data: {
       ? '<p>The Masonfile declares no build numbers yet, or setup has not run.</p>'
       : `<table class="list"><thead><tr><th>Sequence</th><th>Format</th><th>Scope</th><th>Last issued</th></tr></thead><tbody>${rows}</tbody></table>`
   }${form}</section>`
+}
+
+/** A project's Runs and builds tab: its latest runs, each with its published builds and saved artifacts. */
+export function projectRunsView(
+  data: { slug: string; name: string; branch?: string },
+  runs: string,
+): string {
+  return `${head(`${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch, with the builds each published.' : `The latest runs on ${data.branch}, with the builds each published.`, [data.name, 'Runs and builds'])}${projectTabs(data.slug, 'runs')}${
+    data.branch == null
+      ? ''
+      : `<p><a href="/projects/${encodeURIComponent(data.slug)}/runs">${icon('close')} Every branch</a></p>`
+  }<section class="panel">${runs}</section>`
 }
 
 /** A project on the master: repository, app IDs, branch rules, build numbers, and its tabs. */

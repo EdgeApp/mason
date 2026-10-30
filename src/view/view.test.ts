@@ -8,6 +8,7 @@ import {
   field,
   masonfileView,
   nodesView,
+  projectRunsView,
   projectTabs,
   projectView,
   secretsView,
@@ -566,6 +567,13 @@ describe('Design system and views', () => {
     assert.match(html, /Webhook active/)
     assert.match(html, /buildbox/)
     assert.match(html, /role="progressbar"/)
+    // The card opens the project; only its run chips lead elsewhere, to their runs.
+    assert.match(
+      html,
+      /<h2><a class="card-link" href="\/projects\/phones">Phones<\/a><\/h2>/,
+    )
+    assert.doesNotMatch(html, /meta-link|\/masonfile"|\?project=/)
+    assert.match(html, /<a class="run-chip" href="\/runs\/run-\d+"/)
     // A platform filter keeps the projects with an app on it.
     const mac = dashboardData(
       { db, viewer: viewer('developer'), now: NOW, appVisible: all },
@@ -638,7 +646,8 @@ describe('Design system and views', () => {
     assert.deepEqual(find('   '), [])
     // LIKE wildcards are matched literally.
     assert.deepEqual(find('%'), [])
-    assert.equal(search(developer, 'phone')[0]!.href, '/?project=phones')
+    assert.equal(search(developer, 'phone')[0]!.href, '/projects/phones')
+    assert.equal(search(developer, 'phone')[1]!.href, '/projects/phones')
     assert.equal(search(developer, '#2')[0]!.href, '/runs/run-2')
     assert.equal(
       search({ ...developer, viewer: viewer('developer', 'host') }, 'watch')[0]!
@@ -787,6 +796,7 @@ describe('Design system and views', () => {
     const list = artifactsView(source, { project: 'phones', branch: 'main' })
     assert.match(list, /phones · main/)
     assert.match(list, /2 · 1\.5 MB/)
+    assert.match(list, /<td class="mono">26102011, 26102013 · 3 files<\/td>/)
     assert.doesNotMatch(list, /feature\/login/)
     assert.match(artifactsView(source, { project: 'nothing' }), /No runs yet/)
     const master = artifactsView(
@@ -1626,7 +1636,7 @@ describe('Project tabs and the Secrets tab', () => {
       ].map((match) => [match[1], match[2] != null, match[3]]),
       [
         ['/projects/my%20app', false, 'Overview'],
-        ['/?project=my%20app', false, 'Runs and builds'],
+        ['/projects/my%20app/runs', false, 'Runs and builds'],
         ['/projects/my%20app/masonfile', false, 'Masonfile'],
         ['/projects/my%20app/secrets', true, 'Secrets'],
       ],
@@ -1651,6 +1661,23 @@ describe('Project tabs and the Secrets tab', () => {
     assert.match(
       masonfileView({ slug: 'app', name: 'App', commits: [] }),
       /href="\/projects\/app\/masonfile" aria-current="page">Masonfile/,
+    )
+    const runs = projectRunsView(
+      { slug: 'app', name: 'App' },
+      '<table class="list"></table>',
+    )
+    assert.match(
+      runs,
+      /href="\/projects\/app\/runs" aria-current="page">Runs and builds/,
+    )
+    assert.match(
+      runs,
+      /<section class="panel"><table class="list"><\/table><\/section>/,
+    )
+    assert.doesNotMatch(runs, /Every branch/)
+    assert.match(
+      projectRunsView({ slug: 'app', name: 'App', branch: 'beta' }, ''),
+      /The latest runs on beta[^]*href="\/projects\/app\/runs"><span[^>]*>[^<]*<\/span> Every branch/,
     )
   })
 

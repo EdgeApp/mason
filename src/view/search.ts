@@ -58,9 +58,7 @@ export function search(scope: SearchScope, text: string): SearchResult[] {
         kind: 'project',
         label: project.name,
         detail: project.slug,
-        href: developer
-          ? `/?project=${encodeURIComponent(project.slug)}`
-          : `/projects/${encodeURIComponent(project.slug)}`,
+        href: `/projects/${encodeURIComponent(project.slug)}`,
       })
   for (const app of apps)
     out.push({
@@ -70,7 +68,7 @@ export function search(scope: SearchScope, text: string): SearchResult[] {
       href:
         viewer.node === 'host'
           ? `/apps/${app.id}`
-          : `/?project=${encodeURIComponent(app.project)}`,
+          : `/projects/${encodeURIComponent(app.project)}`,
     })
   if (!developer) return out.slice(0, LIMIT)
   const number = /^#?(\d{1,9})$/.exec(query)?.[1]
