@@ -753,7 +753,7 @@ describe('Devices across nodes', function () {
     assert.match(out.join('\n'), /now also trusts|Usage: mason host trust-root/)
   })
 
-  it('U15.6 no code path runs Ruby, Bundler or the profile shim', () => {
+  it('U15.6 no code path runs Bundler, Fastlane or the profile shim; only the Ruby and CocoaPods installers run Ruby', () => {
     const files: string[] = []
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir)) {
@@ -787,6 +787,12 @@ describe('Devices across nodes', function () {
     assert.deepEqual(
       [...installer.matchAll(/\b(?:run|step)\(\s*([\w.]+)/g)].map((m) => m[1]),
       ['bin', 'bin'],
+    )
+    // The CocoaPods installer runs its gem install with its own Ruby, never
+    // Bundler or Fastlane.
+    assert.doesNotMatch(
+      readFileSync(path.resolve('src/worker/tools/cocoapods.ts'), 'utf8'),
+      /['"`](bundle|fastlane)['"`]|bundle exec|Spaceship/,
     )
     assert.equal(createHash('sha256').update('').digest('hex').length, 64)
   })

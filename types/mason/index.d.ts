@@ -86,6 +86,14 @@ export interface Tools {
   apt?: string[]
   /** dnf packages (Linux). */
   dnf?: string[]
+  /**
+   * An exact CocoaPods version (`'1.16.2'`), macOS only: installed with its
+   * own Ruby, no Homebrew or administrator needed. The stage's Xcode
+   * compiles its native gems.
+   */
+  cocoapods?: string
+  /** `'accept'`: this Masonfile accepts the Android SDK licences, so `android` packages install on any node. */
+  androidLicenses?: 'accept'
 }
 
 export type ParamValue = string | number | boolean

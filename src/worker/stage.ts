@@ -62,12 +62,14 @@ import {
   wantedProjectTools,
   type NodeRelease,
 } from './tools/projectTools.js'
+import { launchingXcode } from './tools/versions.js'
 import type { KeyObject } from 'node:crypto'
 import { helperPaths, helperRequest } from '../helper/server.js'
 import { runningInstall, type RunningInstall } from '../release/install.js'
 import { receiveUpdate, restartProcess } from './update.js'
 import type { NodeType } from '../master/nodeTypes.js'
 import {
+  developerDir,
   systemInventory,
   systemRun,
   type SystemInventory,
@@ -675,6 +677,17 @@ export class WorkerRuntime {
       if (!(installable as readonly string[]).includes(request?.tool))
         throw new Error(`${String(request?.tool)} is not a tool Mason installs`)
       const base = this.inventory()
+      // CocoaPods' native gems compile with the Xcode the stage asked for,
+      // which an earlier request of the same stage may just have installed.
+      let xcodeDir: string | undefined
+      if (request.tool === 'cocoapods' && request.xcode != null) {
+        const xcode = launchingXcode(request.xcode, base.xcodes ?? [])
+        if (xcode == null)
+          throw new Error(
+            `No installed Xcode matches ${request.xcode}, which CocoaPods' native gems compile with`,
+          )
+        xcodeDir = developerDir(xcode.path)
+      }
       const version = await install(request, {
         toolsDir: this.path('tools'),
         sources: this.options.toolSources ?? defaultSources,
@@ -683,6 +696,7 @@ export class WorkerRuntime {
         log: (text) => {
           log += text
         },
+        ...(xcodeDir == null ? {} : { developerDir: xcodeDir }),
       })
       return { ok: true, version, log, inventory: this.inventory() }
     } catch (error) {

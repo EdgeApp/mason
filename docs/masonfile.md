@@ -809,9 +809,11 @@ tools: {
   ruby: 'project',
   go: '1.23',
   android: ['platforms;android-35', 'build-tools;35.0.0'],
+  androidLicenses: 'accept', // accept the Android SDK licences for this stage
   xcode: '>=26 <27',       // installed from the master's Xcode downloads when missing
   simulators: ['iOS 26.1'],
-  brew: ['cocoapods'],     // macOS
+  cocoapods: '1.16.2',     // exact version; macOS
+  brew: ['swiftlint'],     // macOS
   apt: ['libssl-dev'],     // Linux
 }
 ```
@@ -831,6 +833,7 @@ phases `ctx.apple.archive`, `testflight` and `notarize` run in Xcode.
 | `python` | `3.12`, `3.12.7` | `.python-version`, `.tool-versions`, `pyproject.toml` `requires-python` | python-build-standalone's current release, checked against its `SHA256SUMS` | `bin` on `PATH`, `PYTHONNOUSERSITE=1` |
 | `ruby` | `3.3`, `3.3.5` | `.ruby-version`, `.tool-versions`, the `Gemfile`'s `ruby` line | built once per node with a pinned ruby-build, which checks each tarball | `bin` on `PATH`; gems install into that Ruby's own directory |
 | `go` | `1.23`, `1.23.4` | `go.mod` (`toolchain`, else `go`), `.tool-versions` | go.dev, checked against the published sha256 | `GOROOT`, `bin` on `PATH`, `GOTOOLCHAIN=local` |
+| `cocoapods` | `1.16.2` (exact) | — | RubyGems, run by Homebrew's portable Ruby (its SHA-256 pinned) | `pod` and that Ruby on `PATH`, `GEM_HOME` |
 | `xcode` | see below | `.xcode-version`, `.tool-versions` | Apple, through the node's helper | `DEVELOPER_DIR` |
 
 - A minor or major (`3.12`, `22`) takes the newest installed version that
@@ -848,6 +851,17 @@ phases `ctx.apple.archive`, `testflight` and `notarize` run in Xcode.
   `libyaml` on macOS, `build-essential` and `libyaml-dev` on Linux, which a
   node type can list). Each Ruby keeps its own gems, so `bundle exec pod
   install` and Fastlane run with the stage's Ruby, never the system's.
+- **Android SDK licences** must be accepted before `sdkmanager` installs a
+  package. `androidLicenses: 'accept'` accepts them for the stage; without it,
+  only a node type whose administrator accepted them installs Android
+  packages.
+- **CocoaPods** installs into the node's tools directory with a private Ruby
+  (Homebrew's portable Ruby, checksum verified), so it needs neither Homebrew
+  nor the privileged helper. The version is exact and `pod` runs with the
+  stage's Xcode. Only CocoaPods itself is pinned: its dependencies resolve
+  from RubyGems when it installs, and the tool's marker lists them. A stage
+  that asks for it runs only on macOS nodes; setup refuses one whose every
+  `on` entry names another `os`.
 - **Xcode** is downloaded by each node itself, directly from Apple, when the
   master tells it to (section 12 explains the sign-in). The node checks
   Apple's signature, installs it side by side as
@@ -860,6 +874,8 @@ phases `ctx.apple.archive`, `testflight` and `notarize` run in Xcode.
   Line Tools and Rosetta are installed by the node's privileged helper
   (`sudo mason worker --install`). A NoMac Mac has no helper: it installs the
   tools in the table except Xcode, and uses the Xcodes NoMac provides.
+  Mason never installs Homebrew itself; an administrator installs it on each
+  macOS node that needs `brew` packages. CocoaPods needs no root, on macOS.
 
 Stages share installed tools; an administrator can keep versions installed
 per node type (Node, Java, Rust, Python, Go, Ruby, Xcode), and unused Xcodes

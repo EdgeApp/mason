@@ -24,6 +24,7 @@ import type {
 } from '../../types/mason/index.js'
 import { asScheme, type BuildNumberScheme } from '../master/buildNumbers.js'
 import { matches } from '../master/rules.js'
+import { inexactCocoapods } from '../validation.js'
 import { isConfig, MAX_CONFIGS, unresolvedSecret } from './variants.js'
 
 /** The Masonfile API versions this Mason major version runs. */
@@ -291,6 +292,8 @@ const toolNames = [
   'brew',
   'apt',
   'dnf',
+  'cocoapods',
+  'androidLicenses',
 ]
 const roles: Role[] = ['admin', 'manager', 'developer', 'tester']
 const triggerKinds = [
@@ -344,7 +347,13 @@ function tools(value: unknown, what: string): Tools | undefined {
       throw new GraphError(`${what}: unknown tool ${name}`)
     if (['android', 'simulators', 'brew', 'apt', 'dnf'].includes(name))
       strings(version, `${what} ${name}`)
-    else if (typeof version !== 'string' || version.length === 0)
+    else if (name === 'androidLicenses') {
+      if (version !== 'accept')
+        throw new GraphError(`${what}: androidLicenses is 'accept'`)
+    } else if (name === 'cocoapods') {
+      const inexact = inexactCocoapods(version)
+      if (inexact != null) throw new GraphError(`${what}: ${inexact}`)
+    } else if (typeof version !== 'string' || version.length === 0)
       throw new GraphError(`${what}: ${name} needs a version`)
   }
   return value as Tools
@@ -1127,8 +1136,20 @@ export function validateGraph(value: unknown, project: ProjectFacts): Graph {
       if (stage.kind === 'approval') continue
       nodeChoice(stage.on, what)
       tools(stage.tools, what)
+      // CocoaPods runs on macOS: a stage only ever offered other systems cannot have it.
+      const choices = alternatives(stage.on)
+      if (
+        stage.tools?.cocoapods != null &&
+        choices.length > 0 &&
+        choices.every(
+          (on) => typeof on === 'object' && on.os != null && on.os !== 'macos',
+        )
+      )
+        throw new GraphError(
+          `Stage ${stage.name} asks for CocoaPods, which installs on macOS only`,
+        )
       if (project.structureOnly === true) continue
-      for (const on of alternatives(stage.on))
+      for (const on of choices)
         if (
           typeof on === 'string' &&
           on !== 'master' &&

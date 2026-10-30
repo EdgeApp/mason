@@ -419,6 +419,7 @@ export class Master {
         masterChecklist(this.apple.status(), this.nodeStates.wantsXcode()),
       cloud: {
         demand: (type): PoolAnswer | undefined => this.pools.demand(type),
+        makesMacs: (type): boolean | undefined => this.pools.makesMacs(type),
         draining: (fingerprint): boolean => this.pools.draining(fingerprint),
         setupDemand: (): string | undefined => this.pools.setupDemand(),
       },

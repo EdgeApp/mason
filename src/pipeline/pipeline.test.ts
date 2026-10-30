@@ -18,6 +18,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Json, ParamSpec, Setup, Stage } from '../../types/mason/index.js'
 import { MaskedLog } from '../builder/execution.js'
+import { inexactCocoapods } from '../validation.js'
 import { createContext, inside, type StageSnapshot } from './context.js'
 import {
   GraphError,
@@ -529,6 +530,29 @@ describe('pipeline graph', () => {
       sized.workflows[0]!.stages[0]!.on = on
       invalid(sized, /a list of node selectors has 1 to 8 entries/)
     }
+    // CocoaPods takes an exact version and macOS; the Android licences only 'accept'.
+    const pods = copy()
+    pods.workflows[0]!.stages[0]!.tools = {
+      cocoapods: '1.16.2',
+      androidLicenses: 'accept',
+    }
+    pods.workflows[0]!.stages[0]!.on = [{ os: 'linux' }, { os: 'macos' }]
+    validateGraph(pods, project)
+    const loose = copy()
+    loose.workflows[0]!.stages[0]!.tools = { cocoapods: '1.16' }
+    invalid(loose, /CocoaPods needs an exact version/)
+    assert.equal(inexactCocoapods('1.16.2'), undefined)
+    for (const inexact of ['~> 1.16', 1, undefined])
+      assert.match(String(inexactCocoapods(inexact)), /exact version/)
+    const licences = copy()
+    licences.workflows[0]!.stages[0]!.tools = {
+      androidLicenses: 'yes' as 'accept',
+    }
+    invalid(licences, /androidLicenses is 'accept'/)
+    const linux = copy()
+    linux.workflows[0]!.stages[0]!.tools = { cocoapods: '1.16.2' }
+    linux.workflows[0]!.stages[0]!.on = { os: 'linux' }
+    invalid(linux, /asks for CocoaPods, which installs on macOS only/)
     const after = copy()
     after.workflows[0]!.triggers = [{ after: { workflow: 'ghost' } }]
     invalid(after, /after unknown workflow ghost/)

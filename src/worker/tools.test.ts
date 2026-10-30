@@ -25,6 +25,7 @@ import { LicencesNotAccepted } from './tools/android.js'
 import {
   ChecksumMismatch,
   extract,
+  readMarker,
   type InstallContext,
 } from './tools/common.js'
 import {
@@ -37,6 +38,8 @@ import { RUBY_BUILD } from './tools/ruby.js'
 import {
   compareVersions,
   newestMatch,
+  portableRuby,
+  rubyBottle,
   selectXcode,
   type XcodeInstall,
 } from './tools/versions.js'
@@ -88,6 +91,7 @@ async function toolServer(dir: string): Promise<{
   base: string
   corrupt: Set<string>
   rubyBuildDigest: string
+  portableRubyDigests: Record<string, string>
 }> {
   const files = new Map<string, Buffer>()
   const corrupt = new Set<string>()
@@ -147,6 +151,24 @@ async function toolServer(dir: string): Promise<{
     script(path.join(home, 'bin', 'java'), 'echo openjdk 21.0.5')
   })
   files.set('/adoptium/jdk.tar.gz', jdk)
+  // Homebrew's portable Ruby, as a bottle: portable-ruby/<version>/bin/gem.
+  // Its gem records how it ran and makes the bin/pod CocoaPods would.
+  const ruby = tarball('ruby', 'portable-ruby/3.4.5', (top) => {
+    script(
+      path.join(top, 'bin', 'gem'),
+      [
+        'for a; do case "$prev" in --bindir) bin=$a;; esac; prev=$a; done',
+        'mkdir -p "$bin" && printf "#!/bin/sh\\necho 1.16.2\\n" > "$bin/pod" && chmod +x "$bin/pod"',
+        'mkdir -p "$GEM_HOME/gems/cocoapods-1.16.2" "$GEM_HOME/gems/xcodeproj-1.28.1"',
+        'echo "gem $* DEVELOPER_DIR=$DEVELOPER_DIR GEM_HOME=$GEM_HOME"',
+      ].join('\n'),
+    )
+  })
+  const rubyName = rubyBottle(arch)
+  files.set(`/portable-ruby/${portableRuby.version}/${rubyName}`, ruby)
+  const portableRubyDigests = {
+    [rubyName]: createHash('sha256').update(ruby).digest('hex'),
+  }
   const toolsZip = path.join(dir, 'build', 'cmdline.zip')
   script(
     path.join(dir, 'build', 'zip', 'cmdline-tools', 'bin', 'sdkmanager'),
@@ -297,6 +319,7 @@ async function toolServer(dir: string): Promise<{
     base,
     corrupt,
     rubyBuildDigest: createHash('sha256').update(rubyBuild).digest('hex'),
+    portableRubyDigests,
   }
 }
 
@@ -314,6 +337,8 @@ describe('Worker tooling', function () {
       python: `${served.base}/python`,
       go: `${served.base}/go`,
       rubyBuild: `${served.base}/ruby-build`,
+      portableRuby: `${served.base}/portable-ruby`,
+      portableRubyDigests: served.portableRubyDigests,
     }
   })
   after(() => {
@@ -381,6 +406,7 @@ describe('Worker tooling', function () {
       go: [],
       ruby: [],
       android: ['platform-tools', 'platforms;android-35'],
+      cocoapods: [],
     })
     assert.deepEqual(
       fullInventory({ ...inventory, os: 'linux' }, { toolsDir: tools }).xcodes,
@@ -623,6 +649,7 @@ describe('Worker tooling', function () {
         'cmdline-tools;latest',
         'platforms;android-35',
       ],
+      cocoapods: [],
     })
     await assert.rejects(
       install(
@@ -756,6 +783,100 @@ describe('Worker tooling', function () {
     assert(!existsSync(path.join(dir, 'outside')))
   })
 
+  it('U8.7 installs CocoaPods with a portable Ruby, compiling with the given Xcode, on macOS only', async () => {
+    const dir = root()
+    const log: string[] = []
+    const developerDir = '/Applications/Xcode-26.1.app/Contents/Developer'
+    assert.equal(
+      await install(
+        { tool: 'cocoapods', version: '1.16.2' },
+        { ...context(dir, log), os: 'macos', developerDir },
+      ),
+      '1.16.2',
+    )
+    const ran = log.join('')
+    assert.match(ran, /Installed portable Ruby 3\.4\.5/)
+    assert.match(
+      ran,
+      new RegExp(
+        `gem install cocoapods -v 1\\.16\\.2 --no-document --install-dir .*cocoapods/1\\.16\\.2\\.installing .*DEVELOPER_DIR=${developerDir.replace(/\./g, '\\.')}`,
+      ),
+    )
+    assert.deepEqual(installedTools(dir).cocoapods, ['1.16.2'])
+    // The marker records the gems RubyGems resolved, since only CocoaPods is pinned.
+    assert.deepEqual(
+      readMarker(path.join(dir, 'cocoapods', '1.16.2'))?.resolved,
+      ['cocoapods-1.16.2', 'xcodeproj-1.28.1'],
+    )
+    // A stage gets its pod and Ruby first on PATH, and its gems.
+    const env = toolEnvironment({ cocoapods: '1.16.2' }, dir, '/usr/bin', null)
+    assert(env.PATH!.startsWith(path.join(dir, 'cocoapods', '1.16.2', 'bin')))
+    assert(env.PATH!.includes(path.join(dir, 'portable-ruby', '3.4.5', 'bin')))
+    assert.equal(env.GEM_HOME, path.join(dir, 'cocoapods', '1.16.2'))
+    assert.deepEqual(
+      missingTools({ cocoapods: '1.16.2' }, installedTools(dir)),
+      [],
+    )
+    assert.deepEqual(
+      missingTools({ cocoapods: '1.15.2' }, installedTools(dir)),
+      [{ tool: 'cocoapods', version: '1.15.2' }],
+    )
+    // The Ruby is installed once; a second CocoaPods reuses it.
+    log.length = 0
+    await install(
+      { tool: 'cocoapods', version: '1.15.2' },
+      { ...context(dir, log), os: 'macos' },
+    )
+    assert.doesNotMatch(log.join(''), /portable Ruby/)
+    // A repeat request for an installed version leaves it alone: no gem
+    // runs and the directory a running stage may use is not replaced.
+    const marker = readMarker(path.join(dir, 'cocoapods', '1.16.2'))
+    log.length = 0
+    assert.equal(
+      await install(
+        { tool: 'cocoapods', version: '1.16.2' },
+        { ...context(dir, log), os: 'macos' },
+      ),
+      '1.16.2',
+    )
+    assert.doesNotMatch(log.join(''), /gem install/)
+    assert.deepEqual(readMarker(path.join(dir, 'cocoapods', '1.16.2')), marker)
+    // A bottle that is not the pinned one, another system, or an inexact version is refused.
+    await assert.rejects(
+      install(
+        { tool: 'cocoapods', version: '1.16.2' },
+        {
+          ...context(root()),
+          os: 'macos',
+          sources: {
+            ...sources,
+            portableRubyDigests: Object.fromEntries(
+              Object.keys(served.portableRubyDigests).map((name) => [
+                name,
+                'f'.repeat(64),
+              ]),
+            ),
+          },
+        },
+      ),
+      /Checksum mismatch/,
+    )
+    await assert.rejects(
+      install(
+        { tool: 'cocoapods', version: '1.16.2' },
+        { ...context(root()), os: 'linux' },
+      ),
+      /CocoaPods installs on macOS only/,
+    )
+    await assert.rejects(
+      install(
+        { tool: 'cocoapods', version: '1.16' },
+        { ...context(root()), os: 'macos' },
+      ),
+      /exact version/,
+    )
+  })
+
   it('U8.4 picks the newest Xcode a range accepts', () => {
     const installs: XcodeInstall[] = [
       { version: '26.0.1', build: '17A400', path: '/A/Xcode.app', beta: false },
@@ -879,7 +1000,8 @@ export function setup(m: Setup) {
     want === 'ruby' ? { ruby: 'project' } :
     want === 'android' ? { android: ['platforms;android-35'] } :
     want === 'xcode' ? { xcode: '26.1' } :
-    want === 'nox' ? { xcode: '99' } : {}
+    want === 'nox' ? { xcode: '99' } :
+    want === 'pods' ? { cocoapods: '1.16.2' } : {}
   m.stage('use', { on: 'mac-xcode', tools, run: use })
 }
 export async function use(ctx: Stage) {
@@ -1098,7 +1220,88 @@ export async function use(ctx: Stage) {
       assert.equal(none.status, 'failed')
       assert.equal(
         use(none).reason,
-        'No connected node for this stage has or can install an Xcode matching 99',
+        'No connected macOS node for this stage has or can install an Xcode matching 99',
+      )
+    })
+
+    it('U8.7 installs CocoaPods over the link with the Xcode its request names, or refuses', async () => {
+      const link = c.master.master!.registry.link(c.fingerprint('tooled'))!
+      const answer = (await link.request('tools.install', {
+        tool: 'cocoapods',
+        version: '1.16.2',
+        xcode: '>=26',
+      })) as Json
+      assert.equal(answer.ok, true, answer.error)
+      assert(
+        String(answer.log).includes(
+          `DEVELOPER_DIR=${path.join(apps, 'Xcode-26.1.app', 'Contents', 'Developer')}`,
+        ),
+        answer.log,
+      )
+      assert.deepEqual(answer.inventory.tools.cocoapods, ['1.16.2'])
+      const none = (await link.request('tools.install', {
+        tool: 'cocoapods',
+        version: '1.15.2',
+        xcode: '99',
+      })) as Json
+      assert.equal(none.ok, false)
+      assert.equal(
+        none.error,
+        "No installed Xcode matches 99, which CocoaPods' native gems compile with",
+      )
+    })
+
+    it('U8.7 a CocoaPods stage waits while no connected Mac matches, then runs on a Mac', async () => {
+      const db = c.master.master!.database.db
+      const nodes = [c.fingerprint('tooled'), c.fingerprint('bare')]
+      // The scheduler reads each worker's stored inventory on every pass.
+      const reportAs = (os: string): void => {
+        for (const fingerprint of nodes)
+          db.prepare(
+            "UPDATE worker_inventory SET inventory=json_set(inventory,'$.os',?) WHERE fingerprint=?",
+          ).run(os, fingerprint)
+      }
+      reportAs('linux')
+      let id: string
+      try {
+        const created = await c.api('POST', '/api/v2/runs', {
+          project: 'tools',
+          params: { want: 'pods' },
+        })
+        assert.equal(created.status, 202, created.text)
+        id = created.json.id as string
+        await c.until(
+          () =>
+            (c.master.master!.run(id) as Json).stages.some(
+              (stage: Json) => stage.name === 'use',
+            ) || undefined,
+          30000,
+          'the pods stage queued',
+        )
+        await new Promise((resolve) => setTimeout(resolve, 1500))
+        const waiting = c.master.master!.run(id) as Json
+        assert.equal(
+          use(waiting).status,
+          'queued',
+          JSON.stringify(waiting.stages),
+        )
+      } finally {
+        reportAs('macos')
+      }
+      const done = await c.until(
+        () => {
+          const run = c.master.master!.run(id) as Json
+          return ['succeeded', 'failed', 'cancelled'].includes(run.status)
+            ? run
+            : undefined
+        },
+        60000,
+        'the pods run',
+      )
+      assert.equal(
+        done.status,
+        'succeeded',
+        c.master.master!.scheduler.logs(done.id),
       )
     })
 
@@ -1118,6 +1321,7 @@ export async function use(ctx: Stage) {
         'go',
         'ruby',
         'android',
+        'cocoapods',
       ])
     })
   })

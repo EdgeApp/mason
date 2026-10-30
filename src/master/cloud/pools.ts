@@ -340,6 +340,12 @@ export class Pools {
     return this.pools().find((pool) => pool.type === type)
   }
 
+  /** Whether the pool for a type makes Macs (NoMac) rather than Linux machines. */
+  makesMacs(type: string): boolean | undefined {
+    const pool = this.forType(type)
+    return pool == null ? undefined : pool.provider === 'nomac'
+  }
+
   machines(pool?: string): MachineRow[] {
     return (pool == null
       ? this.db
