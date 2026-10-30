@@ -131,6 +131,13 @@ export const fileKeyPattern = new RegExp(
   `^[a-f0-9]{32}(-${variantPattern})?(-[a-f0-9]{16})?\\.(ipa|apk|dmg|exe|msi)$`,
 )
 
+/** Why a CocoaPods version is not one Mason installs: it must be exact, `1.16.2`. */
+export function inexactCocoapods(version: unknown): string | undefined {
+  return typeof version === 'string' && /^\d+\.\d+\.\d+$/.test(version)
+    ? undefined
+    : "CocoaPods needs an exact version, such as '1.16.2'"
+}
+
 export const asDigest: Cleaner<string> = (value) => {
   const out = asString(value)
   if (!/^[a-f0-9]{64}$/.test(out)) throw new Error('Invalid digest')

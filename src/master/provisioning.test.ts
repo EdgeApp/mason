@@ -753,7 +753,7 @@ describe('Devices across nodes', function () {
     assert.match(out.join('\n'), /now also trusts|Usage: mason host trust-root/)
   })
 
-  it('U15.6 no code path runs Ruby, Bundler or the profile shim', () => {
+  it('U15.6 no code path runs Bundler, Fastlane or the profile shim; only the CocoaPods installer runs Ruby', () => {
     const files: string[] = []
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir)) {
@@ -765,12 +765,22 @@ describe('Devices across nodes', function () {
     }
     walk(path.resolve('src'))
     assert(!files.some((file) => file.endsWith('.rb')))
-    const offending = files.filter((file) =>
-      /['"`](ruby|bundle|fastlane)['"`]|bundle exec|apple-provision|bundle-profiles|Spaceship/.test(
-        readFileSync(file, 'utf8'),
-      ),
+    // A stage that asks for CocoaPods gets it installed with its own Ruby;
+    // that installer is the one place Ruby runs, and only for that tool.
+    const installer = path.resolve('src/worker/tools/cocoapods.ts')
+    const offending = files.filter(
+      (file) =>
+        file !== installer &&
+        /['"`](ruby|bundle|fastlane)['"`]|bundle exec|apple-provision|bundle-profiles|Spaceship/.test(
+          readFileSync(file, 'utf8'),
+        ),
     )
     assert.deepEqual(offending, [])
+    // The installer runs CocoaPods' gem install, never Bundler or Fastlane.
+    assert.doesNotMatch(
+      readFileSync(installer, 'utf8'),
+      /['"`](bundle|fastlane)['"`]|bundle exec|Spaceship/,
+    )
     assert.equal(createHash('sha256').update('').digest('hex').length, 64)
   })
 })

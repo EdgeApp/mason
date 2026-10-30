@@ -62,6 +62,17 @@ function satisfies(condition: string, version: string): boolean {
   }
 }
 
+/** The Xcode a spec selects among the installed ones that launch on the node. */
+export function launchingXcode(
+  spec: string,
+  installs: XcodeInstall[],
+): XcodeInstall | undefined {
+  return selectXcode(
+    spec,
+    installs.filter((install) => install.launches !== false),
+  )
+}
+
 /**
  * The newest installed Xcode a stage's `xcode` asks for: `latest`, `latest-beta`,
  * an exact version or prefix (`26.1`), a build number (`17B55`), or a range
@@ -92,4 +103,22 @@ export function selectXcode(
         conditions.every((condition) => satisfies(condition, install.version)),
     ),
   )
+}
+
+const rubyVersion = '3.4.5'
+
+/** The file name of Homebrew's portable Ruby bottle for a Mac's architecture. */
+export function rubyBottle(arch: string): string {
+  return `portable-ruby-${rubyVersion}.${arch === 'arm64' ? 'arm64_big_sur' : 'el_capitan'}.bottle.tar.gz`
+}
+
+/** The portable Ruby CocoaPods installs with: Homebrew's release, its bottles' SHA-256 pinned. */
+export const portableRuby = {
+  version: rubyVersion,
+  digests: {
+    [rubyBottle('arm64')]:
+      '20fa657858e44a4b39171d6e4111f8a9716eb62a78ebbd1491d94f90bb7b830a',
+    [rubyBottle('x64')]:
+      '0c78b38f22fb9b42df6918db00e6f5a80d5b35164f910ffe4c89159326ae98cf',
+  } as Record<string, string>,
 }

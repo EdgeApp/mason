@@ -189,6 +189,18 @@ export async function hello(ctx: Stage) {
       10_000,
       'the spare machine',
     )
+    // A stage that needs Xcode never asks a Linux pool for a machine.
+    const machines = cloud.created.length
+    assert.equal(master.pools.makesMacs('linux'), false)
+    assert.equal(
+      stageDemand(
+        { ...stage, tools: { cocoapods: '1.16.2' } } as typeof stage,
+        (type) => master.pools.demand(type),
+        (type) => master.pools.makesMacs(type),
+      ),
+      undefined,
+    )
+    assert.equal(cloud.created.length, machines)
     await master.settings.set(admin, 'cloud', { pools: [linux] })
   })
 })

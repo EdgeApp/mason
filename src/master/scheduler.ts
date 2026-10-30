@@ -48,7 +48,7 @@ import {
 } from '../pipeline/graph.js'
 import type { FullInventory } from '../worker/inventory.js'
 import { missingTools, type InstallRequest } from '../worker/tools/index.js'
-import { selectXcode } from '../worker/tools/versions.js'
+import { launchingXcode, selectXcode } from '../worker/tools/versions.js'
 import type { ChecklistItem } from '../worker/system/reconcile.js'
 import type { AppleXcode } from './apple/developerDownloads.js'
 import type { NodeType } from './nodeTypes.js'
@@ -148,6 +148,8 @@ export interface SchedulerOptions {
   /** Cloud pools: a machine for a type no free node serves, and machines that are retiring. */
   cloud?: {
     demand(type: string): PoolAnswer | undefined
+    /** Whether a type's pool makes Macs; undefined when no pool backs it. */
+    makesMacs?(type: string): boolean | undefined
     draining(fingerprint: string): boolean
     /** A setup with no connected worker asks a pool for a machine. */
     setupDemand?(): string | undefined
@@ -155,13 +157,15 @@ export interface SchedulerOptions {
 }
 
 /**
- * A stage needs an Xcode when it has an `apple` option or asks for macOS
- * (every one of its selectors, when it lists several).
+ * A stage needs an Xcode when it has an `apple` option, asks for CocoaPods
+ * or asks for macOS (every one of its selectors, when it lists several).
  */
 export function needsXcode(stage: GraphStage): boolean {
   const choices = alternatives(stage.on)
   return (
     stage.tools?.xcode != null ||
+    // CocoaPods compiles its native gems with the stage's Xcode.
+    stage.tools?.cocoapods != null ||
     stage.apple != null ||
     (choices.length > 0 &&
       choices.every((on) => typeof on === 'object' && on.os === 'macos'))
@@ -233,7 +237,49 @@ export function stageConfigs(stage: GraphStage): string[] {
   return (stage as { configs?: string[] }).configs ?? []
 }
 
-const noTools = { node: [], rust: [], java: [], android: [] }
+const noTools = { node: [], rust: [], java: [], android: [], cocoapods: [] }
+
+/**
+ * A stage's installs in the order they run: CocoaPods last, after any Xcode
+ * or runtime before it, carrying the stage's Xcode spec so its native gems
+ * compile with that Xcode.
+ */
+export function orderInstalls(
+  missing: InstallRequest[],
+  xcode: string | undefined,
+): InstallRequest[] {
+  return [
+    ...missing.filter((request) => request.tool !== 'cocoapods'),
+    ...missing
+      .filter((request) => request.tool === 'cocoapods')
+      .map((request) => ({
+        ...request,
+        ...(xcode == null ? {} : { xcode }),
+      })),
+  ]
+}
+
+/**
+ * Why a node cannot install the CocoaPods a stage asks for: a worker from
+ * before CocoaPods installs reports no `cocoapods` in its inventory, and
+ * would refuse the install, so the stage waits for an updated node.
+ */
+export function cocoapodsUnsupported(
+  stage: GraphStage,
+  inventory: { tools?: { cocoapods?: string[] } },
+): string | undefined {
+  return stage.tools?.cocoapods != null && inventory.tools?.cocoapods == null
+    ? 'Update this worker to install CocoaPods'
+    : undefined
+}
+
+/** Android SDK licences are accepted for the node's type by an administrator, or by the stage's Masonfile. */
+export function acceptsAndroidLicences(
+  stage: GraphStage,
+  byNodeType: boolean,
+): boolean {
+  return byNodeType || stage.tools?.androidLicenses === 'accept'
+}
 
 /**
  * Asks the cloud pools for a machine for a stage no free node took: its node
@@ -246,11 +292,21 @@ const noTools = { node: [], rust: [], java: [], android: [] }
 export function stageDemand(
   stage: GraphStage,
   demand: (type: string) => PoolAnswer | undefined,
+  makesMacs?: (type: string) => boolean | undefined,
 ): string | undefined {
+  const xcode = needsXcode(stage)
   let first: string | undefined
   for (const on of alternatives(stage.on)) {
     const type = typeof on === 'string' ? on : on.type
     if (type == null || type === 'master') continue
+    // A stage that needs Xcode asks only for Macs: never a pool, or an
+    // entry, that can only give it another system.
+    if (
+      xcode &&
+      ((typeof on === 'object' && on.os != null && on.os !== 'macos') ||
+        makesMacs?.(type) === false)
+    )
+      continue
     const answer = demand(type)
     if (answer == null) continue
     if (answer.serving) return answer.reason
@@ -260,11 +316,45 @@ export function stageDemand(
 }
 
 /**
- * The master's scheduler: resolves each job's commit, gets its validated
- * graph (from the cache or a secret-free setup run on any idle worker), and
- * assigns ready stages to workers whose inventory matches, recording every
- * transition in the database before it takes effect.
+ * Why a stage that needs Xcode (or CocoaPods, which builds with it) fails at
+ * once: connected macOS nodes match its selectors, yet none has or can
+ * install its Xcode. Only Macs count, so a list that also names Linux, with
+ * no Mac connected, waits for a Mac (a pool's) instead of failing.
  */
+export function xcodeUnplaceable(
+  stage: GraphStage,
+  matchingMacs: number,
+  fitting: number,
+): string | undefined {
+  if (!needsXcode(stage) || matchingMacs === 0 || fitting > 0) return undefined
+  const spec = stage.tools?.xcode ?? 'its node type’s default'
+  return `No connected macOS node for this stage has or can install an Xcode matching ${spec}${stage.tools?.cocoapods != null && stage.tools.xcode == null ? ', which CocoaPods builds with' : ''}`
+}
+
+/**
+ * Why the Xcode a stage asks for can run on none of the nodes its selectors
+ * match: every matching Mac has it, but it does not launch there. Only Macs
+ * count, as in `fit`; a matching node that is not a Mac neither proves nor
+ * disproves it. Nothing when no Xcode is asked for, or one may launch.
+ */
+export function xcodeNeverLaunches(
+  nodes: Array<{
+    name: string
+    inventory: Pick<FullInventory, 'os' | 'osVersion' | 'xcodes'>
+    spec: string | undefined
+  }>,
+): string | undefined {
+  let reason: string | undefined
+  for (const { name, inventory, spec } of nodes) {
+    if (spec == null) return undefined
+    if (inventory.os !== 'macos') continue
+    const install = selectXcode(spec, inventory.xcodes ?? [])
+    if (install?.launches !== false) return undefined
+    reason ??= `Xcode ${install.version} does not launch on ${name} (macOS ${inventory.osVersion}): ${install.launchError ?? 'it does not start'}`
+  }
+  return reason
+}
+
 /**
  * A signing stage runs only on nodes with the project's signing label, when
  * the project sets one.
@@ -289,6 +379,12 @@ export function withSigningLabel(
   }
 }
 
+/**
+ * The master's scheduler: resolves each job's commit, gets its validated
+ * graph (from the cache or a secret-free setup run on any idle worker), and
+ * assigns ready stages to workers whose inventory matches, recording every
+ * transition in the database before it takes effect.
+ */
 export class Scheduler {
   private timer: NodeJS.Timeout | undefined
   private ticking: Promise<void> | undefined
@@ -1147,7 +1243,9 @@ export class Scheduler {
   /**
    * Whether a worker can run a stage: the Xcode it asks for must launch on
    * the node, or be one Apple offers to install; node, rust, java, Android,
-   * simulator runtimes and packages may be installed first. A checklist item
+   * simulator runtimes, packages and CocoaPods may be installed first.
+   * CocoaPods, like Xcode, keeps the stage off a node that is not macOS
+   * (`needsXcode`). A checklist item
    * that blocks one of those installs keeps the stage off the node for now.
    */
   private fit(
@@ -1163,10 +1261,7 @@ export class Scheduler {
     const spec = xcodeSpec(stage, type)
     if (spec != null) {
       if (inventory.os !== 'macos') return undefined
-      const launching = (inventory.xcodes ?? []).filter(
-        (install) => install.launches !== false,
-      )
-      const xcode = selectXcode(spec, launching)
+      const xcode = launchingXcode(spec, inventory.xcodes ?? [])
       if (xcode != null)
         developerDir = path.join(xcode.path, 'Contents', 'Developer')
       else {
@@ -1230,32 +1325,37 @@ export class Scheduler {
         needs.add('system')
       }
     }
-    const blocked = [
-      ...(inventory.checklist ?? []),
-      ...(this.options.masterChecklist?.() ?? []),
-    ].find((item) => item.blocks.some((tag) => needs.has(tag)))
+    const blocked =
+      cocoapodsUnsupported(stage, inventory) ??
+      [
+        ...(inventory.checklist ?? []),
+        ...(this.options.masterChecklist?.() ?? []),
+      ].find((item) => item.blocks.some((tag) => needs.has(tag)))?.title
     return {
-      missing,
+      missing: orderInstalls(missing, spec),
       ...(developerDir == null ? {} : { developerDir }),
-      ...(blocked == null ? {} : { blocked: blocked.title }),
+      ...(blocked == null ? {} : { blocked }),
     }
   }
 
   /** Why an Xcode a stage asks for runs on no connected node, when every match fails to launch. */
   private neverLaunches(stage: GraphStage): string | undefined {
-    let reason: string | undefined
-    for (const node of this.options.registry.list()) {
-      const inventory = this.inventory(node.fingerprint)
-      if (node.role !== 'worker' || inventory == null) continue
-      if (!this.matches(stage, node, inventory)) continue
-      const spec = xcodeSpec(stage, this.options.nodeType?.(node.type))
-      if (spec == null || inventory.os !== 'macos') return undefined
-      if (selectXcode(spec, inventory.xcodes ?? [])?.launches !== false)
-        return undefined
-      const install = selectXcode(spec, inventory.xcodes ?? [])!
-      reason ??= `Xcode ${install.version} does not launch on ${node.name} (macOS ${inventory.osVersion}): ${install.launchError ?? 'it does not start'}`
-    }
-    return reason
+    return xcodeNeverLaunches(
+      this.options.registry.list().flatMap((node) => {
+        const inventory = this.inventory(node.fingerprint)
+        return node.role !== 'worker' ||
+          inventory == null ||
+          !this.matches(stage, node, inventory)
+          ? []
+          : [
+              {
+                name: node.name,
+                inventory,
+                spec: xcodeSpec(stage, this.options.nodeType?.(node.type)),
+              },
+            ]
+      }),
+    )
   }
 
   /** Connected workers whose selector and Xcode fit a stage, whatever their load. */
@@ -1272,13 +1372,14 @@ export class Scheduler {
     }).length
   }
 
-  /** Connected workers a stage's selector matches, whatever their tools and load. */
-  private selectable(stage: GraphStage): number {
+  /** Connected workers a stage's selector matches, whatever their tools and load; only those on `os` when given. */
+  private selectable(stage: GraphStage, os?: string): number {
     return this.options.registry.list().filter((node) => {
       const inventory = this.inventory(node.fingerprint)
       return (
         node.role === 'worker' &&
         inventory != null &&
+        (os == null || inventory.os === os) &&
         this.options.registry.link(node.fingerprint) != null &&
         this.matches(stage, node, inventory)
       )
@@ -1372,9 +1473,11 @@ export class Scheduler {
             ? {
                 ...request,
                 nodeType: worker.node.type,
-                acceptLicences:
+                acceptLicences: acceptsAndroidLicences(
+                  stage,
                   this.options.androidLicencesAccepted?.(worker.node.type) ===
-                  true,
+                    true,
+                ),
               }
             : request,
           (system ? 6 : 1) * 60 * 60 * 1000,
@@ -1637,18 +1740,17 @@ export class Scheduler {
     const stage = withSigningLabel(graphStage, this.project(job))
     const worker = this.pick(stage, id)
     if (worker == null) {
-      // Connected workers match the selector but none has an Xcode the range accepts.
-      if (
-        needsXcode(stage) &&
-        this.selectable(stage) > 0 &&
-        this.candidatesIgnoringLoad(stage) === 0
+      const unplaceable = xcodeUnplaceable(
+        stage,
+        this.selectable(stage, 'macos'),
+        this.candidatesIgnoringLoad(stage),
       )
+      if (unplaceable != null)
         this.finishStage(
           id,
           stage.name,
           'failed',
-          this.neverLaunches(stage) ??
-            `No connected node for this stage has or can install an Xcode matching ${stage.tools?.xcode ?? 'its node type’s default'}`,
+          this.neverLaunches(stage) ?? unplaceable,
         )
       else {
         // A type backed by a cloud pool starts a machine; the stage shows why it waits.
@@ -1656,7 +1758,13 @@ export class Scheduler {
         const reason =
           cloud == null
             ? undefined
-            : stageDemand(stage, (type) => cloud.demand(type))
+            : stageDemand(
+                stage,
+                (type) => cloud.demand(type),
+                cloud.makesMacs == null
+                  ? undefined
+                  : (type): boolean | undefined => cloud.makesMacs!(type),
+              )
         if (reason != null && this.stage(id, stage.name)?.reason !== reason) {
           this.db
             .prepare(

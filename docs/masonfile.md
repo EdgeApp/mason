@@ -815,9 +815,11 @@ tools: {
   java: '21',
   rust: '1.90.0',
   android: ['platforms;android-35', 'build-tools;35.0.0'],
+  androidLicenses: 'accept', // accept the Android SDK licences for this stage
   xcode: '>=26 <27',       // installed from the master's Xcode downloads when missing
   simulators: ['iOS 26.1'],
-  brew: ['cocoapods'],     // macOS
+  cocoapods: '1.16.2',     // exact version; macOS
+  brew: ['swiftlint'],     // macOS
   apt: ['libssl-dev'],     // Linux
 }
 ```
@@ -828,6 +830,17 @@ Missing tools are installed before the stage starts (stage status
 
 - Node, Java, Rust and the Android SDK go into the node's tools directory from
   official archives with verified checksums.
+- **Android SDK licences** must be accepted before `sdkmanager` installs a
+  package. `androidLicenses: 'accept'` accepts them for the stage; without it,
+  only a node type whose administrator accepted them installs Android
+  packages.
+- **CocoaPods** installs into the node's tools directory with a private Ruby
+  (Homebrew's portable Ruby, checksum verified), so it needs neither Homebrew
+  nor the privileged helper. The version is exact and `pod` runs with the
+  stage's Xcode. Only CocoaPods itself is pinned: its dependencies resolve
+  from RubyGems when it installs, and the tool's marker lists them. A stage
+  that asks for it runs only on macOS nodes; setup refuses one whose every
+  `on` entry names another `os`.
 - **Xcode** is downloaded by each node itself, directly from Apple, when the
   master tells it to (section 12 explains the sign-in). The node checks
   Apple's signature, installs it side by side as
@@ -836,8 +849,18 @@ Missing tools are installed before the stage starts (stage status
   system-wide Xcode for a stage.
 - **Simulator runtimes** are downloaded by each node with `xcodebuild
   -downloadPlatform`, which needs no Apple ID.
-- Homebrew and its packages, apt/dnf packages, Command Line Tools and Rosetta
-  are installed by the node's privileged helper.
+- Homebrew packages, apt/dnf packages, Command Line Tools and Rosetta are
+  installed by the node's privileged helper. Mason never installs Homebrew
+  itself; an administrator installs it on each macOS node that needs `brew`
+  packages.
+
+**Tools that need root.** Xcode, simulator runtimes, Homebrew packages,
+apt/dnf packages, Command Line Tools and Rosetta install through the
+privileged helper (`sudo mason worker --install` sets it up). A NoMac machine
+runs no helper, so its image must already carry the Xcode, simulator runtimes
+and Homebrew packages its stages ask for; Mason cannot add them there. Node,
+Java, Rust and the Android SDK need no root and install on any node;
+CocoaPods needs no root either, on macOS.
 
 Stages share installed tools; an administrator can pin or remove versions per
 node type, and unused Xcodes are removed when disk space runs low.

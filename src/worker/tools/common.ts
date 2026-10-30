@@ -26,6 +26,14 @@ export interface ToolSources {
   rust: string
   adoptium: string
   android: string
+  /** Homebrew's portable Ruby releases, for CocoaPods. */
+  ruby: string
+  /**
+   * The portable Ruby's digests by bottle name. Unlike the other tools',
+   * they are pinned (`versions.ts`), so tests that serve their own bottle
+   * name its digest here.
+   */
+  rubyDigests?: Record<string, string>
 }
 
 export const defaultSources: ToolSources = {
@@ -33,6 +41,7 @@ export const defaultSources: ToolSources = {
   rust: 'https://static.rust-lang.org',
   adoptium: 'https://api.adoptium.net',
   android: 'https://dl.google.com/android/repository',
+  ruby: 'https://github.com/Homebrew/homebrew-portable-ruby/releases/download',
 }
 
 export interface InstallContext {
@@ -43,6 +52,8 @@ export interface InstallContext {
   arch: 'arm64' | 'x64'
   log: (text: string) => void
   signal?: AbortSignal
+  /** For CocoaPods: the stage's Xcode, which compiles native gems. */
+  developerDir?: string
 }
 
 export class ChecksumMismatch extends Error {}
@@ -193,6 +204,8 @@ export interface Marker {
   digest: string
   source: string
   installed: number
+  /** What an installer resolved beyond the pinned version (CocoaPods' gems). */
+  resolved?: string[]
 }
 
 export const markerFile = (dir: string): string =>
