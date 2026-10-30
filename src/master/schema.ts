@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 17
+export const MASTER_SCHEMA = 18
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -458,6 +458,12 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       UNIQUE(bucket, endpoint)
     ) STRICT;`)
     importStorageLocations(db)
+  },
+  // 18: what pushed each backup: the deploy key or the GitHub connection.
+  (db): void => {
+    const columns = db.prepare('PRAGMA table_info(backup_runs)').all()
+    if (!columns.some((column) => column.name === 'auth'))
+      db.exec('ALTER TABLE backup_runs ADD COLUMN auth TEXT')
   },
 ]
 

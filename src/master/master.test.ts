@@ -292,6 +292,25 @@ describe('Master database, setup and import', function () {
     db.close()
   })
 
+  it('U13.15 schema 18 records which credential pushed each backup', () => {
+    const db = new DatabaseSync(path.join(root, 'auth.sqlite'))
+    migrateMaster(db)
+    db.exec(`ALTER TABLE backup_runs DROP COLUMN auth;
+    INSERT INTO backup_runs(started_at,finished_at,status,commit_sha) VALUES(1,2,'succeeded','c');
+    UPDATE meta SET value='17' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      {
+        ...(db
+          .prepare('SELECT commit_sha,auth FROM backup_runs')
+          .get() as object),
+      },
+      { commit_sha: 'c', auth: null },
+    )
+    db.exec("UPDATE backup_runs SET auth='github'")
+    db.close()
+  })
+
   it('U3.1 schema 16 keeps every cloud host as a host and allows a worker row with its type and labels', () => {
     const db = new DatabaseSync(path.join(root, 'nodes.sqlite'))
     migrateMaster(db)

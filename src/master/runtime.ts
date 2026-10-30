@@ -495,6 +495,8 @@ export class Master {
         url: string
         env: NodeJS.ProcessEnv
       }> => await this.github.gitAccess(repository, options.scratch ?? '/tmp'),
+      hasGitHub: (): boolean =>
+        storedConnection(this.settings.value('github')) != null,
       ...(options.backupAttempts == null
         ? {}
         : { attempts: options.backupAttempts }),
@@ -800,6 +802,8 @@ export class Master {
     await this.cloudHosts.stop()
     clearInterval(this.compaction)
     clearInterval(this.backupTimer)
+    // A change waiting on its backup is applied before the database closes.
+    await this.backups.stop()
     this.provisioning.stop()
     this.apple.stop()
     await this.poller.close()

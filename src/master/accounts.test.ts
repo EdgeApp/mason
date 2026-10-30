@@ -1588,6 +1588,17 @@ export async function one(ctx: Stage) { return 1 }
     )
     page = await request(c.master, 'GET', '/backups', { cookie })
     assert.match(page.text, /Last backup /)
+    // It names what pushed the backup.
+    assert.match(page.text, /, pushed with the deploy key\./)
+    c.master
+      .master!.database.db.prepare(
+        "UPDATE backup_runs SET auth='github' WHERE id=(SELECT MAX(id) FROM backup_runs)",
+      )
+      .run()
+    assert.match(
+      (await request(c.master, 'GET', '/backups', { cookie })).text,
+      /, pushed with the GitHub connection\./,
+    )
     // Backed up, the reminder is the key still to confirm.
     assert.match(
       (await request(c.master, 'GET', '/', { cookie: `${cookie}; ${skip}` }))
