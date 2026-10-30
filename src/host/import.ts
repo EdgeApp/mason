@@ -59,9 +59,9 @@ export function importHost(
       const version = (
         legacy.prepare('PRAGMA user_version').get() as { user_version: number }
       ).user_version
-      if (version !== 7)
+      if (version !== 7 && version !== 8)
         throw new Error(
-          `The distribution database is at schema ${version}; migrate it to 7 first`,
+          `The distribution database is at schema ${version}; migrate it to 8 first`,
         )
       // Sessions belong to accounts the master's sync brings; the rows wait for them.
       cache.db.exec('PRAGMA foreign_keys=OFF')

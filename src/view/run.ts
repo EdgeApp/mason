@@ -532,22 +532,27 @@ export function runView(run: RunData, options: RunViewOptions): string {
   return `${header}${tabs}${graph}<div class="run-body">${stagePanel(run, options)}${stageList(run, options.selected, options.tab)}</div>${history}`
 }
 
-/** The published builds of a run, for its header (by commit and branch). */
+/**
+ * The published builds of a run, default first: its own, or by commit and
+ * branch from before builds named their run. No page renders it yet; it
+ * keeps `runDetail`'s list.
+ */
 export function runBuilds(db: DatabaseSync, run: RunData): string {
   const rows = db
     .prepare(
-      "SELECT a.name,b.platform,b.version,b.build_number FROM builds b JOIN apps a ON a.id=b.app_id WHERE b.commit_hash=? AND b.branch=? AND b.state='ready' ORDER BY b.id",
+      "SELECT a.name,b.platform,b.version,b.build_number,b.variant FROM builds b JOIN apps a ON a.id=b.app_id WHERE (b.run=? OR (b.run IS NULL AND b.commit_hash=? AND b.branch=?)) AND b.state='ready' ORDER BY b.app_id,b.platform,b.variant<>'',b.variant",
     )
-    .all(run.commit ?? '', run.branch) as Array<{
+    .all(run.id, run.commit ?? '', run.branch) as Array<{
     name: string
     platform: string
     version: string
     build_number: string
+    variant: string
   }>
   return rows
     .map(
       (row) =>
-        `${platformChip(row.platform)} ${escape(row.name)} ${escape(row.version)} (${escape(row.build_number)})`,
+        `${platformChip(row.platform)} ${escape(row.name)} ${escape(row.version)} (${escape(row.build_number)})${row.variant === '' ? '' : ` ${escape(row.variant)}`}`,
     )
     .join(' ')
 }

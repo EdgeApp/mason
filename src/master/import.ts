@@ -86,9 +86,10 @@ export function importDeployment(
         }
       ).user_version,
     )
-    if (version !== 7)
+    // 8 adds build variants; an imported build is the default variant either way.
+    if (version !== 7 && version !== 8)
       throw new ImportRefused(
-        `The distribution database is at schema ${version}; migrate it to 7 first (mason migrate --config …)`,
+        `The distribution database is at schema ${version}; migrate it to 8 first (mason migrate --config …)`,
       )
     const builderVersion = (
       builder.prepare('SELECT version FROM builder_meta').get() as

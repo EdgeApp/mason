@@ -422,9 +422,21 @@ export interface PublishOptions {
   app: string
   platform: Platform
   path: string
+  /**
+   * One of several files of this build (`arm64-v8a`, `linux-x64`): 1 to 32
+   * letters, digits, `.`, `_` or `-`, starting with a letter or digit.
+   * Omitted, the file is the default variant. A run publishes each variant
+   * once, from any of its stages or attempts; another file for it is
+   * refused, so a retried stage must reproduce its files exactly.
+   */
+  variant?: string
   /** Required for DMG/EXE/MSI; read from IPA/APK and checked. */
   version?: string
-  /** The number `getBuildNumber` returned for this app. */
+  /**
+   * An IPA's or APK's own number is read from it (this must match it); a
+   * DMG/EXE/MSI's is this, defaulting to `getBuildNumber`'s. Either way it
+   * is one of the run's: N, or N to N+block−1 with a `block`.
+   */
   buildNumber?: string
   changelog?: string
   metadata?: Record<string, Json>
@@ -435,6 +447,8 @@ export type PublishResult = {
   url: string
   installUrl: string
   visible: boolean
+  /** `''` for the default variant. */
+  variant: string
 }
 
 export interface AppleSigning {

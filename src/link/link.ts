@@ -25,7 +25,12 @@ export const CLOSE = {
 export class LinkError extends Error {
   constructor(
     message: string,
-    readonly code: 'not_allowed' | 'failed' | 'closed' | 'timeout' = 'failed',
+    readonly code:
+      | 'not_allowed'
+      | 'failed'
+      | 'closed'
+      | 'timeout'
+      | 'refused' = 'failed',
   ) {
     super(message)
   }
@@ -396,10 +401,14 @@ export class Link extends EventEmitter {
         const result = await handler(message.params, this)
         this.sendMessage({ kind: 'response', id, result: result ?? null })
       } catch (error) {
+        // A handler's deliberate refusal keeps its code; any other error is a failure.
         this.sendMessage({
           kind: 'response',
           id,
           error: error instanceof Error ? error.message : 'Request failed',
+          ...(error instanceof LinkError && error.code === 'refused'
+            ? { code: 'refused' }
+            : {}),
         })
       }
     })()
@@ -416,7 +425,9 @@ export class Link extends EventEmitter {
       pending.reject(
         new LinkError(
           message.error,
-          message.code === 'not_allowed' ? 'not_allowed' : 'failed',
+          message.code === 'not_allowed' || message.code === 'refused'
+            ? message.code
+            : 'failed',
         ),
       )
     else pending.resolve(message.result)

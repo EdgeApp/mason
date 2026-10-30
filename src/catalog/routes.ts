@@ -140,22 +140,53 @@ export function catalogRoutes(
         .filter((build) => build.platform === chosen)
       const deviceStore = new Devices(store),
         selectedDevice = deviceStore.selected(account.id, req.headers.cookie)
-      const rows = builds
-        .map((build) => {
-          const eligible = deviceStore.eligible(build, selectedDevice)
-          const label = `${eligible ? 'Install' : selectedDevice == null ? 'Register Device for' : 'Prepare for this device'} ${build.version} build ${build.build_number}`
-          const content = `<div><strong>${escape(build.version)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${time(build.published_at)} · ${(build.size / 1024 ** 2).toFixed(1)} MB</small><code title="${escape(build.commit_hash)}">${escape(build.commit_hash.slice(0, 12))}</code></div><span class="download-label">${eligible ? 'Install' : selectedDevice == null ? 'Register Device' : 'Prepare for device'} <span aria-hidden="true">↓</span></span>`
-          if (eligible && build.format === 'ipa') {
-            // The tap itself must open the native installer. A page-load
-            // redirect loses Safari's user gesture and adds an app-open prompt.
-            const grant = installations.create(
-              build.id,
-              session,
-              selectedDevice,
+      const megabytes = (bytes: number): string =>
+        `${(bytes / 1024 ** 2).toFixed(1)} MB`
+      // A build's version, number and commit, and when it was published.
+      const heading = (build: Build, size?: string): string =>
+        `<strong>${escape(build.version)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${time(build.published_at)}${size == null ? '' : ` · ${size}`}</small><code title="${escape(build.commit_hash)}">${escape(build.commit_hash.slice(0, 12))}</code>`
+      // One install control: a direct link for an IPA the device may install, else a form.
+      const install = (build: Build, variant?: string): string => {
+        const eligible = deviceStore.eligible(build, selectedDevice)
+        const label = `${eligible ? 'Install' : selectedDevice == null ? 'Register Device for' : 'Prepare for this device'} ${build.version} build ${build.build_number}${variant == null ? '' : ` (${variant})`}`
+        const action = `<span class="download-label">${eligible ? 'Install' : selectedDevice == null ? 'Register Device' : 'Prepare for device'} <span aria-hidden="true">↓</span></span>`
+        const content =
+          variant == null
+            ? `<div>${heading(build, megabytes(build.size))}</div>${action}`
+            : `<div><strong>${escape(variant)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${megabytes(build.size)}</small></div>${action}`
+        if (eligible && build.format === 'ipa') {
+          // The tap itself must open the native installer. A page-load
+          // redirect loses Safari's user gesture and adds an app-open prompt.
+          const grant = installations.create(build.id, session, selectedDevice)
+          return `<a id="build-${build.id}" class="list-row build-row" data-install aria-label="${escape(label)}" href="${escape(installations.iosUrl(grant.token))}">${content}</a>`
+        }
+        return `<form id="build-${build.id}" method="post" action="/builds/${build.id}/install"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><button class="list-row build-row" aria-label="${escape(label)}">${content}</button></form>`
+      }
+      // A run's variants are one build: grouped, newest run first. The default
+      // leads, else the first variant by name in byte order (plain `<`, not
+      // `localeCompare`), as the dashboard's `leadsItsBuild` and the run
+      // pages order them, so every view names the same lead build.
+      const groups = new Map<string, Build[]>()
+      for (const build of builds) {
+        const key = build.run == null ? `build:${build.id}` : `run:${build.run}`
+        const group = groups.get(key)
+        if (group == null) groups.set(key, [build])
+        else group.push(build)
+      }
+      const rows = [...groups.values()]
+        .map((group) => {
+          const sorted = [...group].sort(
+            (a, b) =>
+              Number(a.variant !== '') - Number(b.variant !== '') ||
+              (a.variant < b.variant ? -1 : a.variant > b.variant ? 1 : 0),
+          )
+          const head = sorted[0]!
+          if (sorted.length === 1 && head.variant === '') return install(head)
+          return `<section class="build-group" id="run-${escape(head.run ?? String(head.id))}"><div class="build-group-head">${heading(head)}</div>${sorted
+            .map((build) =>
+              install(build, build.variant === '' ? 'Default' : build.variant),
             )
-            return `<a id="build-${build.id}" class="list-row build-row" data-install aria-label="${escape(label)}" href="${escape(installations.iosUrl(grant.token))}">${content}</a>`
-          }
-          return `<form id="build-${build.id}" method="post" action="/builds/${build.id}/install"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><button class="list-row build-row" aria-label="${escape(label)}">${content}</button></form>`
+            .join('')}</section>`
         })
         .join('')
       res.send(

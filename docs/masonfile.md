@@ -688,8 +688,9 @@ await ctx.publish({
   app: 'app.edge.eddy',            // must be an app ID of this project and listed in `publishes`
   platform: 'macos',
   path: 'build/Eddy-412.dmg',
+  variant?: string,                // one of several files of this build (see Variants)
   version: '0.3.3',                // required for DMG/EXE/MSI; read from IPA/APK and checked
-  buildNumber: '412',              // the number from ctx.getBuildNumber for this app
+  buildNumber: '412',              // DMG/EXE/MSI: defaults to getBuildNumber's; IPA/APK: read from it
   changelog?: string,
   metadata?: Record<string, unknown>,
 })
@@ -697,15 +698,48 @@ await ctx.publish({
 
 The file is uploaded to the host, verified (bundle identity, format, digest),
 and becomes installable once the master confirms it. `publish` resolves when
-the host has the file with `{ buildId, url, installUrl, visible }`; the run
-page shows when it became visible to testers.
+the host has the file with `{ buildId, url, installUrl, visible, variant }`;
+the run's Artifacts page lists what it published.
+
+**Which number.** An IPA's or APK's number is its own (`CFBundleVersion`,
+`versionCode`); `buildNumber`, if given, must match it. A desktop file's is
+`buildNumber`, defaulting to `getBuildNumber`'s. Either way it is one of the
+run's: N itself, or with a sequence `block` (section 8) any of N to
+N+block−1. Anything else is refused before the upload.
+
+**Variants.** A build can be several files of one app and platform: Edge's
+master builds publish the universal APK and one APK per CPU architecture.
+`variant` names a file (`arm64-v8a`, `linux-x64`: 1 to 32 letters, digits,
+`.`, `_` or `-`, starting with a letter or digit); the file published without
+one is the default variant. A run publishes each variant once, from any of
+its stages (parallel ones included) and attempts: the same file under the
+build's own number returns that build, while another file, or the same file
+under another number, is refused. So a publishing stage with `retry` succeeds
+on a later attempt only if its files come out byte for byte the same (a
+reproducible build), or if it published nothing before it failed. Variants
+may share a number (a CLI built for several systems) or use the block's
+others (split APKs, whose version codes must differ):
+
+```ts fragment
+m.buildNumber('co.edgesecure.app', { format: 'YYMMDDCC', block: m.branch === 'master' ? 3 : 1 })
+// … in the Android stage, after `./gradlew assembleRelease -PabiSplits`:
+const apks = 'android/app/build/outputs/apk/release'
+await ctx.publish({ app: 'co.edgesecure.app', platform: 'android', path: `${apks}/app-universal-release.apk` })                         // N
+await ctx.publish({ app: 'co.edgesecure.app', platform: 'android', path: `${apks}/app-armeabi-v7a-release.apk`, variant: 'armeabi-v7a' }) // N+1
+await ctx.publish({ app: 'co.edgesecure.app', platform: 'android', path: `${apks}/app-arm64-v8a-release.apk`, variant: 'arm64-v8a' })     // N+2
+```
+
+The host shows a run's variants as one build: the default first, then each
+variant with its size and its own install button. A variant never replaces
+its build as a branch's latest, and a build's variants expire together.
 
 | Zealot upload API (gone from the cluster) | `ctx.publish` |
 | --- | --- |
 | API token and channel key in the build's private config | Nothing: the stage's upload token is issued by the master with the stage |
 | Channel chosen by `channel_key` | Channel chosen by `app` and `platform`; the master creates it for the project's app ID |
 | Desktop identity sent in `custom_fields.mason` | `version`, `buildNumber` arguments |
-| `version_exist` to avoid duplicate uploads | Unnecessary: build numbers are reserved per stage, and publishing the same file again (a retry) returns the existing build; a different file under the same number is refused |
+| `version_exist` to avoid duplicate uploads | Unnecessary: build numbers are reserved per run, and publishing the same file again (a retry) returns the existing build; a different file in the same variant is refused |
+| A channel per split APK | One build with `variant`s |
 | `branch`, `git_commit`, `ci_url` fields | Filled in from the run |
 | `changelog` field | `changelog` argument; defaults to the commit subjects since the last published build of that app and branch |
 

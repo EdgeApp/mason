@@ -47,7 +47,12 @@ export function plist(binary = false): Buffer {
     trailer,
   ])
 }
-export function manifest(utf16 = false, longString = false): Buffer {
+/** A binary AndroidManifest.xml for `packageFields`, with `versionCode` (42 by default). */
+export function manifest(
+  utf16 = false,
+  longString = false,
+  versionCode = 42,
+): Buffer {
   const strings = [
     'manifest',
     'package',
@@ -106,7 +111,7 @@ export function manifest(utf16 = false, longString = false): Buffer {
     node.writeUInt32LE(0xffffffff, at + 8)
     node.writeUInt16LE(8, at + 12)
     node[at + 15] = i === 2 ? 0x10 : 3
-    node.writeUInt32LE(i === 2 ? 42 : i + 5, at + 16)
+    node.writeUInt32LE(i === 2 ? versionCode : i + 5, at + 16)
   }
   const head = Buffer.alloc(8)
   head.writeUInt16LE(3)

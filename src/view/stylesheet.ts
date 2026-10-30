@@ -178,9 +178,12 @@ button.list-row{border-color:var(--color-border);min-height:0}
 .app-card small{overflow-wrap:anywhere;font-family:var(--font-mono)}
 .app-index{color:var(--color-indigo);font:500 12px/16px var(--font-mono)}
 .list-row strong{overflow-wrap:anywhere}
-.build-row strong{font-size:16px}
+.build-row strong,.build-group-head strong{font-size:16px}
 .build-number{color:var(--color-text-muted);font-family:var(--font-mono);font-weight:400}
-.build-row code{font-size:12px;color:var(--color-indigo)}
+.build-row code,.build-group-head code{font-size:12px;color:var(--color-indigo)}
+.build-group{border:1px solid var(--color-border);border-radius:var(--radius-panel);background:var(--color-panel);padding:12px 12px 4px;margin-bottom:8px}
+.build-group-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;padding:4px 4px 12px}
+.build-group .list-row{margin-bottom:8px}
 .download-label{font-size:13px;color:var(--color-primary);font-weight:500}`
 
 /** Breakpoints: tablet collapses the rail to icons; phone is one column. */

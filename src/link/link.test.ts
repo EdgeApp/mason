@@ -160,7 +160,10 @@ describe('Master-dialed links', function () {
     assert.deepEqual(parseAddress('fd00::7'), { host: 'fd00::7', port: 9310 })
     assert.deepEqual(parseAddress('[fd00::7]'), { host: 'fd00::7', port: 9310 })
     assert.deepEqual(parseAddress('[fd00::7]:1'), { host: 'fd00::7', port: 1 })
-    assert.deepEqual(parseAddress(' buildbox '), { host: 'buildbox', port: 9310 })
+    assert.deepEqual(parseAddress(' buildbox '), {
+      host: 'buildbox',
+      port: 9310,
+    })
     for (const bad of [
       '',
       'http://x',
@@ -563,11 +566,31 @@ describe('Master-dialed links', function () {
           boom: () => {
             throw new Error('Exploded')
           },
+          no: () => {
+            throw new LinkError('Not this file', 'refused')
+          },
+          denied: () => {
+            throw new LinkError('Not that', 'not_allowed')
+          },
         },
       },
       {},
     )
-    await assert.rejects(failing[1].request('boom'), /Exploded/)
+    // A handler's error is a failure; only its deliberate refusal says so.
+    await assert.rejects(
+      failing[1].request('boom'),
+      (error: LinkError) =>
+        error.code === 'failed' && error.message === 'Exploded',
+    )
+    await assert.rejects(
+      failing[1].request('no'),
+      (error: LinkError) =>
+        error.code === 'refused' && error.message === 'Not this file',
+    )
+    await assert.rejects(
+      failing[1].request('denied'),
+      (error: LinkError) => error.code === 'failed',
+    )
     await assert.rejects(
       failing[1].request('slow', undefined, 1),
       (error: LinkError) =>

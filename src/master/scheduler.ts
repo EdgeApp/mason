@@ -2635,8 +2635,15 @@ export class Scheduler {
                 reservation: string
                 app: string
                 platform: string
+                variant?: string
+                digest?: string
               }
-              this.options.artifacts?.markStaged(id, staged.reservation)
+              this.options.artifacts?.markStaged(
+                id,
+                staged.reservation,
+                staged.variant,
+                staged.digest,
+              )
               this.appendLog(
                 id,
                 name,

@@ -142,7 +142,7 @@ describe('Master database, setup and import', function () {
     assert.equal(
       (db.prepare('PRAGMA user_version').get() as { user_version: number })
         .user_version,
-      7,
+      8,
     )
     for (const table of [
       'accounts',
@@ -172,7 +172,7 @@ describe('Master database, setup and import', function () {
     assert.throws(() => migrateMaster(db), /newer Mason/)
     db.close()
     const newer = new DatabaseSync(path.join(root, 'n.sqlite'))
-    newer.exec('PRAGMA user_version=8')
+    newer.exec('PRAGMA user_version=9')
     assert.throws(() => migrateMaster(newer), /newer Mason/)
     newer.close()
   })
@@ -348,6 +348,51 @@ describe('Master database, setup and import', function () {
     // Again: nothing to add, nothing to delete.
     db.exec("UPDATE meta SET value='19' WHERE key='master_schema'")
     migrateMaster(db)
+    db.close()
+  })
+
+  it('U12.16 schema 22 records each published or staged reservation as its default variant', () => {
+    const db = new DatabaseSync(path.join(root, 'publications.sqlite'))
+    migrateMaster(db)
+    db.exec(`DROP TABLE build_publications;
+    INSERT INTO projects(id,slug,name,repository,format,timeout_seconds,created_at)
+      VALUES(1,'p','P','https://github.com/a/p','pipeline',60,0);
+    INSERT INTO jobs(id,project_id,number,workflow,branch,trigger,status,created,request)
+      VALUES('job1',1,1,'build','master','request','succeeded',0,'{}');
+    INSERT INTO apps(id,slug,name,position,enabled) VALUES(1,'a','A',0,1);
+    INSERT INTO channels(id,app_id,platform,channel_key,formats,enabled) VALUES(1,1,'android','k','["apk"]',1);
+    INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields)
+      VALUES(5,1,1,'android','master','c','1','7','a','apk','${'d'.repeat(64)}',1,'${'a'.repeat(32)}.apk',0,1,'ready','','pipeline','{}');
+    INSERT INTO build_reservations(id,job_id,stage,attempt,project_id,app_id,platform,build_number,created_at,build_id,staged_at) VALUES
+      ('published','job1','s',1,1,1,'android','7',0,5,0),
+      ('staged','job1','s',1,1,1,'android','8',0,NULL,3),
+      ('unused','job1','s',1,1,1,'android','9',0,NULL,NULL);
+    UPDATE meta SET value='21' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      db
+        .prepare(
+          'SELECT reservation_id,variant,digest,build_id,staged_at FROM build_publications ORDER BY reservation_id',
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      [
+        {
+          reservation_id: 'published',
+          variant: '',
+          digest: 'd'.repeat(64),
+          build_id: 5,
+          staged_at: 0,
+        },
+        {
+          reservation_id: 'staged',
+          variant: '',
+          digest: null,
+          build_id: null,
+          staged_at: 3,
+        },
+      ],
+    )
     db.close()
   })
 
@@ -650,6 +695,44 @@ describe('Master database, setup and import', function () {
       () => importDeployment(database, { ...fixture, distribution: old }),
       /schema 6/,
     )
+    // A deployment at 7 (before variants) or 8 imports; its builds are default variants.
+    const seven = path.join(root, 'seven.sqlite')
+    writeFileSync(seven, readFileSync(fixture.distribution))
+    const sevenDb = new DatabaseSync(seven)
+    // Schema 7's builds table: no variant or run columns.
+    sevenDb.exec(`PRAGMA foreign_keys=OFF;
+      CREATE TABLE builds_v7 AS SELECT id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,deleted_at,changelog,source,custom_fields FROM builds;
+      DROP TABLE builds;
+      ALTER TABLE builds_v7 RENAME TO builds;
+      PRAGMA user_version=7`)
+    const sevenBuilds = Number(
+      (sevenDb.prepare('SELECT COUNT(*) n FROM builds').get() as { n: number })
+        .n,
+    )
+    assert(sevenBuilds > 0)
+    sevenDb.close()
+    const fresh = new MasterDatabase(
+      new DatabaseSync(path.join(root, 'master-seven.sqlite')),
+    )
+    importDeployment(fresh, { ...fixture, distribution: seven })
+    assert.deepEqual(
+      fresh.db
+        .prepare('SELECT DISTINCT variant FROM builds')
+        .all()
+        .map((row) => row.variant),
+      [''],
+    )
+    assert.equal(
+      Number(
+        (
+          fresh.db.prepare('SELECT COUNT(*) n FROM builds').get() as {
+            n: number
+          }
+        ).n,
+      ),
+      sevenBuilds,
+    )
+    fresh.db.close()
     const builder = new DatabaseSync(fixture.builder)
     builder.exec('UPDATE builder_meta SET version=2')
     builder.close()
