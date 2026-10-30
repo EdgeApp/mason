@@ -171,6 +171,13 @@ interface MachineRow {
   error: string | null
 }
 
+/** Why a stage waits for a pool, and whether the pool is serving it or cannot now. */
+export interface PoolAnswer {
+  reason: string
+  /** Starting, waiting for or full of machines: the stage waits on this pool. */
+  serving: boolean
+}
+
 export interface PoolsOptions {
   master: MasterDatabase
   registry: NodeRegistry
@@ -445,19 +452,25 @@ export class Pools {
 
   /**
    * A stage of `type` found no free node. Starts a machine when the type has
-   * a pool with room; answers why the stage waits otherwise.
+   * a pool with room; answers why the stage waits, and whether the pool is
+   * serving it (starting, waiting for or full of machines) or cannot now.
    */
-  demand(type: string): string | undefined {
+  demand(type: string): PoolAnswer | undefined {
     const pool = this.forType(type)
     if (pool == null) return undefined
     const backoff = this.backoff.get(pool.name)
-    if (backoff != null && backoff.until > this.now()) return backoff.reason
+    if (backoff != null && backoff.until > this.now())
+      return { reason: backoff.reason, serving: false }
     const budget = this.budgetReason()
-    if (budget != null) return budget
+    if (budget != null) return { reason: budget, serving: false }
     if (this.provider(pool.account) == null)
-      return `The ${pool.name} pool's cloud account ${pool.account} is gone: add it on the Cloud page`
+      return {
+        reason: `The ${pool.name} pool's cloud account ${pool.account} is gone: add it on the Cloud page`,
+        serving: false,
+      }
     const installer = this.installer(pool)
-    if (typeof installer === 'string') return installer
+    if (typeof installer === 'string')
+      return { reason: installer, serving: false }
     const machines = this.machines(pool.name)
     if (
       machines.some(
@@ -465,16 +478,22 @@ export class Pools {
           machine.state === 'creating' || machine.state === 'pairing',
       )
     )
-      return `Waiting for a ${pool.name} machine to start`
+      return {
+        reason: `Waiting for a ${pool.name} machine to start`,
+        serving: true,
+      }
     if (
       machines.filter(
         (machine) =>
           machine.state !== 'retiring' && machine.state !== 'snapshotting',
       ).length >= pool.maxNodes
     )
-      return `The ${pool.name} pool is at its ${pool.maxNodes}-machine limit`
+      return {
+        reason: `The ${pool.name} pool is at its ${pool.maxNodes}-machine limit`,
+        serving: true,
+      }
     void this.create(pool, installer)
-    return `Starting a ${pool.name} machine`
+    return { reason: `Starting a ${pool.name} machine`, serving: true }
   }
 
   /**
@@ -486,7 +505,7 @@ export class Pools {
     const pool =
       this.pools().find((entry) => entry.provider !== 'nomac') ??
       this.pools()[0]
-    return pool == null ? undefined : this.demand(pool.type)
+    return pool == null ? undefined : this.demand(pool.type)?.reason
   }
 
   /** A stream to a NoMac machine's link port, by its `nomac:<session>` host. */

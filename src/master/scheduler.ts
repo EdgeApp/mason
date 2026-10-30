@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import type { PoolAnswer } from './cloud/pools.js'
 import {
   appendFileSync,
   existsSync,
@@ -8,7 +9,12 @@ import {
   statSync,
 } from 'node:fs'
 import path from 'node:path'
-import type { Json, ParamValue, Role } from '../../types/mason/index.js'
+import type {
+  Json,
+  NodeSelector,
+  ParamValue,
+  Role,
+} from '../../types/mason/index.js'
 import {
   LinkError,
   type Link,
@@ -32,6 +38,7 @@ import {
   scriptGraph,
   validateGraph,
   validateParams,
+  alternatives,
   GraphError,
   ParamsError,
   type Graph,
@@ -140,19 +147,24 @@ export interface SchedulerOptions {
   }
   /** Cloud pools: a machine for a type no free node serves, and machines that are retiring. */
   cloud?: {
-    demand(type: string): string | undefined
+    demand(type: string): PoolAnswer | undefined
     draining(fingerprint: string): boolean
     /** A setup with no connected worker asks a pool for a machine. */
     setupDemand?(): string | undefined
   }
 }
 
-/** A stage needs an Xcode when it has an `apple` option or asks for macOS. */
+/**
+ * A stage needs an Xcode when it has an `apple` option or asks for macOS
+ * (every one of its selectors, when it lists several).
+ */
 export function needsXcode(stage: GraphStage): boolean {
+  const choices = alternatives(stage.on)
   return (
     stage.tools?.xcode != null ||
     stage.apple != null ||
-    (typeof stage.on === 'object' && stage.on.os === 'macos')
+    (choices.length > 0 &&
+      choices.every((on) => typeof on === 'object' && on.os === 'macos'))
   )
 }
 
@@ -224,6 +236,30 @@ export function stageConfigs(stage: GraphStage): string[] {
 const noTools = { node: [], rust: [], java: [], android: [] }
 
 /**
+ * Asks the cloud pools for a machine for a stage no free node took: its node
+ * types in order, stopping at the first pool that is serving it (starting,
+ * waiting for or full of machines), so one machine, never one per selector.
+ * A pool that cannot serve it now (its account gone, no installer, backing
+ * off, the budget spent) passes to the next type. Answers why the stage
+ * waits, or nothing when no pool backs it.
+ */
+export function stageDemand(
+  stage: GraphStage,
+  demand: (type: string) => PoolAnswer | undefined,
+): string | undefined {
+  let first: string | undefined
+  for (const on of alternatives(stage.on)) {
+    const type = typeof on === 'string' ? on : on.type
+    if (type == null || type === 'master') continue
+    const answer = demand(type)
+    if (answer == null) continue
+    if (answer.serving) return answer.reason
+    first ??= answer.reason
+  }
+  return first
+}
+
+/**
  * The master's scheduler: resolves each job's commit, gets its validated
  * graph (from the cache or a secret-free setup run on any idle worker), and
  * assigns ready stages to workers whose inventory matches, recording every
@@ -239,14 +275,17 @@ export function withSigningLabel(
 ): GraphStage {
   const label = project.signingLabel
   if (stage.apple == null || label == null) return stage
+  const labelled = (on: NodeSelector): NodeSelector =>
+    on === 'master'
+      ? on
+      : typeof on === 'string'
+        ? { type: on, labels: [label] }
+        : { ...on, labels: [...new Set([...(on.labels ?? []), label])] }
   const on = stage.on
-  if (on === 'master') return stage
   if (on == null) return { ...stage, on: { labels: [label] } }
-  if (typeof on === 'string')
-    return { ...stage, on: { type: on, labels: [label] } }
   return {
     ...stage,
-    on: { ...on, labels: [...new Set([...(on.labels ?? []), label])] },
+    on: Array.isArray(on) ? on.map(labelled) : labelled(on),
   }
 }
 
@@ -1423,14 +1462,18 @@ export class Scheduler {
     node: NodeRecord,
     inventory: FullInventory,
   ): boolean {
-    const on = stage.on
-    if (on == null) return true
-    if (typeof on === 'string')
-      return on === 'master' ? node.host === IN_PROCESS : node.type === on
-    if (on.type != null && node.type !== on.type) return false
-    if (on.os != null && inventory.os !== on.os) return false
-    if (on.arch != null && inventory.arch !== on.arch) return false
-    return (on.labels ?? []).every((label) => node.labels.includes(label))
+    const choices = alternatives(stage.on)
+    return (
+      choices.length === 0 ||
+      choices.some((on) => {
+        if (typeof on === 'string')
+          return on === 'master' ? node.host === IN_PROCESS : node.type === on
+        if (on.type != null && node.type !== on.type) return false
+        if (on.os != null && inventory.os !== on.os) return false
+        if (on.arch != null && inventory.arch !== on.arch) return false
+        return (on.labels ?? []).every((label) => node.labels.includes(label))
+      })
+    )
   }
 
   private pick(
@@ -1609,9 +1652,11 @@ export class Scheduler {
         )
       else {
         // A type backed by a cloud pool starts a machine; the stage shows why it waits.
-        const type = typeof stage.on === 'string' ? stage.on : stage.on?.type
+        const cloud = this.options.cloud
         const reason =
-          type == null ? undefined : this.options.cloud?.demand(type)
+          cloud == null
+            ? undefined
+            : stageDemand(stage, (type) => cloud.demand(type))
         if (reason != null && this.stage(id, stage.name)?.reason !== reason) {
           this.db
             .prepare(

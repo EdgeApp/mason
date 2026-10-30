@@ -508,6 +508,27 @@ describe('pipeline graph', () => {
     const os = copy()
     os.workflows[0]!.stages[0]!.on = { os: 'plan9' as 'linux' }
     invalid(os, /unknown OS/)
+    // A list of selectors: any of them; each is checked, and so is its length.
+    const listed = copy()
+    listed.workflows[0]!.stages[0]!.on = [{ os: 'linux' }, { os: 'macos' }]
+    assert.deepEqual(
+      validateGraph(listed, project).workflows[0]!.stages[0]!.on,
+      [{ os: 'linux' }, { os: 'macos' }],
+    )
+    const listedType = copy()
+    listedType.workflows[0]!.stages[0]!.on = ['linux', 'mac-quantum']
+    invalid(listedType, /unknown node type mac-quantum/, {
+      ...project,
+      nodeTypes: ['linux'],
+    })
+    const listedOs = copy()
+    listedOs.workflows[0]!.stages[0]!.on = ['linux', { os: 'plan9' as 'linux' }]
+    invalid(listedOs, /unknown OS/)
+    for (const on of [[], Array.from({ length: 9 }, () => 'linux')]) {
+      const sized = copy()
+      sized.workflows[0]!.stages[0]!.on = on
+      invalid(sized, /a list of node selectors has 1 to 8 entries/)
+    }
     const after = copy()
     after.workflows[0]!.triggers = [{ after: { workflow: 'ghost' } }]
     invalid(after, /after unknown workflow ghost/)

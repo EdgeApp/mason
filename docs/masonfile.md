@@ -137,10 +137,17 @@ on: { os: 'linux' }                               // any Linux node
 on: { type: 'mac-xcode', labels: ['apple-signing'] }
 on: { os: 'macos', arch: 'arm64', labels: ['simulators'] }
 on: 'master'                                      // the master's own worker, if it has one
+on: [{ os: 'linux' }, { os: 'macos' }]            // any of these: Linux or macOS
 ```
 
-All given fields must match. `tools` (section 7) also constrain placement:
-a node qualifies only if it has the tools or can install them.
+All given fields of a selector must match. A list means any of its
+selectors (up to 8): the stage takes whichever free node matches one. When
+none is free, the first entry whose cloud pool can serve it starts one
+machine (or is already starting or waiting for one), so put the cheaper or
+faster type first; a pool that cannot start one now (its account gone,
+backing off after errors, the budget spent) passes to the next entry. A list asks for Xcode only
+when every entry asks for macOS. `tools` (section 7) also constrain
+placement: a node qualifies only if it has the tools or can install them.
 
 ### Node types carry their software
 
@@ -409,7 +416,7 @@ other nodes; this keeps every stage able to finish without the master.
 
 | Option | Meaning |
 | --- | --- |
-| `on` | Node selector (section 2). Required except for `approval`. |
+| `on` | Node selector, or a list of them (any one will do; section 2). Required except for `approval`. |
 | `run` | The exported stage function. |
 | `needs` | Explicit dependencies (stage or group references). |
 | `when` | Condition evaluated before a node is chosen (below). False → `skipped`. |

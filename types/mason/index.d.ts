@@ -140,8 +140,13 @@ export interface StageRef {
 }
 
 export interface StageOptions {
-  /** Node selector. */
-  on: NodeSelector
+  /**
+   * Node selector, or a list of them: the stage runs on whichever free node
+   * matches any of them. With none free, the first entry whose pool can serve
+   * it starts one machine (or is already starting or waiting for one); a
+   * pool that cannot now passes to the next entry.
+   */
+  on: NodeSelector | NodeSelector[]
   /** The exported stage function. */
   run: StageFunction
   /** Explicit dependencies; `[]` starts at once. */
@@ -218,7 +223,10 @@ export type MatrixOptions<A extends MatrixAxes> = {
     | StageOptions[K]
     | ((combination: MatrixCombination<A>) => StageOptions[K])
 } & {
-  on: NodeSelector | ((combination: MatrixCombination<A>) => NodeSelector)
+  on:
+    | NodeSelector
+    | NodeSelector[]
+    | ((combination: MatrixCombination<A>) => NodeSelector | NodeSelector[])
 }
 
 export interface ApprovalOptions {
