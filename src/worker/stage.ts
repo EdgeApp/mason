@@ -41,7 +41,13 @@ import {
 } from '../pipeline/assignment.js'
 import { inside } from '../pipeline/context.js'
 import { runSetup, SetupFailed } from '../pipeline/setup.js'
-import { runStage, secretForms, type StepRecord } from '../pipeline/stage.js'
+import {
+  forgetSecretFiles,
+  recoverSecretFiles,
+  runStage,
+  secretForms,
+  type StepRecord,
+} from '../pipeline/stage.js'
 import { baseInventory } from './baseInventory.js'
 import { fullInventory, type FullInventory } from './inventory.js'
 import {
@@ -849,6 +855,11 @@ export class WorkerRuntime {
     return inside(root, custom)
   }
 
+  /** A stage's private directory; its checkout's secret-file list sits beside it. */
+  private stageDir(key: string): string {
+    return this.path('tmp', `stage-${safe(key)}`)
+  }
+
   private async lockWorkspace(
     dir: string,
     log: (text: string) => void,
@@ -918,7 +929,12 @@ export class WorkerRuntime {
       if (assignment.kind !== 'setup' && assignment.workspace.path != null)
         release = await this.lockWorkspace(dir, say)
       if (signal.aborted) throw signal.reason
-      if (assignment.kind !== 'setup') await this.prepareStage(assignment, say)
+      // Before the checkout moves the tree: what a dead worker's secret files
+      // replaced goes back onto the commit it came from.
+      if (assignment.kind !== 'setup') {
+        recoverSecretFiles(dir, this.stageDir(assignment.key), say)
+        await this.prepareStage(assignment, say)
+      }
       const ticket = { key, token: assignment.token }
       if (assignment.kind === 'setup' || assignment.checkout.enabled)
         await checkout({
@@ -958,6 +974,9 @@ export class WorkerRuntime {
           log: say,
         })
       }
+      // A clean checkout reset the tree: whatever recovery could not clean is gone.
+      if (assignment.kind !== 'setup' && assignment.workspace.mode === 'clean')
+        forgetSecretFiles(dir, this.stageDir(assignment.key))
       if (signal.aborted) throw signal.reason
       if (assignment.kind === 'setup')
         report = await this.setup(assignment, dir, log, signal)
@@ -1079,9 +1098,7 @@ export class WorkerRuntime {
       })
     }
     if ((assignment.tools?.simulators ?? []).length > 0)
-      prepared.simulatorSet = simulatorSet(
-        this.path('tmp', `stage-${safe(assignment.key)}`),
-      )
+      prepared.simulatorSet = simulatorSet(this.stageDir(assignment.key))
     if (assignment.apple != null) {
       const signing = assignment.apple
       const dir = this.path('keychains')
@@ -1097,7 +1114,7 @@ export class WorkerRuntime {
       const profiles = installProfiles(signing, this.options.home)
       this.journal.setSigning(assignment.key, { keychain, profiles })
       const exportFile = path.join(
-        this.path('tmp', `stage-${safe(assignment.key)}`),
+        this.stageDir(assignment.key),
         'ExportOptions.plist',
       )
       mkdirSync(path.dirname(exportFile), { recursive: true, mode: 0o700 })
@@ -1208,7 +1225,7 @@ export class WorkerRuntime {
       (existsSync(path.join(source, 'Masonfile.ts'))
         ? 'Masonfile.ts'
         : 'Masonfile.js')
-    const privateDir = this.path('tmp', `stage-${safe(assignment.key)}`)
+    const privateDir = this.stageDir(assignment.key)
     const result = await runStage({
       snapshot: {
         masonfile: inside(source, relativePath(entry)),
@@ -1604,10 +1621,7 @@ export class WorkerRuntime {
     const prepared = this.prepared.get(assignment.key)?.apple
     if (prepared == null)
       throw new Error('This stage declared no Apple signing')
-    const scratch = path.join(
-      this.path('tmp', `stage-${safe(assignment.key)}`),
-      'apple',
-    )
+    const scratch = path.join(this.stageDir(assignment.key), 'apple')
     mkdirSync(scratch, { recursive: true, mode: 0o700 })
     const keep = this.keeper(assignment, dir, say)
     return {
@@ -1645,10 +1659,7 @@ export class WorkerRuntime {
   ): DistributeContext {
     if (this.prepared.get(assignment.key)?.apple == null)
       throw new Error('This stage declared no Apple signing')
-    const scratch = path.join(
-      this.path('tmp', `stage-${safe(assignment.key)}`),
-      'apple',
-    )
+    const scratch = path.join(this.stageDir(assignment.key), 'apple')
     mkdirSync(scratch, { recursive: true, mode: 0o700 })
     const keep = this.keeper(assignment, dir, say)
     return {

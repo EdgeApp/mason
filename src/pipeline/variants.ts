@@ -109,3 +109,7 @@ export function isReservedName(name: string): boolean {
     name,
   )
 }
+
+/** What `writeSecretFile` is told when its directory is missing or not text. */
+export const NEEDS_DIRECTORY =
+  'writeSecretFile takes a directory inside the checkout, such as "."'

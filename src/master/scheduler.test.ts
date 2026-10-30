@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import path from 'node:path'
@@ -15,8 +22,12 @@ import { Journal } from '../worker/journal.js'
 import { WorkerRuntime } from '../worker/stage.js'
 import { cronMatches, parseCron } from './triggers.js'
 import { localOperator } from './roles.js'
-import { seedLegacySecrets } from '../test/secrets.js'
+import { seedLegacySecrets, seedSecret } from '../test/secrets.js'
+import { resolveSecrets } from '../pipeline/variants.js'
+import { secretFilesPaths } from '../pipeline/stage.js'
 import type { LegacySecrets } from './secrets.js'
+import { stageConfigs } from './scheduler.js'
+import type { GraphStage } from '../pipeline/graph.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1863,6 +1874,7 @@ writeFileSync(e.MASON_RESULT_FILE!, JSON.stringify({
   app: e.MASON_APP, branch: e.MASON_BRANCH, job: e.MASON_JOB_ID, platforms: e.MASON_PLATFORMS,
   plain: e.PLAIN, secret: (e.SCRIPT_SECRET ?? '').length, file: readFileSync(e.CONFIG_FILE!, 'utf8'),
   injected: existsSync('config/app.json'), commit: e.MASON_COMMIT?.length,
+  added: existsSync('added.json') && readFileSync(e.ADDED_FILE!, 'utf8'),
 }))
 if (e.MASON_BRANCH === 'feature/fail') process.exit(3)
 `,
@@ -1890,6 +1902,13 @@ if (e.MASON_BRANCH === 'feature/fail') process.exit(3)
         },
       ],
     })
+    // A file added on the Secrets tab has no separate destination: it is injected at its name.
+    seedSecret(c.master.master!.database.db, 'script', {
+      name: 'added.json',
+      kind: 'file',
+      contents: Buffer.from('{"a":2}').toString('base64'),
+      pathEnv: 'ADDED_FILE',
+    })
     const created = await c.api('POST', '/api/jobs', {
       app: 'script',
       platforms: ['ios'],
@@ -1910,6 +1929,7 @@ if (e.MASON_BRANCH === 'feature/fail') process.exit(3)
       file: '{"k":1}',
       injected: true,
       commit: 40,
+      added: '{"a":2}',
     })
     assert.deepEqual(
       (await c.api('GET', `/api/jobs/${run.id}`)).json.result,
@@ -2125,6 +2145,176 @@ export async function reader(ctx: Stage) { await ctx.unstash('late'); return awa
     assert.equal(
       c.workers.get('alpha')!.worker!.journal.quarantine(),
       undefined,
+    )
+  })
+
+  it('U7.26 each stage gets the variant of the latest config it lists, else the default; a name with no variant for a stage refuses the graph', async () => {
+    await project('configs', {
+      'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('plain', { on: 'linux', secrets: ['API_TOKEN', 'config.json'], run: show })
+  m.stage('develop', { on: 'linux', configs: ['develop'], secrets: ['API_TOKEN', 'config.json'], run: show })
+  m.stage('maestro', { on: 'linux', configs: ['develop', 'maestro'], secrets: ['API_TOKEN', 'config.json'], run: show })
+}
+export async function show(ctx: Stage) {
+  // Unmasked forms of the values, to see which variant arrived.
+  const file = await ctx.writeSecretFile('config.json', '.')
+  return {
+    token: ctx.secret('API_TOKEN').split('').reverse().join(''),
+    env: (await ctx.sh('printf %s "$API_TOKEN" | rev')).stdout.trim(),
+    file: (await ctx.fs.read('config.json')).split('').reverse().join(''),
+    written: file.endsWith('/config.json'),
+  }
+}
+`,
+    })
+    const db = c.master.master!.database.db
+    for (const [configs, value] of [
+      ['', 'tok-default'],
+      ['develop', 'tok-develop'],
+      ['maestro,beta', 'tok-maestro'],
+    ] as const)
+      seedSecret(db, 'configs', {
+        name: 'API_TOKEN',
+        kind: 'value',
+        configs,
+        value,
+      })
+    seedSecret(db, 'configs', {
+      name: 'config.json',
+      kind: 'file',
+      contents: Buffer.from('{"v":"default"}').toString('base64'),
+    })
+    const created = await c.api('POST', '/api/jobs', {
+      app: 'configs',
+      branch: 'master',
+    })
+    assert.equal(created.status, 202, created.text)
+    const run = await finished(c, created.json.id)
+    assert.equal(run.status, 'succeeded', JSON.stringify(run))
+    const reversed = (text: string): string => text.split('').reverse().join('')
+    for (const [name, token] of [
+      ['plain', 'tok-default'],
+      ['develop', 'tok-develop'],
+      ['maestro', 'tok-maestro'],
+    ] as const)
+      assert.deepEqual(stage(run, name).output, {
+        token: reversed(token),
+        env: reversed(token),
+        file: reversed('{"v":"default"}'),
+        written: true,
+      })
+    // A graph stored before stages had configs (the run reuses it by commit): every stage gets the default.
+    db.prepare(
+      "UPDATE graphs SET graph=json_remove(json_remove(json_remove(graph,'$.workflows[0].stages[0].configs'),'$.workflows[0].stages[1].configs'),'$.workflows[0].stages[2].configs') WHERE project_id=(SELECT id FROM projects WHERE slug='configs')",
+    ).run()
+    const old = await finished(
+      c,
+      (await c.api('POST', '/api/jobs', { app: 'configs', branch: 'master' }))
+        .json.id,
+    )
+    assert.equal(old.status, 'succeeded', JSON.stringify(old))
+    assert.equal(stage(old, 'maestro').output.token, reversed('tok-default'))
+    // Without a default, a stage whose configs have no variant cannot declare the name.
+    db.prepare(
+      "DELETE FROM project_secrets WHERE name='API_TOKEN' AND configs=''",
+    ).run()
+    const refused = await c.api('POST', '/api/jobs', {
+      app: 'configs',
+      branch: 'master',
+    })
+    const failed = await finished(c, refused.json.id)
+    assert.equal(failed.status, 'failed')
+    assert.match(
+      JSON.stringify(failed),
+      /Stage plain declares secret API_TOKEN, which has no variant for configs \(none\) and no default/,
+    )
+  })
+
+  it('U7.27 a dead worker’s secret files are cleaned before the next checkout, so the stage sees the new commit’s tracked file', async () => {
+    await project('recover', {
+      'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('read', { on: 'linux', workspace: { path: 'recover', mode: 'clean' }, run: read })
+}
+export async function read(ctx: Stage) {
+  return await ctx.fs.read('google-services.json')
+}
+`,
+      'google-services.json': 'placeholder from the new commit',
+    })
+    // On every worker: a dead stage wrote over the tracked file, and its
+    // manifest kept the earlier commit's copy.
+    const manifests: string[] = []
+    for (const node of c.workers.values()) {
+      const root = path.join(node.dir, 'workspaces')
+      mkdirSync(path.join(root, 'recover'), { recursive: true })
+      const dir = path.join(realpathSync(root), 'recover')
+      writeFileSync(path.join(dir, 'google-services.json'), 'secret')
+      // Where the worker's stage directories are: tmp/stage-<key>.
+      const { manifest, originals } = secretFilesPaths(
+        dir,
+        path.join(node.dir, 'tmp', 'stage-any'),
+      )
+      mkdirSync(originals, { recursive: true })
+      writeFileSync(`${originals}/1`, 'placeholder from the old commit')
+      writeFileSync(
+        manifest,
+        JSON.stringify([
+          {
+            target: path.join(dir, 'google-services.json'),
+            original: `${originals}/1`,
+            mode: 0o644,
+          },
+        ]),
+      )
+      manifests.push(manifest)
+    }
+    const created = await c.api('POST', '/api/jobs', {
+      app: 'recover',
+      branch: 'master',
+    })
+    assert.equal(created.status, 202, created.text)
+    const run = await finished(c, created.json.id)
+    assert.equal(run.status, 'succeeded', JSON.stringify(run))
+    assert.equal(stage(run, 'read').output, 'placeholder from the new commit')
+    assert(manifests.some((manifest) => !existsSync(manifest)))
+    // A list recovery cannot read is dropped once the clean checkout has
+    // reset the tree, so it does not block the checkout's secret files.
+    for (const manifest of manifests) writeFileSync(manifest, 'not json')
+    const again = await finished(
+      c,
+      (await c.api('POST', '/api/jobs', { app: 'recover', branch: 'master' }))
+        .json.id,
+    )
+    assert.equal(again.status, 'succeeded', JSON.stringify(again))
+    assert.match(
+      c.master.master!.scheduler.logs(again.id)!,
+      /Could not read the secret files an earlier stage left/,
+    )
+    assert(manifests.some((manifest) => !existsSync(manifest)))
+  })
+
+  it('U7.26 a stage recorded before stages had configs gets the default variants', () => {
+    const variants = [
+      { name: 'A', configs: [] as string[] },
+      { name: 'A', configs: ['develop'] },
+    ]
+    assert.equal(
+      stageConfigs({ name: 'old' } as unknown as GraphStage).length,
+      0,
+    )
+    assert.deepEqual(
+      stageConfigs({ configs: ['develop'] } as unknown as GraphStage),
+      ['develop'],
+    )
+    assert.equal(
+      resolveSecrets(variants, ['A'], stageConfigs({} as GraphStage)).get('A'),
+      variants[0],
     )
   })
 })
