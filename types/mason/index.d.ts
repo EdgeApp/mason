@@ -290,6 +290,13 @@ export interface BuildNumberOptions {
    * run publishes with the same number.
    */
   apps?: string[]
+  /**
+   * Numbers each run holds, 1 to 100 (default 1): a run gets N and keeps N
+   * to N+block−1; the next run's number comes after the block (N+block, or
+   * the next day's first number for a dated format). Needs a format of digits
+   * ending in its count (`YYMMDDCC`, `N`).
+   */
+  block?: number
 }
 
 /** Declares the stages of one workflow. */

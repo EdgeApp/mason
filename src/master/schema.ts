@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 18
+export const MASTER_SCHEMA = 19
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -558,6 +558,19 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       }
     }
     db.exec('DROP TABLE project_env; DROP TABLE project_files;')
+  },
+  // 19: a run's build number may be a block of numbers, N to N+block−1.
+  (db): void => {
+    for (const table of ['build_number_reservations', 'build_reservations'])
+      if (
+        !db
+          .prepare(`PRAGMA table_info(${table})`)
+          .all()
+          .some((column) => column.name === 'block')
+      )
+        db.exec(
+          `ALTER TABLE ${table} ADD COLUMN block INTEGER NOT NULL DEFAULT 1`,
+        )
   },
 ]
 
