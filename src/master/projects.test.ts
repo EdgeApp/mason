@@ -799,27 +799,38 @@ describe('Projects, branch rules and build numbers', function () {
     const numbers = new BuildNumbers(master)
     const plain = { format: 'N' }
     assert.deepEqual(
-      [1, 2, 3].map((n) =>
-        numbers.reserve(id, 'app', 'master', plain, `r${n}`),
+      [1, 2, 3].map(
+        (n) => numbers.reserve(id, 'app', 'master', plain, `r${n}`).value,
       ),
       ['1', '2', '3'],
     )
-    assert.equal(numbers.reserve(id, 'app', 'master', plain, 'r2'), '2')
+    assert.equal(numbers.reserve(id, 'app', 'master', plain, 'r2').value, '2')
     const branchScope = { scope: 'branch', format: 'N' }
-    assert.equal(numbers.reserve(id, 'b', 'master', branchScope, 'x1'), '1')
-    assert.equal(numbers.reserve(id, 'b', 'feature', branchScope, 'x2'), '1')
-    assert.equal(numbers.reserve(id, 'b', 'master', branchScope, 'x3'), '2')
+    assert.equal(
+      numbers.reserve(id, 'b', 'master', branchScope, 'x1').value,
+      '1',
+    )
+    assert.equal(
+      numbers.reserve(id, 'b', 'feature', branchScope, 'x2').value,
+      '1',
+    )
+    assert.equal(
+      numbers.reserve(id, 'b', 'master', branchScope, 'x3').value,
+      '2',
+    )
     const daily = { scope: 'branch', format: 'YYMMDDCC' }
     assert.equal(
-      numbers.reserve(id, 'd', 'master', daily, 'd1', day(2026, 10, 17)),
+      numbers.reserve(id, 'd', 'master', daily, 'd1', day(2026, 10, 17)).value,
       '26101701',
     )
     assert.equal(
-      numbers.reserve(id, 'd', 'master', daily, 'd2', day(2026, 10, 17, 23)),
+      numbers.reserve(id, 'd', 'master', daily, 'd2', day(2026, 10, 17, 23))
+        .value,
       '26101702',
     )
     assert.equal(
-      numbers.reserve(id, 'd', 'master', daily, 'd3', day(2026, 10, 18, 1)),
+      numbers.reserve(id, 'd', 'master', daily, 'd3', day(2026, 10, 18, 1))
+        .value,
       '26101801',
     )
     // The scheme's time zone decides the date: 05:00 UTC is still the 17th in Los Angeles.
@@ -836,7 +847,7 @@ describe('Projects, branch rules and build numbers', function () {
         pacific,
         'l1',
         Date.UTC(2026, 9, 18, 5),
-      ),
+      ).value,
       '26101701',
     )
     assert.equal(
@@ -862,20 +873,20 @@ describe('Projects, branch rules and build numbers', function () {
           { format: 'YYC' },
           's10',
           day(2026, 1, 1),
-        ),
+        ).value,
       /outgrew C/,
     )
     // start raises a sequence but never lowers it.
     assert.equal(
-      numbers.reserve(id, 'v', 'master', { start: 4000 }, 'v1'),
+      numbers.reserve(id, 'v', 'master', { start: 4000 }, 'v1').value,
       '4000',
     )
     assert.equal(
-      numbers.reserve(id, 'v', 'master', { start: 10 }, 'v2'),
+      numbers.reserve(id, 'v', 'master', { start: 10 }, 'v2').value,
       '4001',
     )
     assert.equal(
-      numbers.reserve(id, 'v', 'master', { start: 5000 }, 'v3'),
+      numbers.reserve(id, 'v', 'master', { start: 5000 }, 'v3').value,
       '5000',
     )
     // A scheme that would render lower than an issued value is refused.
@@ -888,7 +899,7 @@ describe('Projects, branch rules and build numbers', function () {
           { scope: 'branch', format: 'N' },
           'back',
           day(2026, 10, 19),
-        ),
+        ).value,
       /not above 26101801/,
     )
     assert.throws(
@@ -902,8 +913,10 @@ describe('Projects, branch rules and build numbers', function () {
     numbers.checkScheme(id, 'd', 'master', daily, day(2026, 10, 19))
     numbers.checkScheme(id, 'fresh', 'master', daily)
     const many = new Set(
-      Array.from({ length: 50 }, (_, n) =>
-        numbers.reserve(id, 'concurrent', 'master', plain, `c${n}`),
+      Array.from(
+        { length: 50 },
+        (_, n) =>
+          numbers.reserve(id, 'concurrent', 'master', plain, `c${n}`).value,
       ),
     )
     assert.equal(many.size, 50)
@@ -953,17 +966,21 @@ describe('Projects, branch rules and build numbers', function () {
     const numbers = new BuildNumbers(master, () => 50)
     const daily = { scope: 'branch', format: 'YYMMDDCC' }
     assert.equal(
-      numbers.reserve(id, 'app', 'master', daily, 'a', day(2026, 10, 20)),
+      numbers.reserve(id, 'app', 'master', daily, 'a', day(2026, 10, 20)).value,
       '26102051',
     )
     for (let n = 52; n <= 99; n++)
       numbers.reserve(id, 'app', 'master', daily, `a${n}`, day(2026, 10, 20))
     assert.throws(
       () =>
-        numbers.reserve(id, 'app', 'master', daily, 'over', day(2026, 10, 20)),
+        numbers.reserve(id, 'app', 'master', daily, 'over', day(2026, 10, 20))
+          .value,
       /outgrew CC/,
     )
-    assert.equal(numbers.reserve(id, 'n', 'master', { start: 1 }, 'n'), '51')
+    assert.equal(
+      numbers.reserve(id, 'n', 'master', { start: 1 }, 'n').value,
+      '51',
+    )
     assert.throws(
       () =>
         numbers.reserve(
@@ -972,8 +989,112 @@ describe('Projects, branch rules and build numbers', function () {
           'master',
           { start: 2_100_000_000, check: 'android' },
           'big',
-        ),
+        ).value,
       /android limit/,
+    )
+  })
+
+  it('U5.7 a block reserves N to N+block-1 for a run; the next run starts after it, whatever its own block', () => {
+    const master = database()
+    const projects = new Projects(master)
+    const id = projects.save(localOperator, 'blocks', {
+      repository: 'https://github.com/a/blocks',
+    }).project.id
+    const numbers = new BuildNumbers(master)
+    const at = day(2026, 10, 30)
+    const daily = { format: 'YYMMDDCC', timeZone: 'UTC' }
+    // Master runs hold three numbers; a develop run of the same sequence one.
+    assert.deepEqual(
+      numbers.reserve(id, 'edge', 'master', { ...daily, block: 3 }, 'run1', at),
+      { value: '26103001', block: 3 },
+    )
+    assert.deepEqual(
+      numbers.reserve(id, 'edge', 'master', { ...daily, block: 3 }, 'run2', at),
+      { value: '26103004', block: 3 },
+    )
+    assert.deepEqual(
+      numbers.reserve(id, 'edge', 'develop', daily, 'run3', at),
+      { value: '26103007', block: 1 },
+    )
+    assert.equal(
+      numbers.reserve(id, 'edge', 'master', daily, 'run4', at).value,
+      '26103008',
+    )
+    // The same run gets its own number and block back, whatever the scheme says now.
+    assert.deepEqual(numbers.reserve(id, 'edge', 'master', daily, 'run1', at), {
+      value: '26103001',
+      block: 3,
+    })
+    // The sequence's last number is the end of the blocks used so far.
+    assert.equal(
+      (
+        master.db
+          .prepare("SELECT value FROM build_number_last WHERE key='edge'")
+          .get() as { value: string }
+      ).value,
+      '26103008',
+    )
+    // A plain N with start, and a block whose last number would outgrow CC.
+    assert.equal(
+      numbers.reserve(id, 'n', 'master', { start: 10, block: 5 }, 'n1', at)
+        .value,
+      '10',
+    )
+    assert.equal(
+      numbers.reserve(id, 'n', 'master', { start: 10 }, 'n2', at).value,
+      '15',
+    )
+    for (let n = 1; n <= 97; n++)
+      numbers.reserve(id, 'full', 'master', daily, `f${n}`, at)
+    assert.throws(
+      () =>
+        numbers.reserve(
+          id,
+          'full',
+          'master',
+          { ...daily, block: 3 },
+          'over',
+          at,
+        ).value,
+      /outgrew CC/,
+    )
+    // A block's last number must stay within the android limit too.
+    assert.throws(
+      () =>
+        numbers.reserve(
+          id,
+          'android',
+          'master',
+          { start: 2_099_999_999, check: 'android', block: 3 },
+          'big',
+          at,
+        ).value,
+      /2100000001 exceeds the android limit/,
+    )
+    // Only all-digit formats ending in their count take a block above 1.
+    for (const format of [
+      'YYYY.MM.CC',
+      'CCYYMMDD',
+      '1.N',
+      'YYMMDD-CC',
+      'vN',
+      'YYMMDD_CC',
+    ])
+      assert.throws(
+        () => asScheme({ format, block: 2 }),
+        /block needs a format of digits ending in its count/,
+        format,
+      )
+    assert.equal(asScheme({ format: '1YYMMDDCC', block: 3 }).block, 3)
+    for (const block of [0, 101, 1.5, '3'])
+      assert.throws(
+        () => asScheme({ block }),
+        /block is a whole number from 1 to 100/,
+      )
+    assert.equal(asScheme({ block: 1 }).block, undefined)
+    assert.equal(
+      asScheme({ format: 'YYYY.MM.CC', block: 1 }).format,
+      'YYYY.MM.CC',
     )
   })
 
@@ -1009,7 +1130,8 @@ describe('Projects, branch rules and build numbers', function () {
         localOperator,
       )
       assert.equal(
-        m.buildNumbers.reserve(project.id, 'app', 'master', daily, 'm1', today),
+        m.buildNumbers.reserve(project.id, 'app', 'master', daily, 'm1', today)
+          .value,
         '26102004',
       )
       // An earlier day's number seeds only that day; today starts fresh.
@@ -1027,7 +1149,7 @@ describe('Projects, branch rules and build numbers', function () {
           daily,
           'f1',
           today,
-        ),
+        ).value,
         '26102001',
       )
       // A lower number leaves the sequence alone.
@@ -1038,7 +1160,8 @@ describe('Projects, branch rules and build numbers', function () {
         localOperator,
       )
       assert.equal(
-        m.buildNumbers.reserve(project.id, 'app', 'master', daily, 'm2', today),
+        m.buildNumbers.reserve(project.id, 'app', 'master', daily, 'm2', today)
+          .value,
         '26102005',
       )
       for (const [value, message] of [
@@ -1062,7 +1185,7 @@ describe('Projects, branch rules and build numbers', function () {
           { format: '1.N' },
           'p1',
           today,
-        ),
+        ).value,
         '1.42',
       )
       assert.throws(
@@ -1101,14 +1224,8 @@ describe('Projects, branch rules and build numbers', function () {
         { key: 'app', branch: 'release', last: '26102030' },
       )
       assert.equal(
-        m.buildNumbers.reserve(
-          project.id,
-          'app',
-          'release',
-          daily,
-          'r1',
-          today,
-        ),
+        m.buildNumbers.reserve(project.id, 'app', 'release', daily, 'r1', today)
+          .value,
         '26102031',
       )
       assert.equal(

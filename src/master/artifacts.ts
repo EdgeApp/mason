@@ -138,6 +138,7 @@ export class Artifacts {
     run: { job: string; stage: string; attempt: number; project: number },
     publishes: string[],
     buildNumbers: Record<string, string>,
+    blocks: Record<string, number> = {},
   ): Reservation[] {
     const out: Reservation[] = []
     for (const app of publishes) {
@@ -154,7 +155,7 @@ export class Artifacts {
         const id = randomBytes(16).toString('hex')
         this.db
           .prepare(
-            'INSERT INTO build_reservations(id,job_id,stage,attempt,project_id,app_id,platform,build_number,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+            'INSERT INTO build_reservations(id,job_id,stage,attempt,project_id,app_id,platform,build_number,block,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
           )
           .run(
             id,
@@ -165,6 +166,7 @@ export class Artifacts {
             row.id,
             channel.platform,
             number,
+            blocks[app] ?? 1,
             this.now(),
           )
         out.push({ id, app, platform: channel.platform, buildNumber: number })

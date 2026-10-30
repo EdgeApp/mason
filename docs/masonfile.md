@@ -913,6 +913,8 @@ export function setup(m: Setup) {
   m.buildNumber('com.example.camera', { format: 'YYMMDDCC' })     // 26101701, 26101702, …
   m.buildNumber('android-version-code', { start: 4000 })                 // any named sequence, not only app IDs
   m.buildNumber('nightly', { format: 'YYYY.MM.DD.CCC', scope: 'branch', timeZone: 'America/Los_Angeles' })
+  // Master runs hold three numbers (split APKs use N+1 and N+2); other branches one.
+  m.buildNumber('co.edgesecure.app', { format: 'YYMMDDCC', block: m.branch === 'master' ? 3 : 1 })
 }
 ```
 
@@ -927,6 +929,7 @@ name. Options:
 | `timeZone` | Time zone for date tokens. Default UTC. |
 | `check` | `'apple'` (at most three dot-separated integers, as `CFBundleVersion` requires), `'android'` (an integer up to 2,100,000,000, as `versionCode` requires), or none. Setup fails if the format could ever break the rule. |
 | `apps` | App IDs that take their numbers from this sequence instead of their own, so every app of a run publishes with the same number (`m.buildNumber('app', { format: 'YYMMDDCC', apps: ['com.example.app', 'com.example.camera'] })`). An app ID belongs to one sequence at most. |
+| `block` | How many numbers each run holds, 1 (default) to 100. A run gets N, keeps N to N+block−1 for its own use (an Android split APK's version codes, say), and the next run's number comes after the block (N+block, or the next day's first number for a dated format). `getBuildNumber` returns N. Set it in `setup`, so it can depend on `m.branch`; the sequence stays increasing whatever each run's block. A block above 1 needs a format of digits that ends in its count (`YYMMDDCC`, `N`; no `.`, `-` or letters), so the numbers are consecutive integers; a count that would overflow its width fails the stage. |
 
 Format tokens:
 

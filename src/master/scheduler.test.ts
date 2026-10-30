@@ -943,6 +943,65 @@ export async function other(ctx: Stage) { return ctx.getBuildNumber('other') }
     )
   })
 
+  it('U7.13 a block per branch: master runs hold three numbers, other branches one, and every stage reads its run’s N', async () => {
+    await project(
+      'blocks',
+      {
+        'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.buildNumber('app.example.blocks', { format: 'N', block: m.branch === 'master' ? 3 : 1 })
+  m.stage('build', { on: 'linux', publishes: ['app.example.blocks'], run: number })
+  m.stage('again', { on: 'linux', buildNumbers: ['app.example.blocks'], run: number })
+}
+export async function number(ctx: Stage) {
+  return ctx.getBuildNumber('app.example.blocks')
+}
+`,
+      },
+      {
+        apps: [
+          {
+            bundleId: 'app.example.blocks',
+            name: 'blocks',
+            platforms: ['android'],
+          },
+        ],
+      },
+    )
+    c.repo('fixtures/blocks').commit({ 'feature.txt': 'x\n' }, 'feature/x')
+    const runs = []
+    for (const branch of ['master', 'master', 'feature/x', 'master'])
+      runs.push(await finished(c, await request('blocks', { branch })))
+    assert.deepEqual(
+      runs.map((run) => [
+        stage(run, 'build').output,
+        stage(run, 'again').output,
+      ]),
+      [
+        ['1', '1'],
+        ['4', '4'],
+        ['7', '7'],
+        ['8', '8'],
+      ],
+    )
+    // Each run's reservation records its block.
+    const db = c.master.master!.database.db
+    assert.deepEqual(
+      db
+        .prepare(
+          'SELECT value, block FROM build_number_reservations WHERE reservation IN (?,?) ORDER BY value',
+        )
+        .all(runs[1]!.id, runs[2]!.id)
+        .map((row) => ({ ...row })),
+      [
+        { value: '4', block: 3 },
+        { value: '7', block: 1 },
+      ],
+    )
+  })
+
   it('U7.13 restarts from a stage, reusing what does not depend on it, with new build numbers', async () => {
     const flag = path.join(
       mkdtempSync(

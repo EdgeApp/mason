@@ -10,6 +10,8 @@ export interface BuildNumberScheme {
   check?: 'apple' | 'android'
   /** App IDs whose stages take their numbers from this sequence (the graph keeps it; counters ignore it). */
   apps?: string[]
+  /** Numbers each run reserves, N to N+block−1; absent means 1. */
+  block?: number
 }
 
 type Token =
@@ -72,6 +74,22 @@ export function asScheme(value: unknown): BuildNumberScheme {
   const check = input.check
   if (check != null && check !== 'apple' && check !== 'android')
     throw new Error('check is apple or android')
+  const block = input.block ?? 1
+  if (!Number.isSafeInteger(block) || block < 1 || block > 100)
+    throw new Error('block is a whole number from 1 to 100')
+  // N to N+block−1 are consecutive integers only when the count ends the
+  // number and everything before it is a digit.
+  const lastToken = tokens[tokens.length - 1]!
+  if (
+    block > 1 &&
+    ((lastToken.kind !== 'count' && lastToken.kind !== 'plain') ||
+      tokens.some(
+        (token) => token.kind === 'literal' && !/^\d$/.test(token.text),
+      ))
+  )
+    throw new Error(
+      'block needs a format of digits ending in its count, such as YYMMDDCC',
+    )
   const literals = tokens
     .filter((token) => token.kind === 'literal')
     .map((token) => (token as { text: string }).text)
@@ -109,7 +127,14 @@ export function asScheme(value: unknown): BuildNumberScheme {
         )
     }
   }
-  return { scope, format, start, timeZone, ...(check == null ? {} : { check }) }
+  return {
+    scope,
+    format,
+    start,
+    timeZone,
+    ...(check == null ? {} : { check }),
+    ...(block === 1 ? {} : { block }),
+  }
 }
 
 function dateParts(
@@ -319,8 +344,10 @@ export class BuildNumbers {
   }
 
   /**
-   * Reserves the next number for a key. The same `reservation` (a stage
-   * attempt) always gets the same number; a new reservation never reuses one.
+   * Reserves the next number for a key, N, and with it N to N+block−1 for
+   * the scheme's `block`: the next reservation starts after the block. The
+   * same `reservation` (a run) always gets the same number and block; a new
+   * reservation never reuses one.
    */
   reserve(
     projectId: number,
@@ -329,15 +356,19 @@ export class BuildNumbers {
     value: unknown,
     reservation: string,
     at = this.master.now(),
-  ): string {
+  ): { value: string; block: number } {
     const scheme = asScheme(value)
+    const block = scheme.block ?? 1
     return this.master.transaction(() => {
       const existing = this.master.db
         .prepare(
-          'SELECT value FROM build_number_reservations WHERE project_id=? AND key=? AND reservation=?',
+          'SELECT value,block FROM build_number_reservations WHERE project_id=? AND key=? AND reservation=?',
         )
-        .get(projectId, key, reservation) as { value: string } | undefined
-      if (existing != null) return existing.value
+        .get(projectId, key, reservation) as
+        | { value: string; block: number }
+        | undefined
+      if (existing != null)
+        return { value: existing.value, block: Number(existing.block) }
       const scopeBranch = scheme.scope === 'branch' ? branch : ''
       const plain = parseFormat(scheme.format).some(
         (token) => token.kind === 'plain',
@@ -345,9 +376,12 @@ export class BuildNumbers {
       const part = plain ? '' : datePart(scheme, at)
       const count = this.nextCount(projectId, key, scopeBranch, scheme, part)
       const rendered = render(scheme, at, count)
-      if (scheme.check === 'android' && Number(rendered) > ANDROID_MAX)
+      // The block's last number must fit the format and the platform too.
+      const lastCount = count + block - 1
+      const lastRendered = render(scheme, at, lastCount)
+      if (scheme.check === 'android' && Number(lastRendered) > ANDROID_MAX)
         throw new Error(
-          `${rendered} exceeds the android limit of 2,100,000,000`,
+          `${lastRendered} exceeds the android limit of 2,100,000,000`,
         )
       const last = this.last(projectId, key, scopeBranch)
       if (last != null && compareNumbers(rendered, last) <= 0)
@@ -358,18 +392,18 @@ export class BuildNumbers {
         .prepare(
           'INSERT INTO build_numbers(project_id,key,branch,date_part,count) VALUES(?,?,?,?,?) ON CONFLICT(project_id,key,branch,date_part) DO UPDATE SET count=excluded.count',
         )
-        .run(projectId, key, scopeBranch, part, count)
+        .run(projectId, key, scopeBranch, part, lastCount)
       this.master.db
         .prepare(
           'INSERT INTO build_number_last(project_id,key,branch,value) VALUES(?,?,?,?) ON CONFLICT(project_id,key,branch) DO UPDATE SET value=excluded.value',
         )
-        .run(projectId, key, scopeBranch, rendered)
+        .run(projectId, key, scopeBranch, lastRendered)
       this.master.db
         .prepare(
-          'INSERT INTO build_number_reservations(project_id,key,reservation,value,created_at) VALUES(?,?,?,?,?)',
+          'INSERT INTO build_number_reservations(project_id,key,reservation,value,block,created_at) VALUES(?,?,?,?,?,?)',
         )
-        .run(projectId, key, reservation, rendered, this.master.now())
-      return rendered
+        .run(projectId, key, reservation, rendered, block, this.master.now())
+      return { value: rendered, block }
     })
   }
 

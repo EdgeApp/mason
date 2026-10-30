@@ -1754,6 +1754,8 @@ export class Scheduler {
     const token = randomBytes(24).toString('hex')
     const graph = this.workflowOf(job)!.graph
     const buildNumbers: Record<string, string> = {}
+    // How many numbers from each one the run holds (its `block`).
+    const blocks: Record<string, number> = {}
     let secrets: ReturnType<Scheduler['secretFacts']>
     try {
       // A graph cached by commit was checked when it was made; a variant may have gone since.
@@ -1767,15 +1769,16 @@ export class Scheduler {
         ...new Set([...stage.publishes, ...stage.buildNumbers]),
       ]) {
         const sequence = sequenceOf(key)
-        // One number per sequence per run: a run's stages share it; a new run gets the next.
-        buildNumbers[key] = this.options.buildNumbers.reserve(
+        // One reservation per sequence per run (N, or N..N+block−1): a run's stages share N; a new run starts after the block.
+        const reserved = this.options.buildNumbers.reserve(
           project.id,
           sequence,
           String(job.branch),
           graph.buildNumbers[sequence] ?? {},
           id,
         )
-        buildNumbers[sequence] = buildNumbers[key]
+        buildNumbers[key] = buildNumbers[sequence] = reserved.value
+        blocks[key] = blocks[sequence] = reserved.block
       }
     } catch (error) {
       this.unlock(id, stage.name)
@@ -1812,6 +1815,7 @@ export class Scheduler {
         reserved,
         stage.publishes,
         buildNumbers,
+        blocks,
       ) ?? []
     const upload = this.options.artifacts?.uploadToken(
       reserved,
