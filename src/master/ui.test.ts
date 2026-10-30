@@ -713,11 +713,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     assert.match(projectPage, /app\.example\.ui<\/td><td class="mono">YYMMDDCC/)
     assert.match(projectPage, /master<\/span> 26102107/)
     assert.match(projectPage, /data-path="\/api\/v2\/build-numbers\/seed"/)
-    // Secrets are not on the overview, nor is the JSON form that changed them.
+    // Secrets are on their own tab, not the overview.
     assert.doesNotMatch(projectPage, /SIGNING_TOKEN/)
     assert.doesNotMatch(
       projectPage,
-      /data-path="\/api\/v2\/projects\/wizard\/secrets"/,
+      /data-path="\/api\/v2\/projects\/wizard\/secrets"|data-secrets/,
     )
     assert(!projectPage.includes('secret-value-fixture'))
     const developerProject = (
@@ -734,6 +734,58 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
         .status,
       403,
     )
+    // The Secrets tab: names and configs for developers, controls and the audit for managers.
+    const managerSecrets = await request(
+      c.master,
+      'GET',
+      '/projects/wizard/secrets',
+      manager2,
+    )
+    assert.equal(managerSecrets.status, 200)
+    assert.match(managerSecrets.text, /aria-current="page">Secrets</)
+    assert.match(managerSecrets.text, /data-secret-name|SIGNING_TOKEN/)
+    assert.match(managerSecrets.text, /data-secret-edit/)
+    assert.match(managerSecrets.text, /<h2><span[^>]*>[^<]*<\/span>Audit<\/h2>/)
+    assert.match(managerSecrets.text, /src="\/assets\/secrets\.js"/)
+    assert(!managerSecrets.text.includes('secret-value-fixture'))
+    const developerSecrets = (
+      await request(
+        c.master,
+        'GET',
+        '/projects/wizard/secrets',
+        signIn('developer'),
+      )
+    ).text
+    assert.match(developerSecrets, /SIGNING_TOKEN/)
+    assert.doesNotMatch(
+      developerSecrets,
+      /data-secret-edit|Audit|data-secrets|assets\/secrets\.js/,
+    )
+    assert.equal(
+      (
+        await request(
+          c.master,
+          'GET',
+          '/projects/wizard/secrets',
+          signIn('tester'),
+        )
+      ).status,
+      403,
+    )
+    assert.equal(
+      (await request(c.master, 'GET', '/projects/nope/secrets', manager2))
+        .status,
+      404,
+    )
+    assert.equal(
+      (await request(c.master, 'GET', '/projects/wizard/secrets')).status,
+      303,
+    )
+    assert.doesNotMatch(projectPage, /src="\/assets\/secrets\.js"/)
+    assert.match(projectPage, /aria-current="page">Overview</)
+    const bundle = await request(c.master, 'GET', '/assets/secrets.js')
+    assert.equal(bundle.status, 200)
+    assert.match(bundle.text, /data-secrets/)
     assert.equal(
       (await request(c.master, 'GET', '/projects/none', manager2)).status,
       404,

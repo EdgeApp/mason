@@ -1518,7 +1518,7 @@ export function masonfileView(data: {
   error?: string
 }): string {
   const lines = (data.text ?? '').split('\n')
-  return `${head(`${data.name} · Masonfile`, 'The Masonfile is the project’s configuration; it changes with the code.', [data.name, 'Masonfile'])}<form method="get" class="actions"><label for="commit" class="sr-only">Commit</label><select id="commit" name="commit">${data.commits.map((entry) => `<option value="${escape(entry.sha)}"${entry.sha === data.commit ? ' selected' : ''}>${escape(entry.sha.slice(0, 12))} · ${escape(entry.branch)}</option>`).join('')}</select><button class="secondary">Show</button></form>${
+  return `${head(`${data.name} · Masonfile`, 'The Masonfile is the project’s configuration; it changes with the code.', [data.name, 'Masonfile'])}${projectTabs(data.slug, 'masonfile')}<form method="get" class="actions"><label for="commit" class="sr-only">Commit</label><select id="commit" name="commit">${data.commits.map((entry) => `<option value="${escape(entry.sha)}"${entry.sha === data.commit ? ' selected' : ''}>${escape(entry.sha.slice(0, 12))} · ${escape(entry.branch)}</option>`).join('')}</select><button class="secondary">Show</button></form>${
     data.error != null
       ? `<p class="empty-state">${escape(data.error)}</p>`
       : data.text == null
@@ -1527,7 +1527,146 @@ export function masonfileView(data: {
   }`
 }
 
-/** A project on the master: repository, app IDs, branch rules, webhook and secrets (names only; values are write-only). */
+/** The tabs of a project's pages; Runs and builds is the dashboard, filtered to the project. */
+export function projectTabs(
+  slug: string,
+  current: 'overview' | 'masonfile' | 'secrets',
+): string {
+  const path = `/projects/${encodeURIComponent(slug)}`
+  const tab = (key: string, href: string, label: string): string =>
+    `<a href="${escape(href)}"${key === current ? ' aria-current="page"' : ''}>${label}</a>`
+  return `<nav class="tabs" aria-label="Project">${[
+    tab('overview', path, 'Overview'),
+    tab('runs', `/?project=${encodeURIComponent(slug)}`, 'Runs and builds'),
+    tab('masonfile', `${path}/masonfile`, 'Masonfile'),
+    tab('secrets', `${path}/secrets`, 'Secrets'),
+  ].join('')}</nav>`
+}
+
+/** One secret variant as the Secrets tab lists it. */
+export interface SecretRowView {
+  id: number
+  name: string
+  kind: 'value' | 'file'
+  configs: string[]
+  text: boolean
+  masked: boolean
+  pathEnv?: string
+  destination?: string
+  bytes: number
+}
+
+/** One audit entry as the Secrets tab lists it. */
+export interface SecretAuditView {
+  name: string
+  configs: string[]
+  action: string
+  who: string
+  address: string
+  at: number
+  detail?: string
+}
+
+const pillsOf = (configs: string[], button: boolean): string =>
+  (configs.length === 0 ? ['all'] : configs)
+    .map((config) =>
+      button
+        ? `<button type="button" class="pill" data-secret-pill title="Edit build configs">${escape(config)}</button>`
+        : `<span class="pill">${escape(config)}</span>`,
+    )
+    .join('')
+
+/**
+ * The Secrets tab: the add buttons and help, one row per variant, the
+ * audit for administrators and managers, and the text-file editor. Every
+ * control is in the page, hidden until the tab's script shows it.
+ */
+export function secretsView(data: {
+  slug: string
+  name: string
+  format: 'pipeline' | 'script'
+  secrets: SecretRowView[]
+  /** Administrators and managers: add, edit, replace, delete, and the audit. */
+  canChange: boolean
+  /** Changes need a configured backup. */
+  backups: boolean
+  audit?: SecretAuditView[]
+}): string {
+  const script = data.format === 'script'
+  const manage = data.canChange
+  const changeable = manage && data.backups
+  const help = script
+    ? `<p class="hint">This is a script project: its build stage gets every value as an environment variable, and every file written into the checkout at its name, a path such as <code>android/app/google-services.json</code>. Script projects have no build configs.</p>`
+    : `<p class="hint">Values are set as environment variables for the shell commands of stages that declare them in <code>secrets</code>, and the Masonfile reads them with <code>ctx.secret(name)</code>. Files are written by the Masonfile with <code>await ctx.writeSecretFile(name, directory)</code>. A secret’s build configs limit it to stages that list one of them in <code>configs</code>; one with none is used by every other stage.</p>`
+  // Script projects take only default variants, so they have no configs to set.
+  const configsField = (id: string): string =>
+    script
+      ? ''
+      : field(
+          id,
+          'Build configs',
+          `<input id="${id}" name="configs" autocomplete="off" placeholder="all">`,
+          'Comma-separated; empty means all.',
+        )
+  const notice =
+    manage && !data.backups
+      ? `<p class="notice" role="status">Configure backups before changing secrets: every change is pushed in a backup before it is saved. <a href="/backups">Backups</a></p>`
+      : ''
+  const buttons = manage
+    ? `<div class="actions"><button type="button" data-secret-add="value"${changeable ? '' : ' disabled'}>${icon('add')}Add secret value</button><button type="button" data-secret-add="file"${changeable ? '' : ' disabled'}>${icon('upload')}Add secret file</button></div>`
+    : ''
+  const addValue = changeable
+    ? `<form class="secret-add" data-secret-add-form="value" hidden><h3>Add secret value</h3>${field('secret-value-name', 'Name', '<input id="secret-value-name" name="name" class="mono" required autocomplete="off" spellcheck="false" placeholder="API_TOKEN">', 'Capital letters, digits and underscores: the environment variable it becomes.')}${configsField('secret-value-configs')}${field('secret-value-value', 'Value', '<input id="secret-value-value" name="value" type="password" class="mono" autocomplete="off" spellcheck="false" required><textarea data-secret-value-lines hidden rows="6" class="mono" autocomplete="off" spellcheck="false" aria-label="Value"></textarea>')}<label class="check" data-secret-reveal><input type="checkbox" data-secret-show> Show the value</label>${script ? '<label class="check"><input type="checkbox" name="masked" checked> Mask in logs</label>' : ''}<div class="actions"><button>Save</button><button type="button" class="secondary" data-secret-add-cancel>Cancel</button></div><output data-secret-output></output></form>`
+    : ''
+  const addFile = changeable
+    ? `<form class="secret-add" data-secret-add-form="file" hidden><h3>Add secret file</h3><div class="drop" data-secret-drop tabindex="0" role="button" aria-label="Drop a file, or choose one">${icon('upload')}<span>Drop a file here, or click to choose one</span><strong data-secret-chosen></strong></div><input type="file" data-secret-add-file hidden>${field('secret-file-text', 'Or paste its text', '<textarea id="secret-file-text" name="text" rows="6" class="mono" spellcheck="false" placeholder="{ … }"></textarea>')}${field('secret-file-name', script ? 'Path in the checkout' : 'File name', `<input id="secret-file-name" name="name" class="mono" required autocomplete="off" spellcheck="false" placeholder="${script ? 'android/app/google-services.json' : 'config.json'}">`, script ? 'Letters, digits, dots, dashes and underscores, with / between directories: where the build stage finds the file.' : 'Letters, digits, dots, dashes and underscores. The Masonfile chooses the directory.')}${configsField('secret-file-configs')}${script ? field('secret-file-path-env', 'Path variable', '<input id="secret-file-path-env" name="pathEnv" class="mono" autocomplete="off" spellcheck="false">', 'Optional: the variable that holds the file’s path in the build.') : ''}<div class="actions"><button>Save</button><button type="button" class="secondary" data-secret-add-cancel>Cancel</button></div><output data-secret-output></output></form>`
+    : ''
+  const rows = data.secrets
+    .map((variant) => {
+      const notes = [
+        variant.kind === 'value' && !variant.masked
+          ? '<small class="hint">not masked</small>'
+          : '',
+        variant.pathEnv == null
+          ? ''
+          : `<small class="hint">→ $${escape(variant.pathEnv)}</small>`,
+        variant.destination != null && variant.destination !== variant.name
+          ? `<small class="hint">at ${escape(variant.destination)}</small>`
+          : '',
+        variant.kind === 'file'
+          ? `<small class="hint">${escape(bytes(variant.bytes))}${variant.text ? ' · text' : ''}</small>`
+          : '',
+      ].join('')
+      const editable = variant.kind === 'value' || variant.text
+      const actions = manage
+        ? `<span class="row-actions" data-secret-view>${
+            editable
+              ? `<button type="button" class="secondary" data-secret-edit>${icon('edit')}Edit</button>`
+              : `<button type="button" class="secondary" data-secret-replace>${icon('upload')}Replace</button>`
+          }<button type="button" class="secondary danger" data-secret-delete>${icon('delete')}Delete</button></span><span class="row-actions" data-secret-editing hidden><button type="button" data-secret-save>Save</button><button type="button" class="secondary" data-secret-cancel>Cancel</button></span><output data-secret-output></output>`
+        : ''
+      return `<tr data-secret-id="${variant.id}" data-kind="${variant.kind}" data-name="${escape(variant.name)}" data-configs="${escape(variant.configs.join(','))}"><td class="secret-name">${icon(variant.kind === 'value' ? 'key' : 'description')}<span class="mono">${escape(variant.name)}</span>${notes}${manage && variant.kind === 'value' ? `<input class="mono" data-secret-value hidden autocomplete="off" spellcheck="false" aria-label="Value of ${escape(variant.name)}">` : ''}</td><td class="secret-configs"><span class="pills" data-secret-pills>${pillsOf(variant.configs, manage && !script)}</span>${manage && !script ? `<input data-secret-configs-input hidden autocomplete="off" placeholder="all" aria-label="Build configs of ${escape(variant.name)}">` : ''}</td><td class="secret-actions">${actions}</td></tr>`
+    })
+    .join('')
+  const table = `<table class="list secrets"><thead><tr><th>Name</th><th>Build configs</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows || '<tr><td colspan="3" class="empty-state">No secrets yet.</td></tr>'}</tbody></table>${manage ? '<input type="file" data-secret-file hidden>' : ''}`
+  const audit =
+    manage && data.audit != null
+      ? `<section class="panel"><h2>${icon('history')}Audit</h2><p class="hint">Every view of a value or file, every change and every refusal. Values are never recorded.</p><table class="list audit"><thead><tr><th>When</th><th>Who</th><th>Secret</th><th>Action</th><th>Address</th></tr></thead><tbody>${
+          data.audit
+            .map(
+              (entry) =>
+                `<tr><td><time datetime="${new Date(entry.at).toISOString()}" data-at="${entry.at}">${escape(new Date(entry.at).toISOString().replace('T', ' ').slice(0, 19))} UTC</time></td><td>${escape(entry.who)}</td><td><span class="mono">${escape(entry.name)}</span> <span class="pills">${pillsOf(entry.configs, false)}</span></td><td>${escape(entry.action)}${entry.detail == null ? '' : ` <small class="hint">${escape(entry.detail)}</small>`}</td><td class="mono">${escape(entry.address)}</td></tr>`,
+            )
+            .join('') ||
+          '<tr><td colspan="5" class="empty-state">Nothing yet.</td></tr>'
+        }</tbody></table></section>`
+      : ''
+  const editor = manage
+    ? `<div class="secret-editor" data-secret-editor hidden role="dialog" aria-modal="true" aria-labelledby="secret-editor-title"><div class="secret-editor-head"><h2 id="secret-editor-title" class="mono" data-secret-editor-title></h2><span class="pill" data-secret-editor-configs></span><span class="spacer"></span><button type="button" data-secret-editor-save>Save</button><button type="button" class="secondary" data-secret-editor-cancel>Cancel</button></div><textarea class="mono" data-secret-editor-text spellcheck="false" aria-labelledby="secret-editor-title"></textarea><output data-secret-editor-output></output></div>`
+    : ''
+  return `${head(`${data.name} · Secrets`, 'Values and files the project’s stages may read, each limited to build configs.', [data.name, 'Secrets'])}${projectTabs(data.slug, 'secrets')}<section class="panel"${manage ? ` data-secrets="/api/v2/projects/${escape(encodeURIComponent(data.slug))}/secrets"` : ''}>${notice}${buttons}${help}${addValue}${addFile}${table}</section>${audit}${editor}`
+}
+
 /** A project's build-number sequences, and where a manager sets one's last number. */
 function buildNumbersPanel(data: {
   slug: string
@@ -1572,6 +1711,7 @@ function buildNumbersPanel(data: {
   }${form}</section>`
 }
 
+/** A project on the master: repository, app IDs, branch rules, build numbers, and its tabs. */
 export function projectView(data: {
   slug: string
   name: string
@@ -1594,7 +1734,7 @@ export function projectView(data: {
   }>
   canSeed: boolean
 }): string {
-  return `${head(data.name, data.repository, ['Projects', data.slug])}<p><a href="/?project=${encodeURIComponent(data.slug)}">Runs and builds</a> · <a href="/projects/${encodeURIComponent(data.slug)}/masonfile">Masonfile</a></p><section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
+  return `${head(data.name, data.repository, ['Projects', data.slug])}${projectTabs(data.slug, 'overview')}<section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
     data.apps
       .map(
         (app) =>

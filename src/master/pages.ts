@@ -12,6 +12,7 @@ import {
   nodesView,
   peopleView,
   projectView,
+  secretsView,
   cloudView,
   settingsView,
   type SignInMethodView,
@@ -42,6 +43,8 @@ import { can } from './permissions.js'
 import { sessionActor } from './auth.js'
 import type { Master } from './runtime.js'
 import { repository, version } from '../version.js'
+import { clientAddress } from './forward.js'
+import { ProjectNotFound } from './projects.js'
 
 /** The signed-in person as the views see them. */
 function viewerOf(session: MasterSession): Viewer {
@@ -98,6 +101,7 @@ function masterPage(
   content: string,
   session?: MasterSession,
   active?: string,
+  scripts: string[] = [],
 ): string {
   // The backup reminder is for those who may configure backups; an
   // administrator who skipped confirming the key is reminded of it too.
@@ -137,7 +141,7 @@ function masterPage(
         }),
     ...(active == null ? {} : { active }),
     banners: testBanner(context) + banner,
-    scripts: ['/assets/master.js', '/assets/run.js'],
+    scripts: ['/assets/master.js', '/assets/run.js', ...scripts],
   })
 }
 
@@ -229,10 +233,13 @@ export function masterPages(
     current?: MasterSession,
     code = 200,
     active?: string,
+    scripts: string[] = [],
   ): void => {
     res
       .status(code)
-      .send(masterPage(context, master, title, content, current, active))
+      .send(
+        masterPage(context, master, title, content, current, active, scripts),
+      )
   }
   // Only the pages that hash a password run the Argon2id WebAssembly.
   const hashing = (res: express.Response): void => {
@@ -862,40 +869,63 @@ export function masterPages(
       })
     },
   )
-  app.get('/projects/:slug', (req, res, next) => {
-    if (req.params.slug === 'new') {
-      next()
-      return
-    }
+  /**
+   * The project a project page is about, for a signed-in developer or more;
+   * otherwise the page answers (sign-in, 403 or 404) and this returns nothing.
+   */
+  const projectFor = (
+    req: express.Request,
+    res: express.Response,
+    title: string,
+  ):
+    | {
+        current: MasterSession
+        actor: ReturnType<typeof sessionActor>
+        project: ReturnType<Master['projects']['get']>
+      }
+    | undefined => {
     const current = session(req)
     if (current == null) {
       res.redirect(303, master.configured() ? '/sign-in' : '/')
-      return
+      return undefined
     }
     const actor = sessionActor(current)
     if (!can(actor, 'projects.read')) {
       send(
         res,
-        'Project',
+        title,
         '<p>Projects are for developers and up.</p>',
         current,
         403,
       )
-      return
+      return undefined
     }
-    let project
     try {
-      project = master.projects.get(String(req.params.slug))
-    } catch {
+      return {
+        current,
+        actor,
+        project: master.projects.get(String(req.params.slug)),
+      }
+    } catch (error) {
+      if (!(error instanceof ProjectNotFound)) throw error
       send(
         res,
-        'Project',
+        title,
         '<p class="empty-state">There is no such project.</p>',
         current,
         404,
       )
+      return undefined
+    }
+  }
+  app.get('/projects/:slug', (req, res, next) => {
+    if (req.params.slug === 'new') {
+      next()
       return
     }
+    const found = projectFor(req, res, 'Project')
+    if (found == null) return
+    const { current, actor, project } = found
     send(
       res,
       project.name,
@@ -931,6 +961,32 @@ export function masterPages(
       current,
       200,
       'dashboard',
+    )
+  })
+  app.get('/projects/:slug/secrets', (req, res) => {
+    const found = projectFor(req, res, 'Secrets')
+    if (found == null) return
+    const { current, actor, project } = found
+    const caller = { actor, address: clientAddress(req) }
+    send(
+      res,
+      `${project.name} · Secrets`,
+      secretsView({
+        slug: project.slug,
+        name: project.name,
+        format: project.format,
+        secrets: project.secrets,
+        canChange: can(actor, 'secrets.change'),
+        backups: master.backups.status().configured,
+        ...(can(actor, 'secrets.read')
+          ? { audit: master.secrets.audit(caller, project.slug) }
+          : {}),
+      }),
+      current,
+      200,
+      'dashboard',
+      // The tab's script is for those who may view and change secrets.
+      can(actor, 'secrets.read') ? ['/assets/secrets.js'] : [],
     )
   })
   app.get('/projects/:slug/masonfile', (req, res, next) => {
