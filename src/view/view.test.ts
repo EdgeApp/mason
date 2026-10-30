@@ -3,7 +3,16 @@ import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, it } from 'mocha'
 import { MasterDatabase } from '../master/database.js'
-import { action, field, nodesView, settingsView } from './admin.js'
+import {
+  action,
+  field,
+  masonfileView,
+  nodesView,
+  projectTabs,
+  projectView,
+  secretsView,
+  settingsView,
+} from './admin.js'
 import { artifactsView } from './artifacts.js'
 import {
   bytes,
@@ -1316,5 +1325,232 @@ describe('Settings page', () => {
       /<span class="mono">empty<\/span> <small>Nothing managed yet<\/small>/,
     )
     assert.doesNotMatch(html, /&quot;software&quot;/)
+  })
+})
+
+describe('Project tabs and the Secrets tab', () => {
+  const variants = [
+    {
+      id: 1,
+      name: 'API_TOKEN',
+      kind: 'value' as const,
+      configs: [],
+      text: true,
+      masked: true,
+      bytes: 9,
+    },
+    {
+      id: 2,
+      name: 'API_TOKEN',
+      kind: 'value' as const,
+      configs: ['develop', 'maestro'],
+      text: true,
+      masked: false,
+      bytes: 9,
+    },
+    {
+      id: 3,
+      name: 'config.json',
+      kind: 'file' as const,
+      configs: [],
+      text: true,
+      masked: true,
+      bytes: 20,
+      pathEnv: 'CONFIG_FILE',
+      destination: 'config/app.json',
+    },
+    {
+      id: 4,
+      name: 'release.jks',
+      kind: 'file' as const,
+      configs: ['beta'],
+      text: false,
+      masked: true,
+      bytes: 2048,
+    },
+  ]
+  const row = (html: string, id: number): string =>
+    html.split(`data-secret-id="${id}"`)[1]!.split('</tr>')[0]!
+
+  it('U18.13 the project pages share four tabs, the current one marked', () => {
+    const tabs = projectTabs('my app', 'secrets')
+    assert.deepEqual(
+      [
+        ...tabs.matchAll(/<a href="([^"]+)"( aria-current="page")?>([^<]+)</g),
+      ].map((match) => [match[1], match[2] != null, match[3]]),
+      [
+        ['/projects/my%20app', false, 'Overview'],
+        ['/?project=my%20app', false, 'Runs and builds'],
+        ['/projects/my%20app/masonfile', false, 'Masonfile'],
+        ['/projects/my%20app/secrets', true, 'Secrets'],
+      ],
+    )
+    const overview = projectView({
+      slug: 'app',
+      name: 'App',
+      repository: 'https://github.com/a/app',
+      defaultBranch: 'master',
+      format: 'pipeline',
+      apps: [],
+      rules: [],
+      webhook: false,
+      buildNumbers: [],
+      canSeed: false,
+    })
+    assert.match(
+      overview,
+      /href="\/projects\/app" aria-current="page">Overview/,
+    )
+    assert.doesNotMatch(overview, /data-secrets|Save secrets/)
+    assert.match(
+      masonfileView({ slug: 'app', name: 'App', commits: [] }),
+      /href="\/projects\/app\/masonfile" aria-current="page">Masonfile/,
+    )
+  })
+
+  it('U18.13 a manager sees the add buttons, Edit or Replace then Delete per row, the editor and the audit', () => {
+    const html = secretsView({
+      slug: 'app',
+      name: 'App',
+      format: 'pipeline',
+      secrets: variants,
+      canChange: true,
+      backups: true,
+      audit: [
+        {
+          name: 'API_TOKEN',
+          configs: ['develop'],
+          action: 'configs changed',
+          who: 'Mia Manager',
+          address: '10.0.0.5',
+          at: Date.UTC(2026, 9, 29, 12),
+          detail: 'all → develop',
+        },
+      ],
+    })
+    assert.match(
+      html,
+      /data-secret-add="value"><span[^>]*>[^<]*<\/span>Add secret value/,
+    )
+    assert.match(
+      html,
+      /data-secret-add="file"><span[^>]*>[^<]*<\/span>Add secret file/,
+    )
+    assert.match(html, /ctx\.secret\(name\)/)
+    assert.match(html, /await ctx\.writeSecretFile\(name, directory\)/)
+    assert.match(html, /data-secrets="\/api\/v2\/projects\/app\/secrets"/)
+    // A value: Edit before Delete; in edit, Save before Cancel.
+    const value = row(html, 1)
+    assert(
+      value.indexOf('data-secret-edit') < value.indexOf('data-secret-delete'),
+    )
+    assert(
+      value.indexOf('data-secret-save') < value.indexOf('data-secret-cancel'),
+    )
+    assert.match(value, /data-secret-value hidden/)
+    assert.match(
+      value,
+      /<button type="button" class="pill" data-secret-pill[^>]*>all</,
+    )
+    assert.match(row(html, 2), />develop<\/button><button[^>]*>maestro</)
+    assert.match(row(html, 2), /not masked/)
+    // A text file edits in the editor; a binary file is only replaced.
+    assert.match(row(html, 3), /data-kind="file"[^]*data-secret-edit>/)
+    assert.match(row(html, 3), /→ \$CONFIG_FILE/)
+    assert.match(row(html, 3), /at config\/app\.json/)
+    assert.doesNotMatch(row(html, 4), /data-secret-edit>/)
+    assert.match(row(html, 4), /data-secret-replace/)
+    assert.match(html, /data-secret-editor hidden role="dialog"/)
+    assert.match(html, /<input type="file" data-secret-file hidden>/)
+    assert.match(html, /data-secret-add-form="value" hidden/)
+    assert.match(
+      html,
+      /<input type="checkbox" data-secret-show> Show the value/,
+    )
+    assert.match(row(html, 4), /2\.0 KB/)
+    assert.match(row(html, 3), /20 B · text/)
+    assert.match(html, /data-secret-add-form="file" hidden/)
+    assert.match(html, /data-secret-drop/)
+    assert.doesNotMatch(html, /name="masked"|name="pathEnv"/)
+    assert.match(html, /<td>Mia Manager<\/td>/)
+    assert.match(html, /configs changed <small class="hint">all → develop/)
+    assert.match(html, /data-at="1793275200000">2026-10-29 12:00:00 UTC</)
+    // Script projects add values unmasked and files with a path variable.
+    const script = secretsView({
+      slug: 's',
+      name: 'S',
+      format: 'script',
+      secrets: [],
+      canChange: true,
+      backups: true,
+      audit: [],
+    })
+    assert.match(script, /name="masked" checked/)
+    assert.match(script, /name="pathEnv"/)
+    // A script project's tab: its own help, a path for the name, no configs anywhere.
+    assert.match(script, /This is a script project/)
+    assert.match(script, /Path in the checkout/)
+    assert.doesNotMatch(script, /name="configs"|data-secret-configs-input/)
+    assert.match(script, /No secrets yet/)
+    assert.match(script, /Nothing yet/)
+    // A script project's variant: plain "all", no configs control, and still Edit and Delete.
+    const scripted = secretsView({
+      slug: 's',
+      name: 'S',
+      format: 'script',
+      secrets: [variants[0]!],
+      canChange: true,
+      backups: true,
+      audit: [],
+    })
+    const scriptRow = row(scripted, 1)
+    assert.match(scriptRow, /<span class="pill">all<\/span>/)
+    assert.doesNotMatch(
+      scriptRow,
+      /data-secret-pill(?!s)|data-secret-configs-input/,
+    )
+    assert.match(scriptRow, /data-secret-edit/)
+    assert.match(scriptRow, /data-secret-delete/)
+  })
+
+  it('U18.13 without backups a manager is told to configure them, may not add, and may still view and edit', () => {
+    const html = secretsView({
+      slug: 'app',
+      name: 'App',
+      format: 'pipeline',
+      secrets: variants,
+      canChange: true,
+      backups: false,
+      audit: [],
+    })
+    assert.match(html, /Configure backups before changing secrets/)
+    assert.match(html, /data-secret-add="value" disabled/)
+    assert.doesNotMatch(html, /data-secret-add-form/)
+    assert.match(row(html, 1), /data-secret-edit/)
+  })
+
+  it('U18.13 a developer sees names and configs only', () => {
+    const html = secretsView({
+      slug: 'app',
+      name: 'App',
+      format: 'pipeline',
+      secrets: variants,
+      canChange: false,
+      backups: true,
+    })
+    assert.match(html, /API_TOKEN/)
+    assert.match(html, /<span class="pill">maestro<\/span>/)
+    for (const control of [
+      'data-secrets',
+      'data-secret-add',
+      'data-secret-edit',
+      'data-secret-replace',
+      'data-secret-delete',
+      'data-secret-editor',
+      'data-secret-value',
+      'data-secret-pill ',
+      'Audit',
+    ])
+      assert(!html.includes(control), control)
   })
 })

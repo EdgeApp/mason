@@ -101,12 +101,14 @@ commit (at most 20 automatic branches per project), `request` builds only
 when someone asks. Deleted branches stop polling; forks never build.
 
 A project's secrets are named values and files, each limited to build
-configs, changed one variant at a time through
-`/api/v2/projects/<slug>/secrets` (a file up to 5 MiB). Every change is
-pushed in an encrypted backup before it is saved, so changing secrets
-needs backups configured; every view and change is audited. A host
-forwards an API request of at most 512 KB, so send a larger file to the
-master directly.
+configs, on the project's **Secrets** tab: administrators and managers add,
+edit, replace and delete them there and see the audit, and developers see
+their names and configs. Each change is to one variant, made on the tab or
+through `/api/v2/projects/<slug>/secrets` (a file up to 5 MiB), and is pushed
+in an encrypted backup before it is saved, so changing secrets needs backups
+configured. Every view and change is audited. A host forwards an API request
+of at most 512 KB, a file of about 380 KiB once in base64, so send a larger
+file to the master directly.
 
 ## Pipelines
 
