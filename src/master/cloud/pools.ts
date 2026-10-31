@@ -237,6 +237,25 @@ async function gitHubReleaseAssets(
 }
 
 const TAG = 'mason-pool'
+
+/** NoMac's largest session limits: eight hours, and an hour idle. */
+const NOMAC_MAX_SECONDS = 8 * 3600
+const NOMAC_MAX_IDLE_SECONDS = 3600
+
+/**
+ * The limits a NoMac session is created with: the pool's hours per machine,
+ * and NoMac's own idle stop ten minutes after the pool would retire the Mac,
+ * both within what NoMac allows. The idle stop only backs up the pool's.
+ */
+export function nomacLimits(pool: {
+  maxHoursPerNode: number
+  ttlMinutes: number
+}): { maxSeconds: number; idleSeconds: number } {
+  return {
+    maxSeconds: Math.min(pool.maxHoursPerNode * 3600, NOMAC_MAX_SECONDS),
+    idleSeconds: Math.min((pool.ttlMinutes + 10) * 60, NOMAC_MAX_IDLE_SECONDS),
+  }
+}
 /** Cloud machines are x86-64 Linux droplets. */
 const machinePlatform = 'linux-x64'
 
@@ -710,14 +729,7 @@ nomac-service start mason-worker -- ~/.local/bin/mason worker --pairing-file ~/m
           pool.provider === 'nomac'
             ? this.nomacUserData(installer, pairing, pool.slots)
             : this.userData(installer, pairing, pool.slots),
-        ...(pool.provider === 'nomac'
-          ? {
-              limits: {
-                maxSeconds: Math.min(pool.maxHoursPerNode, 8) * 3600,
-                idleSeconds: (pool.ttlMinutes + 10) * 60,
-              },
-            }
-          : {}),
+        ...(pool.provider === 'nomac' ? { limits: nomacLimits(pool) } : {}),
       })
       this.db
         .prepare(

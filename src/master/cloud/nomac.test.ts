@@ -12,6 +12,7 @@ import { FakeNoMac } from '../../test/fakeNoMac.js'
 import { nodesView } from '../../view/admin.js'
 import { ProviderError } from './digitalocean.js'
 import { NoMac } from './nomac.js'
+import { nomacLimits } from './pools.js'
 
 const { utils } = ssh2
 
@@ -258,6 +259,26 @@ describe('NoMac Macs', function () {
       /refused the tunnel \(HTTP 401\)/,
     )
     await nomac.destroy(session.id)
+  })
+})
+
+describe('NoMac session limits', function () {
+  it('U7.4 a session stops idle ten minutes after the pool retires its Mac, and never asks NoMac for more than an hour idle or eight hours', () => {
+    assert.deepEqual(nomacLimits({ maxHoursPerNode: 2, ttlMinutes: 5 }), {
+      maxSeconds: 2 * 3600,
+      idleSeconds: 15 * 60,
+    })
+    assert.deepEqual(nomacLimits({ maxHoursPerNode: 8, ttlMinutes: 60 }), {
+      maxSeconds: 8 * 3600,
+      idleSeconds: 3600,
+    })
+    assert.deepEqual(
+      nomacLimits({ maxHoursPerNode: 24, ttlMinutes: 24 * 60 }),
+      {
+        maxSeconds: 8 * 3600,
+        idleSeconds: 3600,
+      },
+    )
   })
 })
 
