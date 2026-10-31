@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 23
+export const MASTER_SCHEMA = 24
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -612,6 +612,40 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     const columns = db.prepare('PRAGMA table_info(job_steps)').all()
     if (!columns.some((column) => column.name === 'parent'))
       db.exec('ALTER TABLE job_steps ADD COLUMN parent INTEGER')
+  },
+  // 24: setup runs only on nodes labelled setup; every node, permanent
+  // cloud worker and pool had run it, so each gains the label.
+  (db): void => {
+    const withSetup = (labels: unknown): string => {
+      const list = JSON.parse(String(labels ?? '[]')) as unknown
+      const out = Array.isArray(list) ? list.map(String) : []
+      return JSON.stringify(out.includes('setup') ? out : [...out, 'setup'])
+    }
+    for (const row of db.prepare('SELECT fingerprint,labels FROM nodes').all())
+      db.prepare('UPDATE nodes SET labels=? WHERE fingerprint=?').run(
+        withSetup(row.labels),
+        String(row.fingerprint),
+      )
+    for (const row of db
+      .prepare("SELECT rowid,labels FROM cloud_hosts WHERE role='worker'")
+      .all())
+      db.prepare('UPDATE cloud_hosts SET labels=? WHERE rowid=?').run(
+        withSetup(row.labels),
+        Number(row.rowid),
+      )
+    const cloud = db
+      .prepare("SELECT value FROM settings WHERE area='cloud'")
+      .get() as { value: string } | undefined
+    if (cloud == null) return
+    const value = JSON.parse(cloud.value) as {
+      pools?: Array<{ labels?: unknown }>
+    }
+    if (!Array.isArray(value.pools)) return
+    for (const pool of value.pools)
+      pool.labels = JSON.parse(withSetup(JSON.stringify(pool.labels ?? [])))
+    db.prepare("UPDATE settings SET value=? WHERE area='cloud'").run(
+      JSON.stringify(value),
+    )
   },
 ]
 

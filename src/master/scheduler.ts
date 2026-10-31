@@ -68,6 +68,7 @@ import { cronMatches, masterTimeZone, parseCron } from './triggers.js'
 import { projectFiles, projectTools } from '../worker/tools/projectTools.js'
 import { resolveSecrets, unresolvedSecret } from '../pipeline/variants.js'
 import { storedVariants } from './secrets.js'
+import { SETUP_LABEL } from '../pipeline/graph.js'
 
 type Row = Record<string, unknown>
 
@@ -735,11 +736,19 @@ export class Scheduler {
     const project = this.project(job)
     const worker = this.pick(undefined, id)
     if (worker == null) {
-      // With no worker connected at all, only a cloud machine can run it.
+      // With no node for setup connected, only a cloud machine can run it.
       const connected = this.options.registry
         .list()
-        .some((node) => node.role === 'worker' && node.connected)
-      const reason = connected ? undefined : this.options.cloud?.setupDemand?.()
+        .some(
+          (node) =>
+            node.role === 'worker' &&
+            node.connected &&
+            node.labels.includes(SETUP_LABEL),
+        )
+      const reason = connected
+        ? undefined
+        : (this.options.cloud?.setupDemand?.() ??
+          `No connected node is labelled ${SETUP_LABEL}, and no cloud pool's machines are: label a node or pool ${SETUP_LABEL} to run setup`)
       if (reason != null && this.stage(id, SETUP)?.reason !== reason) {
         this.db
           .prepare(
@@ -1285,6 +1294,8 @@ export class Scheduler {
         ).n,
       )
       if (load >= Math.min(node.slots, inventory.slots)) continue
+      // Setup runs the branch's Masonfile: only on nodes labelled for it.
+      if (stage == null && !node.labels.includes(SETUP_LABEL)) continue
       if (stage != null && !this.matches(stage, node, inventory)) continue
       const fit: Fit | undefined =
         stage == null ? { missing: [] } : this.fit(stage, node, inventory)

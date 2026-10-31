@@ -14,6 +14,7 @@ import {
   type CloudProvider,
   type ProviderMachine,
 } from './digitalocean.js'
+import { SETUP_LABEL } from '../../pipeline/graph.js'
 
 /** One pool: machines of one node type, made on demand and reused like in-house computers. */
 export interface PoolSetting {
@@ -84,7 +85,8 @@ function asPool(value: unknown, accounts: CloudAccount[]): PoolSetting {
     )
   // NoMac runs one Mac at a time for up to eight hours, in its one profile.
   const nomac = account.provider === 'nomac'
-  const labels = input.labels ?? []
+  // A pool's machines run setup unless its labels leave the label out.
+  const labels = input.labels ?? [SETUP_LABEL]
   if (
     !Array.isArray(labels) ||
     labels.some((label) => typeof label !== 'string' || !slug.test(label))
@@ -522,14 +524,16 @@ export class Pools {
   }
 
   /**
-   * A job's setup when no worker is connected: a master whose only nodes are
-   * cloud machines starts one from its first pool to run it.
+   * A job's setup when no node for setup is connected: a master whose only
+   * such nodes are cloud machines starts one from the first pool whose
+   * machines are labelled for setup.
    */
   setupDemand(): string | undefined {
+    const pools = this.pools().filter((entry) =>
+      entry.labels.includes(SETUP_LABEL),
+    )
     // A DigitalOcean pool's machine is cheaper and quicker for a setup than a Mac.
-    const pool =
-      this.pools().find((entry) => entry.provider !== 'nomac') ??
-      this.pools()[0]
+    const pool = pools.find((entry) => entry.provider !== 'nomac') ?? pools[0]
     return pool == null ? undefined : this.demand(pool.type)?.reason
   }
 

@@ -48,14 +48,28 @@ const terminal = [
 ]
 
 async function finished(c: Cluster, id: string, ms = 60000): Promise<Json> {
-  return await c.until(
-    () => {
+  return await c
+    .until(
+      () => {
+        const run = c.master.master!.run(id) as Json
+        return terminal.includes(run?.status) ? run : undefined
+      },
+      ms,
+      `run ${id} to finish`,
+    )
+    .catch((error: Error) => {
+      // Where it stood, so a timeout says which stage waited and why.
       const run = c.master.master!.run(id) as Json
-      return terminal.includes(run?.status) ? run : undefined
-    },
-    ms,
-    `run ${id} to finish`,
-  )
+      throw new Error(
+        `${error.message}: ${JSON.stringify(
+          (run?.stages ?? []).map((entry: Json) => [
+            entry.name,
+            entry.status,
+            entry.reason ?? null,
+          ]),
+        )}`,
+      )
+    })
 }
 
 function stage(run: Json, name: string): Json {
@@ -70,7 +84,7 @@ describe('Scheduler, workers and stashes', function () {
     c = await cluster(root(), {
       workers: [
         { name: 'alpha', type: 'linux', slots: 2 },
-        { name: 'beta', type: 'mac', labels: ['signing'] },
+        { name: 'beta', type: 'mac', labels: ['signing'], setup: false },
       ],
     })
   })
@@ -247,6 +261,54 @@ export async function work(ctx: Stage) {}
     const cycle = await finished(c, await request('cycle'))
     assert.equal(cycle.status, 'failed')
     assert.match(cycle.reason, /cycle: a → b → a/)
+  })
+
+  it('U7.2 runs setup only on nodes labelled setup, which a Masonfile cannot ask for', async () => {
+    await project('reserved', {
+      'Masonfile.ts': `
+import type { Setup } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('sign', { on: { labels: ['setup'] }, run: sign })
+}
+export function sign() { return null }
+`,
+    })
+    const refused = await finished(c, await request('reserved'))
+    assert.equal(refused.status, 'failed')
+    assert.match(
+      String(refused.reason),
+      /the label setup is reserved for the nodes that run setup/,
+    )
+    // Every setup so far ran on alpha: beta, the signing node, is not labelled setup.
+    const setups = db()
+      .prepare(
+        "SELECT DISTINCT worker FROM job_stages WHERE name='@setup' AND worker IS NOT NULL",
+      )
+      .all()
+      .map((row) => row.worker)
+    assert.deepEqual(setups, [c.fingerprint('alpha')])
+    // With no node for setup connected, a run's setup waits and says why.
+    const registry = c.master.master!.registry
+    const alpha = c.fingerprint('alpha')
+    const labels = registry.get(alpha)!.labels
+    await registry.assign(alpha, { labels: [] })
+    try {
+      const waiting = await request('reserved')
+      await c.until(
+        () =>
+          /No connected node is labelled setup/.test(
+            String(stageRow(waiting, '@setup')?.reason ?? ''),
+          ),
+        10000,
+        'the setup reason',
+      )
+      assert.equal(stageRow(waiting, '@setup').status, 'queued')
+      c.master.master!.scheduler.cancel(waiting)
+      await finished(c, waiting)
+    } finally {
+      await registry.assign(alpha, { labels })
+    }
   })
 
   it('U7.2 assigns by type, labels and slots, and never to a quarantined worker', async () => {
@@ -2149,6 +2211,9 @@ export async function reader(ctx: Stage) { await ctx.unstash('late'); return awa
           '3',
           '--label',
           'fast',
+          // Labels are replaced: a node that runs setup keeps that label.
+          '--label',
+          'setup',
           '--type',
           'linux',
           '--data',
@@ -2159,7 +2224,7 @@ export async function reader(ctx: Stage) { await ctx.unstash('late'); return awa
       0,
       errors.join('\n'),
     )
-    assert.equal(lines.pop(), 'alpha: type linux, labels fast, 3 slot(s)')
+    assert.equal(lines.pop(), 'alpha: type linux, labels fast,setup, 3 slot(s)')
     assert.equal(
       await nodeMain(
         [
@@ -2170,6 +2235,8 @@ export async function reader(ctx: Stage) { await ctx.unstash('late'); return awa
           '2',
           '--label',
           'fast',
+          '--label',
+          'setup',
           '--name',
           'alpha',
           '--workspace-root',

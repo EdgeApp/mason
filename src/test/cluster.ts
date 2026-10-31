@@ -14,6 +14,7 @@ import { createFirstAdmin } from '../setup/setup.js'
 import { listHeads } from '../master/github.js'
 import { quietMac } from './fakeMac.js'
 import { canonical } from '../worker/gitProxy.js'
+import { SETUP_LABEL } from '../pipeline/graph.js'
 
 const quiet = (): void => undefined
 
@@ -92,6 +93,8 @@ export interface WorkerSpec {
   workerOptions?: NodeOptions['workerOptions']
   type?: string
   labels?: string[]
+  /** Whether it runs setup, as a node does by default (the setup label). */
+  setup?: boolean
   slots?: number
   workspaceRoots?: string[]
 }
@@ -255,7 +258,10 @@ export async function cluster(
     await master.master!.registry.assign(fingerprint, {
       name: spec.name,
       type: spec.type ?? '',
-      labels: spec.labels ?? [],
+      labels: [
+        ...(spec.setup === false ? [] : [SETUP_LABEL]),
+        ...(spec.labels ?? []),
+      ],
       slots: spec.slots ?? 1,
       ...(spec.workspaceRoots == null
         ? {}

@@ -872,6 +872,22 @@ export async function work(ctx: Stage) {
       (await c.api('POST', '/api/v2/cloud/pools', form, admin)).status,
       409,
     )
+    // A pool made without labels runs setup, as a node does by default.
+    const unlabelled: Record<string, string> = { ...form }
+    delete unlabelled.labels
+    const plain = await c.api(
+      'POST',
+      '/api/v2/cloud/pools',
+      { ...unlabelled, name: 'plain', type: 'linux-plain' },
+      admin,
+    )
+    assert.equal(plain.status, 201, plain.text)
+    assert.deepEqual(plain.json.labels, ['setup'])
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/cloud/pools/plain', undefined, admin))
+        .status,
+      200,
+    )
     const listed = await c.api('GET', '/api/v2/cloud/pools', undefined, admin)
     assert.deepEqual(
       listed.json.map((pool: Json) => pool.name),
