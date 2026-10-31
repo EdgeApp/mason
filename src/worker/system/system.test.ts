@@ -1110,7 +1110,9 @@ describe('Node software', () => {
     )
   })
 
-  describe('on a cluster', () => {
+  describe('on a cluster', function () {
+    // Each test runs several whole runs on a cluster, as the cluster suites do.
+    this.timeout(60_000)
     let c: Cluster
     let apple: FakeApple
     let a: FakeMac
