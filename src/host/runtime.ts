@@ -266,6 +266,10 @@ export class HostRuntime {
         },
       },
       streams: {
+        /** A stage's publication, saved artifact or download, relayed by the master. */
+        'artifacts.request': async (stream, params): Promise<void> => {
+          await this.artifacts.linkRequest(params, stream)
+        },
         /** An Xcode a node downloaded first, relayed by the master into the host's storage. */
         'mirror.put': async (stream, params): Promise<void> => {
           try {

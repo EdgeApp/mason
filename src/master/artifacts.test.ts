@@ -527,7 +527,8 @@ describe('Artifacts and publication', function () {
       ).build_id > 0,
       true,
     )
-    // A stage whose own link drops publishes by token, and its record reaches the master once.
+    // A stage whose own link drops waits to publish, and publishes through
+    // the master once the link is back: a node never reaches the host.
     const workerData = c.workers.get('w')!.dir
     const created = await c.api('POST', '/api/v2/runs', {
       project: 'ship',
@@ -546,10 +547,11 @@ describe('Artifacts and publication', function () {
     await c.drop('w', 4000, async () => {
       const workspace = path.join(workerData, 'checkouts', '0', 'ship')
       writeFileSync(path.join(workspace, 'go'), '')
-      await c.until(
-        () => c.workers.get('w')!.worker!.journal.runs('running').length === 0,
-        20_000,
-        'the stage finished offline',
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+      // Still running: the publication waits for the master.
+      assert.equal(
+        c.workers.get('w')!.worker!.journal.runs('running').length,
+        1,
       )
     })
     const done = await c
@@ -559,20 +561,20 @@ describe('Artifacts and publication', function () {
           return value.status === 'succeeded' ? value : undefined
         },
         20_000,
-        'the offline stage reported',
+        'the stage published after the link returned',
       )
       .catch((error: Error) => {
         throw new Error(
           `${error.message}\n${JSON.stringify(c.master.master!.run(id))}\n${c.master.master!.scheduler.logs(id) ?? ''}`,
         )
       })
-    const log = c.master.master!.scheduler.logs(id)!
-    assert.equal(
-      log.match(/while the master was away/g)?.length ?? 0,
-      output(done).buildId === 0 ? 1 : 0,
+    assert(output(done).buildId > 0, JSON.stringify(output(done)))
+    assert.match(
+      c.master.master!.scheduler.logs(id)!,
+      /The master is unreachable; waiting to send artifacts\.publish/,
     )
-    // With the host away too, the run can end before the host confirms the
-    // staged upload; its reservation waits for the host.
+    // With the host away, the master has nowhere to relay to: the stage
+    // waits for the host, and publishes when it is back.
     const late = (
       await c.api('POST', '/api/v2/runs', {
         project: 'ship',
@@ -588,44 +590,33 @@ describe('Artifacts and publication', function () {
       30_000,
       'the late stage running',
     )
-    await c.drop('host', 2000, async () => {
+    await c.drop('host', 4000, async () => {
       await c.until(() => !host.host!.online(), 2000, 'the host offline')
-      await c.drop('w', 2000, async () => {
-        const workspace = path.join(workerData, 'checkouts', '0', 'ship')
-        writeFileSync(path.join(workspace, 'late-go'), '')
-        await c.until(
-          () =>
-            c.workers.get('w')!.worker!.journal.runs('running').length === 0,
-          20_000,
-          'the late stage finished offline',
-        )
-      })
+      const workspace = path.join(workerData, 'checkouts', '0', 'ship')
+      writeFileSync(path.join(workspace, 'late-go'), '')
       await c.until(
-        () => (c.master.master!.run(late) as Json).status === 'succeeded',
+        () =>
+          /The host is unreachable \(No host is connected\); waiting to send artifacts\.publish/.test(
+            c.master.master!.scheduler.logs(late) ?? '',
+          ),
         20_000,
-        'the late run reported',
+        'the late stage waiting for the host',
       )
-      assert.deepEqual(
-        db()
-          .prepare(
-            'SELECT p.build_id, p.staged_at IS NOT NULL staged FROM build_reservations r JOIN build_publications p ON p.reservation_id=r.id WHERE r.job_id=?',
-          )
-          .all(late)
-          .map((row) => ({ ...row })),
-        [{ build_id: null, staged: 1 }],
-      )
+      assert.equal((c.master.master!.run(late) as Json).status, 'running')
     })
     await c.until(
-      () =>
-        (
-          db()
-            .prepare(
-              'SELECT p.build_id FROM build_reservations r JOIN build_publications p ON p.reservation_id=r.id WHERE r.job_id=?',
-            )
-            .get(late) as Json
-        ).build_id != null,
-      10_000,
-      'the host confirmed the staged build after the run ended',
+      () => (c.master.master!.run(late) as Json).status === 'succeeded',
+      20_000,
+      'the late run published after the host returned',
+    )
+    assert(
+      (
+        db()
+          .prepare(
+            'SELECT p.build_id FROM build_reservations r JOIN build_publications p ON p.reservation_id=r.id WHERE r.job_id=?',
+          )
+          .get(late) as Json
+      ).build_id > 0,
     )
   })
 

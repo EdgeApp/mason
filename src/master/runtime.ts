@@ -4,7 +4,7 @@ import ssh2 from 'ssh2'
 import type { DatabaseSync } from 'node:sqlite'
 import type { ControlHandler } from '../node/control.js'
 import type { Identity } from '../node/identity.js'
-import type { MethodTable } from '../link/link.js'
+import type { MethodTable, Stream } from '../link/link.js'
 import { createFirstAdmin } from '../setup/setup.js'
 import { MasterDatabase } from './database.js'
 import { MasterKeys } from './keys.js'
@@ -390,6 +390,9 @@ export class Master {
     })
     this.scheduler = new Scheduler({
       artifacts: this.artifacts,
+      // The host links are made below; a relay asks for them when it runs.
+      toHost: (method, params): Stream =>
+        this.hosts.openHostStream(method, params),
       apple: {
         signing: async (project, stage): Promise<StageSigning> =>
           await this.appleSigning.signing(project, stage),

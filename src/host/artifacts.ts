@@ -8,7 +8,7 @@ import {
   statSync,
 } from 'node:fs'
 import path from 'node:path'
-import { Transform, type Readable } from 'node:stream'
+import { PassThrough, Transform, Writable, type Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { promisify } from 'node:util'
 import express, { Router, type Request, type Response } from 'express'
@@ -35,7 +35,7 @@ import {
   asString,
   asValue,
 } from 'cleaners'
-import { LinkError, type Link } from '../link/link.js'
+import { LinkError, type Link, type Stream } from '../link/link.js'
 import {
   alreadyPublished,
   asBuild,
@@ -899,6 +899,116 @@ export class HostArtifacts {
       'X-Mason-Digest': claims.digest,
     })
     await pipeline(found.stream, res)
+  }
+
+  /**
+   * A stage's publication, saved artifact or download, relayed by the
+   * master over the host's link (nodes never reach the host). It runs the
+   * route's own handler and answers on the stream as the route would: a
+   * JSON header line, `{ status, headers }`, then the body.
+   */
+  async linkRequest(params: unknown, stream: Stream): Promise<void> {
+    const request = (params ?? {}) as {
+      method?: unknown
+      path?: unknown
+      headers?: unknown
+      query?: unknown
+    }
+    const strings = (value: unknown): Record<string, string> =>
+      Object.fromEntries(
+        Object.entries(
+          value != null && typeof value === 'object' ? value : {},
+        ).filter(
+          (entry): entry is [string, string] => typeof entry[1] === 'string',
+        ),
+      )
+    const headers = Object.fromEntries(
+      Object.entries(strings(request.headers)).map(([name, value]) => [
+        name.toLowerCase(),
+        value,
+      ]),
+    )
+    const query = strings(request.query)
+    const route = String(request.path ?? '')
+    const publication = /^\/api\/artifacts\/([^/]+)$/.exec(route)
+    const saved = /^\/api\/runs\/([^/]+)\/artifacts\/([^/]+)$/.exec(route)
+    const body = new PassThrough()
+    stream.on('data', (chunk: Buffer) => body.write(chunk))
+    stream.once('end', () => body.end())
+    stream.once('abort', (reason: string) => body.destroy(new Error(reason)))
+    let status = 200
+    const answerHeaders: Record<string, string> = {}
+    let sent = false
+    const head = async (): Promise<void> => {
+      if (sent) return
+      sent = true
+      await stream.write(
+        Buffer.from(JSON.stringify({ status, headers: answerHeaders }) + '\n'),
+      )
+    }
+    const res = new Writable({
+      write(chunk: Buffer, _encoding, callback): void {
+        head()
+          .then(async () => await stream.write(chunk))
+          .then(() => callback(), callback)
+      },
+      final(callback): void {
+        head().then(() => {
+          stream.end()
+          callback()
+        }, callback)
+      },
+    })
+    Object.defineProperty(res, 'headersSent', { get: () => sent })
+    Object.assign(res, {
+      status: (code: number) => {
+        status = code
+        return res
+      },
+      set: (values: Record<string, string>) => {
+        Object.assign(answerHeaders, values)
+        return res
+      },
+      json: (value: unknown) => {
+        answerHeaders['Content-Type'] = 'application/json'
+        res.end(JSON.stringify(value))
+        return res
+      },
+    })
+    const req = Object.assign(body, {
+      method: String(request.method ?? ''),
+      params:
+        publication != null
+          ? { reservation: decodeURIComponent(publication[1]!) }
+          : saved != null
+            ? {
+                run: decodeURIComponent(saved[1]!),
+                name: decodeURIComponent(saved[2]!),
+              }
+            : {},
+      query,
+      headers,
+      get: (name: string) => headers[name.toLowerCase()],
+    }) as unknown as Request
+    const response = res as unknown as Response
+    try {
+      if (request.method === 'POST' && publication != null)
+        await this.publication(req, response)
+      else if (request.method === 'POST' && saved != null)
+        await this.save(req, response)
+      else if (request.method === 'GET' && route === '/api/artifacts/download')
+        await this.download(req, response)
+      else throw new Refused(404, 'Not an artifact request')
+    } catch (error) {
+      if (sent) {
+        stream.abort((error as Error).message)
+        return
+      }
+      const known = error instanceof Refused
+      response
+        .status(known ? error.status : 500)
+        .json({ error: known ? error.message : 'The request failed' })
+    }
   }
 
   routes(accounts: Parameters<typeof sessionContext>[1]): Router {

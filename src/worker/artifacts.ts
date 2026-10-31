@@ -10,8 +10,6 @@ import {
   writeFileSync,
 } from 'node:fs'
 import path from 'node:path'
-import { Readable } from 'node:stream'
-import { pipeline } from 'node:stream/promises'
 import { promisify } from 'node:util'
 import type {
   ArtifactOptions,
@@ -21,8 +19,7 @@ import type {
   TestSummary,
 } from '../../types/mason/index.js'
 import { baseEnvironment } from '../builder/config.js'
-import { LinkError } from '../link/link.js'
-import { pinnedFetch } from '../node/pinnedFetch.js'
+import { LinkError, type Stream } from '../link/link.js'
 import type { StageAssignment } from '../pipeline/assignment.js'
 import { inside } from '../pipeline/context.js'
 import { parseTests, type TestFormat } from '../pipeline/tests.js'
@@ -46,6 +43,8 @@ export interface ArtifactContext {
   scratch: string
   /** A request to the master; a LinkError `closed` when it is unreachable. */
   request<T>(method: string, params: unknown): Promise<T>
+  /** A stream to the master; a LinkError `closed` when it is unreachable. */
+  stream(method: string, params: unknown): Stream
   /** Waits for the master's link. */
   connected(): Promise<void>
   /** Journals a record the master receives exactly once, after a reconnect if need be. */
@@ -70,35 +69,120 @@ const ticket = (context: ArtifactContext): { key: string; token: string } => ({
 })
 
 /** Uploads a file to the host, by its pin when it serves its own certificate. */
-async function upload(
-  url: string,
-  file: string,
-  headers: Record<string, string>,
-  pin: string | undefined,
+/**
+ * Sends `file`, if any, to the master over a new link stream and reads its
+ * answer: the host's JSON header line, then the body, written to `into`
+ * when the request succeeded and `into` is given, else parsed as JSON. The
+ * master answers every refusal with a status, so a stream that ends without
+ * one, or is aborted, is the link: it is tried again once the master is back.
+ * A 503, the master with no host to relay to, is tried again shortly.
+ */
+async function exchange(
+  context: ArtifactContext,
+  method: string,
+  params: Record<string, unknown>,
+  options: { file?: string; into?: string } = {},
 ): Promise<{ status: number; body: Record<string, unknown> }> {
-  const response = await pinnedFetch(
-    url,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/octet-stream',
-        'Content-Length': String(statSync(file).size),
-        ...headers,
-      },
-      // A file stream is an async iterable body, sent half-duplex.
-      body: createReadStream(file) as never,
-      duplex: 'half',
-    },
-    pin,
-  )
-  const text = await response.text()
-  let body: Record<string, unknown> = {}
-  try {
-    body = JSON.parse(text) as Record<string, unknown>
-  } catch {
-    body = { error: text.slice(0, 500) }
+  for (;;) {
+    try {
+      const answer = await exchangeOnce(context, method, params, options)
+      // 503: the master has no host to relay to right now.
+      if (answer.status !== 503) return answer
+      context.log(
+        `The host is unreachable (${String(answer.body.error ?? 'no host')}); waiting to send ${method}\n`,
+      )
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+    } catch (error) {
+      if (!(error instanceof LinkError && error.code === 'closed')) throw error
+      context.log(`The master is unreachable; waiting to send ${method}\n`)
+      await context.connected()
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
   }
-  return { status: response.status, body }
+}
+
+/** The longest answer header the master may send. */
+const HEADER_LIMIT = 64 * 1024
+
+async function exchangeOnce(
+  context: ArtifactContext,
+  method: string,
+  params: Record<string, unknown>,
+  options: { file?: string; into?: string },
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const stream = context.stream(method, params)
+  const answer = new Promise<{
+    status: number
+    body: Record<string, unknown>
+  }>((resolve, reject) => {
+    let status: number | undefined
+    let pending = Buffer.alloc(0)
+    const chunks: Buffer[] = []
+    let sink: ReturnType<typeof createWriteStream> | undefined
+    stream.on('data', (chunk: Buffer) => {
+      if (status == null) {
+        pending = Buffer.concat([pending, chunk])
+        const newline = pending.indexOf(0x0a)
+        if (newline < 0) {
+          if (pending.length > HEADER_LIMIT) {
+            stream.abort('The answer has no header')
+            reject(new Error('The master’s answer has no header'))
+          }
+          return
+        }
+        try {
+          const header = JSON.parse(
+            pending.subarray(0, newline).toString('utf8'),
+          ) as { status?: unknown }
+          status = Number(header.status)
+        } catch {
+          stream.abort('The answer header is not JSON')
+          reject(new Error('The master’s answer header is not JSON'))
+          return
+        }
+        chunk = pending.subarray(newline + 1)
+        if (options.into != null && status === 200)
+          sink = createWriteStream(options.into, { mode: 0o600 })
+      }
+      if (sink != null) sink.write(chunk)
+      else chunks.push(chunk)
+    })
+    stream.once('end', () => {
+      stream.end()
+      if (status == null) {
+        reject(new LinkError('The stream ended without an answer', 'closed'))
+        return
+      }
+      const known = status
+      const done = (): void => {
+        let body: Record<string, unknown> = {}
+        const text = Buffer.concat(chunks).toString('utf8')
+        try {
+          body = text === '' ? {} : (JSON.parse(text) as typeof body)
+        } catch {
+          body = { error: text.slice(0, 500) }
+        }
+        resolve({ status: known, body })
+      }
+      if (sink == null) done()
+      else {
+        sink.once('error', reject)
+        sink.end(done)
+      }
+    })
+    stream.once('abort', (reason: string) => {
+      sink?.destroy()
+      reject(new LinkError(reason, 'closed'))
+    })
+  })
+  // A refusal can come before the file is sent; it is read below. The
+  // master never aborts a stream it answered, so a failed write is the link.
+  answer.catch(() => undefined)
+  if (options.file != null)
+    for await (const chunk of createReadStream(options.file))
+      await stream.write(chunk as Buffer)
+  stream.end()
+  return await answer
 }
 
 /**
@@ -152,21 +236,12 @@ export async function publish(
     reservation.block ?? 1,
   )
   if (outside != null) throw new Error(outside)
-  const changelog: Record<string, string> =
-    options.changelog == null
-      ? {}
-      : {
-          'X-Mason-Changelog': encodeURIComponent(
-            options.changelog.slice(0, 60_000),
-          ),
-        }
-  let answer: { status: number; body: Record<string, unknown> }
-  try {
-    const grant = await context.request<{
-      grant: string
-      url: string
-      pin?: string
-    }>('artifacts.grant', {
+  // The master grants the file and relays it to the host; while the master
+  // is away the stage waits for it.
+  const answer = await exchange(
+    context,
+    'artifacts.publish',
+    {
       ...ticket(context),
       app: options.app,
       platform: options.platform,
@@ -176,33 +251,10 @@ export async function publish(
       version,
       buildNumber,
       variant,
-    })
-    answer = await upload(
-      grant.url,
-      file,
-      { Authorization: `Bearer ${grant.grant}`, ...changelog },
-      grant.pin,
-    )
-  } catch (error) {
-    if (!(error instanceof LinkError && error.code === 'closed')) throw error
-    // The master is away: the stage's token authorizes the reserved upload.
-    context.log(
-      `The master is unreachable; uploading ${path.basename(file)} with the stage’s token\n`,
-    )
-    answer = await upload(
-      `${uploads.origin}/api/artifacts/${reservation.id}`,
-      file,
-      {
-        'X-Mason-Token': uploads.token,
-        'X-Mason-Format': format,
-        'X-Mason-Version': version,
-        'X-Mason-Build-Number': buildNumber,
-        ...(variant === '' ? {} : { 'X-Mason-Variant': variant }),
-        ...changelog,
-      },
-      uploads.pin,
-    )
-  }
+      ...(options.changelog == null ? {} : { changelog: options.changelog }),
+    },
+    { file },
+  )
   if (answer.status === 202) {
     context.journal(
       'publication',
@@ -293,35 +345,24 @@ export async function save(
     await run('tar', ['-czf', archive, '-C', context.dir, '-T', list], {
       env: baseEnvironment(),
     })
-    for (;;) {
-      try {
-        const answer = await upload(
-          `${uploads.origin}/api/runs/${context.assignment.job}/artifacts/${encodeURIComponent(name)}`,
-          archive,
-          {
-            'X-Mason-Token': uploads.token,
-            'X-Mason-Kind': options.kind ?? 'file',
-            ...(options.entry == null
-              ? {}
-              : { 'X-Mason-Entry': options.entry }),
-            ...(options.visibleTo == null
-              ? {}
-              : { 'X-Mason-Visible-To': options.visibleTo }),
-          },
-          uploads.pin,
-        )
-        if (answer.status !== 201)
-          throw new Error(
-            `The host refused artifact ${name}: ${String(answer.body.error ?? answer.status)}`,
-          )
-        context.log(`Saved artifact ${name} (${files.length} files)\n`)
-        return
-      } catch (error) {
-        if (!(error instanceof TypeError)) throw error
-        // The host is unreachable: try again shortly, as for the master.
-        await new Promise((resolve) => setTimeout(resolve, 2000))
-      }
-    }
+    const answer = await exchange(
+      context,
+      'artifacts.save',
+      {
+        ...ticket(context),
+        name,
+        uploadToken: uploads.token,
+        kind: options.kind ?? 'file',
+        ...(options.entry == null ? {} : { entry: options.entry }),
+        ...(options.visibleTo == null ? {} : { visibleTo: options.visibleTo }),
+      },
+      { file: archive },
+    )
+    if (answer.status !== 201)
+      throw new Error(
+        `The host refused artifact ${name}: ${String(answer.body.error ?? answer.status)}`,
+      )
+    context.log(`Saved artifact ${name} (${files.length} files)\n`)
   } finally {
     rmSync(archive, { force: true })
     rmSync(list, { force: true })
@@ -363,15 +404,16 @@ export async function fetchArtifacts(
     `fetch-${process.pid}-${Date.now()}.tar.gz`,
   )
   try {
-    const response = await pinnedFetch(found.url, {}, found.pin)
-    if (!response.ok || response.body == null)
-      throw new Error(
-        `The host refused artifact ${found.name}: HTTP ${response.status}`,
-      )
-    await pipeline(
-      Readable.fromWeb(response.body as never),
-      createWriteStream(archive, { mode: 0o600 }),
+    const answer = await exchange(
+      context,
+      'artifacts.download',
+      { ...ticket(context), grant: found.grant },
+      { into: archive },
     )
+    if (answer.status !== 200)
+      throw new Error(
+        `The host refused artifact ${found.name}: ${String(answer.body.error ?? answer.status)}`,
+      )
     if ((await sha256(archive)) !== found.digest)
       throw new Error(`Artifact ${found.name} does not match its digest`)
     const target = inside(context.dir, checkoutFile(into))

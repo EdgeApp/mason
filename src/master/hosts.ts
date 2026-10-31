@@ -358,6 +358,13 @@ export class HostLinks {
     return (await host.link.request(method, params, timeoutMs)) as T
   }
 
+  /** Opens a stream to the connected host, for a relay of a node's; with none connected it throws. */
+  openHostStream(method: string, params: unknown): Stream {
+    const host = this.connectedHost()
+    if (host == null) throw new Error('No host is connected')
+    return host.link.openStream(method, params)
+  }
+
   /** A connected host and its link, for relaying an Xcode to its mirror. */
   private connectedHost(): { fingerprint: string; link: Link } | undefined {
     for (const node of this.options.registry.list()) {
