@@ -42,8 +42,8 @@ the types-only package `@mason/types`.
 
 A Masonfile exports:
 
-1. **`setup(m)`** — declares workflows and stages. Mason runs it on a worker,
-   **with no secrets**: no secret environment variables, no injected files, no
+1. **`setup(m)`** — declares workflows and stages. Mason runs it on a worker
+   labelled `setup` (below), **with no secrets**: no secret environment variables, no injected files, no
    upload tokens. It must be deterministic for a given commit, branch, trigger
    and parameters, and must not have side effects. It returns nothing; it
    records the graph by calling `m`. The master caches the validated graph by
@@ -129,6 +129,12 @@ The node reports its OS (`macos`, `linux`, `windows`), architecture (`arm64`,
 list of nodes and their types; types are free-form names an administrator
 chooses (`mac-xcode`, `linux`, `mac-simulators`).
 
+**The `setup` label.** A run's setup executes its branch's Masonfile before
+any stage selector applies, so it runs only on nodes labelled `setup`. Every
+node, permanent cloud node and pool carries the label unless an
+administrator removes it, as from a signing node that should run only the
+stages that ask for it. A Masonfile cannot ask for `setup` in a selector.
+
 A stage's **node selector** says where it may run:
 
 ```ts fragment
@@ -197,7 +203,7 @@ until it has been idle for an hour:
   "region": "sfo3",
   "size": "s-4vcpu-8gb",
   "image": "ubuntu-24-04-x64",
-  "labels": ["docker"],
+  "labels": ["setup", "docker"],
   "maxNodes": 2,
   "slots": 2,
   "ttlMinutes": 60,
@@ -229,8 +235,9 @@ until it has been idle for an hour:
   GitHub's. A master that runs no GitHub release (one built from source), or
   whose release has no tarball for the machine's platform, starts no
   machine and says why. Pools are added and edited on the Nodes page, where the region, size and image lists come from the
-  provider. A master with no worker connected starts a machine from its first
-  pool to run a run's setup, so a cluster can be cloud machines alone.
+  provider. A master with no node labelled `setup` connected starts a machine
+  from its first pool whose machines carry the label to run a run's setup, so
+  a cluster can be cloud machines alone.
 - The machine's first-boot data carries the one-time pairing secret; the
   master dials it, checks the secret, pins its key, and assigns stages. The
   provider's firewall admits the link port only from the master's public

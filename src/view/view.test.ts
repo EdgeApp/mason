@@ -948,7 +948,7 @@ describe('Nodes page', () => {
       hint(
         'labels',
         'Labels',
-        'Extra labels its machines carry, comma-separated, for stages that ask for them.',
+        'Labels its machines carry, comma-separated, for stages that ask for them. Machines labelled setup run setup.',
       ),
     )
     assert.match(

@@ -337,6 +337,63 @@ describe('Master database, setup and import', function () {
     db.close()
   })
 
+  it('U7.2 schema 22 labels every node, permanent cloud worker and pool setup, as each ran setup before', () => {
+    const db = new DatabaseSync(path.join(root, 'setup-label.sqlite'))
+    migrateMaster(db)
+    db.exec(`INSERT INTO nodes(fingerprint,public_key,certificate_hash,role,host,port,name,added_at,last_seen,labels) VALUES
+      ('a','','','worker','h',1,'a',0,0,'[]'),
+      ('b','','','worker','h',2,'b',0,0,'["signing"]'),
+      ('c','','','worker','h',3,'c',0,0,'["setup","x"]');
+    INSERT INTO cloud_hosts(name,account,provider,region,size,image,state,created_at,updated_at,role,labels) VALUES
+      ('w','do','digitalocean','sfo3','s','i','ready',0,0,'worker','["gpu"]'),
+      ('h','do','digitalocean','sfo3','s','i','ready',0,0,'host','[]');
+    INSERT INTO settings(area,value,updated_at,updated_by) VALUES('cloud','{"pools":[{"name":"p","labels":[]},{"name":"q"}]}',0,'test');
+    UPDATE meta SET value='21' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      db
+        .prepare('SELECT fingerprint,labels FROM nodes ORDER BY fingerprint')
+        .all()
+        .map((row) => [row.fingerprint, JSON.parse(String(row.labels))]),
+      [
+        ['a', ['setup']],
+        ['b', ['signing', 'setup']],
+        ['c', ['setup', 'x']],
+      ],
+    )
+    assert.deepEqual(
+      db
+        .prepare('SELECT name,labels FROM cloud_hosts ORDER BY name')
+        .all()
+        .map((row) => [row.name, JSON.parse(String(row.labels))]),
+      [
+        ['h', []],
+        ['w', ['gpu', 'setup']],
+      ],
+    )
+    const cloud = JSON.parse(
+      String(
+        (
+          db.prepare("SELECT value FROM settings WHERE area='cloud'").get() as {
+            value: string
+          }
+        ).value,
+      ),
+    ) as { pools: Array<{ labels: string[] }> }
+    assert.deepEqual(
+      cloud.pools.map((pool) => pool.labels),
+      [['setup'], ['setup']],
+    )
+    // A master with no cloud setting, or one with no pools, migrates too.
+    db.exec(`DELETE FROM settings WHERE area='cloud';
+    UPDATE meta SET value='21' WHERE key='master_schema';`)
+    migrateMaster(db)
+    db.exec(`INSERT INTO settings(area,value,updated_at,updated_by) VALUES('cloud','{}',0,'test');
+    UPDATE meta SET value='21' WHERE key='master_schema';`)
+    migrateMaster(db)
+    db.close()
+  })
+
   it('U18.10 schema 18 turns project_env and project_files into default variants and drops them', () => {
     const db = new DatabaseSync(path.join(root, 'variants.sqlite'))
     migrateMaster(db)

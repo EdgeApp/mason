@@ -277,6 +277,13 @@ export function validateParams(
   return out
 }
 
+/**
+ * The label of the nodes that run setup, the run's first step, which
+ * executes the branch's Masonfile. Every node and pool carries it unless an
+ * administrator removes it; a Masonfile cannot ask for it.
+ */
+export const SETUP_LABEL = 'setup'
+
 const oses = ['macos', 'linux', 'windows']
 const arches = ['arm64', 'x64']
 const toolNames = [
@@ -312,6 +319,10 @@ function selector(value: unknown, what: string): NodeSelector {
   if (value.arch != null && !arches.includes(value.arch as string))
     throw new GraphError(`${what}: unknown architecture ${String(value.arch)}`)
   strings(value.labels, `${what} labels`)
+  if ((value.labels as string[] | undefined)?.includes(SETUP_LABEL))
+    throw new GraphError(
+      `${what}: the label ${SETUP_LABEL} is reserved for the nodes that run setup`,
+    )
   return value as NodeSelector
 }
 

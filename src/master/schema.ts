@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 21
+export const MASTER_SCHEMA = 22
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -590,6 +590,40 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     INSERT OR IGNORE INTO build_publications(reservation_id,variant,digest,build_id,staged_at)
       SELECT r.id,'',b.digest,r.build_id,r.staged_at FROM build_reservations r LEFT JOIN builds b ON b.id=r.build_id
       WHERE r.build_id IS NOT NULL OR r.staged_at IS NOT NULL;`)
+  },
+  // 22: setup runs only on nodes labelled setup; every node, permanent
+  // cloud worker and pool had run it, so each gains the label.
+  (db): void => {
+    const withSetup = (labels: unknown): string => {
+      const list = JSON.parse(String(labels ?? '[]')) as unknown
+      const out = Array.isArray(list) ? list.map(String) : []
+      return JSON.stringify(out.includes('setup') ? out : [...out, 'setup'])
+    }
+    for (const row of db.prepare('SELECT fingerprint,labels FROM nodes').all())
+      db.prepare('UPDATE nodes SET labels=? WHERE fingerprint=?').run(
+        withSetup(row.labels),
+        String(row.fingerprint),
+      )
+    for (const row of db
+      .prepare("SELECT rowid,labels FROM cloud_hosts WHERE role='worker'")
+      .all())
+      db.prepare('UPDATE cloud_hosts SET labels=? WHERE rowid=?').run(
+        withSetup(row.labels),
+        Number(row.rowid),
+      )
+    const cloud = db
+      .prepare("SELECT value FROM settings WHERE area='cloud'")
+      .get() as { value: string } | undefined
+    if (cloud == null) return
+    const value = JSON.parse(cloud.value) as {
+      pools?: Array<{ labels?: unknown }>
+    }
+    if (!Array.isArray(value.pools)) return
+    for (const pool of value.pools)
+      pool.labels = JSON.parse(withSetup(JSON.stringify(pool.labels ?? [])))
+    db.prepare("UPDATE settings SET value=? WHERE area='cloud'").run(
+      JSON.stringify(value),
+    )
   },
 ]
 

@@ -2,6 +2,7 @@ import { bytes, platformChip, statusDot } from './dashboard.js'
 import { ago, escape } from './html.js'
 import { icon } from './icons.js'
 import { spacesRegions } from '../master/cloud/regions.js'
+import { SETUP_LABEL } from '../pipeline/graph.js'
 
 const statusLine =
   '<p class="notice" role="status" data-field="status" hidden></p>'
@@ -237,8 +238,8 @@ function poolFields(
     row(
       'labels',
       'Labels',
-      text('labels', (pool.labels ?? []).join(', ')),
-      'Extra labels its machines carry, comma-separated, for stages that ask for them.',
+      text('labels', (pool.labels ?? [SETUP_LABEL]).join(', ')),
+      `Labels its machines carry, comma-separated, for stages that ask for them. Machines labelled ${SETUP_LABEL} run setup.`,
     ),
     row(
       'maxNodes',
@@ -318,7 +319,7 @@ function hostFields(
     `<input type="hidden" name="account" value="${escape(account.id)}">`,
     role === 'host'
       ? `<label for="${prefix}-name">Name</label>${text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="builds"')}`
-      : `${field(`${prefix}-name`, 'Name', text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-node"'), 'The node’s name on this master and its droplet’s.')}${field(`${prefix}-type`, 'Node type', text('type', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-x86"'), 'Type of node as specified in the Masonfile.')}${field(`${prefix}-labels`, 'Labels', text('labels', ''), 'Extra labels it carries, comma-separated, for stages that ask for them.')}`,
+      : `${field(`${prefix}-name`, 'Name', text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-node"'), 'The node’s name on this master and its droplet’s.')}${field(`${prefix}-type`, 'Node type', text('type', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-x86"'), 'Type of node as specified in the Masonfile.')}${field(`${prefix}-labels`, 'Labels', text('labels', SETUP_LABEL), `Labels it carries, comma-separated, for stages that ask for them. A node labelled ${SETUP_LABEL} runs setup.`)}`,
     `<label for="${prefix}-region">Region</label>${
       catalog == null
         ? text('region', 'sfo3', ' required')
