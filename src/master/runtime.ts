@@ -32,6 +32,7 @@ import path from 'node:path'
 import { githubLfs, Mirrors, type RemoteResolver } from './mirrors.js'
 import { Retention } from './retention.js'
 import { Scheduler } from './scheduler.js'
+import { RunFeed } from './runFeed.js'
 import { Stashes } from './stash.js'
 import { Releases } from './releases.js'
 import { Updates } from './updates.js'
@@ -220,6 +221,8 @@ export class Master {
   readonly mirrors: Mirrors
   readonly stashes: Stashes
   readonly scheduler: Scheduler
+  /** Runs' changes and log growth, for the live pages. */
+  readonly feed: RunFeed
   readonly retention: Retention
   readonly releases: Releases
   readonly updates: Updates
@@ -413,6 +416,7 @@ export class Master {
         setupDemand: (): string | undefined => this.pools.setupDemand(),
       },
     })
+    this.feed = new RunFeed(this.database, this.scheduler.logged)
     this.nodeStates = new NodeStates({
       registry: this.registry,
       settings: this.settings,

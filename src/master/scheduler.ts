@@ -2487,6 +2487,9 @@ export class Scheduler {
     })
   }
 
+  /** Hears each append to a stage's log, as it is written. */
+  readonly logged = new Set<(job: string, stage: string) => void>()
+
   logFile(job: string, stage: string): string {
     return path.join(this.options.logs, job, `${encodeURIComponent(stage)}.log`)
   }
@@ -2502,6 +2505,7 @@ export class Scheduler {
     const file = this.logFile(job, stage)
     mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
     appendFileSync(file, text, { mode: 0o600 })
+    for (const listener of this.logged) listener(job, stage)
   }
 
   /** Every stage log of a job, setup first, each under a header. */
