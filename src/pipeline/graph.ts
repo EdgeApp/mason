@@ -24,6 +24,8 @@ import type {
 } from '../../types/mason/index.js'
 import { asScheme, type BuildNumberScheme } from '../master/buildNumbers.js'
 import { matches } from '../master/rules.js'
+import { inexactCocoapods } from '../validation.js'
+import { isConfig, MAX_CONFIGS, unresolvedSecret } from './variants.js'
 
 /** The Masonfile API versions this Mason major version runs. */
 export const apiVersions = [1]
@@ -54,11 +56,14 @@ export interface GraphStage {
   group?: string
   /** The export the stage run calls. */
   run?: string
-  on?: NodeSelector
+  /** A list means any of them. */
+  on?: NodeSelector | NodeSelector[]
   needs: string[]
   when?: When
   tools?: Tools
   secrets: string[]
+  /** Build configs, in order: each declared secret is the variant of the latest one that has a variant, else the default. */
+  configs: string[]
   env: Record<string, string>
   /** Seconds. */
   timeout: number
@@ -147,6 +152,20 @@ function strings(value: unknown, what: string): string[] {
   )
     throw new GraphError(`${what} must be a list of names`)
   return list as string[]
+}
+
+/** A stage's build configs: at most MAX_CONFIGS tokens of letters, digits, dashes and underscores. */
+function buildConfigs(value: unknown, what: string): string[] {
+  if (value == null) return []
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_CONFIGS ||
+    !value.every(isConfig)
+  )
+    throw new GraphError(
+      `${what} must be at most ${MAX_CONFIGS} names of letters, digits, dashes and underscores`,
+    )
+  return value as string[]
 }
 
 function environment(value: unknown, what: string): Record<string, string> {
@@ -258,18 +277,30 @@ export function validateParams(
   return out
 }
 
+/**
+ * The label of the nodes that run setup, the run's first step, which
+ * executes the branch's Masonfile. Every node and pool carries it unless an
+ * administrator removes it; a Masonfile cannot ask for it.
+ */
+export const SETUP_LABEL = 'setup'
+
 const oses = ['macos', 'linux', 'windows']
 const arches = ['arm64', 'x64']
 const toolNames = [
   'node',
   'java',
   'rust',
+  'python',
+  'go',
+  'ruby',
   'android',
   'xcode',
   'simulators',
   'brew',
   'apt',
   'dnf',
+  'cocoapods',
+  'androidLicenses',
 ]
 const roles: Role[] = ['admin', 'manager', 'developer', 'tester']
 const triggerKinds = [
@@ -291,11 +322,33 @@ function selector(value: unknown, what: string): NodeSelector {
   if (value.arch != null && !arches.includes(value.arch as string))
     throw new GraphError(`${what}: unknown architecture ${String(value.arch)}`)
   strings(value.labels, `${what} labels`)
+  if ((value.labels as string[] | undefined)?.includes(SETUP_LABEL))
+    throw new GraphError(
+      `${what}: the label ${SETUP_LABEL} is reserved for the nodes that run setup`,
+    )
   return value as NodeSelector
 }
 
 export const asNodeSelector = (value: unknown): NodeSelector =>
   selector(value, 'The node selector')
+
+/** A stage's `on`: one selector, or a list of them, any of which will do. */
+function nodeChoice(
+  value: unknown,
+  what: string,
+): NodeSelector | NodeSelector[] {
+  if (!Array.isArray(value)) return selector(value, what)
+  if (value.length === 0 || value.length > 8)
+    throw new GraphError(`${what}: a list of node selectors has 1 to 8 entries`)
+  return value.map((entry) => selector(entry, what))
+}
+
+/** The selectors a stage may run on; none means any node. */
+export function alternatives(
+  on: NodeSelector | NodeSelector[] | undefined,
+): NodeSelector[] {
+  return on == null ? [] : Array.isArray(on) ? on : [on]
+}
 
 function tools(value: unknown, what: string): Tools | undefined {
   if (value == null) return undefined
@@ -305,7 +358,13 @@ function tools(value: unknown, what: string): Tools | undefined {
       throw new GraphError(`${what}: unknown tool ${name}`)
     if (['android', 'simulators', 'brew', 'apt', 'dnf'].includes(name))
       strings(version, `${what} ${name}`)
-    else if (typeof version !== 'string' || version.length === 0)
+    else if (name === 'androidLicenses') {
+      if (version !== 'accept')
+        throw new GraphError(`${what}: androidLicenses is 'accept'`)
+    } else if (name === 'cocoapods') {
+      const inexact = inexactCocoapods(version)
+      if (inexact != null) throw new GraphError(`${what}: ${inexact}`)
+    } else if (typeof version !== 'string' || version.length === 0)
       throw new GraphError(`${what}: ${name} needs a version`)
   }
   return value as Tools
@@ -953,11 +1012,12 @@ export class Recorder {
       ...defaults(stageName, extra.failFast ?? workflow.failFast),
       ...(extra.group == null ? {} : { group: extra.group }),
       run,
-      on: selector(options.on, what),
+      on: nodeChoice(options.on, what),
       needs,
       ...(options.when == null ? {} : { when: when(options.when, what) }),
       ...(options.tools == null ? {} : { tools: tools(options.tools, what) }),
       secrets: strings(options.secrets, `${what} secrets`),
+      configs: buildConfigs(options.configs, `${what} configs`),
       env: environment(options.env, `${what} env`),
       timeout:
         options.timeout == null
@@ -995,6 +1055,7 @@ function defaults(name: string, failFast: boolean): GraphStage {
     kind: 'stage',
     needs: [],
     secrets: [],
+    configs: [],
     env: {},
     timeout: 2 * 3600,
     retry: { attempts: 1, on: ['failed', 'interrupted', 'timed_out'] },
@@ -1042,8 +1103,8 @@ export interface ProjectFacts {
   apps: string[]
   /** Bundle IDs each app ID signs (the app and its extensions). */
   signs?: Record<string, string[]>
-  /** Names a stage may declare in `secrets`: environment values and injected files. */
-  secrets: string[]
+  /** The project's secret variants a stage may declare by name, and the configs each is for. */
+  secrets: Array<{ name: string; configs: string[] }>
   /** Known node type names; omitted means any name is accepted. */
   nodeTypes?: string[]
   /**
@@ -1078,22 +1139,44 @@ export function validateGraph(value: unknown, project: ProjectFacts): Graph {
         throw new GraphError(`Stage ${stage.name} is declared twice`)
       stageNames.add(stage.name)
       const what = `Stage ${stage.name}`
-      if (stage.kind === 'approval') continue
-      selector(stage.on, what)
-      tools(stage.tools, what)
-      if (project.structureOnly === true) continue
-      if (
-        typeof stage.on === 'string' &&
-        stage.on !== 'master' &&
-        project.nodeTypes != null &&
-        !project.nodeTypes.includes(stage.on)
+      // A graph from a node on an older release has no configs.
+      stage.configs = buildConfigs(
+        (stage as { configs?: unknown }).configs,
+        `${what} configs`,
       )
-        throw new GraphError(`${what} runs on unknown node type ${stage.on}`)
-      for (const secret of stage.secrets)
-        if (!project.secrets.includes(secret))
-          throw new GraphError(
-            `${what} declares secret ${secret}, which the project does not have`,
-          )
+      if (stage.kind === 'approval') continue
+      nodeChoice(stage.on, what)
+      tools(stage.tools, what)
+      // CocoaPods runs on macOS: a stage only ever offered other systems cannot have it.
+      const choices = alternatives(stage.on)
+      if (
+        stage.tools?.cocoapods != null &&
+        choices.length > 0 &&
+        choices.every(
+          (on) => typeof on === 'object' && on.os != null && on.os !== 'macos',
+        )
+      )
+        throw new GraphError(
+          `Stage ${stage.name} asks for CocoaPods, which installs on macOS only`,
+        )
+      if (project.structureOnly === true) continue
+      for (const on of choices)
+        if (
+          typeof on === 'string' &&
+          on !== 'master' &&
+          project.nodeTypes != null &&
+          !project.nodeTypes.includes(on)
+        )
+          throw new GraphError(`${what} runs on unknown node type ${on}`)
+      for (const secret of stage.secrets) {
+        const refused = unresolvedSecret(
+          stage.name,
+          secret,
+          project.secrets,
+          stage.configs,
+        )
+        if (refused != null) throw new GraphError(refused)
+      }
       const apps = [
         ...stage.publishes,
         ...(stage.apple?.app == null ? [] : [stage.apple.app]),

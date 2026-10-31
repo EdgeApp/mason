@@ -50,7 +50,6 @@ const tables: Record<
     },
   },
   device: { table: 'devices', key: 'id' },
-  api_key: { table: 'api_keys', key: 'id' },
   job: {
     table: 'jobs',
     key: 'id',
@@ -62,24 +61,21 @@ const tables: Record<
     },
   },
   setting: { table: 'host_settings', key: 'area' },
-  release: { table: 'host_release', key: 'id' },
 }
 
 /** Deleting in this order keeps foreign keys satisfied; applying uses the reverse. */
 const order = [
   'setting',
-  'release',
   'project',
   'app',
   'account',
   'group',
   'device',
   'build',
-  'api_key',
   'job',
 ]
 
-const HOST_SCHEMA = 3
+const HOST_SCHEMA = 5
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -96,10 +92,23 @@ function migrateHost(db: DatabaseSync): void {
   if (current < 1) migrateHostV1(db)
   if (current < 2) migrateHostV2(db)
   // Where each step's lines are in its stage log, replicated with the step.
-  db.exec(`BEGIN IMMEDIATE;
+  if (current < 3)
+    db.exec(`BEGIN IMMEDIATE;
     ALTER TABLE job_steps ADD COLUMN log_start INTEGER;
     ALTER TABLE job_steps ADD COLUMN log_end INTEGER;
     INSERT INTO host_meta(key,value) VALUES('host_schema','3') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  // The host no longer serves the Zealot upload API, the only reader of keys.
+  if (current < 4)
+    db.exec(`BEGIN IMMEDIATE;
+    DELETE FROM api_keys;
+    INSERT INTO host_meta(key,value) VALUES('host_schema','4') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  // The section step each step ran in, replicated with the step.
+  const columns = db.prepare('PRAGMA table_info(job_steps)').all()
+  db.exec(`BEGIN IMMEDIATE;
+    ${columns.some((column) => column.name === 'parent') ? '' : 'ALTER TABLE job_steps ADD COLUMN parent INTEGER;'}
+    INSERT INTO host_meta(key,value) VALUES('host_schema','5') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
 }
 
@@ -335,10 +344,6 @@ export class HostCache {
         .run(Number(key))
       return
     }
-    if (entity === 'release') {
-      this.db.prepare('DELETE FROM host_release').run()
-      return
-    }
     for (const [child, link] of Object.entries(spec.children ?? {}))
       if (link.field === spec.key)
         this.db.prepare(`DELETE FROM ${child} WHERE ${link.column}=?`).run(key)
@@ -368,10 +373,6 @@ export class HostCache {
               String(value.row[spec.key]),
             ),
           )
-          if (entity === 'release') {
-            if (keep.size === 0) this.remove('release', 'current')
-            continue
-          }
           const condition = entity === 'build' ? " WHERE state<>'deleted'" : ''
           for (const row of this.db
             .prepare(`SELECT ${spec.key} AS k FROM ${spec.table}${condition}`)

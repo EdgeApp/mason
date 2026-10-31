@@ -16,7 +16,7 @@ import { verifyCms } from '../devices/cms.js'
 import { Devices, DEVICE_COOKIE } from '../devices/store.js'
 import { HostRuntime } from '../host/runtime.js'
 import { nodeMain, type MainIO } from '../node/main.js'
-import { pinnedAgent, pinnedFetch } from '../node/pinnedFetch.js'
+import { pinnedFetch } from '../node/pinnedFetch.js'
 import type { RunningNode } from '../node/serve.js'
 import { insertBuild } from '../store.js'
 import { cluster, type Cluster } from '../test/cluster.js'
@@ -575,34 +575,8 @@ describe('Devices across nodes', function () {
     )
   })
 
-  it('U15.5 an ad hoc IPA uploaded on the host records its devices and expiry for the master and the host', async () => {
+  it('U15.5 an ad hoc IPA published through a grant records its devices and expiry for the master and the host', async () => {
     const master = c.master.master!
-    const appId = Number(
-      (db().prepare('SELECT id FROM apps WHERE slug=?').get(APP) as Json).id,
-    )
-    const key = master.keys.create(admin, {
-      role: 'upload',
-      apps: [appId],
-      name: 'zealot',
-    })
-    master.database.change('api_key', key.id)
-    const channelKey = String(
-      (
-        db()
-          .prepare(
-            "SELECT channel_key FROM channels WHERE app_id=? AND platform='ios'",
-          )
-          .get(appId) as Json
-      ).channel_key,
-    )
-    await c.until(
-      () =>
-        host
-          .host!.cache.db.prepare('SELECT 1 FROM api_keys WHERE id=?')
-          .get(key.id),
-      2000,
-      'the key on the host',
-    )
     const profileXml = `<plist version="1.0"><dict><key>ProvisionedDevices</key><array><string>${udidB}</string></array><key>TeamIdentifier</key><array><string>${TEAM}</string></array><key>ExpirationDate</key><date>${new Date(Date.now() + 86_400_000).toISOString()}</date><key>Entitlements</key><dict><key>get-task-allow</key><false/><key>application-identifier</key><string>${TEAM}.${APP}</string></dict></dict></plist>`
     const info = plist()
       .toString()
@@ -612,18 +586,46 @@ describe('Devices across nodes', function () {
       ['Payload/Phone.app/Info.plist', Buffer.from(info)],
       ['Payload/Phone.app/embedded.mobileprovision', sign(profileXml)],
     ])
-    const body = new FormData()
-    body.set('token', key.token)
-    body.set('channel_key', channelKey)
-    body.set('branch', 'release')
-    body.set('git_commit', 'd'.repeat(40))
-    body.set('file', new Blob([new Uint8Array(ipa)]), 'Phone.ipa')
-    const upload = await fetch(`${hostUrl()}/api/apps/upload`, {
-      method: 'POST',
-      body,
-      // @ts-expect-error undici's dispatcher option
-      dispatcher: pinnedAgent(host.web!.certificate!.pin),
+    // As a stage publishes: a reservation for the run, a grant, then the file to the host.
+    const run = master.jobs.request(localOperator, {
+      app: 'phones',
+      branch: 'release',
     })
+    // The build records the run's commit; this suite's runs never resolve one.
+    db()
+      .prepare('UPDATE jobs SET commit_sha=? WHERE id=?')
+      .run('d'.repeat(40), run.id)
+    const job = db()
+      .prepare('SELECT id,project_id FROM jobs WHERE id=?')
+      .get(run.id) as Json
+    master.artifacts.reserve(
+      { job: job.id, stage: 'publish', attempt: 7, project: job.project_id },
+      [APP],
+      { [APP]: '77' },
+    )
+    const granted = master.artifacts.grant(
+      { job: job.id, stage: 'publish', attempt: 7 },
+      {
+        app: APP,
+        platform: 'ios',
+        format: 'ipa',
+        digest: createHash('sha256').update(ipa).digest('hex'),
+        size: ipa.length,
+        version: '1.2.3',
+      },
+    )
+    const upload = await pinnedFetch(
+      granted.url,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          Authorization: `Bearer ${granted.grant}`,
+        },
+        body: ipa,
+      },
+      granted.pin,
+    )
     assert.equal(upload.status, 201, await upload.clone().text())
     const build = db()
       .prepare("SELECT id FROM builds WHERE bundle_id=? AND build_number='77'")
@@ -751,7 +753,7 @@ describe('Devices across nodes', function () {
     assert.match(out.join('\n'), /now also trusts|Usage: mason host trust-root/)
   })
 
-  it('U15.6 no code path runs Ruby, Bundler or the profile shim', () => {
+  it('U15.6 no code path runs Bundler, Fastlane or the profile shim; only the Ruby and CocoaPods installers run Ruby', () => {
     const files: string[] = []
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir)) {
@@ -763,12 +765,35 @@ describe('Devices across nodes', function () {
     }
     walk(path.resolve('src'))
     assert(!files.some((file) => file.endsWith('.rb')))
-    const offending = files.filter((file) =>
-      /['"`](ruby|bundle|fastlane)['"`]|bundle exec|apple-provision|bundle-profiles|Spaceship/.test(
-        readFileSync(file, 'utf8'),
-      ),
-    )
+    // `ruby` is also a tool a stage may ask Mason to install (built by
+    // ruby-build, a shell script): its name may appear, but nothing runs it.
+    const runsRuby =
+      /\b\w*(?:exec|spawn|run|step)\w*\(\s*['"`][^'"`]*\bruby['"`]|['"`]ruby['"`]\s*,\s*\[/i
+    const offending = files.filter((file) => {
+      const text = readFileSync(file, 'utf8')
+      return (
+        runsRuby.test(text) ||
+        /['"`](bundle|fastlane)['"`]|bundle exec|apple-provision|bundle-profiles|Spaceship/.test(
+          text,
+        )
+      )
+    })
     assert.deepEqual(offending, [])
+    // The Ruby installer runs only ruby-build.
+    const installer = readFileSync(
+      path.resolve('src/worker/tools/ruby.ts'),
+      'utf8',
+    )
+    assert.deepEqual(
+      [...installer.matchAll(/\b(?:run|step)\(\s*([\w.]+)/g)].map((m) => m[1]),
+      ['bin', 'bin'],
+    )
+    // The CocoaPods installer runs its gem install with its own Ruby, never
+    // Bundler or Fastlane.
+    assert.doesNotMatch(
+      readFileSync(path.resolve('src/worker/tools/cocoapods.ts'), 'utf8'),
+      /['"`](bundle|fastlane)['"`]|bundle exec|Spaceship/,
+    )
     assert.equal(createHash('sha256').update('').digest('hex').length, 64)
   })
 })

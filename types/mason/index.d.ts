@@ -56,10 +56,24 @@ export type NodeSelector =
 
 /** Tool versions a stage needs; missing ones are installed before it starts. */
 export interface Tools {
-  /** Major or exact version, `'24'` or `'24.11.1'`. */
+  /**
+   * Each version-managed tool takes a version, or `'project'` for the
+   * version the repository pins (section 7 lists the files). Versions are
+   * installed side by side; the stage's are first on `PATH`.
+   *
+   * Node: major or exact, `'24'` or `'24.11.1'`; also in `NODE_BINARY`.
+   */
   node?: string
+  /** Temurin JDK, major or exact: `'21'`. */
   java?: string
+  /** Toolchain: `'1.82.0'`, `'stable'`. */
   rust?: string
+  /** CPython, minor or exact: `'3.12'`, `'3.12.7'`. */
+  python?: string
+  /** Minor or exact: `'1.23'`, `'1.23.4'`. */
+  go?: string
+  /** CRuby, minor or exact: `'3.3'`, `'3.3.5'`; built once per node, gems per version. */
+  ruby?: string
   /** `sdkmanager` packages, `'platforms;android-35'`. */
   android?: string[]
   /** Exact version, range, Xcode build number, `'latest'` or `'latest-beta'`. */
@@ -72,6 +86,14 @@ export interface Tools {
   apt?: string[]
   /** dnf packages (Linux). */
   dnf?: string[]
+  /**
+   * An exact CocoaPods version (`'1.16.2'`), macOS only: installed with its
+   * own Ruby, no Homebrew or administrator needed. The stage's Xcode
+   * compiles its native gems.
+   */
+  cocoapods?: string
+  /** `'accept'`: this Masonfile accepts the Android SDK licences, so `android` packages install on any node. */
+  androidLicenses?: 'accept'
 }
 
 export type ParamValue = string | number | boolean
@@ -140,16 +162,33 @@ export interface StageRef {
 }
 
 export interface StageOptions {
-  /** Node selector. */
-  on: NodeSelector
+  /**
+   * Node selector, or a list of them: the stage runs on whichever free node
+   * matches any of them. With none free, the first entry whose pool can serve
+   * it starts one machine (or is already starting or waiting for one); a
+   * pool that cannot now passes to the next entry.
+   */
+  on: NodeSelector | NodeSelector[]
   /** The exported stage function. */
   run: StageFunction
   /** Explicit dependencies; `[]` starts at once. */
   needs?: StageRef[]
   when?: When
   tools?: Tools
-  /** Names of project secrets this stage may read. */
+  /**
+   * Names of project secrets this stage may read. Values are read with
+   * `ctx.secret` and are also set as environment variables of the stage's
+   * commands (except names the build environment sets, such as PATH); files
+   * are written with `ctx.writeSecretFile`, or read through `ctx.secretFile`.
+   */
   secrets?: string[]
+  /**
+   * Build configs, in order: at most 20, each letters, digits, dashes and
+   * underscores. Each secret the stage declares is the variant of the latest
+   * config that has one, else the secret's default variant (the one for all
+   * configs). A secret with neither cannot be declared.
+   */
+  configs?: string[]
   /** Non-secret environment for this stage. */
   env?: Record<string, string>
   /** Stage limit, enforced by the worker. Default `'2h'`. */
@@ -206,7 +245,10 @@ export type MatrixOptions<A extends MatrixAxes> = {
     | StageOptions[K]
     | ((combination: MatrixCombination<A>) => StageOptions[K])
 } & {
-  on: NodeSelector | ((combination: MatrixCombination<A>) => NodeSelector)
+  on:
+    | NodeSelector
+    | NodeSelector[]
+    | ((combination: MatrixCombination<A>) => NodeSelector | NodeSelector[])
 }
 
 export interface ApprovalOptions {
@@ -270,6 +312,13 @@ export interface BuildNumberOptions {
    * run publishes with the same number.
    */
   apps?: string[]
+  /**
+   * Numbers each run holds, 1 to 100 (default 1): a run gets N and keeps N
+   * to N+block−1; the next run's number comes after the block (N+block, or
+   * the next day's first number for a dated format). Needs a format of digits
+   * ending in its count (`YYMMDDCC`, `N`).
+   */
+  block?: number
 }
 
 /** Declares the stages of one workflow. */
@@ -309,7 +358,7 @@ export interface Setup extends WorkflowBuilder {
 export interface CommandOptions {
   /** Relative to the workspace. */
   cwd?: string
-  /** Added for this command only; secrets reach a command only this way. */
+  /** Added for this command only. Declared value secrets are already set. */
   env?: Record<string, string>
   timeout?: Duration
   /** Standard input. */
@@ -381,9 +430,21 @@ export interface PublishOptions {
   app: string
   platform: Platform
   path: string
+  /**
+   * One of several files of this build (`arm64-v8a`, `linux-x64`): 1 to 32
+   * letters, digits, `.`, `_` or `-`, starting with a letter or digit.
+   * Omitted, the file is the default variant. A run publishes each variant
+   * once, from any of its stages or attempts; another file for it is
+   * refused, so a retried stage must reproduce its files exactly.
+   */
+  variant?: string
   /** Required for DMG/EXE/MSI; read from IPA/APK and checked. */
   version?: string
-  /** The number `getBuildNumber` returned for this app. */
+  /**
+   * An IPA's or APK's own number is read from it (this must match it); a
+   * DMG/EXE/MSI's is this, defaulting to `getBuildNumber`'s. Either way it
+   * is one of the run's: N, or N to N+block−1 with a `block`.
+   */
   buildNumber?: string
   changelog?: string
   metadata?: Record<string, Json>
@@ -394,6 +455,8 @@ export type PublishResult = {
   url: string
   installUrl: string
   visible: boolean
+  /** `''` for the default variant. */
+  variant: string
 }
 
 export interface AppleSigning {
@@ -464,10 +527,24 @@ export interface Stage {
     options?: CommandOptions,
   ): Promise<CommandResult>
 
-  /** A secret the stage declared; anything else throws. */
+  /** A value secret the stage declared, the variant its configs choose; anything else throws. */
   secret(name: string): string
-  /** Path of a declared secret file, deleted after the stage. */
+  /** Path of a declared secret file (the variant the stage's configs choose), in the stage's private directory, deleted after the stage. */
   secretFile(name: string): string
+  /**
+   * Writes a declared secret file to `<directory>/<name>` inside the
+   * checkout (`'.'` is its root) and returns the path. The directory is
+   * created; a file or symlink already at the target is set aside and put
+   * back when the stage ends, and a directory there is refused. The secret
+   * file is removed when the stage ends, however it ends. `mode` defaults to
+   * owner-only (0o600); a file the build ships, such as a resource copied
+   * into an app bundle, needs a readable one (0o644).
+   */
+  writeSecretFile(
+    name: string,
+    directory: string,
+    options?: { mode?: number },
+  ): Promise<string>
 
   /** The value another stage (or an approval) returned. */
   output<T extends Json = Json>(stage: string): Promise<T>

@@ -51,6 +51,25 @@ function appJwt(appId: number, privateKey: string, now: number): string {
   return `${body}.${sign('sha256', Buffer.from(body), createPrivateKey(privateKey)).toString('base64url')}`
 }
 
+/** The first two lines git printed, without the command line: why a push failed, in short. */
+export function gitReason(error: unknown): string {
+  const stderr = String((error as { stderr?: unknown })?.stderr ?? '').trim()
+  const text = stderr === '' ? String((error as Error)?.message) : stderr
+  return text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('Command failed:'))
+    .slice(0, 2)
+    .join(' ')
+}
+
+/** The `owner/repo` part of a GitHub URL the master can give credentials to, or undefined for any other URL. */
+export function githubRepositoryName(repository: string): string | undefined {
+  return /^(?:https:\/\/github\.com\/|git@github\.com:)(.+)$/.exec(
+    repository,
+  )?.[1]
+}
+
 /** The master's GitHub connection: credentials, API calls and git access. */
 export class GitHub {
   private installation: { token: string; expires: number } | undefined
@@ -248,10 +267,7 @@ export class GitHub {
     scratch: string,
   ): Promise<{ url: string; env: NodeJS.ProcessEnv }> {
     const connection = this.connection()
-    const match = /^(?:https:\/\/github\.com\/|git@github\.com:)(.+)$/.exec(
-      repository,
-    )
-    const name = match == null ? undefined : match[1]
+    const name = githubRepositoryName(repository)
     const env: NodeJS.ProcessEnv = {
       ...baseEnvironment(),
       GIT_TERMINAL_PROMPT: '0',

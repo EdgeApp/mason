@@ -23,6 +23,7 @@ import { asForwardRequest, isRunAction } from './forward.js'
 import { policy, type Action } from './permissions.js'
 import { localOperator, roles, type Role } from './roles.js'
 import { masterApp } from './web.js'
+import { seedSecret } from '../test/secrets.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -771,7 +772,7 @@ describe('Master sign-in, setup, people and permissions', function () {
     return out
   }
 
-  it('U5.2 the Settings form creates a key: apps as the form sends them, the token once, never in the list', async () => {
+  it('U5.2 the Settings form creates a key: the token once, never in the list; no upload keys', async () => {
     const developer = await c.api('POST', '/api/v2/keys', {
       name: 'from the page',
       role: 'developer',
@@ -780,16 +781,15 @@ describe('Master sign-in, setup, people and permissions', function () {
     assert.equal(developer.status, 201, developer.text)
     assert.match(developer.json.token, /^mason_v1_[0-9a-f]{32}\./)
     assert.equal(developer.json.token.slice(9, 41), developer.json.id)
-    // The form's comma-separated app ids are ids: unknown ones are refused as apps.
+    // The cluster publishes only through ctx.publish: no upload role.
     assert.match(
       (
         await c.api('POST', '/api/v2/keys', {
           name: 'uploads',
           role: 'upload',
-          apps: '999998, 999999',
         })
       ).json.error,
-      /Unknown app scope/,
+      /Expected a role: admin, manager, developer or tester/,
     )
     const listed = (await c.api('GET', '/api/v2/keys')).json as Json[]
     const mine = listed.find((key) => key.id === developer.json.id)!
@@ -1087,6 +1087,8 @@ describe('Master sign-in, setup, people and permissions', function () {
       'PUT /api/v2/settings/nodeTypes/:type': 'settings.change',
       'DELETE /api/v2/settings/nodeTypes/:type': 'settings.change',
       'POST /api/v2/storage/disk': 'settings.change',
+      'POST /api/v2/storage/locations/:id/use': 'settings.change',
+      'DELETE /api/v2/storage/locations/:id': 'settings.change',
       'GET /api/v2/people': 'people.read',
       'POST /api/v2/people': 'people.change',
       'GET /api/v2/people/:id': 'people.read',
@@ -1102,7 +1104,14 @@ describe('Master sign-in, setup, people and permissions', function () {
       'DELETE /api/v2/projects/:slug': 'projects.change',
       'POST /api/v2/projects/:slug/apps': 'projects.change',
       'DELETE /api/v2/projects/:slug/apps/:bundleId': 'projects.change',
-      'PUT /api/v2/projects/:slug/secrets': 'secrets.change',
+      'GET /api/v2/projects/:slug/secrets': 'projects.read',
+      'GET /api/v2/projects/:slug/secrets/audit': 'secrets.read',
+      'GET /api/v2/projects/:slug/secrets/:id': 'secrets.read',
+      'POST /api/v2/projects/:slug/secrets': 'secrets.change',
+      'PUT /api/v2/projects/:slug/secrets/:id': 'secrets.change',
+      'PUT /api/v2/projects/:slug/secrets/:id/file': 'secrets.change',
+      'PUT /api/v2/projects/:slug/secrets/:id/configs': 'secrets.change',
+      'DELETE /api/v2/projects/:slug/secrets/:id': 'secrets.change',
       'PUT /api/v2/projects/:slug/rules': 'projects.change',
       'POST /api/v2/build-numbers/seed': 'buildNumbers.seed',
       'POST /api/jobs': 'runs.request',
@@ -1475,6 +1484,62 @@ export async function one(ctx: Stage) { return 1 }
     })
   })
 
+  it('U18.12 a secret viewed through the host is audited with the client address the host saw, and the host keeps its own body limit', async () => {
+    master().saveProject(admin, 'forward-secrets', {
+      repository: 'https://github.com/a/forward-secrets',
+    })
+    const id = seedSecret(master().database.db, 'forward-secrets', {
+      name: 'HOST_TOKEN',
+      kind: 'value',
+      value: 'host-token-value',
+    })
+    const managerKey = master().keys.create(admin, { role: 'manager' }).token
+    const seen = await request(
+      host,
+      'GET',
+      `/api/v2/projects/forward-secrets/secrets/${id}`,
+      { bearer: managerKey },
+    )
+    assert.equal(seen.status, 200, seen.text)
+    assert.deepEqual(seen.json, { value: 'host-token-value' })
+    const last = (): { address: string } =>
+      master()
+        .database.db.prepare(
+          'SELECT address FROM secret_audit ORDER BY id DESC LIMIT 1',
+        )
+        .get() as { address: string }
+    assert.equal(last().address, '127.0.0.1 via host')
+    // A direct client cannot claim an address: the header counts only on the API socket.
+    const direct = await pinnedFetch(
+      c.master.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') +
+        `/api/v2/projects/forward-secrets/secrets/${id}`,
+      {
+        headers: {
+          authorization: `Bearer ${managerKey}`,
+          'x-mason-forwarded-for': '10.9.9.9',
+        },
+      },
+      c.master.identity.pin,
+    )
+    assert.equal(direct.status, 200)
+    assert.equal(last().address, '127.0.0.1')
+    // Through a host a body is at most 512 KB: a larger file goes to the master directly.
+    const large = await request(
+      host,
+      'POST',
+      '/api/v2/projects/forward-secrets/secrets',
+      {
+        bearer: managerKey,
+        body: {
+          name: 'large.bin',
+          kind: 'file',
+          contents: Buffer.alloc(600 * 1024).toString('base64'),
+        },
+      },
+    )
+    assert.equal(large.status, 413)
+  })
+
   it('U13.5 forwarded requests are limited to the API paths and the four run actions', () => {
     assert.throws(
       () => asForwardRequest({ method: 'PATCH', path: '/api/v2/x' }),
@@ -1586,6 +1651,17 @@ export async function one(ctx: Stage) { return 1 }
     )
     page = await request(c.master, 'GET', '/backups', { cookie })
     assert.match(page.text, /Last backup /)
+    // It names what pushed the backup.
+    assert.match(page.text, /, pushed with the deploy key\./)
+    c.master
+      .master!.database.db.prepare(
+        "UPDATE backup_runs SET auth='github' WHERE id=(SELECT MAX(id) FROM backup_runs)",
+      )
+      .run()
+    assert.match(
+      (await request(c.master, 'GET', '/backups', { cookie })).text,
+      /, pushed with the GitHub connection\./,
+    )
     // Backed up, the reminder is the key still to confirm.
     assert.match(
       (await request(c.master, 'GET', '/', { cookie: `${cookie}; ${skip}` }))

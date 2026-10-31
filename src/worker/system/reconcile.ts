@@ -11,7 +11,7 @@ import { pipeline } from 'node:stream/promises'
 import { pinnedFetch } from '../../node/pinnedFetch.js'
 import type { NodeType } from '../../master/nodeTypes.js'
 import type { FullInventory } from '../inventory.js'
-import type { InstallRequest } from '../tools/index.js'
+import { versioned, type InstallRequest } from '../tools/index.js'
 import {
   compareVersions,
   newestMatch,
@@ -123,7 +123,7 @@ export function reconcilePlan(
     if (software.docker && system?.docker !== true)
       out.push({ id: 'docker', kind: 'docker' })
   }
-  for (const tool of ['node', 'java', 'rust'] as const) {
+  for (const tool of versioned) {
     const version = software[tool]
     if (version != null && newestMatch(version, inventory.tools[tool]) == null)
       out.push({

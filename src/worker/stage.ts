@@ -30,7 +30,12 @@ import {
   type ProcessIdentity,
 } from '../builder/execution.js'
 import { noSymlinks } from '../config.js'
-import { LinkError, type Link, type MethodTable } from '../link/link.js'
+import {
+  LinkError,
+  type Link,
+  type MethodTable,
+  type Stream,
+} from '../link/link.js'
 import { globExpression } from '../master/rules.js'
 import {
   redact,
@@ -41,7 +46,13 @@ import {
 } from '../pipeline/assignment.js'
 import { inside } from '../pipeline/context.js'
 import { runSetup, SetupFailed } from '../pipeline/setup.js'
-import { runStage, secretForms, type StepRecord } from '../pipeline/stage.js'
+import {
+  forgetSecretFiles,
+  recoverSecretFiles,
+  runStage,
+  secretForms,
+  type StepRecord,
+} from '../pipeline/stage.js'
 import { baseInventory } from './baseInventory.js'
 import { fullInventory, type FullInventory } from './inventory.js'
 import {
@@ -50,13 +61,20 @@ import {
   toolEnvironment,
   type InstallRequest,
 } from './tools/index.js'
-import { defaultSources, type ToolSources } from './tools/common.js'
+import { defaultSources, fetchText, type ToolSources } from './tools/common.js'
+import {
+  readProjectTools,
+  wantedProjectTools,
+  type NodeRelease,
+} from './tools/projectTools.js'
+import { launchingXcode } from './tools/versions.js'
 import type { KeyObject } from 'node:crypto'
 import { helperPaths, helperRequest } from '../helper/server.js'
 import { runningInstall, type RunningInstall } from '../release/install.js'
 import { receiveUpdate, restartProcess } from './update.js'
 import type { NodeType } from '../master/nodeTypes.js'
 import {
+  developerDir,
   systemInventory,
   systemRun,
   type SystemInventory,
@@ -78,6 +96,8 @@ import {
 } from './system/xcode.js'
 import { xcodeLaunches } from './system/index.js'
 import { checkout } from './checkout.js'
+import { localImports } from '../pipeline/localImports.js'
+import { duration } from '../view/html.js'
 import {
   fetchArtifacts,
   publish,
@@ -142,6 +162,8 @@ export interface WorkerOptions {
   masterKey?: () => KeyObject | undefined
   /** The privileged helper's socket. */
   helperSocket?: string
+  /** How often the worker checks whether its helper appeared. Default 15 s. */
+  helperWatchMs?: number
   /** How this Mason was installed; the running process's install by default. */
   install?: RunningInstall
   /** Restarts into a newly installed release; exits for the service manager by default. */
@@ -247,6 +269,8 @@ export class WorkerRuntime {
   private readonly busy = new Set<number>()
   private readonly workspaceLocks = new Map<string, Promise<void>>()
   private timer: NodeJS.Timeout | undefined
+  private helperTimer: NodeJS.Timeout | undefined
+  private helperSeen = false
   private flushing: Promise<void> | undefined
   private again = false
   private stopped = false
@@ -296,11 +320,30 @@ export class WorkerRuntime {
       this.flushSoon()
     }, this.options.flushMs ?? 250)
     this.timer.unref()
+    // `mason worker --install` starts the worker before its helper.
+    this.helperSeen = this.helperReady()
+    this.helperTimer = setInterval(() => {
+      this.watchHelper()
+    }, this.options.helperWatchMs ?? 15_000)
+    this.helperTimer.unref()
+  }
+
+  /**
+   * When the helper appears or goes, hands it the master's key and tells the
+   * master, so the node's checklist and placement follow at once.
+   */
+  watchHelper(): void {
+    const ready = this.helperReady()
+    if (ready === this.helperSeen || this.stopped) return
+    this.helperSeen = ready
+    if (ready) this.trustMaster()
+    void this.refreshSystem()
   }
 
   async stop(): Promise<void> {
     this.stopped = true
     clearInterval(this.timer)
+    clearInterval(this.helperTimer)
     for (const controller of this.controllers.values())
       controller.abort(new Error('The worker is stopping'))
     // Stopped runs finish writing their journal before the database closes.
@@ -641,6 +684,17 @@ export class WorkerRuntime {
       if (!(installable as readonly string[]).includes(request?.tool))
         throw new Error(`${String(request?.tool)} is not a tool Mason installs`)
       const base = this.inventory()
+      // CocoaPods' native gems compile with the Xcode the stage asked for,
+      // which an earlier request of the same stage may just have installed.
+      let xcodeDir: string | undefined
+      if (request.tool === 'cocoapods' && request.xcode != null) {
+        const xcode = launchingXcode(request.xcode, base.xcodes ?? [])
+        if (xcode == null)
+          throw new Error(
+            `No installed Xcode matches ${request.xcode}, which CocoaPods' native gems compile with`,
+          )
+        xcodeDir = developerDir(xcode.path)
+      }
       const version = await install(request, {
         toolsDir: this.path('tools'),
         sources: this.options.toolSources ?? defaultSources,
@@ -649,6 +703,7 @@ export class WorkerRuntime {
         log: (text) => {
           log += text
         },
+        ...(xcodeDir == null ? {} : { developerDir: xcodeDir }),
       })
       return { ok: true, version, log, inventory: this.inventory() }
     } catch (error) {
@@ -849,6 +904,11 @@ export class WorkerRuntime {
     return inside(root, custom)
   }
 
+  /** A stage's private directory; its checkout's secret-file list sits beside it. */
+  private stageDir(key: string): string {
+    return this.path('tmp', `stage-${safe(key)}`)
+  }
+
   private async lockWorkspace(
     dir: string,
     log: (text: string) => void,
@@ -913,12 +973,24 @@ export class WorkerRuntime {
     let release: (() => void) | undefined
     let source: string | undefined
     let report: RunReport
+    // The stage's timeout covers its checkout too, not only its function.
+    const deadline =
+      assignment.kind === 'setup'
+        ? undefined
+        : AbortSignal.timeout(assignment.timeout * 1000)
+    const preparing =
+      deadline == null ? signal : AbortSignal.any([signal, deadline])
     try {
       const dir = this.workspace(assignment, slot)
       if (assignment.kind !== 'setup' && assignment.workspace.path != null)
         release = await this.lockWorkspace(dir, say)
       if (signal.aborted) throw signal.reason
-      if (assignment.kind !== 'setup') await this.prepareStage(assignment, say)
+      // Before the checkout moves the tree: what a dead worker's secret files
+      // replaced goes back onto the commit it came from.
+      if (assignment.kind !== 'setup') {
+        recoverSecretFiles(dir, this.stageDir(assignment.key), say)
+        await this.prepareStage(assignment, say)
+      }
       const ticket = { key, token: assignment.token }
       if (assignment.kind === 'setup' || assignment.checkout.enabled)
         await checkout({
@@ -937,27 +1009,19 @@ export class WorkerRuntime {
           bridge: this.bridge,
           ticket,
           log: say,
+          signal: preparing,
         })
       else {
-        // No checkout: the workspace starts empty (or as left, with reuse), and
-        // the Masonfile comes from a separate copy of the pinned commit.
+        // No checkout: the workspace starts empty (or as left, with reuse).
         if (assignment.workspace.mode === 'clean')
           rmSync(dir, { recursive: true, force: true })
         mkdirSync(dir, { recursive: true, mode: 0o700 })
         source = this.path('sources', String(slot), assignment.project)
-        await checkout({
-          dir: source,
-          repository: assignment.repository,
-          commit: assignment.commit,
-          repositories: [],
-          submodules: false,
-          lfs: false,
-          mode: 'clean',
-          bridge: this.bridge,
-          ticket,
-          log: say,
-        })
+        await this.stageSource(assignment, source, ticket, say, preparing)
       }
+      // A clean checkout reset the tree: whatever recovery could not clean is gone.
+      if (assignment.kind !== 'setup' && assignment.workspace.mode === 'clean')
+        forgetSecretFiles(dir, this.stageDir(assignment.key))
       if (signal.aborted) throw signal.reason
       if (assignment.kind === 'setup')
         report = await this.setup(assignment, dir, log, signal)
@@ -980,10 +1044,15 @@ export class WorkerRuntime {
             )
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const late = deadline?.aborted === true && !signal.aborted
+      const message = late
+        ? `The checkout ran past the stage's timeout of ${duration(assignment.kind === 'setup' ? 0 : assignment.timeout * 1000)}`
+        : error instanceof Error
+          ? error.message
+          : String(error)
       say(`${message}\n`)
       report = {
-        status: signal.aborted ? 'cancelled' : 'failed',
+        status: signal.aborted ? 'cancelled' : late ? 'timed_out' : 'failed',
         reason: message,
       }
     } finally {
@@ -1033,10 +1102,26 @@ export class WorkerRuntime {
         lstatSync(file).size < 256
           ? readFileSync(file, 'utf8')
           : undefined
+      const wanted = wantedProjectTools(graph)
+      const tools =
+        wanted.length === 0
+          ? undefined
+          : await readProjectTools(
+              dir,
+              wanted,
+              async () =>
+                JSON.parse(
+                  await fetchText(
+                    `${(this.options.toolSources ?? defaultSources).node}/index.json`,
+                    signal,
+                  ),
+                ) as NodeRelease[],
+            )
       return {
         status: 'succeeded',
         value: graph as Json,
         ...(xcodeVersion == null ? {} : { xcodeVersion }),
+        ...(tools == null ? {} : { projectTools: tools }),
       }
     } catch (error) {
       if (error instanceof SetupFailed)
@@ -1079,9 +1164,7 @@ export class WorkerRuntime {
       })
     }
     if ((assignment.tools?.simulators ?? []).length > 0)
-      prepared.simulatorSet = simulatorSet(
-        this.path('tmp', `stage-${safe(assignment.key)}`),
-      )
+      prepared.simulatorSet = simulatorSet(this.stageDir(assignment.key))
     if (assignment.apple != null) {
       const signing = assignment.apple
       const dir = this.path('keychains')
@@ -1097,7 +1180,7 @@ export class WorkerRuntime {
       const profiles = installProfiles(signing, this.options.home)
       this.journal.setSigning(assignment.key, { keychain, profiles })
       const exportFile = path.join(
-        this.path('tmp', `stage-${safe(assignment.key)}`),
+        this.stageDir(assignment.key),
         'ExportOptions.plist',
       )
       mkdirSync(path.dirname(exportFile), { recursive: true, mode: 0o700 })
@@ -1196,6 +1279,60 @@ export class WorkerRuntime {
     }
   }
 
+  /**
+   * Where a stage with no checkout finds its Masonfile: the master sends
+   * the file itself, so the node gets none of the repository. A Masonfile
+   * that imports other files of the repository at run time gets a shallow
+   * copy of the pinned commit instead, without its history.
+   */
+  private async stageSource(
+    assignment: StageAssignment,
+    source: string,
+    ticket: { key: string; token: string },
+    say: (text: string) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let given: { path: string; text: string } | undefined
+    try {
+      given = await this.request<{ path: string; text: string }>(
+        'stage.masonfile',
+        ticket,
+        60_000,
+      )
+    } catch (error) {
+      // A master too old to send it: the shallow copy below.
+      if (!(error instanceof LinkError) || error.code === 'closed') throw error
+      say(`The master sent no Masonfile (${error.message})\n`)
+    }
+    const imports = given == null ? [] : localImports(given.text)
+    if (given != null && imports.length === 0) {
+      rmSync(source, { recursive: true, force: true })
+      const file = path.join(source, relativePath(given.path))
+      mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+      writeFileSync(file, given.text + '\n', { mode: 0o600 })
+      say(`Running ${given.path} from the master, with no checkout\n`)
+      return
+    }
+    if (imports.length > 0)
+      say(
+        `${given!.path} imports ${imports.join(', ')}: fetching the pinned commit alone\n`,
+      )
+    await checkout({
+      dir: source,
+      repository: assignment.repository,
+      commit: assignment.commit,
+      repositories: [],
+      depth: 1,
+      submodules: false,
+      lfs: false,
+      mode: 'clean',
+      bridge: this.bridge,
+      ticket,
+      log: say,
+      signal,
+    })
+  }
+
   private async stage(
     assignment: StageAssignment,
     dir: string,
@@ -1208,7 +1345,7 @@ export class WorkerRuntime {
       (existsSync(path.join(source, 'Masonfile.ts'))
         ? 'Masonfile.ts'
         : 'Masonfile.js')
-    const privateDir = this.path('tmp', `stage-${safe(assignment.key)}`)
+    const privateDir = this.stageDir(assignment.key)
     const result = await runStage({
       snapshot: {
         masonfile: inside(source, relativePath(entry)),
@@ -1604,10 +1741,7 @@ export class WorkerRuntime {
     const prepared = this.prepared.get(assignment.key)?.apple
     if (prepared == null)
       throw new Error('This stage declared no Apple signing')
-    const scratch = path.join(
-      this.path('tmp', `stage-${safe(assignment.key)}`),
-      'apple',
-    )
+    const scratch = path.join(this.stageDir(assignment.key), 'apple')
     mkdirSync(scratch, { recursive: true, mode: 0o700 })
     const keep = this.keeper(assignment, dir, say)
     return {
@@ -1616,7 +1750,7 @@ export class WorkerRuntime {
       signing: prepared.signing,
       keychain: prepared.keychain,
       exportOptions: prepared.exportOptions,
-      exec: this.options.appleExec ?? spawnExec,
+      exec: this.appleExec(assignment),
       log: say,
       entitlements: async (values) =>
         await this.request('apple.entitlements', {
@@ -1638,6 +1772,20 @@ export class WorkerRuntime {
     }
   }
 
+  /**
+   * Runs the Apple steps' tools (xcodebuild, xcrun) with the stage's
+   * environment under the call's own, so build phases see the stage's tools
+   * and Xcode as `ctx.sh` does.
+   */
+  private appleExec(assignment: StageAssignment): Exec {
+    const exec = this.options.appleExec ?? spawnExec
+    return async (file, args, options) =>
+      await exec(file, args, {
+        ...options,
+        env: { ...this.stageEnvironment(assignment), ...options.env },
+      })
+  }
+
   private distributeContext(
     assignment: StageAssignment,
     dir: string,
@@ -1645,10 +1793,7 @@ export class WorkerRuntime {
   ): DistributeContext {
     if (this.prepared.get(assignment.key)?.apple == null)
       throw new Error('This stage declared no Apple signing')
-    const scratch = path.join(
-      this.path('tmp', `stage-${safe(assignment.key)}`),
-      'apple',
-    )
+    const scratch = path.join(this.stageDir(assignment.key), 'apple')
     mkdirSync(scratch, { recursive: true, mode: 0o700 })
     const keep = this.keeper(assignment, dir, say)
     return {
@@ -1667,7 +1812,7 @@ export class WorkerRuntime {
         const controller = this.controllers.get(assignment.key)
         await this.connected(controller?.signal ?? new AbortController().signal)
       },
-      exec: this.options.appleExec ?? spawnExec,
+      exec: this.appleExec(assignment),
       log: say,
       ...(keep == null ? {} : { keep }),
       ...(this.options.appleFetch == null
@@ -1690,6 +1835,12 @@ export class WorkerRuntime {
       scratch: this.path('tmp', 'artifacts'),
       request: async <T>(method: string, params: unknown): Promise<T> =>
         await this.request<T>(method, params, 5 * 60_000),
+      stream: (method: string, params: unknown): Stream => {
+        const link = this.options.link()
+        if (link == null || link.closed)
+          throw new LinkError('The master is not connected', 'closed')
+        return link.openStream(method, params)
+      },
       connected: async (): Promise<void> => {
         const controller = this.controllers.get(assignment.key)
         await this.connected(controller?.signal ?? new AbortController().signal)

@@ -142,7 +142,7 @@ describe('Master database, setup and import', function () {
     assert.equal(
       (db.prepare('PRAGMA user_version').get() as { user_version: number })
         .user_version,
-      7,
+      8,
     )
     for (const table of [
       'accounts',
@@ -153,8 +153,8 @@ describe('Master database, setup and import', function () {
       'api_keys',
       'projects',
       'project_apps',
-      'project_env',
-      'project_files',
+      'project_secrets',
+      'secret_audit',
       'branch_rules',
       'settings',
       'change_log',
@@ -172,9 +172,68 @@ describe('Master database, setup and import', function () {
     assert.throws(() => migrateMaster(db), /newer Mason/)
     db.close()
     const newer = new DatabaseSync(path.join(root, 'n.sqlite'))
-    newer.exec('PRAGMA user_version=8')
+    newer.exec('PRAGMA user_version=9')
     assert.throws(() => migrateMaster(newer), /newer Mason/)
     newer.close()
+  })
+
+  it('U1.1 schema 17 makes every known Space a storage location: the storage setting’s, and each cloud host’s', () => {
+    const db = new DatabaseSync(path.join(root, 'locations.sqlite'))
+    migrateMaster(db)
+    db.exec(`DROP TABLE storage_locations;
+    UPDATE meta SET value='16' WHERE key='master_schema';
+    INSERT INTO cloud_hosts(name,account,provider,region,size,image,state,created_at,updated_at,space_bucket,space_region,space_key_id,space_secret,space_owned,space_key_owned,role)
+      VALUES('h','do','digitalocean','sfo3','s','i','ready',1,2,'host-space','sfo3','HOSTKEY12345','host-secret-1',1,1,'host'),
+            ('gone','do','digitalocean','sfo3','s','i','removed',1,2,'old-space','sfo3','OLDKEY123456','old-secret-12',1,1,'host');`)
+    db.prepare(
+      "INSERT INTO settings(area,value,updated_at,updated_by) VALUES('storage',?,1,'paul')",
+    ).run(
+      JSON.stringify({
+        driver: 's3',
+        s3: {
+          endpoint: 'https://nyc3.digitaloceanspaces.com',
+          bucket: 'made-space',
+          region: 'nyc3',
+          accessKeyId: 'MADEKEY12345',
+          secretAccessKey: 'made-secret-1',
+        },
+        managed: { account: 'do', keyId: 'MADEKEY12345' },
+      }),
+    )
+    migrateMaster(db)
+    migrateMaster(db)
+    assert.deepEqual(
+      (
+        db
+          .prepare(
+            'SELECT id,bucket,origin,bucket_owned,key_owned,account,key_id,host FROM storage_locations ORDER BY bucket',
+          )
+          .all() as object[]
+      ).map((row) => ({ ...row })),
+      [
+        {
+          id: 'space-host-space-sfo3.digitaloceanspaces.com',
+          bucket: 'host-space',
+          origin: 'host',
+          bucket_owned: 1,
+          key_owned: 1,
+          account: 'do',
+          key_id: 'HOSTKEY12345',
+          host: 'h',
+        },
+        {
+          id: 'space-made-space-nyc3.digitaloceanspaces.com',
+          bucket: 'made-space',
+          origin: 'made',
+          bucket_owned: 1,
+          key_owned: 1,
+          account: 'do',
+          key_id: 'MADEKEY12345',
+          host: null,
+        },
+      ],
+    )
+    db.close()
   })
 
   it('U2.1 schema 15 keeps every cloud host and lets one be updating', () => {
@@ -233,6 +292,233 @@ describe('Master database, setup and import', function () {
     db.close()
   })
 
+  it('U13.15 schema 18 records which credential pushed each backup', () => {
+    const db = new DatabaseSync(path.join(root, 'auth.sqlite'))
+    migrateMaster(db)
+    db.exec(`ALTER TABLE backup_runs DROP COLUMN auth;
+    INSERT INTO backup_runs(started_at,finished_at,status,commit_sha) VALUES(1,2,'succeeded','c');
+    UPDATE meta SET value='17' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      {
+        ...(db
+          .prepare('SELECT commit_sha,auth FROM backup_runs')
+          .get() as object),
+      },
+      { commit_sha: 'c', auth: null },
+    )
+    db.exec("UPDATE backup_runs SET auth='github'")
+    db.close()
+  })
+
+  it('U5.7/U12.5 schemas 20 and 21 give reservations a block and drop upload keys', () => {
+    const db = new DatabaseSync(path.join(root, 'blocks.sqlite'))
+    migrateMaster(db)
+    db.exec(`ALTER TABLE build_number_reservations DROP COLUMN block;
+    ALTER TABLE build_reservations DROP COLUMN block;
+    INSERT INTO projects(id,slug,name,repository,format,timeout_seconds,created_at)
+      VALUES(1,'p','P','https://github.com/a/p','pipeline',60,0);
+    INSERT INTO build_number_reservations(project_id,key,reservation,value,created_at) VALUES(1,'app','run1','7',0);
+    INSERT INTO api_keys(id,hash,name,apps,created_at,role) VALUES
+      ('u','${'a'.repeat(64)}','zealot','[1]',0,'upload'),
+      ('d','${'b'.repeat(64)}','ci','"all"',0,'developer');
+    UPDATE meta SET value='19' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      {
+        ...(db
+          .prepare('SELECT value,block FROM build_number_reservations')
+          .get() as object),
+      },
+      { value: '7', block: 1 },
+    )
+    assert(
+      db
+        .prepare('PRAGMA table_info(build_reservations)')
+        .all()
+        .some((column) => column.name === 'block'),
+    )
+    assert.deepEqual(
+      db
+        .prepare('SELECT id FROM api_keys ORDER BY id')
+        .all()
+        .map((row) => row.id),
+      ['d'],
+    )
+    // Again: nothing to add, nothing to delete.
+    db.exec("UPDATE meta SET value='19' WHERE key='master_schema'")
+    migrateMaster(db)
+    db.close()
+  })
+
+  it('U12.16 schema 22 records each published or staged reservation as its default variant', () => {
+    const db = new DatabaseSync(path.join(root, 'publications.sqlite'))
+    migrateMaster(db)
+    db.exec(`DROP TABLE build_publications;
+    INSERT INTO projects(id,slug,name,repository,format,timeout_seconds,created_at)
+      VALUES(1,'p','P','https://github.com/a/p','pipeline',60,0);
+    INSERT INTO jobs(id,project_id,number,workflow,branch,trigger,status,created,request)
+      VALUES('job1',1,1,'build','master','request','succeeded',0,'{}');
+    INSERT INTO apps(id,slug,name,position,enabled) VALUES(1,'a','A',0,1);
+    INSERT INTO channels(id,app_id,platform,channel_key,formats,enabled) VALUES(1,1,'android','k','["apk"]',1);
+    INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields)
+      VALUES(5,1,1,'android','master','c','1','7','a','apk','${'d'.repeat(64)}',1,'${'a'.repeat(32)}.apk',0,1,'ready','','pipeline','{}');
+    INSERT INTO build_reservations(id,job_id,stage,attempt,project_id,app_id,platform,build_number,created_at,build_id,staged_at) VALUES
+      ('published','job1','s',1,1,1,'android','7',0,5,0),
+      ('staged','job1','s',1,1,1,'android','8',0,NULL,3),
+      ('unused','job1','s',1,1,1,'android','9',0,NULL,NULL);
+    UPDATE meta SET value='21' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      db
+        .prepare(
+          'SELECT reservation_id,variant,digest,build_id,staged_at FROM build_publications ORDER BY reservation_id',
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      [
+        {
+          reservation_id: 'published',
+          variant: '',
+          digest: 'd'.repeat(64),
+          build_id: 5,
+          staged_at: 0,
+        },
+        {
+          reservation_id: 'staged',
+          variant: '',
+          digest: null,
+          build_id: null,
+          staged_at: 3,
+        },
+      ],
+    )
+    db.close()
+  })
+
+  it('U7.2 schema 24 labels every node, permanent cloud worker and pool setup, as each ran setup before', () => {
+    const db = new DatabaseSync(path.join(root, 'setup-label.sqlite'))
+    migrateMaster(db)
+    db.exec(`INSERT INTO nodes(fingerprint,public_key,certificate_hash,role,host,port,name,added_at,last_seen,labels) VALUES
+      ('a','','','worker','h',1,'a',0,0,'[]'),
+      ('b','','','worker','h',2,'b',0,0,'["signing"]'),
+      ('c','','','worker','h',3,'c',0,0,'["setup","x"]');
+    INSERT INTO cloud_hosts(name,account,provider,region,size,image,state,created_at,updated_at,role,labels) VALUES
+      ('w','do','digitalocean','sfo3','s','i','ready',0,0,'worker','["gpu"]'),
+      ('h','do','digitalocean','sfo3','s','i','ready',0,0,'host','[]');
+    INSERT INTO settings(area,value,updated_at,updated_by) VALUES('cloud','{"pools":[{"name":"p","labels":[]},{"name":"q"}]}',0,'test');
+    UPDATE meta SET value='23' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      db
+        .prepare('SELECT fingerprint,labels FROM nodes ORDER BY fingerprint')
+        .all()
+        .map((row) => [row.fingerprint, JSON.parse(String(row.labels))]),
+      [
+        ['a', ['setup']],
+        ['b', ['signing', 'setup']],
+        ['c', ['setup', 'x']],
+      ],
+    )
+    assert.deepEqual(
+      db
+        .prepare('SELECT name,labels FROM cloud_hosts ORDER BY name')
+        .all()
+        .map((row) => [row.name, JSON.parse(String(row.labels))]),
+      [
+        ['h', []],
+        ['w', ['gpu', 'setup']],
+      ],
+    )
+    const cloud = JSON.parse(
+      String(
+        (
+          db.prepare("SELECT value FROM settings WHERE area='cloud'").get() as {
+            value: string
+          }
+        ).value,
+      ),
+    ) as { pools: Array<{ labels: string[] }> }
+    assert.deepEqual(
+      cloud.pools.map((pool) => pool.labels),
+      [['setup'], ['setup']],
+    )
+    // A master with no cloud setting, or one with no pools, migrates too.
+    db.exec(`DELETE FROM settings WHERE area='cloud';
+    UPDATE meta SET value='23' WHERE key='master_schema';`)
+    migrateMaster(db)
+    db.exec(`INSERT INTO settings(area,value,updated_at,updated_by) VALUES('cloud','{}',0,'test');
+    UPDATE meta SET value='23' WHERE key='master_schema';`)
+    migrateMaster(db)
+    db.close()
+  })
+
+  it('U18.10 schema 19 turns project_env and project_files into default variants and drops them', () => {
+    const db = new DatabaseSync(path.join(root, 'variants.sqlite'))
+    migrateMaster(db)
+    const b64 = (text: string): string => Buffer.from(text).toString('base64')
+    db.exec(`
+    CREATE TABLE project_env (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      name TEXT NOT NULL, value TEXT NOT NULL, secret INTEGER NOT NULL DEFAULT 1 CHECK(secret IN (0,1)),
+      PRIMARY KEY(project_id, name)
+    ) STRICT;
+    CREATE TABLE project_files (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      destination TEXT NOT NULL, contents TEXT NOT NULL, env TEXT,
+      PRIMARY KEY(project_id, destination)
+    ) STRICT;
+    INSERT INTO projects(id,slug,name,repository,format,timeout_seconds,created_at)
+      VALUES(1,'pipe','Pipe','https://github.com/a/pipe','pipeline',60,0),
+            (2,'scr','Scr','https://github.com/a/scr','script',60,0);
+    INSERT INTO project_env VALUES(1,'API_TOKEN','tok',1),(2,'CONFIG','v',1),(2,'PLAIN','p',0);
+    INSERT INTO project_files VALUES
+      (1,'master/config.json','${b64('{"a":1}')}',NULL),
+      (1,'keystore.jks','${Buffer.from([0, 255]).toString('base64')}','ANDROID_KEYSTORE'),
+      (1,'API_TOKEN','${b64('x')}',NULL),
+      (1,'X.file','${b64('y')}',NULL),
+      (1,'a.json','${b64('{}')}','X'),
+      (1,'X','${b64('z')}',NULL),
+      (1,'me@x.json','${b64('{}')}',NULL),
+      (1,'.git/hooks','${Buffer.from([0, 1]).toString('base64')}',NULL),
+      (2,'CONFIG','${b64('{}')}','CONFIG_FILE');
+    UPDATE meta SET value='18' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      db
+        .prepare(
+          'SELECT project_id,name,kind,configs,text,masked,path_env,destination,bytes FROM project_secrets ORDER BY project_id,name',
+        )
+        .all()
+        .map((row) => Object.values(row)),
+      [
+        [1, 'ANDROID_KEYSTORE', 'file', '', 0, 1, 'ANDROID_KEYSTORE', null, 2],
+        [1, 'API_TOKEN', 'value', '', 1, 1, null, null, 3],
+        [1, 'API_TOKEN.file', 'file', '', 1, 1, null, null, 1],
+        // Files with a variable first: a.json takes X, so the file named X gains .file,
+        // past X.file, which a file already holds.
+        [1, 'X', 'file', '', 1, 1, 'X', null, 2],
+        [1, 'X.file', 'file', '', 1, 1, null, null, 1],
+        [1, 'X.file.file', 'file', '', 1, 1, null, null, 1],
+        [1, '_git/hooks', 'file', '', 0, 1, null, null, 2],
+        [1, 'master/config.json', 'file', '', 1, 1, null, null, 7],
+        [1, 'me_x.json', 'file', '', 1, 1, null, null, 2],
+        [2, 'CONFIG', 'value', '', 1, 1, null, null, 1],
+        [2, 'CONFIG.file', 'file', '', 1, 1, 'CONFIG_FILE', 'CONFIG', 2],
+        [2, 'PLAIN', 'value', '', 1, 0, null, null, 1],
+      ],
+    )
+    assert.equal(
+      db
+        .prepare(
+          "SELECT COUNT(*) n FROM sqlite_master WHERE name IN ('project_env','project_files')",
+        )
+        .get()!.n,
+      0,
+    )
+    db.close()
+  })
+
   it('U3.1 schema 16 keeps every cloud host as a host and allows a worker row with its type and labels', () => {
     const db = new DatabaseSync(path.join(root, 'nodes.sqlite'))
     migrateMaster(db)
@@ -278,7 +564,7 @@ describe('Master database, setup and import', function () {
         channels: 2,
         builds: 3,
         devices: 1,
-        keys: { upload: 1, admin: 1, developer: 1 },
+        keys: { admin: 1, developer: 1, uploadSkipped: 1 },
         projects: 2,
         branchRules: 4,
         adminKeys: 1,
@@ -371,10 +657,11 @@ describe('Master database, setup and import', function () {
         .name,
       'My iPhone',
     )
-    // Imported keys keep their digests, so each still authenticates.
+    // Imported keys keep their digests, so each still authenticates; upload
+    // keys stay behind, since the cluster publishes only through ctx.publish.
     const keys = new MasterKeys(database)
-    const upload = keys.authenticate(fixture.tokens.upload)!
-    assert.deepEqual([upload.role, upload.apps], ['upload', [fixture.apps.app]])
+    assert.equal(keys.authenticate(fixture.tokens.upload), undefined)
+    assert.equal(summary.keys.uploadSkipped, 1)
     assert.equal(keys.authenticate(fixture.tokens.admin)!.role, 'admin')
     const builder = keys.authenticate(fixture.tokens.builder)!
     assert.deepEqual(
@@ -402,26 +689,31 @@ describe('Master database, setup and import', function () {
         { workspace: 'git-worktrees', platforms: ['ios', 'android'] },
       ],
     )
+    // The app's environment and files become the script project's default variants.
     assert.deepEqual(
       db
         .prepare(
-          'SELECT name,value,secret FROM project_env WHERE project_id=? ORDER BY name',
+          "SELECT name,contents,masked FROM project_secrets WHERE project_id=? AND kind='value' ORDER BY name",
         )
         .all(project.id as number)
-        .map((row) => [row.name, row.value, row.secret]),
+        .map((row) => [row.name, row.contents, row.masked]),
       [
         ['APP_SERVER_URL', 'https://example.test', 0],
         ['SIGNING_TOKEN', 'tok=en/+value', 1],
       ],
     )
     const file = db
-      .prepare('SELECT * FROM project_files WHERE project_id=?')
+      .prepare(
+        "SELECT * FROM project_secrets WHERE project_id=? AND kind='file'",
+      )
       .get(project.id as number)!
     assert.equal(
       Buffer.from(String(file.contents), 'base64').toString(),
       '{"secret":1}',
     )
-    assert.equal(file.env, 'DEPLOY_CONFIG_FILE')
+    assert.equal(file.path_env, 'DEPLOY_CONFIG_FILE')
+    assert.equal(file.destination, file.name)
+    assert.equal(file.configs, '')
     assert.deepEqual(
       db
         .prepare(
@@ -460,6 +752,44 @@ describe('Master database, setup and import', function () {
       () => importDeployment(database, { ...fixture, distribution: old }),
       /schema 6/,
     )
+    // A deployment at 7 (before variants) or 8 imports; its builds are default variants.
+    const seven = path.join(root, 'seven.sqlite')
+    writeFileSync(seven, readFileSync(fixture.distribution))
+    const sevenDb = new DatabaseSync(seven)
+    // Schema 7's builds table: no variant or run columns.
+    sevenDb.exec(`PRAGMA foreign_keys=OFF;
+      CREATE TABLE builds_v7 AS SELECT id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,deleted_at,changelog,source,custom_fields FROM builds;
+      DROP TABLE builds;
+      ALTER TABLE builds_v7 RENAME TO builds;
+      PRAGMA user_version=7`)
+    const sevenBuilds = Number(
+      (sevenDb.prepare('SELECT COUNT(*) n FROM builds').get() as { n: number })
+        .n,
+    )
+    assert(sevenBuilds > 0)
+    sevenDb.close()
+    const fresh = new MasterDatabase(
+      new DatabaseSync(path.join(root, 'master-seven.sqlite')),
+    )
+    importDeployment(fresh, { ...fixture, distribution: seven })
+    assert.deepEqual(
+      fresh.db
+        .prepare('SELECT DISTINCT variant FROM builds')
+        .all()
+        .map((row) => row.variant),
+      [''],
+    )
+    assert.equal(
+      Number(
+        (
+          fresh.db.prepare('SELECT COUNT(*) n FROM builds').get() as {
+            n: number
+          }
+        ).n,
+      ),
+      sevenBuilds,
+    )
+    fresh.db.close()
     const builder = new DatabaseSync(fixture.builder)
     builder.exec('UPDATE builder_meta SET version=2')
     builder.close()
@@ -800,29 +1130,12 @@ describe('Master database, setup and import', function () {
         (await api(node, 'GET', '/api/v2/keys', developer.json.token)).status,
         403,
       )
-      // Upload keys publish only through the upload API.
-      assert.equal((await create(admin!, { role: 'upload' })).status, 400)
-      const appId = Number(
-        node.databases
-          .get('master.sqlite')!
-          .prepare(
-            "INSERT INTO apps(slug,name,position,enabled) VALUES('a','A',0,1)",
-          )
-          .run().lastInsertRowid,
-      )
-      const upload = await create(admin!, { role: 'upload', apps: [appId] })
-      assert.equal(upload.status, 201)
-      assert.equal(
-        (await api(node, 'GET', '/api/v2/keys', upload.json.token)).status,
-        403,
-      )
-      assert.equal(
-        (await create(admin!, { role: 'upload', apps: [999] })).status,
-        400,
-      )
-      assert.equal(
-        (await create(admin!, { role: 'developer', apps: [appId] })).status,
-        400,
+      // The cluster has no upload keys: publishing goes through ctx.publish.
+      const refused = await create(admin!, { role: 'upload' })
+      assert.equal(refused.status, 400)
+      assert.match(
+        JSON.stringify(refused.json),
+        /Expected a role: admin, manager, developer or tester/,
       )
       assert.equal(
         (await create(admin!, { role: 'developer', expiresAt: 1 })).status,

@@ -1,11 +1,6 @@
 import { randomBytes } from 'node:crypto'
-import { asArray, asBoolean, asObject, asOptional, asString } from 'cleaners'
-import {
-  branchName,
-  envName,
-  relativePath,
-  repository,
-} from '../builder/config.js'
+import { asArray, asBoolean, asObject, asOptional } from 'cleaners'
+import { branchName, relativePath, repository } from '../builder/config.js'
 import {
   asPlatform,
   formats,
@@ -19,6 +14,7 @@ import type { MasterDatabase } from './database.js'
 import { asRules, type BranchRule } from './rules.js'
 import { allow, allowRole } from './permissions.js'
 import type { Actor } from './roles.js'
+import { listVariants, type SecretVariant } from './secrets.js'
 
 export class ProjectNotFound extends Error {
   constructor(slug: string) {
@@ -62,9 +58,8 @@ export interface Project {
   webhookSecret: { set: boolean }
   apps: ProjectApp[]
   rules: BranchRule[]
-  /** Secret names only; values are write-only. */
-  env: Array<{ name: string; secret: boolean }>
-  files: Array<{ destination: string; env?: string }>
+  /** Secret variants: names, kinds and configs, never contents. */
+  secrets: SecretVariant[]
   /** Other repositories its stages may fetch: submodules and `ctx.checkout`. */
   repositories: string[]
   /** Whether `ctx.git.tag` with `push` may push tags to GitHub. */
@@ -150,31 +145,6 @@ const asAppInput = asObject({
   ),
 })
 
-const asSecretsInput = asObject({
-  env: asOptional(
-    asArray(
-      asObject({
-        name: envName,
-        value: asOptional(asString),
-        keep: asOptional(asBoolean),
-        secret: asOptional(asBoolean, true),
-      }),
-    ),
-    [],
-  ),
-  files: asOptional(
-    asArray(
-      asObject({
-        destination: relativePath,
-        contents: asOptional(asString),
-        keep: asOptional(asBoolean),
-        env: asOptional(envName),
-      }),
-    ),
-    [],
-  ),
-})
-
 type Row = Record<string, unknown>
 
 /** Projects: a repository, the app IDs it owns, its secrets and branch rules. */
@@ -231,21 +201,7 @@ export class Projects {
       webhookSecret: { set: row.webhook_secret != null },
       apps,
       rules: this.rules(id),
-      env: this.db
-        .prepare(
-          'SELECT name,secret FROM project_env WHERE project_id=? ORDER BY name',
-        )
-        .all(id)
-        .map((env) => ({ name: String(env.name), secret: env.secret === 1 })),
-      files: this.db
-        .prepare(
-          'SELECT destination,env FROM project_files WHERE project_id=? ORDER BY destination',
-        )
-        .all(id)
-        .map((file) => ({
-          destination: String(file.destination),
-          ...(file.env == null ? {} : { env: String(file.env) }),
-        })),
+      secrets: listVariants(this.db, id),
     }
   }
   private row(slug: string): Row {
@@ -286,34 +242,6 @@ export class Projects {
         pattern: String(rule.pattern),
         mode: rule.mode === 'automatic' ? 'automatic' : 'request',
       }))
-  }
-  /** Secret values, for the master to deliver to a stage. */
-  secrets(projectId: number): {
-    env: Array<{ name: string; value: string; secret: boolean }>
-    files: Array<{ destination: string; contents: string; env?: string }>
-  } {
-    return {
-      env: this.db
-        .prepare(
-          'SELECT name,value,secret FROM project_env WHERE project_id=? ORDER BY name',
-        )
-        .all(projectId)
-        .map((env) => ({
-          name: String(env.name),
-          value: String(env.value),
-          secret: env.secret === 1,
-        })),
-      files: this.db
-        .prepare(
-          'SELECT destination,contents,env FROM project_files WHERE project_id=? ORDER BY destination',
-        )
-        .all(projectId)
-        .map((file) => ({
-          destination: String(file.destination),
-          contents: String(file.contents),
-          ...(file.env == null ? {} : { env: String(file.env) }),
-        })),
-    }
   }
   webhookSecret(projectId: number): string | undefined {
     const row = this.db
@@ -539,82 +467,6 @@ export class Projects {
       if (result.changes === 0) throw new ProjectNotFound(`${slug}/${bundleId}`)
       this.master.audit(actor, 'project.app.remove', `${slug}:${bundleId}`)
       this.master.change('project', slug)
-    })
-  }
-
-  /**
-   * Replaces a project's secrets. Values are write-only: an entry with
-   * `keep: true` reuses the stored value, and an entry left out is removed.
-   */
-  setSecrets(actor: Actor, slug: string, value: unknown): Project {
-    allow(actor, 'secrets.change', { project: slug })
-    const input = asSecretsInput(value ?? {})
-    return this.master.transaction(() => {
-      const project = Number(this.row(slug).id)
-      const stored = this.secrets(project)
-      const env = input.env.map((entry) => {
-        if (entry.keep === true) {
-          const old = stored.env.find((item) => item.name === entry.name)
-          if (old == null)
-            throw new Error(`No stored value of ${entry.name} to keep`)
-          return { ...old, secret: entry.secret }
-        }
-        if (
-          entry.value == null ||
-          entry.value.length > 65536 ||
-          entry.value.includes('\0')
-        )
-          throw new Error(`Invalid value for ${entry.name}`)
-        return { name: entry.name, value: entry.value, secret: entry.secret }
-      })
-      const files = input.files.map((entry) => {
-        if (entry.keep === true) {
-          const old = stored.files.find(
-            (item) => item.destination === entry.destination,
-          )
-          if (old == null)
-            throw new Error(`No stored file ${entry.destination} to keep`)
-          return { ...old, ...(entry.env == null ? {} : { env: entry.env }) }
-        }
-        if (
-          entry.contents == null ||
-          Buffer.from(entry.contents, 'base64').toString('base64') !==
-            entry.contents
-        )
-          throw new Error(`File ${entry.destination} needs base64 contents`)
-        return {
-          destination: entry.destination,
-          contents: entry.contents,
-          ...(entry.env == null ? {} : { env: entry.env }),
-        }
-      })
-      const names = [
-        ...env.map((entry) => entry.name),
-        ...files.flatMap((file) => (file.env == null ? [] : [file.env])),
-      ]
-      if (
-        new Set(names).size !== names.length ||
-        new Set(files.map((file) => file.destination)).size !== files.length
-      )
-        throw new Error('Duplicate secret')
-      this.db.prepare('DELETE FROM project_env WHERE project_id=?').run(project)
-      this.db
-        .prepare('DELETE FROM project_files WHERE project_id=?')
-        .run(project)
-      for (const entry of env)
-        this.db
-          .prepare(
-            'INSERT INTO project_env(project_id,name,value,secret) VALUES(?,?,?,?)',
-          )
-          .run(project, entry.name, entry.value, Number(entry.secret))
-      for (const file of files)
-        this.db
-          .prepare(
-            'INSERT INTO project_files(project_id,destination,contents,env) VALUES(?,?,?,?)',
-          )
-          .run(project, file.destination, file.contents, file.env ?? null)
-      this.master.audit(actor, 'project.secrets', slug)
-      return this.get(slug)
     })
   }
 

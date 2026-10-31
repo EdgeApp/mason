@@ -11,7 +11,8 @@ import {
 } from './graph.js'
 import { ago, duration, escape, time } from './html.js'
 import { icon } from './icons.js'
-import { logHtml, plainLog } from './log.js'
+import { logHtml } from './log.js'
+import { stepItems } from './steps.js'
 
 /** A run's graph as its stages and post stages, from the graph its setup recorded. */
 export interface RunGraph {
@@ -55,6 +56,8 @@ export interface RunStep {
   ms: number | null
   logStart: number | null
   logEnd: number | null
+  /** The section step it ran in, if any. */
+  parent: number | null
 }
 
 export interface RunData {
@@ -137,7 +140,7 @@ export function runData(
   const steps = (
     db
       .prepare(
-        'SELECT stage,attempt,id,kind,title,status,ms,log_start,log_end FROM job_steps WHERE job_id=? ORDER BY stage,attempt,id',
+        'SELECT stage,attempt,id,kind,title,status,ms,log_start,log_end,parent FROM job_steps WHERE job_id=? ORDER BY stage,attempt,id',
       )
       .all(id) as Array<{
       stage: string
@@ -149,6 +152,7 @@ export function runData(
       ms: number | null
       log_start: number | null
       log_end: number | null
+      parent: number | null
     }>
   ).map((row) => ({
     stage: row.stage,
@@ -160,6 +164,7 @@ export function runData(
     ms: row.ms,
     logStart: row.log_start,
     logEnd: row.log_end,
+    parent: row.parent ?? null,
   }))
   const projectId = Number(job.project_id)
   const history = (
@@ -417,14 +422,14 @@ function stagePanel(run: RunData, options: RunViewOptions): string {
     artifacts.length === 0
       ? ''
       : `<h3>Artifacts</h3><ul class="plain">${artifacts.map((artifact) => `<li><a href="${escape(`${options.base}/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.name)}`)}">${escape(artifact.name)}</a> <small>${escape(artifact.kind)} · ${escape(bytes(artifact.size))}</small></li>`).join('')}</ul>`
-  }<h3>Steps</h3><ol class="steps" data-steps>${
-    steps
-      .map(
-        (step) =>
-          `<li class="step${step.id === options.step ? ' open' : ''}"><a href="?stage=${encodeURIComponent(selected.name)}&amp;step=${step.id}${options.tab === 'timeline' ? '&amp;tab=timeline' : ''}">${statusDot(step.status)}<span class="mono">${escape(plainLog(step.title))}</span><small>${escape(step.kind)}${step.ms == null ? '' : ` · ${escape(duration(step.ms))}`}</small></a></li>`,
-      )
-      .join('') || '<li class="empty">No steps yet.</li>'
-  }</ol><h3>${options.step == null ? 'Log' : 'Lines of this step'}</h3>${downloads}<div data-log data-offset="${options.step == null ? (options.logOffset ?? 0) : -1}"${options.logSource == null ? '' : ` data-src="${escape(options.logSource)}"`}>${log}</div></section>`
+  }<h3>Steps</h3><ol class="steps" data-steps>${stepItems(
+    selected.name,
+    steps,
+    {
+      ...(options.step == null ? {} : { open: options.step }),
+      tab: options.tab,
+    },
+  )}</ol><h3>${options.step == null ? 'Log' : 'Lines of this step'}</h3>${downloads}<div data-log data-offset="${options.step == null ? (options.logOffset ?? 0) : -1}"${options.logSource == null ? '' : ` data-src="${escape(options.logSource)}"`}>${log}</div></section>`
 }
 
 function stageList(
@@ -513,7 +518,7 @@ export function runView(run: RunData, options: RunViewOptions): string {
       )}</div></details>`
     : ''
   const params = Object.entries(run.params)
-  const header = `<div class="page-head run-head" data-run="${escape(run.id)}" data-live="${live ? '1' : '0'}"><div><div class="breadcrumbs"><a href="/?project=${encodeURIComponent(run.project.slug)}">${escape(run.project.name)}</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.project.slug)}&amp;branch=${encodeURIComponent(run.branch)}">${escape(run.branch)}</a></div><h1><a href="?" class="run-title">${escape(run.workflow)} #${run.number}</a> <span class="state-${escape(run.status)}" data-run-status>${statusDot(run.status)} ${escape(run.status.replace('_', ' '))}</span></h1><p class="run-meta">${icon('fork_right')} <span class="mono">${escape(run.branch)}</span>${run.commit == null ? '' : ` · ${icon('commit')} <span class="mono">${escape(run.commit.slice(0, 12))}</span>`}${run.project.repository == null ? '' : ` · <span class="mono">${escape(run.project.repository)}</span>`} · ${escape(triggerText[run.trigger] ?? run.trigger)}${run.actor === '' ? '' : ` by ${escape(run.actor)}`} ${time(run.created)} · queued ${escape(duration(queued))}${took == null ? '' : ` · took ${escape(duration(took))}`}${nodes.length === 0 ? '' : ` · on <span class="mono">${nodes.map(escape).join(', ')}</span>`}</p>${run.description == null ? '' : `<p class="run-description">${escape(run.description)}</p>`}${run.reason == null ? '' : `<p class="state-failed">${escape(run.reason)}</p>`}${
+  const header = `<div class="page-head run-head" data-run="${escape(run.id)}" data-live="${live ? '1' : '0'}"><div><div class="breadcrumbs"><a href="/projects/${encodeURIComponent(run.project.slug)}">${escape(run.project.name)}</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.project.slug)}&amp;branch=${encodeURIComponent(run.branch)}">${escape(run.branch)}</a></div><h1><a href="?" class="run-title">${escape(run.workflow)} #${run.number}</a> <span class="state-${escape(run.status)}" data-run-status>${statusDot(run.status)} ${escape(run.status.replace('_', ' '))}</span></h1><p class="run-meta">${icon('fork_right')} <span class="mono">${escape(run.branch)}</span>${run.commit == null ? '' : ` · ${icon('commit')} <span class="mono">${escape(run.commit.slice(0, 12))}</span>`}${run.project.repository == null ? '' : ` · <span class="mono">${escape(run.project.repository)}</span>`} · ${escape(triggerText[run.trigger] ?? run.trigger)}${run.actor === '' ? '' : ` by ${escape(run.actor)}`} ${time(run.created)} · queued ${escape(duration(queued))}${took == null ? '' : ` · took ${escape(duration(took))}`}${nodes.length === 0 ? '' : ` · on <span class="mono">${nodes.map(escape).join(', ')}</span>`}</p>${run.description == null ? '' : `<p class="run-description">${escape(run.description)}</p>`}${run.reason == null ? '' : `<p class="state-failed">${escape(run.reason)}</p>`}${
     params.length === 0
       ? ''
       : `<details><summary>Parameters</summary><ul class="plain">${params.map(([name, value]) => `<li><span class="mono">${escape(name)}</span> = <span class="mono">${escape(JSON.stringify(value))}</span></li>`).join('')}</ul></details>`
@@ -532,22 +537,27 @@ export function runView(run: RunData, options: RunViewOptions): string {
   return `${header}${tabs}${graph}<div class="run-body">${stagePanel(run, options)}${stageList(run, options.selected, options.tab)}</div>${history}`
 }
 
-/** The published builds of a run, for its header (by commit and branch). */
+/**
+ * The published builds of a run, default first: its own, or by commit and
+ * branch from before builds named their run. No page renders it yet; it
+ * keeps `runDetail`'s list.
+ */
 export function runBuilds(db: DatabaseSync, run: RunData): string {
   const rows = db
     .prepare(
-      "SELECT a.name,b.platform,b.version,b.build_number FROM builds b JOIN apps a ON a.id=b.app_id WHERE b.commit_hash=? AND b.branch=? AND b.state='ready' ORDER BY b.id",
+      "SELECT a.name,b.platform,b.version,b.build_number,b.variant FROM builds b JOIN apps a ON a.id=b.app_id WHERE (b.run=? OR (b.run IS NULL AND b.commit_hash=? AND b.branch=?)) AND b.state='ready' ORDER BY b.app_id,b.platform,b.variant<>'',b.variant",
     )
-    .all(run.commit ?? '', run.branch) as Array<{
+    .all(run.id, run.commit ?? '', run.branch) as Array<{
     name: string
     platform: string
     version: string
     build_number: string
+    variant: string
   }>
   return rows
     .map(
       (row) =>
-        `${platformChip(row.platform)} ${escape(row.name)} ${escape(row.version)} (${escape(row.build_number)})`,
+        `${platformChip(row.platform)} ${escape(row.name)} ${escape(row.version)} (${escape(row.build_number)})${row.variant === '' ? '' : ` ${escape(row.variant)}`}`,
     )
     .join(' ')
 }

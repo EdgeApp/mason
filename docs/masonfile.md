@@ -42,8 +42,8 @@ the types-only package `@mason/types`.
 
 A Masonfile exports:
 
-1. **`setup(m)`** — declares workflows and stages. Mason runs it on a worker,
-   **with no secrets**: no secret environment variables, no injected files, no
+1. **`setup(m)`** — declares workflows and stages. Mason runs it on a worker
+   labelled `setup` (below), **with no secrets**: no secret environment variables, no injected files, no
    upload tokens. It must be deterministic for a given commit, branch, trigger
    and parameters, and must not have side effects. It returns nothing; it
    records the graph by calling `m`. The master caches the validated graph by
@@ -96,29 +96,21 @@ constants.
 ## 2. Nodes and node types
 
 A worker **node** is a computer running `mason worker`. It needs no
-configuration file: on first start it creates its identity and prints a
-pairing key and its addresses:
+configuration file. One command installs Mason (with its own Node runtime;
+no Node or npm needed beforehand), starts the worker and its helper as
+services, and prints the pairing key:
 
 ```sh
-sudo mason worker --install      # installs the service and helper, prints the pairing key
+curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh | bash -s -- worker
 # Pairing key: mason1:mldsa65:…
 ```
 
-Mason installs like Homebrew, with one command and no Node or npm needed
-beforehand:
-
-```sh
-/bin/bash -c "$(curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh)"
-# or: wget -qO- …/install.sh | bash
-```
-
-It downloads the Mason release for the computer's OS and architecture from
-GitHub, which bundles its own Node runtime, and puts `mason` on the `PATH`.
-While the Mason repository is private, the installer needs a GitHub token
-(`GITHUB_TOKEN`, or a signed-in `gh`); nodes joining a cluster can instead use
-the host's copy, `curl -fsSL https://<host>/install.sh | bash`, which needs
-none.
-Then `sudo mason worker --install` as above.
+It asks for your password once (or put `sudo` before `bash`); the worker runs
+as the account that ran it, and as a `mason` system user when that is root on
+Linux. Every computer installs this way, cloud machines included: a node never
+downloads Mason from the master or the host. `master` and `host` work the
+same way, and `uninstall <role>` removes the service and the program and keeps
+the data.
 An administrator enters the pairing key and the node's address (URL, IP
 address or DNS name) in **Add node** on the master, or through the API. The
 master pairs, then sets the node's name, type and labels and manages its
@@ -130,6 +122,12 @@ The node reports its OS (`macos`, `linux`, `windows`), architecture (`arm64`,
 list of nodes and their types; types are free-form names an administrator
 chooses (`mac-xcode`, `linux`, `mac-simulators`).
 
+**The `setup` label.** A run's setup executes its branch's Masonfile before
+any stage selector applies, so it runs only on nodes labelled `setup`. Every
+node, permanent cloud node and pool carries the label unless an
+administrator removes it, as from a signing node that should run only the
+stages that ask for it. A Masonfile cannot ask for `setup` in a selector.
+
 A stage's **node selector** says where it may run:
 
 ```ts fragment
@@ -138,10 +136,17 @@ on: { os: 'linux' }                               // any Linux node
 on: { type: 'mac-xcode', labels: ['apple-signing'] }
 on: { os: 'macos', arch: 'arm64', labels: ['simulators'] }
 on: 'master'                                      // the master's own worker, if it has one
+on: [{ os: 'linux' }, { os: 'macos' }]            // any of these: Linux or macOS
 ```
 
-All given fields must match. `tools` (section 7) also constrain placement:
-a node qualifies only if it has the tools or can install them.
+All given fields of a selector must match. A list means any of its
+selectors (up to 8): the stage takes whichever free node matches one. When
+none is free, the first entry whose cloud pool can serve it starts one
+machine (or is already starting or waiting for one), so put the cheaper or
+faster type first; a pool that cannot start one now (its account gone,
+backing off after errors, the budget spent) passes to the next entry. A list asks for Xcode only
+when every entry asks for macOS. `tools` (section 7) also constrain
+placement: a node qualifies only if it has the tools or can install them.
 
 ### Node types carry their software
 
@@ -191,7 +196,7 @@ until it has been idle for an hour:
   "region": "sfo3",
   "size": "s-4vcpu-8gb",
   "image": "ubuntu-24-04-x64",
-  "labels": ["docker"],
+  "labels": ["setup", "docker"],
   "maxNodes": 2,
   "slots": 2,
   "ttlMinutes": 60,
@@ -218,11 +223,14 @@ until it has been idle for an hour:
   cannot use it), the master starts from the plain `image` instead, installs
   Mason and the node type's software, and snapshots that machine when it
   retires, so the following start is fast again.
-- A new machine installs Mason from the host, or, while the master has no
-  host, the master's own release from GitHub. Pools are added and edited on
-  the Nodes page, where the region, size and image lists come from the
-  provider. A master with no worker connected starts a machine from its first
-  pool to run a run's setup, so a cluster can be cloud machines alone.
+- A new machine installs the master's own release from GitHub, as the
+  public install command does, so it needs to trust no certificate but
+  GitHub's. A master that runs no GitHub release (one built from source), or
+  whose release has no tarball for the machine's platform, starts no
+  machine and says why. Pools are added and edited on the Nodes page, where the region, size and image lists come from the
+  provider. A master with no node labelled `setup` connected starts a machine
+  from its first pool whose machines carry the label to run a run's setup, so
+  a cluster can be cloud machines alone.
 - The machine's first-boot data carries the one-time pairing secret; the
   master dials it, checks the secret, pins its key, and assigns stages. The
   provider's firewall admits the link port only from the master's public
@@ -408,12 +416,13 @@ other nodes; this keeps every stage able to finish without the master.
 
 | Option | Meaning |
 | --- | --- |
-| `on` | Node selector (section 2). Required except for `approval`. |
+| `on` | Node selector, or a list of them (any one will do; section 2). Required except for `approval`. |
 | `run` | The exported stage function. |
 | `needs` | Explicit dependencies (stage or group references). |
 | `when` | Condition evaluated before a node is chosen (below). False → `skipped`. |
 | `tools` | Tool versions the stage needs (section 7). |
 | `secrets` | Names of project secrets the stage may read. Nothing else is delivered. |
+| `configs` | Build configs, in order (`['develop', 'maestro']`), at most 20, each letters, digits, dashes and underscores: which variant of each declared secret the stage gets (below). Default none. |
 | `env` | Non-secret environment for this stage. |
 | `timeout` | Stage limit, enforced by the worker. Default 2 h. |
 | `activityTimeout` | Fail the stage as `timed_out` when it prints nothing for this long (`'20m'`), catching hung simulators and prompts waiting for input. Default none. |
@@ -422,7 +431,7 @@ other nodes; this keeps every stage able to finish without the master.
 | `apple` | Apple signing for this stage (section 12): `{ distribution, app?, bundleIds? }`. |
 | `publishes` | App IDs this stage may publish. Build numbers are reserved for them before the stage starts (section 8). |
 | `buildNumbers` | Other build-number sequences this stage needs (section 8). |
-| `checkout` | `true` (default), `false`, or `{ submodules?: boolean, depth?: number, lfs?: boolean }`. The source comes from the master (below). |
+| `checkout` | `true` (default), `false`, or `{ submodules?: boolean, depth?: number, lfs?: boolean }`. The source comes from the master (below); with `false`, only the Masonfile does. |
 | `workspace` | `'clean'` (default: reset to the pinned commit), `'reuse'` (keep untracked files from the node's last run of this stage), or `{ path, mode? }` (below). |
 | `cache` | `[{ key: string, paths: string[] }]` restored before and saved after, per node. |
 | `continueOnError` | A failure marks the stage and run `unstable` instead of failed. |
@@ -470,6 +479,16 @@ from the master:
   the project lists, the same way.
 - Because the checkout finishes before the stage starts, a stage never needs
   the master for source code, even if the link drops.
+- A stage with `checkout: false` gets an empty workspace and none of the
+  repository: the master sends the Masonfile alone, read from its mirror at the
+  pinned commit, and the stage function runs from it. A Masonfile that imports
+  other files of the repository at run time (`import { x } from './x.ts'`;
+  type-only imports do not count) gets a shallow copy of the pinned commit
+  instead, without its history. A signing stage that only takes stashed files
+  needs nothing more.
+- A stage's `timeout` covers its checkout as well as its function; a checkout
+  that outlasts it ends the stage `timed_out`. When a git command fails, what
+  git said is in the stage's log.
 - `ctx.git.tag(name, { message?, push?: boolean })` creates a tag on the pinned
   commit. With `push: true` the **master** pushes it to GitHub with its own
   credentials, if the project's settings allow tag pushes; the worker never
@@ -559,21 +578,76 @@ export async function buildIos(ctx: Stage) {
   unless `allowFailure: true`, and resolve with `{ code, stdout, stderr }`
   (captured output is capped; the full output is in the log).
 - Options: `cwd` (relative to the workspace), `env` (added for that command
-  only), `timeout`, `input` (stdin), `quiet` (log the command line only, and its last 40 lines
-  of output when it fails).
+  only, over the stage's declared values), `timeout`, `input` (stdin), `quiet`
+  (log the command line only, and its last 40 lines of output when it fails).
 - Every process a stage starts belongs to the stage. Cancel, timeout and
   failure stop the whole process tree (the existing guardian).
 
 ### Secrets
 
-- `ctx.secret(name)` returns a secret the stage declared in `secrets`;
-  anything else throws. `ctx.secretFile(name)` returns the path of a declared
-  secret file, written owner-only into the stage's private directory and
-  deleted afterwards.
-- Secrets are **not** in `process.env`. A command sees one only when the stage
-  passes it in `env`, so tools the stage runs do not inherit every secret.
+A project's secrets are on its **Secrets** tab: values and files, each with
+build configs. A secret with no configs is the default variant, for every
+config; the same name can have other variants for other configs, with other
+values. No config is in two variants of one name. A file is named by its file
+name alone (`google-services.json`, not `android/app/google-services.json`):
+the Masonfile says which directory it is written to.
+
+- A stage lists `configs` in order. For each secret it declares, it gets the
+  variant holding the latest of those configs that some variant holds, else
+  the default variant. A declared secret with neither for the stage refuses
+  the graph before the run starts, and a stage whose variant was deleted
+  after its graph was made fails with the same reason.
+- `ctx.secret(name)` returns a declared value; anything else throws. Declared
+  values are also the environment of the stage's `ctx.sh` and `ctx.exec`
+  commands, under their names, so a build tool reads `$API_TOKEN` directly; a
+  command's own `env` wins. A name the build environment sets (PATH, HOME,
+  GIT_*, SSH_*, …) is left out of it and read only with `ctx.secret`. The
+  stage function's own `process.env` holds none.
+- `await ctx.writeSecretFile(name, directory)` writes a declared file to
+  `<directory>/<name>` inside the checkout (`'.'` is its root), owner-only
+  unless `{ mode }` says otherwise (a resource the build ships into an app
+  needs a readable 0o644), creating the directory, and returns the path. The
+  directory may be reached through a symlink that stays in the checkout, but
+  never one that leads out; a file or symlink already at the target is set
+  aside, not written through. When the stage ends, however it ends, the
+  secret file is removed and what it replaced is put back. If the worker
+  itself dies mid-stage, that happens before the next checkout in that
+  workspace.
+- Token-like string values inside a declared JSON file (16 characters or
+  more, no spaces, letters and digits, not a URL: a token in a keys.json,
+  say) are masked like the file itself, so a script that prints one field
+  does not reveal it, while a config file's URLs and names stay readable.
+  A path with letters and digits is masked too: a base64 token may start
+  with a slash.
+- `ctx.secretFile(name)` returns the path of a declared file written
+  owner-only into the stage's private directory instead, for a tool that
+  takes a path.
 - Secret values, and their base64 and URL-encoded forms, are masked in the log
   and in returned values.
+
+```ts
+import type { Setup, Stage } from '@mason/types'
+
+const CONFIGS = ['develop', 'beta']
+
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('android', {
+    on: 'linux',
+    // develop and beta get their own google-services.json; any other branch the default.
+    configs: CONFIGS.includes(m.branch) ? [m.branch] : [],
+    secrets: ['API_KEY', 'google-services.json', 'release.jks'],
+    run: android,
+  })
+}
+
+export async function android(ctx: Stage) {
+  await ctx.writeSecretFile('google-services.json', 'android/app')
+  await ctx.writeSecretFile('release.jks', 'keystores')
+  // API_KEY is in the command's environment already.
+  await ctx.sh('./gradlew assembleRelease', { cwd: 'android' })
+}
+```
 
 ### Values between stages
 
@@ -624,8 +698,8 @@ await ctx.tests('junit', 'reports/**/*.xml')
 
 ### Published builds
 
-`ctx.publish` is how a build's output reaches testers on the host. It replaces
-the Zealot-compatible upload API for pipeline Masonfiles: the stage needs no
+`ctx.publish` is how a build's output reaches testers on the host, and the
+only way: the cluster has no Zealot-compatible upload API. The stage needs no
 API token, no channel key and no upload configuration.
 
 ```ts fragment
@@ -633,29 +707,67 @@ await ctx.publish({
   app: 'app.edge.eddy',            // must be an app ID of this project and listed in `publishes`
   platform: 'macos',
   path: 'build/Eddy-412.dmg',
+  variant?: string,                // one of several files of this build (see Variants)
   version: '0.3.3',                // required for DMG/EXE/MSI; read from IPA/APK and checked
-  buildNumber: '412',              // the number from ctx.getBuildNumber for this app
+  buildNumber: '412',              // DMG/EXE/MSI: defaults to getBuildNumber's; IPA/APK: read from it
   changelog?: string,
   metadata?: Record<string, unknown>,
 })
 ```
 
-The file is uploaded to the host, verified (bundle identity, format, digest),
-and becomes installable once the master confirms it. `publish` resolves when
-the host has the file with `{ buildId, url, installUrl, visible }`; the run
-page shows when it became visible to testers.
+The file goes over the node's link to the master, which grants it and relays
+it to the host over its own link: a node never reaches the host. The host
+verifies it (bundle identity, format, digest), and it becomes installable once
+the master confirms it. `publish` resolves when the host has the file with
+`{ buildId, url, installUrl, visible, variant }`; the run's Artifacts page
+lists what it published. `ctx.artifacts.save` and `ctx.artifacts.fetch` go
+through the master the same way.
 
-| Zealot upload API | `ctx.publish` |
+**Which number.** An IPA's or APK's number is its own (`CFBundleVersion`,
+`versionCode`); `buildNumber`, if given, must match it. A desktop file's is
+`buildNumber`, defaulting to `getBuildNumber`'s. Either way it is one of the
+run's: N itself, or with a sequence `block` (section 8) any of N to
+N+block−1. Anything else is refused before the upload.
+
+**Variants.** A build can be several files of one app and platform: Edge's
+master builds publish the universal APK and one APK per CPU architecture.
+`variant` names a file (`arm64-v8a`, `linux-x64`: 1 to 32 letters, digits,
+`.`, `_` or `-`, starting with a letter or digit); the file published without
+one is the default variant. A run publishes each variant once, from any of
+its stages (parallel ones included) and attempts: the same file under the
+build's own number returns that build, while another file, or the same file
+under another number, is refused. So a publishing stage with `retry` succeeds
+on a later attempt only if its files come out byte for byte the same (a
+reproducible build), or if it published nothing before it failed. Variants
+may share a number (a CLI built for several systems) or use the block's
+others (split APKs, whose version codes must differ):
+
+```ts fragment
+m.buildNumber('co.edgesecure.app', { format: 'YYMMDDCC', block: m.branch === 'master' ? 3 : 1 })
+// … in the Android stage, after `./gradlew assembleRelease -PabiSplits`:
+const apks = 'android/app/build/outputs/apk/release'
+await ctx.publish({ app: 'co.edgesecure.app', platform: 'android', path: `${apks}/app-universal-release.apk` })                         // N
+await ctx.publish({ app: 'co.edgesecure.app', platform: 'android', path: `${apks}/app-armeabi-v7a-release.apk`, variant: 'armeabi-v7a' }) // N+1
+await ctx.publish({ app: 'co.edgesecure.app', platform: 'android', path: `${apks}/app-arm64-v8a-release.apk`, variant: 'arm64-v8a' })     // N+2
+```
+
+The host shows a run's variants as one build: the default first, then each
+variant with its size and its own install button. A variant never replaces
+its build as a branch's latest, and a build's variants expire together.
+
+| Zealot upload API (gone from the cluster) | `ctx.publish` |
 | --- | --- |
 | API token and channel key in the build's private config | Nothing: the stage's upload token is issued by the master with the stage |
 | Channel chosen by `channel_key` | Channel chosen by `app` and `platform`; the master creates it for the project's app ID |
 | Desktop identity sent in `custom_fields.mason` | `version`, `buildNumber` arguments |
-| `version_exist` to avoid duplicate uploads | Unnecessary: build numbers are reserved per stage, and publishing the same file again (a retry) returns the existing build; a different file under the same number is refused |
+| `version_exist` to avoid duplicate uploads | Unnecessary: build numbers are reserved per run, and publishing the same file again (a retry) returns the existing build; a different file in the same variant is refused |
+| A channel per split APK | One build with `variant`s |
 | `branch`, `git_commit`, `ci_url` fields | Filled in from the run |
 | `changelog` field | `changelog` argument; defaults to the commit subjects since the last published build of that app and branch |
 
-The Zealot-compatible API stays on the host for script Masonfiles and for
-builds made outside Mason.
+A script Masonfile cannot publish: move the project to a pipeline Masonfile
+and call `ctx.publish`. A build made outside Mason is published by a pipeline
+stage that runs it.
 
 ### Build numbers
 
@@ -712,23 +824,66 @@ the same value.
 
 ```ts fragment
 tools: {
-  node: '24',              // major or exact version
+  node: '24',              // a version, or 'project' for the repository's pin (below)
   java: '21',
   rust: '1.90.0',
+  python: '3.12',
+  ruby: 'project',
+  go: '1.23',
   android: ['platforms;android-35', 'build-tools;35.0.0'],
+  androidLicenses: 'accept', // accept the Android SDK licences for this stage
   xcode: '>=26 <27',       // installed from the master's Xcode downloads when missing
   simulators: ['iOS 26.1'],
-  brew: ['cocoapods'],     // macOS
+  cocoapods: '1.16.2',     // exact version; macOS
+  brew: ['swiftlint'],     // macOS
   apt: ['libssl-dev'],     // Linux
 }
 ```
 
 Missing tools are installed before the stage starts (stage status
-`preparing`) and put first on `PATH` (`JAVA_HOME`, `ANDROID_HOME`,
-`DEVELOPER_DIR` set accordingly):
+`preparing`). Every version lives side by side, so stages, branches and
+projects on one node use different versions at the same time; nothing is
+switched system-wide. A stage gets exactly its versions first on `PATH`, with
+their variables, for everything it runs: `ctx.sh`, `ctx.exec`, and the build
+phases `ctx.apple.archive`, `testflight` and `notarize` run in Xcode.
 
-- Node, Java, Rust and the Android SDK go into the node's tools directory from
-  official archives with verified checksums.
+| Tool | Versions | `'project'` reads (first found at the checkout's root) | Installed from | Stage environment |
+| --- | --- | --- | --- | --- |
+| `node` | `24`, `24.11.1` | `.nvmrc`, `.node-version`, `.tool-versions`, `package.json` `engines.node` | nodejs.org, checked against `SHASUMS256.txt` | `bin` on `PATH`, `NODE_BINARY` |
+| `rust` | `1.82.0`, `stable` | `rust-toolchain.toml`, `rust-toolchain`, `.tool-versions` | rustup, checked against its SHA-256 | `CARGO_HOME`, `RUSTUP_HOME`, cargo `bin` on `PATH` |
+| `java` | `21`, `21.0.5` | `.java-version`, `.sdkmanrc`, `.tool-versions` | Temurin (Adoptium), checked against the published checksum | `JAVA_HOME`, `bin` on `PATH` |
+| `python` | `3.12`, `3.12.7` | `.python-version`, `.tool-versions`, `pyproject.toml` `requires-python` | python-build-standalone's current release, checked against its `SHA256SUMS` | `bin` on `PATH`, `PYTHONNOUSERSITE=1` |
+| `ruby` | `3.3`, `3.3.5` | `.ruby-version`, `.tool-versions`, the `Gemfile`'s `ruby` line | built once per node with a pinned ruby-build, which checks each tarball | `bin` on `PATH`; gems install into that Ruby's own directory |
+| `go` | `1.23`, `1.23.4` | `go.mod` (`toolchain`, else `go`), `.tool-versions` | go.dev, checked against the published sha256 | `GOROOT`, `bin` on `PATH`, `GOTOOLCHAIN=local` |
+| `cocoapods` | `1.16.2` (exact) | — | RubyGems, run by Homebrew's portable Ruby (its SHA-256 pinned) | `pod` and that Ruby on `PATH`, `GEM_HOME` |
+| `xcode` | see below | `.xcode-version`, `.tool-versions` | Apple, through the node's helper | `DEVELOPER_DIR` |
+
+- A minor or major (`3.12`, `22`) takes the newest installed version that
+  matches, or installs the newest release that does; an exact version is
+  exact.
+- `'project'` is read at setup. A range gives its first version
+  (`>=3.11` → `3.11`, `engines.node: ">=20"` → `20`); Node's `lts/*` and
+  `lts/<codename>` give that LTS line's newest major; `.tool-versions` uses
+  asdf's names (`nodejs`, `golang`, …). A run whose workflow has a stage with
+  `'project'` and no usable pin fails at setup naming the tool and the files
+  looked for. A stage that needs Xcode and names none still uses
+  `.xcode-version` when the repository has one.
+- Ruby is compiled, so its first install on a node takes several minutes and
+  needs a C compiler and libyaml (the Command Line Tools and Homebrew's
+  `libyaml` on macOS, `build-essential` and `libyaml-dev` on Linux, which a
+  node type can list). Each Ruby keeps its own gems, so `bundle exec pod
+  install` and Fastlane run with the stage's Ruby, never the system's.
+- **Android SDK licences** must be accepted before `sdkmanager` installs a
+  package. `androidLicenses: 'accept'` accepts them for the stage; without it,
+  only a node type whose administrator accepted them installs Android
+  packages.
+- **CocoaPods** installs into the node's tools directory with a private Ruby
+  (Homebrew's portable Ruby, checksum verified), so it needs neither Homebrew
+  nor the privileged helper. The version is exact and `pod` runs with the
+  stage's Xcode. Only CocoaPods itself is pinned: its dependencies resolve
+  from RubyGems when it installs, and the tool's marker lists them. A stage
+  that asks for it runs only on macOS nodes; setup refuses one whose every
+  `on` entry names another `os`.
 - **Xcode** is downloaded by each node itself, directly from Apple, when the
   master tells it to (section 12 explains the sign-in). The node checks
   Apple's signature, installs it side by side as
@@ -737,11 +892,26 @@ Missing tools are installed before the stage starts (stage status
   system-wide Xcode for a stage.
 - **Simulator runtimes** are downloaded by each node with `xcodebuild
   -downloadPlatform`, which needs no Apple ID.
-- Homebrew and its packages, apt/dnf packages, Command Line Tools and Rosetta
-  are installed by the node's privileged helper.
+- Xcode, simulators, Homebrew and its packages, apt/dnf packages, Command
+  Line Tools and Rosetta are installed by the node's privileged helper
+  (`sudo mason worker --install`). A NoMac Mac has no helper: it installs the
+  tools in the table except Xcode, and uses the Xcodes NoMac provides.
+  Mason never installs Homebrew itself; an administrator installs it on each
+  macOS node that needs `brew` packages. CocoaPods needs no root, on macOS.
 
-Stages share installed tools; an administrator can pin or remove versions per
-node type, and unused Xcodes are removed when disk space runs low.
+Stages share installed tools; an administrator can keep versions installed
+per node type (Node, Java, Rust, Python, Go, Ruby, Xcode), and unused Xcodes
+are removed when disk space runs low.
+
+### Node.js for React Native
+
+React Native's "Bundle React Native code and images" phase and its other
+Xcode build scripts run `$NODE_BINARY` (the default `ios/.xcode.env` sets it
+from `command -v node`, which finds the same Node), so with
+`tools: { node: 'project', ruby: 'project' }` the JavaScript bundle is built
+with the `.nvmrc` Node and CocoaPods runs on the `.ruby-version` Ruby. Mason
+installs these itself, the way nvm or rbenv would but checked and side by
+side; neither is needed on the node, nor a shell profile.
 
 ### Several Xcodes on one node
 
@@ -816,6 +986,8 @@ export function setup(m: Setup) {
   m.buildNumber('com.example.camera', { format: 'YYMMDDCC' })     // 26101701, 26101702, …
   m.buildNumber('android-version-code', { start: 4000 })                 // any named sequence, not only app IDs
   m.buildNumber('nightly', { format: 'YYYY.MM.DD.CCC', scope: 'branch', timeZone: 'America/Los_Angeles' })
+  // Master runs hold three numbers (split APKs use N+1 and N+2); other branches one.
+  m.buildNumber('co.edgesecure.app', { format: 'YYMMDDCC', block: m.branch === 'master' ? 3 : 1 })
 }
 ```
 
@@ -830,6 +1002,7 @@ name. Options:
 | `timeZone` | Time zone for date tokens. Default UTC. |
 | `check` | `'apple'` (at most three dot-separated integers, as `CFBundleVersion` requires), `'android'` (an integer up to 2,100,000,000, as `versionCode` requires), or none. Setup fails if the format could ever break the rule. |
 | `apps` | App IDs that take their numbers from this sequence instead of their own, so every app of a run publishes with the same number (`m.buildNumber('app', { format: 'YYMMDDCC', apps: ['com.example.app', 'com.example.camera'] })`). An app ID belongs to one sequence at most. |
+| `block` | How many numbers each run holds, 1 (default) to 100. A run gets N, keeps N to N+block−1 for its own use (an Android split APK's version codes, say), and the next run's number comes after the block (N+block, or the next day's first number for a dated format). `getBuildNumber` returns N. Set it in `setup`, so it can depend on `m.branch`; the sequence stays increasing whatever each run's block. A block above 1 needs a format of digits that ends in its count (`YYMMDDCC`, `N`; no `.`, `-` or letters), so the numbers are consecutive integers; a count that would overflow its width fails the stage. |
 
 Format tokens:
 
@@ -896,14 +1069,15 @@ export async function buildMac(ctx: Stage) {
 ## 9. Running while the master is away
 
 When a stage starts, its node already has everything it needs: the stage
-definition, the checked-out source, its secrets, its stashes, its reserved
-build numbers, and an upload token for the host. If the master's link drops:
+definition, the checked-out source, its secrets, its stashes and its reserved
+build numbers. If the master's link drops:
 
 - the stage keeps running to completion and enforces its own timeout;
 - the log, result, return value, stashes it creates and artifacts are kept on
   the node and delivered when the link returns;
-- `publish` and `artifacts.save` upload to the host directly; the master
-  confirms publication when it reconnects;
+- `publish` and `artifacts.save` wait for the link and send their file once
+  it is back, since files reach the host only through the master; they wait
+  the same way while the master has no host to relay to;
 - the master shows the stage as `running (disconnected)` until it hears back
   or the stage's timeout passes with no word, when it marks it `interrupted`;
 - calls that need the master during a stage — `artifacts.fetch` from another
@@ -942,7 +1116,9 @@ runs: `keep.stashes` (default 3 runs) in the workflow options.
 Existing Masonfiles keep working. A project whose format is `script` runs
 `Masonfile.ts` (or `.js`) as one stage named `build` on a node matching the
 project's script selector, with every project secret and file injected into
-the environment and the `MASON_*` variables of today, exactly as now.
+the environment and the `MASON_*` variables of today, exactly as now. It
+cannot publish builds: the cluster has no upload API, so a project that
+publishes moves to a pipeline Masonfile and `ctx.publish`.
 
 ## 11. Versions
 
@@ -1259,6 +1435,8 @@ export async function test(ctx: Stage) {
   await ctx.stash('node_modules', ['node_modules/**'])
 }
 
+// The stage's tools.node ('24' here; 'project' reads the .nvmrc) runs npm,
+// CocoaPods' scripts and Xcode's React Native bundling phase.
 async function archiveIos(ctx: Stage) {
   await ctx.sh('npm ci && npx pod-install ios')
   const build = ctx.getBuildNumber(APP)

@@ -3,7 +3,17 @@ import { readFileSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { describe, it } from 'mocha'
 import { MasterDatabase } from '../master/database.js'
-import { action, field, nodesView, settingsView } from './admin.js'
+import {
+  action,
+  field,
+  masonfileView,
+  nodesView,
+  projectRunsView,
+  projectTabs,
+  projectView,
+  secretsView,
+  settingsView,
+} from './admin.js'
 import { artifactsView } from './artifacts.js'
 import {
   bytes,
@@ -434,6 +444,103 @@ describe('Design system and views', () => {
     assert.deepEqual(phones.apps[0]!.builds, [
       { branch: 'main', buildNumber: '26102011', at: NOW - 29 * HOUR },
     ])
+    // A newer variant never displaces its build as the branch's latest.
+    db.prepare("UPDATE builds SET run='run-1' WHERE id=2").run()
+    db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(43,1,2,'android','main',?,'1.0','26102012','app.example.phone','apk','d43',1000,'f43',?,?,'ready','','pipeline','{}','arm64-v8a','run-1')",
+    ).run('a'.repeat(40), NOW - HOUR, NOW + HOUR)
+    const withVariant = dashboardData({
+      db,
+      viewer: viewer('developer'),
+      now: NOW,
+      appVisible: all,
+      nodes: [],
+      repositories: new Map(),
+    })
+    assert.deepEqual(withVariant.projects[0]!.apps[0]!.builds, [
+      { branch: 'main', buildNumber: '26102011', at: NOW - 29 * HOUR },
+    ])
+    assert(!withVariant.builds.some((build) => build.id === 43))
+    // A run that published only named variants shows as its first by name,
+    // as the branch page heads it, not as the one published first.
+    db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(?,1,2,'android','main',?,'1.0',?,'app.example.phone','apk',?,1000,?,?,?,'ready','','pipeline','{}',?,'run-2')",
+    ).run(
+      44,
+      'b'.repeat(40),
+      '26102013',
+      'd44',
+      'f44',
+      NOW - 30 * 60_000,
+      NOW + HOUR,
+      'macos-arm64',
+    )
+    db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(?,1,2,'android','main',?,'1.0',?,'app.example.phone','apk',?,1000,?,?,?,'ready','','pipeline','{}',?,'run-2')",
+    ).run(
+      45,
+      'b'.repeat(40),
+      '26102014',
+      'd45',
+      'f45',
+      NOW - 30 * 60_000,
+      NOW + HOUR,
+      'linux-x64',
+    )
+    const onlyVariants = dashboardData({
+      db,
+      viewer: viewer('developer'),
+      now: NOW,
+      appVisible: all,
+      nodes: [],
+      repositories: new Map(),
+    })
+    assert.deepEqual(onlyVariants.projects[0]!.apps[0]!.builds, [
+      { branch: 'main', buildNumber: '26102014', at: NOW - 30 * 60_000 },
+    ])
+    assert.deepEqual(
+      onlyVariants.builds
+        .filter((build) => build.id === 44 || build.id === 45)
+        .map((build) => build.id),
+      [45],
+    )
+    // Byte order, not locale order: `Zed` leads `arm`, as on the branch page.
+    db.prepare('DELETE FROM builds WHERE id IN (44,45)').run()
+    const variantRow = db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(?,1,2,'android','main',?,'1.0',?,'app.example.phone','apk',?,1000,?,?,?,'ready','','pipeline','{}',?,'run-3')",
+    )
+    variantRow.run(
+      46,
+      'c'.repeat(40),
+      '26102015',
+      'd46',
+      'f46',
+      NOW - 20 * 60_000,
+      NOW + HOUR,
+      'arm',
+    )
+    variantRow.run(
+      47,
+      'c'.repeat(40),
+      '26102016',
+      'd47',
+      'f47',
+      NOW - 20 * 60_000,
+      NOW + HOUR,
+      'Zed',
+    )
+    const mixedCase = dashboardData({
+      db,
+      viewer: viewer('developer'),
+      now: NOW,
+      appVisible: all,
+      nodes: [],
+      repositories: new Map(),
+    })
+    assert.deepEqual(mixedCase.projects[0]!.apps[0]!.builds, [
+      { branch: 'main', buildNumber: '26102016', at: NOW - 20 * 60_000 },
+    ])
+    db.prepare('DELETE FROM builds WHERE id IN (46,47)').run()
     // The running stage shows its progress against its usual duration; setup and approvals are not queue entries.
     assert.deepEqual(
       data.queue.map((entry) => [
@@ -460,6 +567,13 @@ describe('Design system and views', () => {
     assert.match(html, /Webhook active/)
     assert.match(html, /buildbox/)
     assert.match(html, /role="progressbar"/)
+    // The card opens the project; only its run chips lead elsewhere, to their runs.
+    assert.match(
+      html,
+      /<h2><a class="card-link" href="\/projects\/phones">Phones<\/a><\/h2>/,
+    )
+    assert.doesNotMatch(html, /meta-link|\/masonfile"|\?project=/)
+    assert.match(html, /<a class="run-chip" href="\/runs\/run-\d+"/)
     // A platform filter keeps the projects with an app on it.
     const mac = dashboardData(
       { db, viewer: viewer('developer'), now: NOW, appVisible: all },
@@ -532,7 +646,8 @@ describe('Design system and views', () => {
     assert.deepEqual(find('   '), [])
     // LIKE wildcards are matched literally.
     assert.deepEqual(find('%'), [])
-    assert.equal(search(developer, 'phone')[0]!.href, '/?project=phones')
+    assert.equal(search(developer, 'phone')[0]!.href, '/projects/phones')
+    assert.equal(search(developer, 'phone')[1]!.href, '/projects/phones')
     assert.equal(search(developer, '#2')[0]!.href, '/runs/run-2')
     assert.equal(
       search({ ...developer, viewer: viewer('developer', 'host') }, 'watch')[0]!
@@ -638,7 +753,35 @@ describe('Design system and views', () => {
       appVisible: (): boolean => true,
       artifactBase: '',
     }
+    // A variant this run published, and a build another run made of the same commit.
+    const variant = db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(?,1,2,'android','main',?,'1.0',?,'app.example.phone','apk',?,1000,?,?,?,'ready','','pipeline','{}',?,?)",
+    )
+    variant.run(
+      41,
+      'a'.repeat(40),
+      '26102013',
+      'd41',
+      'f41',
+      NOW,
+      NOW + HOUR,
+      'arm64-v8a',
+      'run-1',
+    )
+    variant.run(
+      42,
+      'a'.repeat(40),
+      '26102014',
+      'd42',
+      'f42',
+      NOW,
+      NOW + HOUR,
+      '',
+      'run-other',
+    )
     const run = artifactsView(source, { run: 'run-1' })
+    assert.match(run, /Phone 1\.0 \(26102013\) arm64-v8a</)
+    assert.doesNotMatch(run, /26102014/)
     assert.match(run, /<h1>build #1<\/h1>/)
     assert.match(run, /Version 1\.0 \(11\)/)
     assert.match(run, /12 passed/)
@@ -653,6 +796,7 @@ describe('Design system and views', () => {
     const list = artifactsView(source, { project: 'phones', branch: 'main' })
     assert.match(list, /phones · main/)
     assert.match(list, /2 · 1\.5 MB/)
+    assert.match(list, /<td class="mono">26102011, 26102013 · 3 files<\/td>/)
     assert.doesNotMatch(list, /feature\/login/)
     assert.match(artifactsView(source, { project: 'nothing' }), /No runs yet/)
     const master = artifactsView(
@@ -705,30 +849,21 @@ describe('Nodes page', () => {
     budget: { monthly: 200 },
     canChange: true,
   }
-  it('gives copyable install commands from the host, else the master’s own release', () => {
-    const fromHost = nodesView({
+  it('gives the copyable install command from the master’s GitHub release, never the host', () => {
+    const page = nodesView({
       ...base,
       host: 'https://builds.example.test',
       release: { repository: 'example/mason', version: '1.2.3' },
     })
+    // One line installs Mason and starts the role; no separate sudo command.
     assert.match(
-      fromHost,
-      /<pre class="mono">\/bin\/bash -c &quot;\$\(curl -fsSL https:\/\/builds\.example\.test\/install\.sh\)&quot; -- --from https:\/\/builds\.example\.test<\/pre><button type="button" class="secondary copy" data-copy="\/bin\/bash -c &quot;/,
+      page,
+      /It installs Mason 1\.2\.3, the master’s version, from GitHub, and starts it as a worker service under your account; it asks for your password once\.<\/small><div class="command"><pre class="mono">curl -fsSL https:\/\/github\.com\/example\/mason\/releases\/download\/v1\.2\.3\/install\.sh \| bash -s -- --version 1\.2\.3 worker<\/pre>/,
     )
-    assert.match(
-      fromHost,
-      /data-copy="sudo mason worker --install --link-port 9410"/,
-    )
-    const fromGitHub = nodesView({
-      ...base,
-      release: { repository: 'example/mason', version: '1.2.3' },
-    })
-    assert.match(
-      fromGitHub,
-      /It installs Mason 1\.2\.3, the master’s version\.<\/small><div class="command"><pre class="mono">.*https:\/\/github\.com\/example\/mason\/releases\/latest\/download\/install\.sh\)&quot; -- --version 1\.2\.3<\/pre>/,
-    )
-    assert(!fromGitHub.includes('&lt;host&gt;'))
-    assert.match(nodesView(base), /href="\/settings#host"/)
+    assert(!page.includes('--from'))
+    assert(!page.includes('builds.example.test/install.sh'))
+    assert(!page.includes('sudo mason worker --install'))
+    assert.match(nodesView(base), /This master runs no GitHub release of Mason/)
     assert(!nodesView({ ...base, canChange: false }).includes('id="add-node"'))
   })
 
@@ -752,15 +887,11 @@ describe('Nodes page', () => {
     // Each step: its title first, then the command box with Copy beside it.
     assert.match(
       nodes,
-      /<li><strong>Install Mason<\/strong><small class="hint">[^<]*<\/small><div class="command"><pre class="mono">[^<]*<\/pre><button type="button" class="secondary copy"/,
+      /<li><strong>Install and start Mason as a worker<\/strong><small class="hint">On the new computer\.[^<]*<\/small><div class="command"><pre class="mono">[^<]* worker<\/pre><button type="button" class="secondary copy"[\s\S]*?<\/div><small class="hint">It prints the pairing key\.<\/small><\/li>/,
     )
     assert.match(
       nodes,
-      /<li><strong>Start as a worker<\/strong><div class="command"><pre class="mono">sudo mason worker --install --link-port 9410<\/pre><button[^>]*class="secondary copy"[\s\S]*?<\/div><small class="hint">It prints its pairing key\.<\/small><\/li>/,
-    )
-    assert.match(
-      nodes,
-      /<li><strong>Pair it here<\/strong><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*<label for="node-address">Mason node address and port<\/label><input id="node-address" name="address" placeholder="192\.168\.1\.20:9410"[\s\S]*Pair node/,
+      /<li><strong>Pair it here<\/strong><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*<label for="node-address">Mason node address and port<\/label><input id="node-address" name="address" placeholder="192\.168\.1\.20:9310"[\s\S]*Pair node/,
     )
     // The host's two ways: on DigitalOcean, or by hand with the same steps.
     assert.match(
@@ -774,15 +905,11 @@ describe('Nodes page', () => {
     )
     assert.match(
       byHand,
-      /<strong>Install Mason<\/strong><small class="hint">On a computer the internet can reach\./,
+      /<strong>Install and start Mason as the host<\/strong><small class="hint">On a computer the internet can reach\.[^<]*<\/small><div class="command"><pre class="mono">[^<]* host<\/pre>/,
     )
     assert.match(
       byHand,
-      /<strong>Start it as the host<\/strong><div class="command"><pre class="mono">sudo mason host --install<\/pre>/,
-    )
-    assert.match(
-      byHand,
-      /<strong>Pair it here<\/strong><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*placeholder="builds\.example\.com:9310"[\s\S]*Pair host/,
+      /<strong>Pair it here<\/strong><small class="hint">To put the host behind TLS on port 443, see the README’s public-server command\.<\/small><form[^>]*data-path="\/api\/v2\/nodes"[\s\S]*placeholder="builds\.example\.com:9310"[\s\S]*Pair host/,
     )
   })
 
@@ -811,7 +938,7 @@ describe('Nodes page', () => {
       hint(
         'labels',
         'Labels',
-        'Extra labels its machines carry, comma-separated, for stages that ask for them.',
+        'Labels its machines carry, comma-separated, for stages that ask for them. Machines labelled setup run setup.',
       ),
     )
     assert.match(
@@ -907,7 +1034,137 @@ describe('Nodes page', () => {
     assert.doesNotMatch(viewer, /Remove node|Reconcile/)
   })
 
-  it('U2.2 every disclosure on the page is a button: red to add or use, secondary for Edit and Remove', () => {
+  it('U3.3 node and host cards keep Reconcile and a red Remove on one line', () => {
+    const html = nodesView({
+      ...base,
+      host: 'https://builds.example.test',
+      cloudNodes: [
+        {
+          name: 'linux-node',
+          state: 'ready',
+          account: 'do',
+          region: 'sfo3',
+          size: 's-1vcpu-1gb',
+          address: '203.0.113.20',
+          origin: null,
+          error: null,
+          nodeType: 'linux-x86',
+          labels: [],
+        },
+      ],
+      cloudHosts: [
+        {
+          name: 'h',
+          state: 'ready',
+          account: 'do',
+          region: 'sfo3',
+          size: 's-1vcpu-1gb',
+          address: '203.0.113.30',
+          origin: 'https://builds.example.test',
+          error: null,
+          space: { bucket: 'mason-h', region: 'sfo3' },
+        },
+      ],
+    })
+    for (const [kind, name] of [
+      ['nodes', 'linux-node'],
+      ['hosts', 'h'],
+    ] as const) {
+      const row = new RegExp(
+        `<div class="actions"><form data-mason="api" data-path="/api/v2/cloud/${kind}/${name}/reconcile"[\\s\\S]*?Reconcile</button>[\\s\\S]*?</form><details class="action"><summary class="button danger-fill">[^<]*<span[^>]*>[^<]*</span> Remove</summary>[\\s\\S]*?<button class="danger-fill">[\\s\\S]*?</details></div>`,
+      )
+      assert.match(html, row, kind)
+    }
+    assert.match(html, /Keep the Space and its builds as a storage location/)
+  })
+
+  it('U3.1 the Storage card lists every location: where new builds go, files and size, and Delete or Forget for the others', () => {
+    const html = nodesView({
+      ...base,
+      host: 'https://builds.example.test',
+      storage: {
+        driver: 's3',
+        bucket: 'mason-active',
+        endpoint: 'https://sfo3.digitaloceanspaces.com',
+        locations: [
+          {
+            id: 'disk',
+            kind: 'disk',
+            active: false,
+            usage: { files: 3, bytes: 2048 },
+          },
+          {
+            id: 'space-mason-active-sfo3',
+            kind: 'space',
+            active: true,
+            bucket: 'mason-active',
+            region: 'sfo3',
+            origin: 'made',
+            bucketOwned: true,
+            usage: { files: 7, bytes: 5 * 1024 * 1024 },
+          },
+          {
+            id: 'space-mason-old-nyc3',
+            kind: 'space',
+            active: false,
+            bucket: 'mason-old',
+            region: 'nyc3',
+            origin: 'host',
+            host: 'h1',
+            bucketOwned: true,
+          },
+          {
+            id: 'space-theirs-ams3',
+            kind: 'space',
+            active: false,
+            bucket: 'theirs',
+            region: 'ams3',
+            origin: 'added',
+            bucketOwned: false,
+            usage: { files: 2, bytes: 10 },
+          },
+        ],
+      },
+    })
+    const card = html.slice(html.indexOf('id="storage"'))
+    const row = (id: string): string => {
+      const start = card.indexOf(`<tr data-location="${id}">`)
+      return card.slice(start, card.indexOf('</tr>', start))
+    }
+    assert.match(
+      row('disk'),
+      /Host’s disk[\s\S]*data-path="\/api\/v2\/storage\/disk"[\s\S]*Use for new builds<\/button>[\s\S]*<td>3<\/td><td>2\.0 KB<\/td><td><\/td>/,
+    )
+    const active = row('space-mason-active-sfo3')
+    assert.match(active, /mason-active<\/span> · sfo3 · made by Mason/)
+    assert.match(active, /New builds go here/)
+    assert.doesNotMatch(active, /Delete|Forget/)
+    const old = row('space-mason-old-nyc3')
+    assert.match(old, /made for host h1/)
+    assert.match(
+      old,
+      /data-path="\/api\/v2\/storage\/locations\/space-mason-old-nyc3\/use"/,
+    )
+    assert.match(old, /<td>—<\/td><td>—<\/td>/)
+    assert.match(
+      old,
+      /Deletes the Space mason-old from DigitalOcean with its key/,
+    )
+    assert.match(
+      old,
+      /data-path="\/api\/v2\/storage\/locations\/space-mason-old-nyc3" data-method="DELETE" data-fields="confirm"/,
+    )
+    assert.match(old, /Type mason-old to delete it/)
+    const theirs = row('space-theirs-ams3')
+    assert.match(theirs, / Forget<\/summary>/)
+    assert.match(
+      theirs,
+      /the Space and its files stay in DigitalOcean, and its 2 builds and artifacts leave Mason/,
+    )
+    assert.match(theirs, /Type theirs to forget it/)
+  })
+
+  it('U2.2 every disclosure on the page is a button: red to add or use, secondary for Edit, filled red for Remove', () => {
     const html = nodesView({
       ...base,
       host: 'https://builds.example.test',
@@ -952,14 +1209,16 @@ describe('Nodes page', () => {
     assert(summaries.length >= 5, String(summaries.length))
     for (const [, details, summary, label] of summaries) {
       assert.match(details!, /class="action/)
-      if (/Edit|Remove/.test(label!))
+      if (/Remove/.test(label!))
+        assert.equal(summary, ' class="button danger-fill"')
+      else if (/Edit/.test(label!))
         assert.equal(summary, ' class="button secondary"')
       else assert.equal(summary, ' class="button"')
     }
     for (const label of [
       'Store builds in a new DigitalOcean Space',
       'Remove',
-      'Use an existing Space',
+      'Add an existing Space',
       'Edit',
       'Add a pool on DigitalOcean',
     ])
@@ -1003,7 +1262,6 @@ describe('Settings page', () => {
   const base = {
     apple: { signedIn: false, needsCode: false },
     keys: [],
-    apps: [],
     canChange: true,
     canCreate: true,
     canRevoke: true,
@@ -1012,7 +1270,6 @@ describe('Settings page', () => {
     const created = new Date(2026, 9, 3, 23, 30).getTime()
     const html = settingsView({
       ...base,
-      apps: [{ id: 3, name: 'Edge' }],
       keys: [
         {
           id: 'abcdef0123456789abcdef0123456789',
@@ -1025,7 +1282,7 @@ describe('Settings page', () => {
         {
           id: 'b1',
           name: 'old builder',
-          role: 'upload',
+          role: 'developer',
           createdAt: created,
           revoked: true,
           format: 'builder',
@@ -1038,9 +1295,10 @@ describe('Settings page', () => {
       /<h2>.*API keys<\/h2><p>Create API keys to access Mason from other apps and agents\.<\/p>/,
     )
     assert.match(card, /<summary class="button">.*Create API key<\/summary>/)
-    for (const role of ['developer', 'tester', 'manager', 'admin', 'upload'])
+    for (const role of ['developer', 'tester', 'manager', 'admin'])
       assert.match(card, new RegExp(`<option value="${role}">`))
-    assert.match(card, /<input type="checkbox" name="app" value="3"> Edge/)
+    // Keys publish nothing: the upload role and its app scopes are gone.
+    assert.doesNotMatch(card, /value="upload"|name="app"/)
     assert.match(card, /data-then="token"/)
     // Done loads the page again (a new query, not only a hash), so the new key is listed.
     assert.match(card, /<a href="\/settings\?key=created#keys">Done<\/a>/)
@@ -1323,5 +1581,249 @@ describe('Settings page', () => {
       /<span class="mono">empty<\/span> <small>Nothing managed yet<\/small>/,
     )
     assert.doesNotMatch(html, /&quot;software&quot;/)
+  })
+})
+
+describe('Project tabs and the Secrets tab', () => {
+  const variants = [
+    {
+      id: 1,
+      name: 'API_TOKEN',
+      kind: 'value' as const,
+      configs: [],
+      text: true,
+      masked: true,
+      bytes: 9,
+    },
+    {
+      id: 2,
+      name: 'API_TOKEN',
+      kind: 'value' as const,
+      configs: ['develop', 'maestro'],
+      text: true,
+      masked: false,
+      bytes: 9,
+    },
+    {
+      id: 3,
+      name: 'config.json',
+      kind: 'file' as const,
+      configs: [],
+      text: true,
+      masked: true,
+      bytes: 20,
+      pathEnv: 'CONFIG_FILE',
+      destination: 'config/app.json',
+    },
+    {
+      id: 4,
+      name: 'release.jks',
+      kind: 'file' as const,
+      configs: ['beta'],
+      text: false,
+      masked: true,
+      bytes: 2048,
+    },
+  ]
+  const row = (html: string, id: number): string =>
+    html.split(`data-secret-id="${id}"`)[1]!.split('</tr>')[0]!
+
+  it('U18.13 the project pages share four tabs, the current one marked', () => {
+    const tabs = projectTabs('my app', 'secrets')
+    assert.deepEqual(
+      [
+        ...tabs.matchAll(/<a href="([^"]+)"( aria-current="page")?>([^<]+)</g),
+      ].map((match) => [match[1], match[2] != null, match[3]]),
+      [
+        ['/projects/my%20app', false, 'Overview'],
+        ['/projects/my%20app/runs', false, 'Runs and builds'],
+        ['/projects/my%20app/masonfile', false, 'Masonfile'],
+        ['/projects/my%20app/secrets', true, 'Secrets'],
+      ],
+    )
+    const overview = projectView({
+      slug: 'app',
+      name: 'App',
+      repository: 'https://github.com/a/app',
+      defaultBranch: 'master',
+      format: 'pipeline',
+      apps: [],
+      rules: [],
+      webhook: false,
+      buildNumbers: [],
+      canSeed: false,
+    })
+    assert.match(
+      overview,
+      /href="\/projects\/app" aria-current="page">Overview/,
+    )
+    assert.doesNotMatch(overview, /data-secrets|Save secrets/)
+    assert.match(
+      masonfileView({ slug: 'app', name: 'App', commits: [] }),
+      /href="\/projects\/app\/masonfile" aria-current="page">Masonfile/,
+    )
+    const runs = projectRunsView(
+      { slug: 'app', name: 'App' },
+      '<table class="list"></table>',
+    )
+    assert.match(
+      runs,
+      /href="\/projects\/app\/runs" aria-current="page">Runs and builds/,
+    )
+    assert.match(
+      runs,
+      /<section class="panel"><table class="list"><\/table><\/section>/,
+    )
+    assert.doesNotMatch(runs, /Every branch/)
+    assert.match(
+      projectRunsView({ slug: 'app', name: 'App', branch: 'beta' }, ''),
+      /The latest runs on beta[^]*href="\/projects\/app\/runs"><span[^>]*>[^<]*<\/span> Every branch/,
+    )
+  })
+
+  it('U18.13 a manager sees the add buttons, Edit or Replace then Delete per row, the editor and the audit', () => {
+    const html = secretsView({
+      slug: 'app',
+      name: 'App',
+      format: 'pipeline',
+      secrets: variants,
+      canChange: true,
+      backups: true,
+      audit: [
+        {
+          name: 'API_TOKEN',
+          configs: ['develop'],
+          action: 'configs changed',
+          who: 'Mia Manager',
+          address: '10.0.0.5',
+          at: Date.UTC(2026, 9, 29, 12),
+          detail: 'all → develop',
+        },
+      ],
+    })
+    assert.match(
+      html,
+      /data-secret-add="value"><span[^>]*>[^<]*<\/span>Add secret value/,
+    )
+    assert.match(
+      html,
+      /data-secret-add="file"><span[^>]*>[^<]*<\/span>Add secret file/,
+    )
+    assert.match(html, /ctx\.secret\(name\)/)
+    assert.match(html, /await ctx\.writeSecretFile\(name, directory\)/)
+    assert.match(html, /data-secrets="\/api\/v2\/projects\/app\/secrets"/)
+    // A value: Edit before Delete; in edit, Save before Cancel.
+    const value = row(html, 1)
+    assert(
+      value.indexOf('data-secret-edit') < value.indexOf('data-secret-delete'),
+    )
+    assert(
+      value.indexOf('data-secret-save') < value.indexOf('data-secret-cancel'),
+    )
+    assert.match(value, /data-secret-value hidden/)
+    assert.match(
+      value,
+      /<button type="button" class="pill" data-secret-pill[^>]*>all</,
+    )
+    assert.match(row(html, 2), />develop<\/button><button[^>]*>maestro</)
+    assert.match(row(html, 2), /not masked/)
+    // A text file edits in the editor; a binary file is only replaced.
+    assert.match(row(html, 3), /data-kind="file"[^]*data-secret-edit>/)
+    assert.match(row(html, 3), /→ \$CONFIG_FILE/)
+    assert.match(row(html, 3), /at config\/app\.json/)
+    assert.doesNotMatch(row(html, 4), /data-secret-edit>/)
+    assert.match(row(html, 4), /data-secret-replace/)
+    assert.match(html, /data-secret-editor hidden role="dialog"/)
+    assert.match(html, /<input type="file" data-secret-file hidden>/)
+    assert.match(html, /data-secret-add-form="value" hidden/)
+    assert.match(
+      html,
+      /<input type="checkbox" data-secret-show> Show the value/,
+    )
+    assert.match(row(html, 4), /2\.0 KB/)
+    assert.match(row(html, 3), /20 B · text/)
+    assert.match(html, /data-secret-add-form="file" hidden/)
+    assert.match(html, /data-secret-drop/)
+    assert.doesNotMatch(html, /name="masked"|name="pathEnv"/)
+    assert.match(html, /<td>Mia Manager<\/td>/)
+    assert.match(html, /configs changed <small class="hint">all → develop/)
+    assert.match(html, /data-at="1793275200000">2026-10-29 12:00:00 UTC</)
+    // Script projects add values unmasked and files with a path variable.
+    const script = secretsView({
+      slug: 's',
+      name: 'S',
+      format: 'script',
+      secrets: [],
+      canChange: true,
+      backups: true,
+      audit: [],
+    })
+    assert.match(script, /name="masked" checked/)
+    assert.match(script, /name="pathEnv"/)
+    // A script project's tab: its own help, a path for the name, no configs anywhere.
+    assert.match(script, /This is a script project/)
+    assert.match(script, /Path in the checkout/)
+    assert.doesNotMatch(script, /name="configs"|data-secret-configs-input/)
+    assert.match(script, /No secrets yet/)
+    assert.match(script, /Nothing yet/)
+    // A script project's variant: plain "all", no configs control, and still Edit and Delete.
+    const scripted = secretsView({
+      slug: 's',
+      name: 'S',
+      format: 'script',
+      secrets: [variants[0]!],
+      canChange: true,
+      backups: true,
+      audit: [],
+    })
+    const scriptRow = row(scripted, 1)
+    assert.match(scriptRow, /<span class="pill">all<\/span>/)
+    assert.doesNotMatch(
+      scriptRow,
+      /data-secret-pill(?!s)|data-secret-configs-input/,
+    )
+    assert.match(scriptRow, /data-secret-edit/)
+    assert.match(scriptRow, /data-secret-delete/)
+  })
+
+  it('U18.13 without backups a manager is told to configure them, may not add, and may still view and edit', () => {
+    const html = secretsView({
+      slug: 'app',
+      name: 'App',
+      format: 'pipeline',
+      secrets: variants,
+      canChange: true,
+      backups: false,
+      audit: [],
+    })
+    assert.match(html, /Configure backups before changing secrets/)
+    assert.match(html, /data-secret-add="value" disabled/)
+    assert.doesNotMatch(html, /data-secret-add-form/)
+    assert.match(row(html, 1), /data-secret-edit/)
+  })
+
+  it('U18.13 a developer sees names and configs only', () => {
+    const html = secretsView({
+      slug: 'app',
+      name: 'App',
+      format: 'pipeline',
+      secrets: variants,
+      canChange: false,
+      backups: true,
+    })
+    assert.match(html, /API_TOKEN/)
+    assert.match(html, /<span class="pill">maestro<\/span>/)
+    for (const control of [
+      'data-secrets',
+      'data-secret-add',
+      'data-secret-edit',
+      'data-secret-replace',
+      'data-secret-delete',
+      'data-secret-editor',
+      'data-secret-value',
+      'data-secret-pill ',
+      'Audit',
+    ])
+      assert(!html.includes(control), control)
   })
 })

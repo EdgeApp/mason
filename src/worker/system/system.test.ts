@@ -18,12 +18,21 @@ import {
   type NodeType,
 } from '../../master/nodeTypes.js'
 import {
+  acceptsAndroidLicences,
+  cocoapodsUnsupported,
+  xcodeNeverLaunches,
+  xcodeUnplaceable,
   applyXcodeVersion,
   needsXcode,
+  orderInstalls,
+  stageDemand,
+  withSigningLabel,
   xcodeSpec,
 } from '../../master/scheduler.js'
+import type { PoolAnswer } from '../../master/cloud/pools.js'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { RuntimeStore } from '../../master/runtimes.js'
+import { NOMAC_HELPER } from '../../master/runtime.js'
 import { EventEmitter } from 'node:events'
 import { FakeApple } from '../../test/fakeApple.js'
 import { FakeMac, fakeXcode } from '../../test/fakeMac.js'
@@ -65,7 +74,15 @@ function inventory(extra: Partial<FullInventory> = {}): FullInventory {
     slots: 1,
     version: '0.1.0',
     xcodes: [],
-    tools: { node: [], rust: [], java: [], android: [] },
+    tools: {
+      node: [],
+      rust: [],
+      java: [],
+      python: [],
+      go: [],
+      ruby: [],
+      android: [],
+    },
     ...extra,
   }
 }
@@ -157,7 +174,15 @@ describe('Node software', () => {
               beta: false,
             },
           ],
-          tools: { node: ['24.11.1'], rust: [], java: [], android: [] },
+          tools: {
+            node: ['24.11.1'],
+            rust: [],
+            java: [],
+            python: [],
+            go: [],
+            ruby: [],
+            android: [],
+          },
         }),
         system: {
           commandLineTools: true,
@@ -359,7 +384,15 @@ describe('Node software', () => {
       inventory: {
         ...inventory({
           xcodes: scanXcodes(mac.applications),
-          tools: { node: ['24.11.1'], rust: [], java: [], android: [] },
+          tools: {
+            node: ['24.11.1'],
+            rust: [],
+            java: [],
+            python: [],
+            go: [],
+            ruby: [],
+            android: [],
+          },
         }),
         system: await systemInventory({
           os: 'macos',
@@ -676,6 +709,242 @@ describe('Node software', () => {
     )
   })
 
+  it('U7.28 a stage listing node selectors asks one pool for one machine, and signs on each with the label', () => {
+    const stage = (extra: Partial<GraphStage>): GraphStage =>
+      ({ name: 's', ...extra }) as GraphStage
+    const asked: string[] = []
+    // A pool answers with its reason; a pool that cannot serve says so.
+    const cannot = (reason: string): PoolAnswer => ({ reason, serving: false })
+    const demand =
+      (pools: Record<string, string | PoolAnswer>) =>
+      (type: string): PoolAnswer | undefined => {
+        asked.push(type)
+        const answer = pools[type]
+        return typeof answer === 'string'
+          ? { reason: answer, serving: true }
+          : answer
+      }
+    // The first type a pool backs starts the machine; the rest are not asked.
+    assert.equal(
+      stageDemand(
+        stage({
+          on: ['master', { os: 'linux' }, 'mac', { type: 'linux-x86' }],
+        }),
+        demand({
+          'linux-x86': 'Starting a linux machine',
+          mac: 'Starting a mac machine',
+        }),
+      ),
+      'Starting a mac machine',
+    )
+    assert.deepEqual(asked, ['mac'])
+    asked.length = 0
+    assert.equal(
+      stageDemand(
+        stage({ on: [{ type: 'none' }, 'linux'] }),
+        demand({ linux: 'Starting a linux machine' }),
+      ),
+      'Starting a linux machine',
+    )
+    assert.deepEqual(asked, ['none', 'linux'])
+    // A pool that cannot start one now passes to the next type; a waiting or
+    // full one serves the stage; with none able, the first reason stands.
+    asked.length = 0
+    assert.equal(
+      stageDemand(
+        stage({ on: ['linux-x86', 'macos-arm64'] }),
+        demand({
+          'linux-x86': cannot(
+            "The linux pool's cloud account do is gone: add it on the Cloud page",
+          ),
+          'macos-arm64': 'Starting a mac machine',
+        }),
+      ),
+      'Starting a mac machine',
+    )
+    assert.deepEqual(asked, ['linux-x86', 'macos-arm64'])
+    asked.length = 0
+    for (const serving of [
+      'Waiting for a linux machine to start',
+      'The linux pool is at its 2-machine limit',
+    ]) {
+      assert.equal(
+        stageDemand(
+          stage({ on: ['linux-x86', 'macos-arm64'] }),
+          demand({
+            'linux-x86': serving,
+            'macos-arm64': 'Starting a mac machine',
+          }),
+        ),
+        serving,
+      )
+    }
+    assert.deepEqual(asked, ['linux-x86', 'linux-x86'])
+    assert.equal(
+      stageDemand(
+        stage({ on: ['linux-x86', 'macos-arm64'] }),
+        demand({
+          'linux-x86': cannot('Backing off after provider errors'),
+          'macos-arm64': cannot('No installer'),
+        }),
+      ),
+      'Backing off after provider errors',
+    )
+    // A stage needing Xcode (CocoaPods here) asks only a pool that makes
+    // Macs, skipping a Linux pool and an entry naming Linux.
+    asked.length = 0
+    assert.equal(
+      stageDemand(
+        stage({
+          on: ['linux-x86', { os: 'linux', type: 'other' }, 'macos-arm64'],
+          tools: { cocoapods: '1.16.2' },
+        }),
+        demand({
+          'linux-x86': 'Starting a linux machine',
+          other: 'Starting another machine',
+          'macos-arm64': 'Starting a mac machine',
+        }),
+        (type) => type === 'macos-arm64',
+      ),
+      'Starting a mac machine',
+    )
+    assert.deepEqual(asked, ['macos-arm64'])
+    assert.equal(stageDemand(stage({}), demand({})), undefined)
+    assert.equal(stageDemand(stage({ on: 'gone' }), demand({})), undefined)
+    // A signing stage's label goes on every selector of a list.
+    const project = { signingLabel: 'signer' } as never
+    assert.deepEqual(
+      withSigningLabel(
+        stage({
+          apple: {} as never,
+          on: ['mac', { os: 'macos', labels: ['x'] }, 'master'],
+        }),
+        project,
+      ).on,
+      [
+        { type: 'mac', labels: ['signer'] },
+        { os: 'macos', labels: ['x', 'signer'] },
+        'master',
+      ],
+    )
+    assert.deepEqual(
+      withSigningLabel(stage({ apple: {} as never }), project).on,
+      { labels: ['signer'] },
+    )
+    assert.deepEqual(
+      withSigningLabel(stage({ apple: {} as never, on: 'mac' }), project).on,
+      { type: 'mac', labels: ['signer'] },
+    )
+  })
+
+  it('U8.7 CocoaPods installs after Xcode with its spec; a stage may accept the Android licences itself', () => {
+    const stage = (extra: Partial<GraphStage>): GraphStage =>
+      ({ name: 's', ...extra }) as GraphStage
+    // CocoaPods needs the stage's Xcode, so it waits for it and names it;
+    // with no Xcode named it still has a spec, which keeps it off non-macOS
+    // nodes (fit refuses a spec on any other os).
+    assert.equal(needsXcode(stage({ tools: { cocoapods: '1.16.2' } })), true)
+    assert.equal(
+      xcodeSpec(stage({ tools: { cocoapods: '1.16.2' } }), undefined),
+      'latest',
+    )
+    assert.deepEqual(
+      orderInstalls(
+        [
+          { tool: 'cocoapods', version: '1.16.2' },
+          { tool: 'node', version: '22' },
+          { tool: 'xcode', version: '26.1' },
+          { tool: 'simulators', packages: ['iOS 26.1'] },
+        ],
+        '>=26',
+      ).map((request) => [request.tool, request.xcode]),
+      [
+        ['node', undefined],
+        ['xcode', undefined],
+        ['simulators', undefined],
+        ['cocoapods', '>=26'],
+      ],
+    )
+    assert.deepEqual(
+      orderInstalls([{ tool: 'cocoapods', version: '1.16.2' }], undefined),
+      [{ tool: 'cocoapods', version: '1.16.2' }],
+    )
+    // A worker from before CocoaPods installs keeps the stage waiting.
+    const pods = stage({ tools: { cocoapods: '1.16.2' } })
+    // A stage needing Xcode fails at once only when a matching Mac is
+    // connected and none can serve it; with no Mac (Linux only), it waits.
+    assert.equal(xcodeUnplaceable(pods, 0, 0), undefined)
+    assert.equal(xcodeUnplaceable(pods, 2, 1), undefined)
+    assert.equal(
+      xcodeUnplaceable(pods, 1, 0),
+      'No connected macOS node for this stage has or can install an Xcode matching its node type’s default, which CocoaPods builds with',
+    )
+    assert.equal(
+      xcodeUnplaceable(stage({ tools: { xcode: '99' } }), 1, 0),
+      'No connected macOS node for this stage has or can install an Xcode matching 99',
+    )
+    assert.equal(xcodeUnplaceable(stage({}), 1, 0), undefined)
+    // Whether its Xcode never launches is judged on the matching Macs alone.
+    const broken = {
+      version: '26.1',
+      build: '17B55',
+      path: '/Applications/Xcode-26.1.app',
+      beta: false,
+      launches: false,
+      launchError: 'needs macOS 26',
+    }
+    const linux = {
+      name: 'linux-1',
+      inventory: { os: 'linux' as const, osVersion: '24.04', xcodes: [] },
+      spec: '26.1',
+    }
+    const mac = {
+      name: 'mac-1',
+      inventory: { os: 'macos' as const, osVersion: '15.6', xcodes: [broken] },
+      spec: '26.1',
+    }
+    assert.equal(
+      xcodeNeverLaunches([linux, mac]),
+      'Xcode 26.1 does not launch on mac-1 (macOS 15.6): needs macOS 26',
+    )
+    assert.equal(xcodeNeverLaunches([linux]), undefined)
+    assert.equal(
+      xcodeNeverLaunches([
+        linux,
+        {
+          ...mac,
+          inventory: {
+            ...mac.inventory,
+            xcodes: [{ ...broken, launches: true }],
+          },
+        },
+      ]),
+      undefined,
+    )
+    assert.equal(
+      cocoapodsUnsupported(pods, { tools: {} }),
+      'Update this worker to install CocoaPods',
+    )
+    assert.equal(
+      cocoapodsUnsupported(pods, {}),
+      'Update this worker to install CocoaPods',
+    )
+    assert.equal(
+      cocoapodsUnsupported(pods, { tools: { cocoapods: [] } }),
+      undefined,
+    )
+    assert.equal(cocoapodsUnsupported(stage({}), { tools: {} }), undefined)
+    assert.equal(acceptsAndroidLicences(stage({}), true), true)
+    assert.equal(acceptsAndroidLicences(stage({}), false), false)
+    assert.equal(
+      acceptsAndroidLicences(
+        stage({ tools: { androidLicenses: 'accept' } }),
+        false,
+      ),
+      true,
+    )
+  })
+
   it('U9.11 resolves the Xcode a stage asks for: its own, .xcode-version, the type default, betas only where allowed', () => {
     const stage = (extra: Partial<GraphStage>): GraphStage =>
       ({ name: 's', on: { os: 'macos' }, ...extra }) as GraphStage
@@ -684,6 +953,14 @@ describe('Node software', () => {
       software: { xcode: ['26.1'], xcodeDefault: '26.1', allowBeta: true },
     })
     assert.equal(needsXcode(stage({ on: 'linux' })), false)
+    // A list needs Xcode only when every entry asks for macOS.
+    assert.equal(needsXcode(stage({ on: ['linux', { os: 'macos' }] })), false)
+    assert.equal(
+      needsXcode(
+        stage({ on: [{ os: 'macos' }, { os: 'macos', arch: 'arm64' }] }),
+      ),
+      true,
+    )
     assert.equal(
       needsXcode(stage({ on: 'mac-xcode', apple: {} as never })),
       true,
@@ -833,7 +1110,9 @@ describe('Node software', () => {
     )
   })
 
-  describe('on a cluster', () => {
+  describe('on a cluster', function () {
+    // Each test runs several whole runs on a cluster, as the cluster suites do.
+    this.timeout(60_000)
     let c: Cluster
     let apple: FakeApple
     let a: FakeMac
@@ -922,6 +1201,7 @@ export async function use(ctx: Stage) {
               systemRun: b.run,
               helper: b.helper,
               helperSocket: sockets.b,
+              helperWatchMs: 50,
             },
           },
         ],
@@ -1243,6 +1523,33 @@ export async function use(ctx: Stage) {
       )
       assert.deepEqual(b.brew!.formulae, ['jq'])
       rmSync(sockets.b)
+    })
+
+    it('U9.3 a helper installed after the worker started clears the checklist without a reconcile; a NoMac Mac says it has none by design', async () => {
+      const master = c.master.master!
+      const helperItem = (): Json | undefined =>
+        (master.nodeDetails(c.fingerprint('mac-b')) as Json).checklist.find(
+          (item: Json) => item.id === 'helper',
+        )
+      await c.until(() => helperItem() != null, 20000, 'helper item on b')
+      // mason worker --install starts the worker, then the helper.
+      writeFileSync(sockets.b, '')
+      await c.until(() => helperItem() == null, 20000, 'helper item cleared')
+      rmSync(sockets.b)
+      await c.until(() => helperItem() != null, 20000, 'helper item back')
+      assert.match(helperItem()!.title, /run sudo mason worker --install/)
+      const fingerprint = c.fingerprint('mac-b')
+      const host = master.registry.get(fingerprint)!.host
+      master.database.db
+        .prepare('UPDATE nodes SET host=? WHERE fingerprint=?')
+        .run('nomac:ses_test', fingerprint)
+      try {
+        assert.deepEqual(helperItem(), NOMAC_HELPER)
+      } finally {
+        master.database.db
+          .prepare('UPDATE nodes SET host=? WHERE fingerprint=?')
+          .run(host, fingerprint)
+      }
     })
 
     it('U9.3 installs a stage’s Homebrew formula on demand and refuses unwanted downloads and runtimes', async () => {

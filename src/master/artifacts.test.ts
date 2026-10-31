@@ -4,12 +4,14 @@ import { existsSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { after, before, describe, it } from 'mocha'
 import { Agent } from 'undici'
+import { LinkError } from '../link/link.js'
 import { pinnedFetch } from '../node/pinnedFetch.js'
 import type { RunningNode } from '../node/serve.js'
 import { cluster, type Cluster } from '../test/cluster.js'
 import { FakeS3 } from '../test/fakeS3.js'
 import { desktop, manifest, zip } from '../upload/fixtures.test.js'
 import { signClaims, verifyClaims, type GrantClaims } from './artifacts.js'
+import { seedLegacySecrets, seedSecret } from '../test/secrets.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -36,9 +38,28 @@ const masonfile = `
 import type { Setup, Stage } from '@mason/types'
 export function setup(m: Setup) {
   m.apiVersion(1)
-  m.buildNumber('${APP}', { start: 42 })
+  const split = String(m.params.mode).startsWith('variants')
+  m.buildNumber('${APP}', { start: 42, block: split ? 3 : 1 })
   m.workflow('build', { params: { mode: { type: 'string', default: 'apk' } }, keep: { artifactDays: 3 } }, () => {})
-  m.stage('ship', { on: {}, publishes: ['${APP}'], secrets: ['FIXTURE_APK', 'FIXTURE_DMG'], run: ship })
+  if (split)
+    m.parallel('split', {
+      universal: { on: {}, publishes: ['${APP}'], secrets: ['APK_N0', 'APK_N1'], run: shipUniversal },
+      arm64: { on: {}, publishes: ['${APP}'], secrets: ['APK_N2', 'APK_N3'], run: shipArm64 },
+    })
+  else m.stage('ship', { on: {}, publishes: ['${APP}'], secrets: ['FIXTURE_APK', 'FIXTURE_DMG'], run: ship })
+}
+const put = async (ctx: Stage, secret: string): Promise<string> => {
+  const { writeFileSync } = await import('node:fs')
+  writeFileSync(secret + '.apk', Buffer.from(ctx.secret(secret), 'base64'))
+  return secret + '.apk'
+}
+export async function shipUniversal(ctx: Stage) {
+  await ctx.publish({ app: '${APP}', platform: 'android', path: await put(ctx, 'APK_N0'), changelog: 'Split' })
+  return await ctx.publish({ app: '${APP}', platform: 'android', variant: 'armeabi-v7a', path: await put(ctx, 'APK_N1') })
+}
+export async function shipArm64(ctx: Stage) {
+  const secret = ctx.run.params.mode === 'variants-outside' ? 'APK_N3' : 'APK_N2'
+  return await ctx.publish({ app: '${APP}', platform: 'android', variant: 'arm64-v8a', path: await put(ctx, secret) })
 }
 export async function ship(ctx: Stage) {
   const { writeFileSync, mkdirSync, existsSync } = await import('node:fs')
@@ -128,13 +149,17 @@ describe('Artifacts and publication', function () {
       apps: [
         { bundleId: APP, name: 'Example', platforms: ['android', 'macos'] },
       ],
-      secrets: {
-        env: [
-          { name: 'FIXTURE_APK', value: apk.toString('base64'), secret: false },
-          { name: 'FIXTURE_DMG', value: dmg.toString('base64'), secret: false },
-        ],
-        files: [],
-      },
+    })
+    seedLegacySecrets(master.database.db, 'ship', {
+      env: [
+        { name: 'FIXTURE_APK', value: apk.toString('base64'), secret: false },
+        { name: 'FIXTURE_DMG', value: dmg.toString('base64'), secret: false },
+        ...[0, 1, 2, 3].map((k) => ({
+          name: `APK_N${k}`,
+          value: apk.toString('base64'),
+          secret: false,
+        })),
+      ],
     })
     master.saveProject(admin, 'other', {
       repository: c.repo('fixtures/other').url,
@@ -202,13 +227,18 @@ describe('Artifacts and publication', function () {
     const reservations = (
       db()
         .prepare(
-          'SELECT platform,build_number,build_id FROM build_reservations WHERE job_id=?',
+          'SELECT r.platform,r.build_number,p.variant,p.build_id FROM build_reservations r LEFT JOIN build_publications p ON p.reservation_id=r.id WHERE r.job_id=?',
         )
         .all(value.id) as Json[]
     ).map((row) => ({ ...row }))
     // The unused macOS reservation went with the run's end.
     assert.deepEqual(reservations, [
-      { platform: 'android', build_number: '42', build_id: result.buildId },
+      {
+        platform: 'android',
+        build_number: '42',
+        variant: '',
+        build_id: result.buildId,
+      },
     ])
     await c.until(
       () =>
@@ -379,101 +409,61 @@ describe('Artifacts and publication', function () {
         ),
       /published as apk/,
     )
+    // The same file again is a retry; another file in that variant is
+    // refused for the whole run; another variant takes the same reservation.
+    const grantFor = (extra: Record<string, unknown>): Json =>
+      master.artifacts.grant(
+        { job, stage: 'ship', attempt: 9 },
+        {
+          app: APP,
+          platform: 'android',
+          format: 'apk',
+          digest: sha(apk),
+          size: apk.length,
+          version: '1',
+          ...extra,
+        },
+      )
+    assert.equal(grantFor({}).reservation, granted.reservation)
     assert.throws(
-      () =>
-        master.artifacts.grant(
-          { job, stage: 'ship', attempt: 9 },
-          {
-            app: APP,
-            platform: 'android',
-            format: 'apk',
-            digest: sha(apk),
-            size: apk.length,
-            version: '1',
-          },
-        ),
-      /no android reservation/,
+      () => grantFor({ digest: sha(dmg), size: dmg.length }),
+      /The default variant is already published for this run/,
+    )
+    assert.equal(
+      grantFor({ variant: 'arm64-v8a' }).reservation,
+      granted.reservation,
+    )
+    assert.throws(
+      () => grantFor({ variant: '-bad' }),
+      /A variant is 1 to 32 letters/,
+    )
+    // With a block of 1 the number is the reserved one, as before.
+    assert.throws(
+      () => grantFor({ variant: 'x', buildNumber: '43' }),
+      /The build number 43 is not the reserved 42/,
     )
   })
 
-  it('U12.5/U12.6 publishes Zealot uploads through the master, conflicts on a duplicate number, and answers 503 offline', async () => {
-    const master = c.master.master!
-    const appId = (
-      db().prepare('SELECT id FROM apps WHERE slug=?').get(APP) as Json
-    ).id
-    const key = master.keys.create(admin, {
-      role: 'upload',
-      apps: [appId],
-      name: 'zealot',
-    })
-    master.database.change('api_key', key.id)
-    const channelKey = (
-      db()
-        .prepare(
-          "SELECT channel_key FROM channels WHERE app_id=? AND platform='macos'",
-        )
-        .get(appId) as Json
-    ).channel_key
-    await c.until(
-      () =>
-        host
-          .host!.cache.db.prepare('SELECT 1 FROM api_keys WHERE id=?')
-          .get(key.id),
-      2000,
-      'the key on the host',
-    )
-    const upload = async (file: Buffer, build: string): Promise<Response> => {
-      const form = new FormData()
-      form.set('token', key.token)
-      form.set('channel_key', channelKey)
-      form.set('branch', 'release')
-      form.set('git_commit', 'a'.repeat(40))
-      form.set(
-        'custom_fields',
-        JSON.stringify({
-          mason: { bundleId: APP, version: '2.0.0', buildNumber: build },
-        }),
-      )
-      form.set('file', new Blob([new Uint8Array(file)]), 'app.dmg')
-      return await fetch(`${host.web!.url}/api/apps/upload`, {
-        method: 'POST',
-        body: form,
-        // @ts-expect-error undici's dispatcher option
+  it('U12.5 the host has no Zealot upload API: publishing goes only through ctx.publish', async () => {
+    for (const [method, route] of [
+      ['POST', '/api/apps/upload?token=x&channel_key=y'],
+      [
+        'GET',
+        '/api/apps/version_exist?token=x&channel_key=y&bundle_id=a&git_commit=b',
+      ],
+    ] as const) {
+      const response = await fetch(host.web!.url + route, {
+        method,
         dispatcher: insecure,
-      })
+      } as RequestInit)
+      assert.equal(response.status, 404, `${method} ${route}`)
     }
-    const ok = await upload(dmg, '700')
-    assert.equal(ok.status, 201, await ok.clone().text())
-    const published = db()
-      .prepare(
-        "SELECT * FROM builds WHERE branch='release' AND build_number='700'",
-      )
-      .get() as Json
-    assert.equal(published.state, 'ready')
-    assert.equal((await upload(dmg2, '700')).status, 409)
-    const exists = await fetch(
-      `${host.web!.url}/api/apps/version_exist?token=${key.token}&channel_key=${channelKey}&bundle_id=${APP}&release_version=2.0.0&build_version=700&branch=release`,
-      {
-        // @ts-expect-error undici's dispatcher option
-        dispatcher: insecure,
-      },
+    // Nor does the master take one.
+    assert.equal(
+      (await c.api('POST', '/api/v2/keys', { name: 'zealot', role: 'upload' }))
+        .status,
+      400,
     )
-    await c.until(
-      () =>
-        host
-          .host!.cache.db.prepare(
-            "SELECT 1 FROM builds WHERE build_number='700'",
-          )
-          .get(),
-      2000,
-      'the build cached',
-    )
-    assert([200, 404].includes(exists.status))
-    await c.drop('host', 1500, async () => {
-      await c.until(() => !host.host!.online(), 2000, 'offline')
-      assert.equal((await upload(dmg, '701')).status, 503)
-    })
-    await c.until(() => host.host!.online(), 10_000, 'online')
   })
 
   it('U12.7 stages an upload by the stage token while the master is away and publishes it on reconnect', async () => {
@@ -530,12 +520,15 @@ describe('Artifacts and publication', function () {
     assert.equal(
       (
         db()
-          .prepare('SELECT build_id FROM build_reservations WHERE id=?')
+          .prepare(
+            "SELECT build_id FROM build_publications WHERE reservation_id=? AND variant=''",
+          )
           .get(mac.id) as Json
       ).build_id > 0,
       true,
     )
-    // A stage whose own link drops publishes by token, and its record reaches the master once.
+    // A stage whose own link drops waits to publish, and publishes through
+    // the master once the link is back: a node never reaches the host.
     const workerData = c.workers.get('w')!.dir
     const created = await c.api('POST', '/api/v2/runs', {
       project: 'ship',
@@ -554,10 +547,11 @@ describe('Artifacts and publication', function () {
     await c.drop('w', 4000, async () => {
       const workspace = path.join(workerData, 'checkouts', '0', 'ship')
       writeFileSync(path.join(workspace, 'go'), '')
-      await c.until(
-        () => c.workers.get('w')!.worker!.journal.runs('running').length === 0,
-        20_000,
-        'the stage finished offline',
+      await new Promise((resolve) => setTimeout(resolve, 3000))
+      // Still running: the publication waits for the master.
+      assert.equal(
+        c.workers.get('w')!.worker!.journal.runs('running').length,
+        1,
       )
     })
     const done = await c
@@ -567,20 +561,20 @@ describe('Artifacts and publication', function () {
           return value.status === 'succeeded' ? value : undefined
         },
         20_000,
-        'the offline stage reported',
+        'the stage published after the link returned',
       )
       .catch((error: Error) => {
         throw new Error(
           `${error.message}\n${JSON.stringify(c.master.master!.run(id))}\n${c.master.master!.scheduler.logs(id) ?? ''}`,
         )
       })
-    const log = c.master.master!.scheduler.logs(id)!
-    assert.equal(
-      log.match(/while the master was away/g)?.length ?? 0,
-      output(done).buildId === 0 ? 1 : 0,
+    assert(output(done).buildId > 0, JSON.stringify(output(done)))
+    assert.match(
+      c.master.master!.scheduler.logs(id)!,
+      /The master is unreachable; waiting to send artifacts\.publish/,
     )
-    // With the host away too, the run can end before the host confirms the
-    // staged upload; its reservation waits for the host.
+    // With the host away, the master has nowhere to relay to: the stage
+    // waits for the host, and publishes when it is back.
     const late = (
       await c.api('POST', '/api/v2/runs', {
         project: 'ship',
@@ -596,43 +590,745 @@ describe('Artifacts and publication', function () {
       30_000,
       'the late stage running',
     )
-    await c.drop('host', 2000, async () => {
+    await c.drop('host', 4000, async () => {
       await c.until(() => !host.host!.online(), 2000, 'the host offline')
-      await c.drop('w', 2000, async () => {
-        const workspace = path.join(workerData, 'checkouts', '0', 'ship')
-        writeFileSync(path.join(workspace, 'late-go'), '')
-        await c.until(
-          () =>
-            c.workers.get('w')!.worker!.journal.runs('running').length === 0,
-          20_000,
-          'the late stage finished offline',
-        )
-      })
+      const workspace = path.join(workerData, 'checkouts', '0', 'ship')
+      writeFileSync(path.join(workspace, 'late-go'), '')
       await c.until(
-        () => (c.master.master!.run(late) as Json).status === 'succeeded',
+        () =>
+          /The host is unreachable \(No host is connected\); waiting to send artifacts\.publish/.test(
+            c.master.master!.scheduler.logs(late) ?? '',
+          ),
         20_000,
-        'the late run reported',
+        'the late stage waiting for the host',
       )
-      assert.deepEqual(
+      assert.equal((c.master.master!.run(late) as Json).status, 'running')
+    })
+    await c.until(
+      () => (c.master.master!.run(late) as Json).status === 'succeeded',
+      20_000,
+      'the late run published after the host returned',
+    )
+    assert(
+      (
         db()
           .prepare(
-            'SELECT build_id, staged_at IS NOT NULL staged FROM build_reservations WHERE job_id=?',
+            'SELECT p.build_id FROM build_reservations r JOIN build_publications p ON p.reservation_id=r.id WHERE r.job_id=?',
           )
-          .all(late)
-          .map((row) => ({ ...row })),
-        [{ build_id: null, staged: 1 }],
+          .get(late) as Json
+      ).build_id > 0,
+    )
+  })
+
+  it('U12.16 a run publishes variants from parallel stages inside its block; a number past it is refused', async () => {
+    // The run's N: one past the sequence's last number.
+    const next = (): number =>
+      Number(
+        (
+          db()
+            .prepare('SELECT value FROM build_number_last WHERE key=?')
+            .get(APP) as Json | undefined
+        )?.value ?? 41,
+      ) + 1
+    const seed = (n: number): void => {
+      for (const k of [0, 1, 2, 3]) {
+        db()
+          .prepare('DELETE FROM project_secrets WHERE name=?')
+          .run(`APK_N${k}`)
+        seedSecret(db(), 'ship', {
+          name: `APK_N${k}`,
+          kind: 'value',
+          value: zip([
+            ['AndroidManifest.xml', manifest(false, false, n + k)],
+            ['pad.bin', Buffer.alloc(100 * (k + 1))],
+          ]).toString('base64'),
+        })
+      }
+    }
+    const n = next()
+    seed(n)
+    const value = await run('variants')
+    assert.equal(
+      value.status,
+      'succeeded',
+      c.master.master!.scheduler.logs(value.id),
+    )
+    const rows = (
+      db()
+        .prepare(
+          'SELECT variant,build_number,expires_at,size FROM builds WHERE run=? ORDER BY variant',
+        )
+        .all(value.id) as Json[]
+    ).map((row) => ({ ...row }))
+    assert.deepEqual(
+      rows.map((row) => [row.variant, row.build_number]),
+      [
+        ['', String(n)],
+        ['arm64-v8a', String(n + 2)],
+        ['armeabi-v7a', String(n + 1)],
+      ],
+    )
+    // One build: its variants expire together.
+    assert.equal(new Set(rows.map((row) => row.expires_at)).size, 1)
+    await c.until(
+      () =>
+        (
+          host
+            .host!.cache.db.prepare('SELECT COUNT(*) n FROM builds WHERE run=?')
+            .get(value.id) as Json
+        ).n === 3,
+      5000,
+      'the variants on the host',
+    )
+    // The next run's block starts after this one's; a variant past it is refused.
+    const m = next()
+    assert.equal(m, n + 3)
+    seed(m)
+    const outside = await run('variants-outside')
+    assert.equal(outside.status, 'failed')
+    assert.match(
+      c.master.master!.scheduler.logs(outside.id)!,
+      new RegExp(`${m + 3} is outside the run's block ${m}–${m + 2}`),
+    )
+  })
+
+  it('U12.17 the host stages each variant by token, refuses another file in one, and drops a staged file the master refuses', async () => {
+    const master = c.master.master!
+    // A run of its own, so its builds are this test's alone.
+    const job = (await run('apk')).id as string
+    // Two stages of one run, each with its own Android reservation.
+    const runA = { job, stage: 'a', attempt: 1, project: 1 }
+    const runB = { job, stage: 'b', attempt: 1, project: 1 }
+    const pick = (list: Json[]): Json =>
+      list.find((entry) => entry.platform === 'android')
+    const a = pick(
+      master.artifacts.reserve(runA, [APP], { [APP]: '900' }, { [APP]: 3 }),
+    )
+    const b = pick(
+      master.artifacts.reserve(runB, [APP], { [APP]: '900' }, { [APP]: 3 }),
+    )
+    assert.equal(a.block, 3)
+    const tokenA = master.artifacts.uploadToken(runA, [a], 60)!
+    const tokenB = master.artifacts.uploadToken(runB, [b], 60)!
+    const apkAt = (code: number, pad = 0): Buffer =>
+      zip([
+        ['AndroidManifest.xml', manifest(false, false, code)],
+        ['pad.bin', Buffer.alloc(pad)],
+      ])
+    const post = async (
+      token: Json,
+      reservation: string,
+      body: Buffer,
+      headers: Record<string, string>,
+    ): ReturnType<typeof pinnedFetch> =>
+      await pinnedFetch(
+        `${token.origin}/api/artifacts/${reservation}`,
+        {
+          method: 'POST',
+          headers: {
+            'X-Mason-Token': token.token,
+            'X-Mason-Format': 'apk',
+            'X-Mason-Version': '1.2.3',
+            ...headers,
+          },
+          body,
+        },
+        token.pin,
+      )
+    await c.drop('host', 2000, async () => {
+      await c.until(() => !host.host!.online(), 2000, 'offline')
+      const staged = await post(tokenA, a.id, apkAt(902), {
+        'X-Mason-Build-Number': '902',
+        'X-Mason-Variant': 'arm64-v8a',
+      })
+      assert.equal(staged.status, 202, await staged.clone().text())
+      // Past the block, a bad name, or another file in that variant.
+      assert.equal(
+        (
+          await post(tokenA, a.id, apkAt(903), {
+            'X-Mason-Build-Number': '903',
+            'X-Mason-Variant': 'arm64-v8a',
+          })
+        ).status,
+        400,
+      )
+      assert.equal(
+        (
+          await post(tokenA, a.id, apkAt(902), {
+            'X-Mason-Build-Number': '902',
+            'X-Mason-Variant': '..',
+          })
+        ).status,
+        400,
+      )
+      const other = await post(tokenA, a.id, apkAt(902, 10), {
+        'X-Mason-Build-Number': '902',
+        'X-Mason-Variant': 'arm64-v8a',
+      })
+      assert.equal(other.status, 409)
+      assert.match(
+        String(((await other.json()) as Json).error),
+        /arm64-v8a is already published for this run/,
       )
     })
     await c.until(
       () =>
-        (
-          db()
-            .prepare('SELECT build_id FROM build_reservations WHERE job_id=?')
-            .get(late) as Json
-        ).build_id != null,
+        db()
+          .prepare(
+            "SELECT 1 FROM builds WHERE run=? AND variant='arm64-v8a' AND build_number='902'",
+          )
+          .get(job),
       10_000,
-      'the host confirmed the staged build after the run ended',
+      'the staged variant published',
     )
+    // Another stage of the run publishes the same variant with another file:
+    // the master refuses, and the host drops what it staged.
+    const refused = await post(tokenB, b.id, apkAt(902, 20), {
+      'X-Mason-Build-Number': '902',
+      'X-Mason-Variant': 'arm64-v8a',
+    })
+    assert.equal(refused.status, 409)
+    assert.match(
+      String(((await refused.json()) as Json).error),
+      /arm64-v8a is already published for this run/,
+    )
+    const cache = host.host!.cache.db
+    assert.equal(
+      cache.prepare('SELECT 1 FROM host_staged WHERE reservation=?').get(b.id),
+      undefined,
+    )
+    assert.equal(
+      await host.host!.objects.head(
+        `${b.id}-arm64-v8a-${sha(apkAt(902, 20)).slice(0, 16)}.apk`,
+      ),
+      undefined,
+    )
+    // The variant's published file, under its own digest's key, stays.
+    assert.notEqual(
+      await host.host!.objects.head(
+        `${a.id}-arm64-v8a-${sha(apkAt(902)).slice(0, 16)}.apk`,
+      ),
+      undefined,
+    )
+    // A staged confirm the master refuses for good, through the outbox, is
+    // dropped too, when that upload stored its file.
+    // A queued confirmation of a staged file, and the record its upload made.
+    const stagedFile = (
+      reservation: string,
+      variant: string,
+      fileKey: string,
+      fresh: boolean,
+      stagedAt?: number,
+    ): Json => {
+      if (stagedAt != null)
+        host
+          .host!.cache.db.prepare(
+            'INSERT OR REPLACE INTO host_staged(reservation,variant,digest,staged_at) VALUES(?,?,?,?)',
+          )
+          .run(reservation, variant, sha(apkAt(1)), stagedAt)
+      return {
+        action: 'staged',
+        reservation,
+        variant,
+        fileKey,
+        staged: {
+          reservation,
+          variant,
+          digest: sha(apkAt(1)),
+          fileKey,
+          fresh,
+          ...(stagedAt == null ? {} : { stagedAt }),
+        },
+      }
+    }
+    const lost = `${'e'.repeat(32)}-lost.apk`
+    const file = path.join(host.dir, 'lost.apk')
+    writeFileSync(file, apkAt(1))
+    await host.host!.objects.put(lost, file, sha(apkAt(1)))
+    host.host!.outbox.enqueue(
+      'artifact',
+      stagedFile('e'.repeat(32), 'lost', lost, true, 1),
+    )
+    for (let attempt = 0; attempt < 4; attempt++)
+      await host.host!.outbox.flush(host.host!.options.link())
+    for (let wait = 0; (await host.host!.objects.head(lost)) != null; wait++) {
+      assert(wait < 200, 'the refused file was not dropped')
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    // A fresh upload's refusal keeps its file while a repeat of it still
+    // waits in the outbox for its own confirmation.
+    const shared = `${'a'.repeat(32)}-shared-${sha(apkAt(1)).slice(0, 16)}.apk`
+    await host.host!.objects.put(shared, file, sha(apkAt(1)))
+    host.host!.outbox.enqueue(
+      'artifact',
+      stagedFile('a'.repeat(32), 'shared', shared, true, 2),
+    )
+    host.host!.outbox.enqueue(
+      'artifact',
+      stagedFile('a'.repeat(32), 'shared', shared, false),
+    )
+    for (let attempt = 0; attempt < 3; attempt++)
+      await host.host!.outbox.flush(host.host!.options.link())
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.notEqual(await host.host!.objects.head(shared), undefined)
+    // Nor while a repeat sent straight to the master has recorded the file
+    // anew, before its build reaches the host.
+    const direct = `${'b'.repeat(32)}-direct-${sha(apkAt(1)).slice(0, 16)}.apk`
+    await host.host!.objects.put(direct, file, sha(apkAt(1)))
+    host.host!.outbox.enqueue(
+      'artifact',
+      stagedFile('b'.repeat(32), 'direct', direct, true, 3),
+    )
+    host
+      .host!.cache.db.prepare(
+        "UPDATE host_staged SET staged_at=4 WHERE reservation=? AND variant='direct'",
+      )
+      .run('b'.repeat(32))
+    // A set-aside payload that does not clean deletes nothing.
+    const kept = `${'f'.repeat(32)}-kept.apk`
+    await host.host!.objects.put(kept, file, sha(apkAt(1)))
+    const escape = host.host!.outbox.enqueue('artifact', {
+      ...stagedFile('f'.repeat(32), 'kept', kept, true),
+      staged: { reservation: 'f'.repeat(32), variant: '..', fileKey: kept },
+    })
+    // The shared repeat and the direct upload's message ahead of it are
+    // refused too, without deleting either file.
+    for (let attempt = 0; attempt < 12; attempt++)
+      await host.host!.outbox.flush(host.host!.options.link())
+    assert(host.host!.outbox.refused().some((entry) => entry.id === escape))
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.notEqual(await host.host!.objects.head(shared), undefined)
+    assert.notEqual(await host.host!.objects.head(direct), undefined)
+    assert.equal(
+      (
+        host
+          .host!.cache.db.prepare(
+            "SELECT staged_at FROM host_staged WHERE reservation=? AND variant='direct'",
+          )
+          .get('b'.repeat(32)) as Json
+      ).staged_at,
+      4,
+    )
+    assert.notEqual(await host.host!.objects.head(kept), undefined)
+  })
+
+  it('U12.18 a confirmation with no answer or a failure keeps its file; a refusal frees its variant; a repeat never deletes a published file', async () => {
+    const master = c.master.master!
+    const job = (await run('apk')).id as string
+    const runC = { job, stage: 'c', attempt: 1, project: 1 }
+    const reservations = master.artifacts.reserve(
+      runC,
+      [APP],
+      { [APP]: '950' },
+      { [APP]: 3 },
+    )
+    const c1 = reservations.find((entry: Json) => entry.platform === 'android')!
+    const mac = reservations.find((entry: Json) => entry.platform === 'macos')!
+    const token = master.artifacts.uploadToken(runC, reservations, 60)!
+    const apk950 = zip([['AndroidManifest.xml', manifest(false, false, 950)]])
+    const post = async (
+      using: Json,
+      reservation: string,
+      body: Buffer,
+      headers: Record<string, string>,
+    ): ReturnType<typeof pinnedFetch> =>
+      await pinnedFetch(
+        `${using.origin}/api/artifacts/${reservation}`,
+        {
+          method: 'POST',
+          headers: {
+            'X-Mason-Token': using.token,
+            'X-Mason-Version': '1.2.3',
+            ...headers,
+          },
+          body,
+        },
+        using.pin,
+      )
+    const keyOf = (name: string, body: Buffer, format: string): string =>
+      `${name}-${sha(body).slice(0, 16)}.${format}`
+    // The master's answer to the confirmation never comes (a timeout), or it
+    // fails (a busy database): the host keeps the file and its outbox settles it.
+    const options = host.host!.options as { link: () => Json }
+    const realLink = options.link
+    const answering = async (
+      error: LinkError,
+      send: () => ReturnType<typeof pinnedFetch>,
+    ): ReturnType<typeof pinnedFetch> => {
+      options.link = (): Json => {
+        const link = realLink()
+        return link == null
+          ? undefined
+          : {
+              get closed(): boolean {
+                return link.closed as boolean
+              },
+              request: async (method: string, params: unknown) =>
+                method === 'artifacts.staged'
+                  ? await Promise.reject(error)
+                  : await link.request(method, params),
+            }
+      }
+      try {
+        return await send()
+      } finally {
+        options.link = realLink
+      }
+    }
+    const slow = await answering(
+      new LinkError('The request timed out', 'timeout'),
+      async () =>
+        await post(token, c1.id, apk950, {
+          'X-Mason-Format': 'apk',
+          'X-Mason-Build-Number': '950',
+        }),
+    )
+    assert.equal(slow.status, 202, await slow.clone().text())
+    const busy = await answering(
+      new LinkError('database is locked', 'failed'),
+      async () =>
+        await post(token, c1.id, apk950, {
+          'X-Mason-Format': 'apk',
+          'X-Mason-Build-Number': '950',
+          'X-Mason-Variant': 'busy',
+        }),
+    )
+    assert.equal(busy.status, 202, await busy.clone().text())
+    const key = keyOf(c1.id, apk950, 'apk')
+    const busyKey = keyOf(`${c1.id}-busy`, apk950, 'apk')
+    for (const stored of [key, busyKey])
+      assert.notEqual(await host.host!.objects.head(stored), undefined)
+    await c.until(
+      () =>
+        db()
+          .prepare(
+            "SELECT COUNT(*) n FROM builds WHERE run=? AND variant IN ('','busy')",
+          )
+          .get(job)!.n === 2 || undefined,
+      10_000,
+      'both confirmations delivered by the outbox',
+    )
+    // A grant for that same file under another number in the block is
+    // refused, and so is another file from the stage's second attempt.
+    assert.throws(
+      () =>
+        master.artifacts.grant(runC, {
+          app: APP,
+          platform: 'android',
+          format: 'apk',
+          digest: sha(apk950),
+          size: apk950.length,
+          version: '1.2.3',
+          buildNumber: '951',
+        }),
+      /The default variant is already published for this run/,
+    )
+    const runC2 = { ...runC, attempt: 2 }
+    const retried = master.artifacts.reserve(
+      runC2,
+      [APP],
+      { [APP]: '950' },
+      { [APP]: 3 },
+    )
+    const c2 = retried.find((entry: Json) => entry.platform === 'android')!
+    assert.throws(
+      () =>
+        master.artifacts.grant(runC2, {
+          app: APP,
+          platform: 'android',
+          format: 'apk',
+          digest: sha(Buffer.from('another file')),
+          size: 10,
+          version: '1.2.3',
+        }),
+      /The default variant is already published for this run/,
+    )
+    // The retry sends its run's published file again: that build answers,
+    // and the host stores nothing more.
+    await c.until(
+      () =>
+        host
+          .host!.cache.db.prepare('SELECT 1 FROM builds WHERE file_key=?')
+          .get(key),
+      10_000,
+      'the build on the host',
+    )
+    const again = await post(
+      master.artifacts.uploadToken(runC2, retried, 60)!,
+      c2.id,
+      apk950,
+      { 'X-Mason-Format': 'apk', 'X-Mason-Build-Number': '950' },
+    )
+    assert.equal(again.status, 201, await again.clone().text())
+    assert.equal(
+      await host.host!.objects.head(keyOf(c2.id, apk950, 'apk')),
+      undefined,
+    )
+    // A desktop file published as 950, then sent again as 951: the master
+    // refuses the repeat, and the published file and its record stay.
+    const desktop = { 'X-Mason-Format': 'dmg' }
+    const first = await post(token, mac.id, dmg, {
+      ...desktop,
+      'X-Mason-Build-Number': '950',
+      'X-Mason-Variant': 'mac',
+    })
+    assert.equal(first.status, 201, await first.clone().text())
+    const repeat = await post(token, mac.id, dmg, {
+      ...desktop,
+      'X-Mason-Build-Number': '951',
+      'X-Mason-Variant': 'mac',
+    })
+    assert.equal(repeat.status, 409)
+    assert.match(
+      String(((await repeat.json()) as Json).error),
+      /mac is already published for this run/,
+    )
+    const dmgKey = keyOf(`${mac.id}-mac`, dmg, 'dmg')
+    assert.notEqual(await host.host!.objects.head(dmgKey), undefined)
+    assert.notEqual(
+      host
+        .host!.cache.db.prepare(
+          "SELECT 1 FROM host_staged WHERE reservation=? AND variant='mac'",
+        )
+        .get(mac.id),
+      undefined,
+    )
+    // The published variant stays the run's: its record keeps its digest and
+    // build, and another file for it is still refused.
+    const macRecord = db()
+      .prepare(
+        "SELECT digest,build_id FROM build_publications WHERE reservation_id=? AND variant='mac'",
+      )
+      .get(mac.id) as Json
+    assert.equal(macRecord.digest, sha(dmg))
+    assert.notEqual(macRecord.build_id, null)
+    assert.throws(
+      () =>
+        master.artifacts.grant(runC, {
+          app: APP,
+          platform: 'macos',
+          format: 'dmg',
+          digest: sha(dmg3),
+          size: dmg3.length,
+          version: '1.2.3',
+          variant: 'mac',
+        }),
+      /mac is already published for this run/,
+    )
+    // Two uploads of one file for one variant at once, as N and N+1: one
+    // publishes, the other is refused, and the published file stays.
+    const pair = Buffer.from(dmg)
+    pair[18] = (pair[18]! + 1) % 256
+    const twins = await Promise.all(
+      ['950', '951'].map(
+        async (number) =>
+          await post(token, mac.id, pair, {
+            ...desktop,
+            'X-Mason-Build-Number': number,
+            'X-Mason-Variant': 'pair',
+          }),
+      ),
+    )
+    assert.deepEqual(twins.map((answer) => answer.status).sort(), [201, 409])
+    assert.notEqual(
+      await host.host!.objects.head(keyOf(`${mac.id}-pair`, pair, 'dmg')),
+      undefined,
+    )
+    assert.notEqual(
+      host
+        .host!.cache.db.prepare(
+          "SELECT 1 FROM host_staged WHERE reservation=? AND variant='pair'",
+        )
+        .get(mac.id),
+      undefined,
+    )
+    // A failure inside the store's check (a corrupt channel row) is not a
+    // refusal: the host keeps the file for its outbox, and it publishes once
+    // the master is well again.
+    const flaky = Buffer.from(dmg)
+    flaky[19] = (flaky[19]! + 1) % 256
+    const channel = db()
+      .prepare(
+        "SELECT c.id,c.formats FROM channels c JOIN apps a ON a.id=c.app_id WHERE a.slug=? AND c.platform='macos'",
+      )
+      .get(APP) as Json
+    db()
+      .prepare("UPDATE channels SET formats='not json' WHERE id=?")
+      .run(channel.id)
+    let failing
+    try {
+      failing = await post(token, mac.id, flaky, {
+        ...desktop,
+        'X-Mason-Build-Number': '950',
+        'X-Mason-Variant': 'flaky',
+      })
+    } finally {
+      db()
+        .prepare('UPDATE channels SET formats=? WHERE id=?')
+        .run(channel.formats, channel.id)
+    }
+    assert.equal(failing.status, 202, await failing.clone().text())
+    const flakyKey = keyOf(`${mac.id}-flaky`, flaky, 'dmg')
+    assert.notEqual(await host.host!.objects.head(flakyKey), undefined)
+    await host.host!.outbox.flush(host.host!.options.link())
+    await c.until(
+      () =>
+        db()
+          .prepare("SELECT 1 FROM builds WHERE run=? AND variant='flaky'")
+          .get(job),
+      10_000,
+      'the flaky publication delivered',
+    )
+    // The same repeat through the outbox, set aside after its refusals,
+    // deletes nothing either: that upload did not store the file.
+    host.host!.outbox.enqueue('artifact', {
+      action: 'staged',
+      reservation: mac.id,
+      variant: 'mac',
+      digest: sha(dmg),
+      size: dmg.length,
+      format: 'dmg',
+      version: '1.2.3',
+      buildNumber: '951',
+      bundleId: APP,
+      fileKey: dmgKey,
+      staged: {
+        reservation: mac.id,
+        variant: 'mac',
+        digest: sha(dmg),
+        fileKey: dmgKey,
+        fresh: false,
+      },
+    })
+    for (let attempt = 0; attempt < 4; attempt++)
+      await host.host!.outbox.flush(host.host!.options.link())
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    assert.notEqual(await host.host!.objects.head(dmgKey), undefined)
+    // An offline stage's journal reserved a variant; the host's confirmation
+    // of it is refused (past the block) through the outbox delivery, so the
+    // variant is free again; so is a record from before digests were kept.
+    const confirmation = (variant: string, buildNumber: string): Json => ({
+      action: 'staged',
+      reservation: mac.id,
+      variant,
+      digest: sha(dmg2),
+      size: dmg2.length,
+      format: 'dmg',
+      version: '1.2.3',
+      buildNumber,
+      bundleId: APP,
+      fileKey: keyOf(`${mac.id}-${variant}`, dmg2, 'dmg'),
+    })
+    master.artifacts.markStaged(job, mac.id, 'x64', sha(dmg2))
+    db()
+      .prepare(
+        "INSERT INTO build_publications(reservation_id,variant,staged_at) VALUES(?,'old',1),(?,'older',1)",
+      )
+      .run(mac.id, mac.id)
+    const record = (variant: string): Json =>
+      db()
+        .prepare(
+          'SELECT digest,build_id FROM build_publications WHERE reservation_id=? AND variant=?',
+        )
+        .get(mac.id, variant)
+    for (const variant of ['x64', 'old'])
+      assert.throws(
+        () =>
+          master.hosts.deliver(
+            {
+              id: `refused-${variant}`,
+              kind: 'artifact',
+              payload: confirmation(variant, '999'),
+            },
+            c.fingerprint('host'),
+          ),
+        (error: LinkError) =>
+          error.code === 'refused' &&
+          /outside the run's block 950–952/.test(error.message),
+      )
+    assert.equal(record('x64'), undefined)
+    assert.equal(record('old'), undefined)
+    // A record from before digests confirms normally and gains its build.
+    master.hosts.deliver(
+      {
+        id: 'confirmed-older',
+        kind: 'artifact',
+        payload: confirmation('older', '952'),
+      },
+      c.fingerprint('host'),
+    )
+    assert.equal(record('older').digest, sha(dmg2))
+    assert.notEqual(record('older').build_id, null)
+    const granted = master.artifacts.grant(runC, {
+      app: APP,
+      platform: 'macos',
+      format: 'dmg',
+      digest: sha(dmg3),
+      size: dmg3.length,
+      version: '1.2.3',
+      variant: 'x64',
+    })
+    assert.equal(granted.reservation, mac.id)
+    // The store's own refusal is final too: another run sends this run's
+    // published desktop file for the same variant under its own number.
+    const job2 = (await run('apk')).id as string
+    const runD = { job: job2, stage: 'd', attempt: 1, project: 1 }
+    const later = master.artifacts.reserve(runD, [APP], { [APP]: '960' })
+    const mac2 = later.find((entry: Json) => entry.platform === 'macos')!
+    const conflicting = await post(
+      master.artifacts.uploadToken(runD, later, 60)!,
+      mac2.id,
+      dmg,
+      { ...desktop, 'X-Mason-Build-Number': '960', 'X-Mason-Variant': 'mac' },
+    )
+    assert.equal(conflicting.status, 409)
+    assert.match(
+      String(((await conflicting.json()) as Json).error),
+      /Build publication conflict/,
+    )
+    master.artifacts.markStaged(job2, mac2.id, 'mac', sha(dmg))
+    assert.throws(
+      () =>
+        master.hosts.deliver(
+          {
+            id: 'conflict-mac',
+            kind: 'artifact',
+            payload: {
+              action: 'staged',
+              reservation: mac2.id,
+              variant: 'mac',
+              digest: sha(dmg),
+              size: dmg.length,
+              format: 'dmg',
+              version: '1.2.3',
+              buildNumber: '960',
+              bundleId: APP,
+              fileKey: keyOf(`${mac2.id}-mac`, dmg, 'dmg'),
+            },
+          },
+          c.fingerprint('host'),
+        ),
+      (error: LinkError) =>
+        error.code === 'refused' &&
+        error.message === 'Build publication conflict',
+    )
+    assert.equal(
+      db()
+        .prepare(
+          "SELECT 1 FROM build_publications WHERE reservation_id=? AND variant='mac'",
+        )
+        .get(mac2.id),
+      undefined,
+    )
+    // A finished run keeps its reservations with publications and drops
+    // the retry's, which published nothing of its own.
+    master.artifacts.release(job)
+    const kept = db()
+      .prepare('SELECT id FROM build_reservations WHERE job_id=?')
+      .all(job)
+      .map((row: Json) => row.id)
+    assert(kept.includes(c1.id) && kept.includes(mac.id), String(kept))
+    assert(!kept.includes(c2.id))
   })
 
   it('U12.8/U12.9/U12.11 saves artifacts and test results; testers see only what is visible to them; reports open sandboxed', async () => {
@@ -950,6 +1646,102 @@ describe('Artifacts and publication', function () {
       await second.close()
     }
     await settings.set(admin, 'storage', { driver: 'disk' })
+  })
+
+  it('U2.1/U2.2 lists every storage location with its files, keeps a Space after switching to disk, and forgets an added Space with its builds', async () => {
+    const master = c.master.master!
+    const endpoint = s3.endpoint.replace(/^http:/, 'https:')
+    const listed = await c.api('GET', '/api/v2/storage')
+    assert.equal(listed.status, 200, listed.text)
+    const locations = listed.json.locations as Json[]
+    assert.deepEqual(
+      locations.map((location: Json) => [
+        location.bucket ?? location.id,
+        location.active,
+        location.origin ?? null,
+      ]),
+      [
+        ['disk', true, null],
+        ['mason-artifacts', false, 'added'],
+        ['mason-artifacts-2', false, 'added'],
+      ],
+    )
+    assert(!listed.text.includes('fake-secret-value-1234'))
+    const first = locations[1]
+    assert(first.usage.files >= 1, JSON.stringify(first))
+    assert(locations[0].usage.files >= 1, 'builds stored on the disk')
+    // Using a Space and then the disk again leaves the Space a location.
+    const used = await c.api(
+      'POST',
+      `/api/v2/storage/locations/${encodeURIComponent(first.id)}/use`,
+      {},
+    )
+    assert.equal(used.status, 200, used.text)
+    assert.equal(master.settings.value('storage')!.driver, 's3')
+    const active = await c.api(
+      'DELETE',
+      `/api/v2/storage/locations/${encodeURIComponent(first.id)}`,
+      { confirm: 'mason-artifacts' },
+    )
+    assert.equal(active.status, 400)
+    assert.match(active.json.error, /New builds go to this Space/)
+    assert.equal((await c.api('POST', '/api/v2/storage/disk', {})).status, 200)
+    assert(
+      master.storageLocations
+        .list()
+        .some((location) => location.bucket === 'mason-artifacts'),
+    )
+    assert.match(
+      (
+        await c.api(
+          'DELETE',
+          `/api/v2/storage/locations/${encodeURIComponent(first.id)}`,
+          { confirm: 'wrong' },
+        )
+      ).json.error,
+      /Type the Space’s name, mason-artifacts/,
+    )
+    assert.match(
+      (await c.api('DELETE', '/api/v2/storage/locations/disk', {})).json.error,
+      /always a storage location/,
+    )
+    assert.equal(
+      (await c.api('POST', '/api/v2/storage/locations/nowhere/use', {})).status,
+      400,
+    )
+    // Forgetting the added Space: its run artifacts leave Mason, the host
+    // forgets the store, and the files stay in the bucket.
+    const store = { bucket: 'mason-artifacts', endpoint }
+    const keys = host.host!.objects.keys(store)
+    assert(keys.length > 0)
+    const runId = /^runs\/([^/]+)\//.exec(
+      keys.find((key) => key.startsWith('runs/'))!,
+    )![1]!
+    const bucketKeys = s3.objects.size
+    const removed = await c.api(
+      'DELETE',
+      `/api/v2/storage/locations/${encodeURIComponent(first.id)}`,
+      { confirm: 'mason-artifacts' },
+    )
+    assert.equal(removed.status, 200, removed.text)
+    assert.deepEqual(removed.json, { files: keys.length, bucketDeleted: false })
+    assert.equal(
+      (
+        db()
+          .prepare('SELECT count(*) AS n FROM run_artifacts WHERE job_id=?')
+          .get(runId) as { n: number }
+      ).n,
+      0,
+    )
+    assert.deepEqual(host.host!.objects.keys(store), [])
+    assert.equal(s3.objects.size, bucketKeys, 'an added Space keeps its files')
+    assert(
+      !master.storageLocations
+        .list()
+        .some((location) => location.bucket === 'mason-artifacts'),
+    )
+    const usage = host.host!.objects.usage()
+    assert(!usage.some((entry) => entry.bucket === 'mason-artifacts'))
   })
 
   it('U12.15 expires builds and saved artifacts: the host deletes the files and confirms once, also after being offline', async () => {

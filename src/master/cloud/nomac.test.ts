@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { version } from '../../version.js'
 import { createHash, randomBytes } from 'node:crypto'
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -12,6 +13,7 @@ import { FakeNoMac } from '../../test/fakeNoMac.js'
 import { nodesView } from '../../view/admin.js'
 import { ProviderError } from './digitalocean.js'
 import { NoMac } from './nomac.js'
+import { nomacLimits } from './pools.js'
 
 const { utils } = ssh2
 
@@ -261,6 +263,26 @@ describe('NoMac Macs', function () {
   })
 })
 
+describe('NoMac session limits', function () {
+  it('U7.4 a session stops idle ten minutes after the pool retires its Mac, and never asks NoMac for more than an hour idle or eight hours', () => {
+    assert.deepEqual(nomacLimits({ maxHoursPerNode: 2, ttlMinutes: 5 }), {
+      maxSeconds: 2 * 3600,
+      idleSeconds: 15 * 60,
+    })
+    assert.deepEqual(nomacLimits({ maxHoursPerNode: 8, ttlMinutes: 60 }), {
+      maxSeconds: 8 * 3600,
+      idleSeconds: 3600,
+    })
+    assert.deepEqual(
+      nomacLimits({ maxHoursPerNode: 24, ttlMinutes: 24 * 60 }),
+      {
+        maxSeconds: 8 * 3600,
+        idleSeconds: 3600,
+      },
+    )
+  })
+})
+
 describe('A NoMac pool', function () {
   this.timeout(180_000)
   let c: Cluster
@@ -277,6 +299,12 @@ describe('A NoMac pool', function () {
         now: () => Date.now() + offset,
         cloud: {
           publicAddress: async () => '203.0.113.7',
+          // The master's GitHub release, without the network.
+          github: () => ({ repository: 'EdgeApp/mason', version }),
+          releaseAssets: async () => [
+            `mason-${version}-darwin-arm64.tar.gz`,
+            'install.sh',
+          ],
           tickMs: 200,
           pairTimeoutMs: 60_000,
           nomac: {
@@ -450,8 +478,11 @@ export async function build(ctx: Stage) {
     const command = (setup.body as Json).argv[2] as string
     assert.match(
       command,
-      /bash ~\/mason-install.sh --user --from https:\/\/builds.example.test/,
+      new RegExp(
+        `curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh -o ~/mason-install.sh\nbash ~/mason-install.sh --user --version ${version.replaceAll('.', '\\.')}`,
+      ),
     )
+    assert(!command.includes('builds.example.test'))
     assert.match(
       command,
       /nomac-service start mason-worker -- ~\/.local\/bin\/mason worker --pairing-file ~\/mason-pairing.json --listen 127.0.0.1 --link-port 9310 --slots 1/,

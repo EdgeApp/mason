@@ -20,6 +20,8 @@ export const policy = {
   'keys.create': 'developer',
   /** Configure Mason. */
   'projects.change': 'manager',
+  /** A secret's value or file contents; every fetch is audited. */
+  'secrets.read': 'manager',
   'secrets.change': 'manager',
   'buildNumbers.seed': 'manager',
   'settings.read': 'manager',

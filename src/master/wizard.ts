@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import express, { Router } from 'express'
-import type { Graph } from '../pipeline/graph.js'
+import { alternatives, type Graph } from '../pipeline/graph.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
 import { allowRole } from './permissions.js'
 import { repositoryName } from './mirrors.js'
@@ -47,8 +47,12 @@ export function declaredApps(graph: Graph): DeclaredApp[] {
       if (stage.apple != null)
         platforms.add(applePlatform[stage.apple.distribution] ?? 'ios')
       if ((stage.tools?.android?.length ?? 0) > 0) platforms.add('android')
-      const os = typeof stage.on === 'object' ? stage.on?.os : undefined
-      if (os === 'windows') platforms.add('windows')
+      if (
+        alternatives(stage.on).some(
+          (on) => typeof on === 'object' && on.os === 'windows',
+        )
+      )
+        platforms.add('windows')
       const ids = new Set([
         ...stage.publishes,
         ...(stage.apple?.app == null ? [] : [stage.apple.app]),

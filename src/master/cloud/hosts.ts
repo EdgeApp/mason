@@ -12,6 +12,7 @@ import {
   type ProviderMachine,
 } from './digitalocean.js'
 import { SpaceError } from './spaces.js'
+import { SETUP_LABEL } from '../../pipeline/graph.js'
 
 /**
  * Mason hosts the master makes on DigitalOcean. Each is a row in
@@ -336,7 +337,7 @@ export function asNodeInput(value: unknown): NodeInput {
   const labels =
     typeof input.labels === 'string'
       ? input.labels.split(',').map((label) => label.trim())
-      : (input.labels ?? [])
+      : (input.labels ?? [SETUP_LABEL])
   if (
     !Array.isArray(labels) ||
     labels.length > 20 ||

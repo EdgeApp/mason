@@ -26,6 +26,19 @@ export interface ToolSources {
   rust: string
   adoptium: string
   android: string
+  /** python-build-standalone's `latest-release.json` directory. */
+  python: string
+  go: string
+  /** ruby-build release tarballs, by tag. */
+  rubyBuild: string
+  /** Homebrew's portable Ruby releases, which CocoaPods installs with. */
+  portableRuby: string
+  /**
+   * The portable Ruby's digests by bottle name. Unlike the other tools',
+   * they are pinned (`versions.ts`), so tests that serve their own bottle
+   * name its digest here.
+   */
+  portableRubyDigests?: Record<string, string>
 }
 
 export const defaultSources: ToolSources = {
@@ -33,6 +46,12 @@ export const defaultSources: ToolSources = {
   rust: 'https://static.rust-lang.org',
   adoptium: 'https://api.adoptium.net',
   android: 'https://dl.google.com/android/repository',
+  python:
+    'https://raw.githubusercontent.com/astral-sh/python-build-standalone/latest-release',
+  go: 'https://go.dev/dl',
+  rubyBuild: 'https://github.com/rbenv/ruby-build/archive/refs/tags',
+  portableRuby:
+    'https://github.com/Homebrew/homebrew-portable-ruby/releases/download',
 }
 
 export interface InstallContext {
@@ -43,6 +62,8 @@ export interface InstallContext {
   arch: 'arm64' | 'x64'
   log: (text: string) => void
   signal?: AbortSignal
+  /** For CocoaPods: the stage's Xcode, which compiles native gems. */
+  developerDir?: string
 }
 
 export class ChecksumMismatch extends Error {}
@@ -193,6 +214,8 @@ export interface Marker {
   digest: string
   source: string
   installed: number
+  /** What an installer resolved beyond the pinned version (CocoaPods' gems). */
+  resolved?: string[]
 }
 
 export const markerFile = (dir: string): string =>

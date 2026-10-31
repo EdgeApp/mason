@@ -75,6 +75,8 @@ export interface StageAssignment {
       app: string
       platform: string
       buildNumber: string
+      /** The run holds buildNumber to buildNumber+block−1; absent means 1. */
+      block?: number
     }>
   }
 }
@@ -125,6 +127,11 @@ export interface RunReport {
   quarantine?: string
   /** A setup run's copy of the repository's `.xcode-version`. */
   xcodeVersion?: string
+  /** A setup run's reading of the repository's pin files, per tool a stage sets to `'project'`. */
+  projectTools?: Record<
+    string,
+    { file: string; version?: string; problem?: string }
+  >
 }
 
 /** An assignment as the worker journals it: without secrets, files, injected contents or signing keys. */

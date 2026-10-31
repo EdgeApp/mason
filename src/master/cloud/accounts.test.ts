@@ -291,9 +291,15 @@ describe('Cloud accounts', function () {
     })
     assert.deepEqual(setting(upgraded, 'cloud'), {
       monthlyBudget: 50,
+      // Schema 24 then labels every pool's machines for setup.
       pools: [
-        { name: 'linux', type: 'linux', account: 'digitalocean' },
-        { name: 'big', type: 'big', account: 'other' },
+        {
+          name: 'linux',
+          type: 'linux',
+          account: 'digitalocean',
+          labels: ['setup'],
+        },
+        { name: 'big', type: 'big', account: 'other', labels: ['setup'] },
       ],
     })
     assert.equal(

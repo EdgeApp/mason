@@ -18,7 +18,7 @@ import { Accounts } from '../auth/accounts.js'
 import { SESSION_COOKIE } from '../auth/routes.js'
 import { asConfig } from '../config.js'
 import { createApp } from '../server.js'
-import { Store, digest } from '../store.js'
+import { Store, digest, insertBuild } from '../store.js'
 import type { Build, Format, Platform } from '../validation.js'
 import { byteRange, Installations } from './install.js'
 import { branchKey, branchName, platform } from './platform.js'
@@ -150,9 +150,7 @@ describe('Mason protected catalog and installation', () => {
         home.indexOf('Next App') < home.indexOf('Last App'),
     )
     const list = await (await request(`/apps/${app}?platform=ios`)).text()
-    assert(
-      list.indexOf('<strong>master') < list.indexOf('<strong>feature/new'),
-    )
+    assert(list.indexOf('<strong>master') < list.indexOf('<strong>feature/new'))
     const route = `/apps/${app}/branches/${branchKey('feature/new')}`
     const builds = await (await request(route + '?platform=ios')).text()
     assert(builds.indexOf('build 4') < builds.indexOf('build 3'))
@@ -178,6 +176,158 @@ describe('Mason protected catalog and installation', () => {
       /No retained builds/,
     )
   })
+  it('U12.16 shows a run’s variants as one build, default first, each with its size and install control', async () => {
+    const android = publish('android', 'master', '90')
+    let key = 0
+    const variant = (name: string, number: string, size: number): Build =>
+      insertBuild(
+        store.db,
+        {
+          channelId: android.channel_id,
+          branch: 'master',
+          commit: 'f'.repeat(40),
+          version: '4.53.0',
+          buildNumber: number,
+          bundleId: 'test.example.app',
+          format: 'apk',
+          size,
+          digest: digest(`${name}${number}`),
+          changelog: '',
+          source: 'pipeline',
+          customFields: '{}',
+          variant: name,
+          run: 'run-7',
+        },
+        `${(++key).toString(16).padStart(32, 'c')}.apk`,
+        { now: now + 1000, retentionDays: 14 },
+      )
+    now += 1000
+    variant('arm64-v8a', '102', 2 * 1024 ** 2)
+    variant('', '100', 3 * 1024 ** 2)
+    variant('armeabi-v7a', '101', 1024 ** 2)
+    const page = await (
+      await request(
+        `/apps/${app}/branches/${branchKey('master')}?platform=android`,
+      )
+    ).text()
+    const group = page.slice(
+      page.indexOf('<section class="build-group" id="run-run-7">'),
+      page.indexOf('</section>', page.indexOf('id="run-run-7"')),
+    )
+    assert.match(
+      group,
+      /<div class="build-group-head"><strong>4\.53\.0 <span class="build-number">\(100\)<\/span><\/strong>/,
+    )
+    // Default, then the others by name, each its own install control.
+    const order = ['Default', 'arm64-v8a', 'armeabi-v7a'].map((name) =>
+      group.indexOf(`<strong>${name} `),
+    )
+    assert(
+      order.every((at) => at > 0),
+      group,
+    )
+    assert.deepEqual(
+      [...order].sort((x, y) => x - y),
+      order,
+    )
+    assert.match(
+      group,
+      /<strong>armeabi-v7a <span class="build-number">\(101\)<\/span><\/strong><small>1\.0 MB<\/small>/,
+    )
+    assert.equal(group.match(/action="\/builds\/\d+\/install"/g)?.length, 3)
+    assert.match(group, /aria-label="Install 4\.53\.0 build 102 \(arm64-v8a\)"/)
+    // The run's group is newer than the build of no run, which stays as it was.
+    assert(
+      page.indexOf('id="run-run-7"') < page.indexOf(`id="build-${android.id}"`),
+    )
+    assert.doesNotMatch(page, new RegExp(`id="run-${android.id}"`))
+    // A run that published only named variants is headed by its first.
+    const only = (name: string, number: string): Build =>
+      insertBuild(
+        store.db,
+        {
+          channelId: android.channel_id,
+          branch: 'master',
+          commit: 'e'.repeat(40),
+          version: '4.54.0',
+          buildNumber: number,
+          bundleId: 'test.example.app',
+          format: 'apk',
+          size: 1024 ** 2,
+          digest: digest(`only${name}`),
+          changelog: '',
+          source: 'pipeline',
+          customFields: '{}',
+          variant: name,
+          run: 'run-8',
+        },
+        `${(++key).toString(16).padStart(32, 'd')}.apk`,
+        { now: now + 2000, retentionDays: 14 },
+      )
+    now += 2000
+    only('armeabi-v7a', '104')
+    only('arm64-v8a', '105')
+    const later = await (
+      await request(
+        `/apps/${app}/branches/${branchKey('master')}?platform=android`,
+      )
+    ).text()
+    const variantsOnly = later.slice(
+      later.indexOf('<section class="build-group" id="run-run-8">'),
+      later.indexOf('</section>', later.indexOf('id="run-run-8"')),
+    )
+    assert.match(
+      variantsOnly,
+      /<div class="build-group-head"><strong>4\.54\.0 <span class="build-number">\(105\)<\/span><\/strong>/,
+    )
+    assert(
+      variantsOnly.indexOf('<strong>arm64-v8a ') <
+        variantsOnly.indexOf('<strong>armeabi-v7a '),
+      variantsOnly,
+    )
+    assert(variantsOnly.indexOf('<strong>armeabi-v7a ') > 0, variantsOnly)
+    assert.doesNotMatch(variantsOnly, /<strong>Default /)
+    // Byte order, not locale order: `Zed` leads `arm`, as on the dashboard.
+    const mixed = (name: string, number: string): Build =>
+      insertBuild(
+        store.db,
+        {
+          channelId: android.channel_id,
+          branch: 'master',
+          commit: 'd'.repeat(40),
+          version: '4.55.0',
+          buildNumber: number,
+          bundleId: 'test.example.app',
+          format: 'apk',
+          size: 1024 ** 2,
+          digest: digest(`mixed${name}`),
+          changelog: '',
+          source: 'pipeline',
+          customFields: '{}',
+          variant: name,
+          run: 'run-9',
+        },
+        `${(++key).toString(16).padStart(32, 'e')}.apk`,
+        { now: now + 3000, retentionDays: 14 },
+      )
+    now += 3000
+    mixed('arm', '106')
+    mixed('Zed', '107')
+    const latest = await (
+      await request(
+        `/apps/${app}/branches/${branchKey('master')}?platform=android`,
+      )
+    ).text()
+    const caseGroup = latest.slice(
+      latest.indexOf('<section class="build-group" id="run-run-9">'),
+      latest.indexOf('</section>', latest.indexOf('id="run-run-9"')),
+    )
+    assert.match(
+      caseGroup,
+      /<div class="build-group-head"><strong>4\.55\.0 <span class="build-number">\(107\)<\/span>/,
+    )
+  })
+
   it('does not reveal catalog data to anonymous or pending accounts', async () => {
     publish('android')
     const anonymous = await request(`/apps/${app}`, {}, false)
@@ -201,7 +351,11 @@ describe('Mason protected catalog and installation', () => {
     const html = await (await request(route)).text()
     assert.match(html, /<a id="build-/)
     assert.equal(html.includes(`<form id="build-${build.id}"`), false)
-    const link = new URL(/data-install[^>]*href="([^"]+)"/.exec(html)![1]!.replaceAll('&amp;', '&'))
+    const link = new URL(
+      /data-install[^>]*href="([^"]+)"/
+        .exec(html)![1]!
+        .replaceAll('&amp;', '&'),
+    )
     assert.equal(link.protocol, 'itms-services:')
     const manifest = link.searchParams.get('url')!
     assert.equal(new URL(manifest).origin, store.config.origin)
@@ -271,11 +425,7 @@ describe('Mason protected catalog and installation', () => {
       ['bytes=0-999', content],
       ['bytes=-999', content],
     ]) {
-      const response = await request(
-        url,
-        { headers: { range: range! } },
-        false,
-      )
+      const response = await request(url, { headers: { range: range! } }, false)
       assert.equal(response.status, 206)
       assert.equal(await response.text(), expected)
     }
@@ -363,10 +513,7 @@ describe('Mason protected catalog and installation', () => {
     assert.equal(
       (
         await request(
-          installs.url(
-            installs.create(msi.id, user.session).token,
-            'artifact',
-          ),
+          installs.url(installs.create(msi.id, user.session).token, 'artifact'),
           {},
           false,
         )

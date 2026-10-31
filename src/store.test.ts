@@ -24,15 +24,24 @@ import {
   readPrivateJson,
   type Config,
 } from './config.js'
-import { migrateBranchNumbers } from './branchNumbers.js'
-import { Store, digest } from './store.js'
+import { migrateBuildVariants } from './buildVariants.js'
 import {
+  PublicationConflict,
+  Store,
+  checkPublication,
+  digest,
+  insertBuild,
+} from './store.js'
+import {
+  alreadyPublished,
   asFileKey,
   asFlag,
   asHttps,
   asOrigin,
+  asVariant,
   integer,
   object,
+  outsideBlock,
   text,
 } from './validation.js'
 
@@ -113,10 +122,53 @@ describe('Mason durable store', () => {
       .exec(`INSERT INTO accounts(id,name,created_at) VALUES(1,'Fixture',0);
       INSERT INTO sessions VALUES('session',1,0,'csrf',0,9999999999999);
       INSERT INTO install_grants(hash,build_id,session_hash,created_at,expires_at) VALUES('grant',${first.id},'session',0,9999999999999);`)
-    migrateBranchNumbers(store.db)
+    // Builds whose custom fields name a run, are not JSON, or name none.
+    const copy = store.db.prepare(
+      `INSERT INTO builds(app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields)
+       SELECT app_id,channel_id,platform,branch,commit_hash,version,?,bundle_id,format,?,size,?,published_at,expires_at,state,changelog,source,? FROM builds WHERE id=? RETURNING id`,
+    )
+    const fields = [
+      ['78', '{"mason":{"run":"r1","stage":"android"}}'],
+      ['79', 'not json'],
+      ['80', '{"other":true}'],
+    ].map(
+      ([number, customFields]) =>
+        (
+          copy.get(
+            number!,
+            `d${number}`,
+            `${'b'.repeat(32)}-${number}.apk`,
+            customFields!,
+            first.id,
+          ) as { id: number }
+        ).id,
+    )
+    // The latest rebuild of builds (schema 8, variants) keeps the grants and
+    // makes every earlier build the default variant, with the run its custom
+    // fields name.
+    migrateBuildVariants(store.db)
+    assert.deepEqual(
+      fields.map(
+        (id) =>
+          (
+            store.db.prepare('SELECT run FROM builds WHERE id=?').get(id) as {
+              run: string | null
+            }
+          ).run,
+      ),
+      ['r1', null, null],
+    )
     assert.equal(
       store.db.prepare('SELECT build_id FROM install_grants').get()!.build_id,
       first.id,
+    )
+    assert.deepEqual(
+      {
+        ...store.db
+          .prepare('SELECT variant,run FROM builds WHERE id=?')
+          .get(first.id),
+      },
+      { variant: '', run: null },
     )
     assert.deepEqual(store.db.prepare('PRAGMA foreign_key_check').all(), [])
     const next = stage('77', 'different')
@@ -130,6 +182,150 @@ describe('Mason durable store', () => {
     assert.throws(() => store.publish(conflict.id, conflict.input), /conflict/)
     store.cancel(conflict.id)
   })
+  it('U12.16 a number is inside its run’s block; variant names and file keys share one grammar', () => {
+    // Block 1: the reserved number itself, in any format.
+    assert.equal(outsideBlock('100', '100', 1), undefined)
+    assert.equal(outsideBlock('2026.10.30.1', '2026.10.30.1', 1), undefined)
+    assert.equal(
+      outsideBlock('101', '100', 1),
+      'The build number 101 is not the reserved 100',
+    )
+    // A larger block: integers from N to N+block−1.
+    for (const inside of ['26103001', '26103002', '26103003'])
+      assert.equal(outsideBlock(inside, '26103001', 3), undefined)
+    for (const outside of ['26103004', '26103000', 'abc', '26103001.5', ''])
+      assert.equal(
+        outsideBlock(outside, '26103001', 3),
+        `${outside} is outside the run's block 26103001–26103003`,
+      )
+    assert.equal(asVariant(undefined), '')
+    assert.equal(asVariant(null), '')
+    assert.equal(asVariant('arm64-v8a'), 'arm64-v8a')
+    for (const bad of ['.arm64', '-x64', 'a'.repeat(33), 'a b', 7])
+      assert.throws(() => asVariant(bad), /starting with a letter or digit/)
+    const reservation = 'a'.repeat(32)
+    for (const key of [
+      `${reservation}.apk`,
+      `${reservation}-arm64-v8a.apk`,
+      `${reservation}-0123456789abcdef.apk`,
+      `${reservation}-arm64-v8a-0123456789abcdef.apk`,
+    ])
+      assert.equal(asFileKey(key), key)
+    for (const key of [`${reservation}-.apk`, `${reservation}-x.zip`])
+      assert.throws(() => asFileKey(key), /Invalid file key/)
+    assert.equal(
+      alreadyPublished(''),
+      'The default variant is already published for this run',
+    )
+    assert.equal(
+      alreadyPublished('x64'),
+      'x64 is already published for this run',
+    )
+  })
+
+  it('U12.16 numbers and files are unique per variant; a run’s variants share its expiry', () => {
+    const base = {
+      channelId: channel,
+      branch: 'master',
+      commit: 'abc123',
+      version: '1.2.3',
+      bundleId: 'test.example.app',
+      format: 'apk' as const,
+      size: 7,
+      changelog: '',
+      source: 'pipeline',
+      customFields: '{}',
+      run: 'run-1',
+    }
+    let key = 0
+    const insert = (
+      extra: Record<string, unknown>,
+    ): ReturnType<typeof insertBuild> => {
+      const input = {
+        ...base,
+        buildNumber: '100',
+        digest: digest('a'),
+        ...extra,
+      }
+      return (
+        checkPublication(store.db, input, now) ??
+        insertBuild(
+          store.db,
+          input,
+          `${(++key).toString(16).padStart(32, '0')}.apk`,
+          { now, retentionDays: 14 },
+        )
+      )
+    }
+    const universal = insert({})
+    // The same number in another variant, and a variant's own file and number.
+    const armv7 = insert({
+      variant: 'armeabi-v7a',
+      buildNumber: '100',
+      digest: digest('b'),
+    })
+    assert.deepEqual([armv7.variant, armv7.run], ['armeabi-v7a', 'run-1'])
+    // Published an hour later, a variant still takes its run's expiry.
+    now += 3_600_000
+    const arm64 = insert({
+      variant: 'arm64-v8a',
+      buildNumber: '102',
+      digest: digest('c'),
+    })
+    assert.equal(arm64.expires_at, universal.expires_at)
+    const other = insert({
+      run: 'run-2',
+      buildNumber: '103',
+      digest: digest('d'),
+    })
+    assert.equal(other.expires_at, now + 14 * DAY)
+    // A retry of the same file returns its build.
+    assert.equal(
+      insert({ variant: 'arm64-v8a', buildNumber: '102', digest: digest('c') })
+        .id,
+      arm64.id,
+    )
+    // Another file or number in a variant that has one conflicts, and so
+    // does a wrong format or app: each a PublicationConflict, the store's
+    // deliberate refusal.
+    const refused =
+      (message: string) =>
+      (error: unknown): boolean =>
+        error instanceof PublicationConflict && error.message === message
+    assert.throws(
+      () =>
+        insert({
+          variant: 'arm64-v8a',
+          buildNumber: '102',
+          digest: digest('e'),
+        }),
+      refused('Build publication conflict'),
+    )
+    assert.throws(
+      () =>
+        insert({
+          variant: 'arm64-v8a',
+          buildNumber: '104',
+          digest: digest('c'),
+        }),
+      refused('Build publication conflict'),
+    )
+    assert.throws(
+      () => insert({ format: 'ipa', digest: digest('f') }),
+      refused('Format does not match channel'),
+    )
+    assert.throws(
+      () => insert({ bundleId: 'other.app', digest: digest('g') }),
+      refused('Package does not match app'),
+    )
+    // A file key may carry its variant; nothing else.
+    assert.equal(
+      asFileKey(`${'a'.repeat(32)}-arm64-v8a.apk`),
+      `${'a'.repeat(32)}-arm64-v8a.apk`,
+    )
+    assert.throws(() => asFileKey(`${'a'.repeat(32)}-.apk`), /Invalid file key/)
+  })
+
   it('rejects unsafe existing state directories and replaceable ancestors', () => {
     const published = publish()
     for (const directory of [

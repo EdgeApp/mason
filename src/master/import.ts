@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { asDefinition } from '../builder/config.js'
 import type { MasterDatabase } from './database.js'
+import { insertRows, legacyRows } from './secrets.js'
 
 export interface ImportSummary {
   accounts: number
@@ -12,7 +13,8 @@ export interface ImportSummary {
   channels: number
   builds: number
   devices: number
-  keys: { upload: number; admin: number; developer: number }
+  /** Upload keys are skipped: the cluster publishes only through `ctx.publish`. */
+  keys: { admin: number; developer: number; uploadSkipped: number }
   projects: number
   branchRules: number
   /** Distribution admin keys, now admin keys on /api/v2; their callers move. */
@@ -60,7 +62,8 @@ function openReadOnly(file: string): DatabaseSync {
 
 /**
  * Builds a master database from the current deployment's distribution and
- * builder databases, preserving IDs, key digests, channel keys and devices.
+ * builder databases, preserving IDs, the key digests of admin and builder
+ * keys (upload keys are skipped and counted), channel keys and devices.
  * Each account takes the role its flags imply; each verified identity becomes
  * the account's address for that provider; each builder app becomes a script
  * project. The sources are opened read-only.
@@ -83,9 +86,10 @@ export function importDeployment(
         }
       ).user_version,
     )
-    if (version !== 7)
+    // 8 adds build variants; an imported build is the default variant either way.
+    if (version !== 7 && version !== 8)
       throw new ImportRefused(
-        `The distribution database is at schema ${version}; migrate it to 7 first (mason migrate --config …)`,
+        `The distribution database is at schema ${version}; migrate it to 8 first (mason migrate --config …)`,
       )
     const builderVersion = (
       builder.prepare('SELECT version FROM builder_meta').get() as
@@ -105,7 +109,7 @@ export function importDeployment(
         channels: copy(distribution, db, 'channels'),
         builds: copy(distribution, db, 'builds'),
         devices: copy(distribution, db, 'devices'),
-        keys: { upload: 0, admin: 0, developer: 0 },
+        keys: { admin: 0, developer: 0, uploadSkipped: 0 },
         projects: 0,
         branchRules: 0,
         adminKeys: [],
@@ -168,6 +172,10 @@ export function importDeployment(
       for (const key of distribution
         .prepare('SELECT * FROM api_keys ORDER BY id')
         .all()) {
+        if (key.role !== 'admin') {
+          summary.keys.uploadSkipped++
+          continue
+        }
         db.prepare(
           "INSERT INTO api_keys(id,hash,name,apps,created_at,expires_at,revoked,role,format) VALUES(?,?,?,?,?,?,?,?,'v1')",
         ).run(
@@ -180,13 +188,11 @@ export function importDeployment(
           key.revoked as number,
           key.role as string,
         )
-        if (key.role === 'admin') {
-          summary.keys.admin++
-          summary.adminKeys.push({
-            id: key.id as string,
-            name: key.name as string,
-          })
-        } else summary.keys.upload++
+        summary.keys.admin++
+        summary.adminKeys.push({
+          id: key.id as string,
+          name: key.name as string,
+        })
       }
       for (const key of builder
         .prepare('SELECT * FROM builder_keys ORDER BY id')
@@ -264,14 +270,16 @@ export function importDeployment(
         db.prepare(
           'INSERT INTO project_apps(app_id,project_id) VALUES(?,?)',
         ).run(app, project)
-        for (const env of definition.env)
-          db.prepare(
-            'INSERT INTO project_env(project_id,name,value,secret) VALUES(?,?,?,?)',
-          ).run(project, env.name, env.value, Number(env.secret))
-        for (const file of definition.files)
-          db.prepare(
-            'INSERT INTO project_files(project_id,destination,contents,env) VALUES(?,?,?,?)',
-          ).run(project, file.destination, file.contents, file.env ?? null)
+        // An old Mason app's environment and files, as a script project's default variants.
+        insertRows(
+          db,
+          project,
+          legacyRows('script', {
+            env: definition.env,
+            files: definition.files,
+          }),
+          now,
+        )
         // Automatic branches build on new commits; any other branch can still be requested.
         const automatic = builder
           .prepare(

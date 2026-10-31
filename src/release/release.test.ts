@@ -448,22 +448,12 @@ describe('Releases, install.sh and updates', function () {
 
   describe('install.sh', () => {
     let github: { server: Server; base: string }
-    let host: { server: Server; base: string }
     const tampered = new Set<string>()
     before(async () => {
       github = await serve(work, githubApi(releases, tampered))
-      const hostDir = path.join(work, 'host')
-      mkdirSync(path.join(hostDir, 'releases'), { recursive: true })
-      symlinkSync(releases['0.1.2']!, path.join(hostDir, 'releases', 'current'))
-      symlinkSync(
-        path.join(releases['0.1.2']!, 'install.sh'),
-        path.join(hostDir, 'install.sh'),
-      )
-      host = await serve(hostDir)
     })
     after(() => {
       github.server.close()
-      host.server.close()
     })
     const bash = async (
       args: string[],
@@ -539,7 +529,7 @@ describe('Releases, install.sh and updates', function () {
       )
     })
 
-    it('U9.1 installs from the public releases with no token, needs one for a private repository, refuses a mismatch, and installs from a host with none', async () => {
+    it('U9.1 installs from the public releases with no token, needs one for a private repository, refuses a mismatch, and has no host install', async () => {
       const home = root()
       mkdirSync(path.join(home, 'tmp'))
       const openHome = root()
@@ -573,14 +563,14 @@ describe('Releases, install.sh and updates', function () {
       }
       const prefix = path.join(home, 'opt')
       const bin = path.join(home, 'bin')
-      const fromHost = await bash(
-        ['--from', host.base],
+      const system = await bash(
+        [],
         { MASON_PREFIX: prefix, MASON_BIN: bin },
         home,
       )
-      assert.equal(fromHost.status, 0, fromHost.out)
-      assert.match(fromHost.out, /Installed Mason 0\.1\.2 in .*\/opt\/0\.1\.2/)
-      assert.match(fromHost.out, /sudo mason worker --install/)
+      assert.equal(system.status, 0, system.out)
+      assert.match(system.out, /Installed Mason 0\.1\.2 in .*\/opt\/0\.1\.2/)
+      assert.match(system.out, /sudo mason worker --install/)
       assert.equal(
         readlinkSync(path.join(bin, 'mason')),
         path.join(prefix, 'current', 'mason'),
@@ -588,6 +578,11 @@ describe('Releases, install.sh and updates', function () {
       assert.match(
         (await bash(['--bogus'], {}, home)).out,
         /unknown option --bogus/,
+      )
+      // Mason installs only from its GitHub release, never from a host.
+      assert.match(
+        (await bash(['--from', 'https://builds.example.test'], {}, home)).out,
+        /unknown option --from/,
       )
       assert.match(
         (
@@ -606,6 +601,70 @@ describe('Releases, install.sh and updates', function () {
         home,
       )
       assert(!leaked.out.includes('secret-token-x'), leaked.out)
+    })
+
+    it('U9.1 installs and starts a role in one command, as root through sudo, and uninstalls it keeping the data', async () => {
+      const home = root()
+      mkdirSync(path.join(home, 'tmp'))
+      const prefix = path.join(home, 'opt')
+      const bin = path.join(home, 'bin')
+      // Stands in for sudo: records what it would run as root.
+      const record = path.join(home, 'sudo.log')
+      const sudo = path.join(home, 'fake-sudo')
+      writeFileSync(sudo, `#!/bin/sh\necho "$*" >> '${record}'\n`)
+      chmodSync(sudo, 0o755)
+      const env = { MASON_PREFIX: prefix, MASON_BIN: bin, MASON_SUDO: sudo }
+      const master = await bash(
+        ['master', '--worker', '--port', '9500'],
+        env,
+        home,
+      )
+      assert.equal(master.status, 0, master.out)
+      assert.match(master.out, /Installed Mason 0\.1\.2 in .*\/opt\/0\.1\.2/)
+      assert.doesNotMatch(master.out, /Next:/)
+      assert.equal(
+        readFileSync(record, 'utf8'),
+        `${path.join(bin, 'mason')} master --install --worker --port 9500\n`,
+      )
+      const worker = await bash(['--version', '0.1.1', 'worker'], env, home)
+      assert.equal(worker.status, 0, worker.out)
+      assert.match(
+        readFileSync(record, 'utf8'),
+        new RegExp(`${path.join(bin, 'mason')} worker --install\\n$`),
+      )
+      // A service needs root; --user installs only the program.
+      assert.match(
+        (await bash(['--user', 'host'], env, home)).out,
+        /a host service needs root: leave out --user/,
+      )
+      assert.match(
+        (await bash(['uninstall'], env, home)).out,
+        /uninstall needs the role/,
+      )
+      assert.match(
+        (await bash(['worker', 'uninstall'], env, home)).out,
+        /uninstall comes before the role/,
+      )
+      writeFileSync(path.join(home, '.mason-data'), 'kept')
+      const removed = await bash(['uninstall', 'worker'], env, home)
+      assert.equal(removed.status, 0, removed.out)
+      assert.match(
+        readFileSync(record, 'utf8'),
+        new RegExp(`${path.join(bin, 'mason')} worker --uninstall\\n$`),
+      )
+      assert.equal(existsSync(prefix), false)
+      assert.equal(existsSync(path.join(bin, 'mason')), false)
+      assert(existsSync(path.join(home, '.mason-data')))
+      // Nothing that is not a Mason install is removed.
+      mkdirSync(path.join(home, 'other'))
+      const refused = await bash(
+        ['uninstall', 'worker'],
+        { ...env, MASON_PREFIX: path.join(home, 'other') },
+        home,
+      )
+      assert.notEqual(refused.status, 0)
+      assert.match(refused.out, /is not a Mason install/)
+      assert(existsSync(path.join(home, 'other')))
     })
 
     it('U9.1 mason update installs the newer release and keeps the data directory', async () => {

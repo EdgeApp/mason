@@ -192,7 +192,7 @@ export function runSnapshot(
         ? []
         : db
             .prepare(
-              'SELECT id,kind,title,status,ms FROM job_steps WHERE job_id=? AND stage=? AND attempt=(SELECT MAX(attempt) FROM job_steps WHERE job_id=? AND stage=?) ORDER BY id',
+              'SELECT id,kind,title,status,ms,parent FROM job_steps WHERE job_id=? AND stage=? AND attempt=(SELECT MAX(attempt) FROM job_steps WHERE job_id=? AND stage=?) ORDER BY id',
             )
             .all(id, stage, id, stage),
   })

@@ -445,5 +445,17 @@ describe('Run view', () => {
     assert.match(timelineTab, /class="timeline"/)
     assert.match(timelineTab, /Logs are on the master\./)
     assert.equal(runBuilds(db, run), '')
+    // The run's own builds, the default first, each other named by its variant.
+    db.exec(`INSERT INTO apps(id,slug,name,position,enabled) VALUES(1,'app.example.run','Run App',0,1);
+      INSERT INTO channels(id,app_id,platform,channel_key,formats,enabled) VALUES(1,1,'android','k','["apk"]',1);`)
+    const insert = db.prepare(
+      "INSERT INTO builds(app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(1,1,'android','main','x','2.0',?,'app.example.run','apk',?,1,?,0,1,'ready','','pipeline','{}',?,?)",
+    )
+    insert.run('9', 'd2', 'k2', 'arm64-v8a', 'r1')
+    insert.run('7', 'd1', 'k1', '', 'r1')
+    insert.run('8', 'd3', 'k3', '', 'r2')
+    const header = runBuilds(db, run)
+    assert.match(header, /Run App 2\.0 \(7\)[^]*Run App 2\.0 \(9\) arm64-v8a/)
+    assert.doesNotMatch(header, /\(8\)/)
   })
 })

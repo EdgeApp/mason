@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import path from 'node:path'
@@ -15,6 +23,12 @@ import { Journal } from '../worker/journal.js'
 import { WorkerRuntime } from '../worker/stage.js'
 import { cronMatches, parseCron } from './triggers.js'
 import { localOperator } from './roles.js'
+import { seedLegacySecrets, seedSecret } from '../test/secrets.js'
+import { resolveSecrets } from '../pipeline/variants.js'
+import { secretFilesPaths } from '../pipeline/stage.js'
+import type { LegacySecrets } from './secrets.js'
+import { stageConfigs } from './scheduler.js'
+import type { GraphStage } from '../pipeline/graph.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -35,14 +49,28 @@ const terminal = [
 ]
 
 async function finished(c: Cluster, id: string, ms = 60000): Promise<Json> {
-  return await c.until(
-    () => {
+  return await c
+    .until(
+      () => {
+        const run = c.master.master!.run(id) as Json
+        return terminal.includes(run?.status) ? run : undefined
+      },
+      ms,
+      `run ${id} to finish`,
+    )
+    .catch((error: Error) => {
+      // Where it stood, so a timeout says which stage waited and why.
       const run = c.master.master!.run(id) as Json
-      return terminal.includes(run?.status) ? run : undefined
-    },
-    ms,
-    `run ${id} to finish`,
-  )
+      throw new Error(
+        `${error.message}: ${JSON.stringify(
+          (run?.stages ?? []).map((entry: Json) => [
+            entry.name,
+            entry.status,
+            entry.reason ?? null,
+          ]),
+        )}`,
+      )
+    })
 }
 
 function stage(run: Json, name: string): Json {
@@ -57,7 +85,7 @@ describe('Scheduler, workers and stashes', function () {
     c = await cluster(root(), {
       workers: [
         { name: 'alpha', type: 'linux', slots: 2 },
-        { name: 'beta', type: 'mac', labels: ['signing'] },
+        { name: 'beta', type: 'mac', labels: ['signing'], setup: false },
       ],
     })
   })
@@ -72,6 +100,9 @@ describe('Scheduler, workers and stashes', function () {
   ): Promise<string> {
     const repo = c.repo(`fixtures/${slug}`)
     const commit = repo.commit(files)
+    const { secrets, ...rest } = extra as {
+      secrets?: Partial<LegacySecrets>
+    }
     c.master.master!.saveProject({ role: 'admin', label: 'test' }, slug, {
       repository: repo.url,
       format: 'pipeline',
@@ -82,8 +113,10 @@ describe('Scheduler, workers and stashes', function () {
       apps: [
         { bundleId: `app.example.${slug}`, name: slug, platforms: ['ios'] },
       ],
-      ...extra,
+      ...rest,
     })
+    if (secrets != null)
+      seedLegacySecrets(c.master.master!.database.db, slug, secrets)
     return commit
   }
 
@@ -229,6 +262,54 @@ export async function work(ctx: Stage) {}
     const cycle = await finished(c, await request('cycle'))
     assert.equal(cycle.status, 'failed')
     assert.match(cycle.reason, /cycle: a → b → a/)
+  })
+
+  it('U7.2 runs setup only on nodes labelled setup, which a Masonfile cannot ask for', async () => {
+    await project('reserved', {
+      'Masonfile.ts': `
+import type { Setup } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('sign', { on: { labels: ['setup'] }, run: sign })
+}
+export function sign() { return null }
+`,
+    })
+    const refused = await finished(c, await request('reserved'))
+    assert.equal(refused.status, 'failed')
+    assert.match(
+      String(refused.reason),
+      /the label setup is reserved for the nodes that run setup/,
+    )
+    // Every setup so far ran on alpha: beta, the signing node, is not labelled setup.
+    const setups = db()
+      .prepare(
+        "SELECT DISTINCT worker FROM job_stages WHERE name='@setup' AND worker IS NOT NULL",
+      )
+      .all()
+      .map((row) => row.worker)
+    assert.deepEqual(setups, [c.fingerprint('alpha')])
+    // With no node for setup connected, a run's setup waits and says why.
+    const registry = c.master.master!.registry
+    const alpha = c.fingerprint('alpha')
+    const labels = registry.get(alpha)!.labels
+    await registry.assign(alpha, { labels: [] })
+    try {
+      const waiting = await request('reserved')
+      await c.until(
+        () =>
+          /No connected node is labelled setup/.test(
+            String(stageRow(waiting, '@setup')?.reason ?? ''),
+          ),
+        10000,
+        'the setup reason',
+      )
+      assert.equal(stageRow(waiting, '@setup').status, 'queued')
+      c.master.master!.scheduler.cancel(waiting)
+      await finished(c, waiting)
+    } finally {
+      await registry.assign(alpha, { labels })
+    }
   })
 
   it('U7.2 assigns by type, labels and slots, and never to a quarantined worker', async () => {
@@ -922,6 +1003,65 @@ export async function other(ctx: Stage) { return ctx.getBuildNumber('other') }
     assert.deepEqual(
       ['one', 'two', 'other'].map((name) => stage(second, name).output),
       ['2/', '2/2', '2'],
+    )
+  })
+
+  it('U7.13 a block per branch: master runs hold three numbers, other branches one, and every stage reads its run’s N', async () => {
+    await project(
+      'blocks',
+      {
+        'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.buildNumber('app.example.blocks', { format: 'N', block: m.branch === 'master' ? 3 : 1 })
+  m.stage('build', { on: 'linux', publishes: ['app.example.blocks'], run: number })
+  m.stage('again', { on: 'linux', buildNumbers: ['app.example.blocks'], run: number })
+}
+export async function number(ctx: Stage) {
+  return ctx.getBuildNumber('app.example.blocks')
+}
+`,
+      },
+      {
+        apps: [
+          {
+            bundleId: 'app.example.blocks',
+            name: 'blocks',
+            platforms: ['android'],
+          },
+        ],
+      },
+    )
+    c.repo('fixtures/blocks').commit({ 'feature.txt': 'x\n' }, 'feature/x')
+    const runs = []
+    for (const branch of ['master', 'master', 'feature/x', 'master'])
+      runs.push(await finished(c, await request('blocks', { branch })))
+    assert.deepEqual(
+      runs.map((run) => [
+        stage(run, 'build').output,
+        stage(run, 'again').output,
+      ]),
+      [
+        ['1', '1'],
+        ['4', '4'],
+        ['7', '7'],
+        ['8', '8'],
+      ],
+    )
+    // Each run's reservation records its block.
+    const db = c.master.master!.database.db
+    assert.deepEqual(
+      db
+        .prepare(
+          'SELECT value, block FROM build_number_reservations WHERE reservation IN (?,?) ORDER BY value',
+        )
+        .all(runs[1]!.id, runs[2]!.id)
+        .map((row) => ({ ...row })),
+      [
+        { value: '4', block: 3 },
+        { value: '7', block: 1 },
+      ],
     )
   })
 
@@ -1856,6 +1996,7 @@ writeFileSync(e.MASON_RESULT_FILE!, JSON.stringify({
   app: e.MASON_APP, branch: e.MASON_BRANCH, job: e.MASON_JOB_ID, platforms: e.MASON_PLATFORMS,
   plain: e.PLAIN, secret: (e.SCRIPT_SECRET ?? '').length, file: readFileSync(e.CONFIG_FILE!, 'utf8'),
   injected: existsSync('config/app.json'), commit: e.MASON_COMMIT?.length,
+  added: existsSync('added.json') && readFileSync(e.ADDED_FILE!, 'utf8'),
 }))
 if (e.MASON_BRANCH === 'feature/fail') process.exit(3)
 `,
@@ -1869,19 +2010,26 @@ if (e.MASON_BRANCH === 'feature/fail') process.exit(3)
         { pattern: 'master', mode: 'request' },
         { pattern: 'feature/**', mode: 'request' },
       ],
-      secrets: {
-        env: [
-          { name: 'PLAIN', value: 'visible', secret: false },
-          { name: 'SCRIPT_SECRET', value: 'shh-secret-value', secret: true },
-        ],
-        files: [
-          {
-            destination: 'config/app.json',
-            contents: Buffer.from('{"k":1}').toString('base64'),
-            env: 'CONFIG_FILE',
-          },
-        ],
-      },
+    })
+    seedLegacySecrets(c.master.master!.database.db, 'script', {
+      env: [
+        { name: 'PLAIN', value: 'visible', secret: false },
+        { name: 'SCRIPT_SECRET', value: 'shh-secret-value', secret: true },
+      ],
+      files: [
+        {
+          destination: 'config/app.json',
+          contents: Buffer.from('{"k":1}').toString('base64'),
+          env: 'CONFIG_FILE',
+        },
+      ],
+    })
+    // A file added on the Secrets tab has no separate destination: it is injected at its name.
+    seedSecret(c.master.master!.database.db, 'script', {
+      name: 'added.json',
+      kind: 'file',
+      contents: Buffer.from('{"a":2}').toString('base64'),
+      pathEnv: 'ADDED_FILE',
     })
     const created = await c.api('POST', '/api/jobs', {
       app: 'script',
@@ -1903,6 +2051,7 @@ if (e.MASON_BRANCH === 'feature/fail') process.exit(3)
       file: '{"k":1}',
       injected: true,
       commit: 40,
+      added: '{"a":2}',
     })
     assert.deepEqual(
       (await c.api('GET', `/api/jobs/${run.id}`)).json.result,
@@ -2002,6 +2151,86 @@ export async function reader(ctx: Stage) { await ctx.unstash('late'); return awa
     )
   })
 
+  it('U7.28 a stage with no checkout runs the Masonfile the master sends, or a shallow copy when it imports other files', async () => {
+    await project('bare', {
+      'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+import { join } from 'node:path'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('sign', { on: 'linux', checkout: false, run: sign })
+}
+// A comment that mentions import './nothing.ts' loads nothing.
+export async function sign(ctx: Stage) {
+  return { files: await ctx.fs.glob('**'), joined: join('a', 'b') }
+}
+`,
+      'big.bin': 'not for the signer',
+    })
+    const bare = await finished(c, await request('bare'))
+    assert.equal(
+      bare.status,
+      'succeeded',
+      c.master.master!.scheduler.logs(bare.id),
+    )
+    assert.deepEqual(stage(bare, 'sign').output, { files: [], joined: 'a/b' })
+    const bareLog = c.master.master!.scheduler.logs(bare.id)!
+    assert.match(
+      bareLog,
+      /Running Masonfile\.ts from the master, with no checkout/,
+    )
+    assert.doesNotMatch(
+      bareLog.split('── Stage sign')[1] ?? '',
+      /Fetching [0-9a-f]{40} from the master/,
+    )
+    await project('helped', {
+      'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+import { greet } from './helper.ts'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('sign', { on: 'linux', checkout: false, run: sign })
+}
+export async function sign(ctx: Stage) {
+  return { greeting: greet(), files: await ctx.fs.glob('**') }
+}
+`,
+      'helper.ts': `export function greet(): string { return 'hello' }\n`,
+    })
+    c.repo('fixtures/helped').commit({ 'later.txt': 'a second commit' })
+    const helped = await finished(c, await request('helped'))
+    assert.equal(
+      helped.status,
+      'succeeded',
+      c.master.master!.scheduler.logs(helped.id),
+    )
+    assert.deepEqual(stage(helped, 'sign').output, {
+      greeting: 'hello',
+      files: [],
+    })
+    assert.match(
+      c.master.master!.scheduler.logs(helped.id)!,
+      /Masonfile\.ts imports \.\/helper\.ts: fetching the pinned commit alone/,
+    )
+    // Only the pinned commit, without its history.
+    const worker = stageRow(helped.id, 'sign').worker as string
+    const name = [...['alpha', 'beta']].find(
+      (entry) => c.fingerprint(entry) === worker,
+    )!
+    const sources = path.join(c.workers.get(name)!.dir, 'sources')
+    const copy = path.join(sources, readdirSync(sources)[0]!, 'helped')
+    assert.equal(
+      execFileSync(
+        'git',
+        ['-C', copy, 'rev-parse', '--is-shallow-repository'],
+        {
+          encoding: 'utf8',
+        },
+      ).trim(),
+      'true',
+    )
+  })
+
   it('answers the runs, nodes and recover commands', async () => {
     const lines: string[] = []
     const errors: string[] = []
@@ -2063,6 +2292,9 @@ export async function reader(ctx: Stage) { await ctx.unstash('late'); return awa
           '3',
           '--label',
           'fast',
+          // Labels are replaced: a node that runs setup keeps that label.
+          '--label',
+          'setup',
           '--type',
           'linux',
           '--data',
@@ -2073,7 +2305,7 @@ export async function reader(ctx: Stage) { await ctx.unstash('late'); return awa
       0,
       errors.join('\n'),
     )
-    assert.equal(lines.pop(), 'alpha: type linux, labels fast, 3 slot(s)')
+    assert.equal(lines.pop(), 'alpha: type linux, labels fast,setup, 3 slot(s)')
     assert.equal(
       await nodeMain(
         [
@@ -2084,6 +2316,8 @@ export async function reader(ctx: Stage) { await ctx.unstash('late'); return awa
           '2',
           '--label',
           'fast',
+          '--label',
+          'setup',
           '--name',
           'alpha',
           '--workspace-root',
@@ -2118,6 +2352,176 @@ export async function reader(ctx: Stage) { await ctx.unstash('late'); return awa
     assert.equal(
       c.workers.get('alpha')!.worker!.journal.quarantine(),
       undefined,
+    )
+  })
+
+  it('U7.26 each stage gets the variant of the latest config it lists, else the default; a name with no variant for a stage refuses the graph', async () => {
+    await project('configs', {
+      'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('plain', { on: 'linux', secrets: ['API_TOKEN', 'config.json'], run: show })
+  m.stage('develop', { on: 'linux', configs: ['develop'], secrets: ['API_TOKEN', 'config.json'], run: show })
+  m.stage('maestro', { on: 'linux', configs: ['develop', 'maestro'], secrets: ['API_TOKEN', 'config.json'], run: show })
+}
+export async function show(ctx: Stage) {
+  // Unmasked forms of the values, to see which variant arrived.
+  const file = await ctx.writeSecretFile('config.json', '.')
+  return {
+    token: ctx.secret('API_TOKEN').split('').reverse().join(''),
+    env: (await ctx.sh('printf %s "$API_TOKEN" | rev')).stdout.trim(),
+    file: (await ctx.fs.read('config.json')).split('').reverse().join(''),
+    written: file.endsWith('/config.json'),
+  }
+}
+`,
+    })
+    const db = c.master.master!.database.db
+    for (const [configs, value] of [
+      ['', 'tok-default'],
+      ['develop', 'tok-develop'],
+      ['maestro,beta', 'tok-maestro'],
+    ] as const)
+      seedSecret(db, 'configs', {
+        name: 'API_TOKEN',
+        kind: 'value',
+        configs,
+        value,
+      })
+    seedSecret(db, 'configs', {
+      name: 'config.json',
+      kind: 'file',
+      contents: Buffer.from('{"v":"default"}').toString('base64'),
+    })
+    const created = await c.api('POST', '/api/jobs', {
+      app: 'configs',
+      branch: 'master',
+    })
+    assert.equal(created.status, 202, created.text)
+    const run = await finished(c, created.json.id)
+    assert.equal(run.status, 'succeeded', JSON.stringify(run))
+    const reversed = (text: string): string => text.split('').reverse().join('')
+    for (const [name, token] of [
+      ['plain', 'tok-default'],
+      ['develop', 'tok-develop'],
+      ['maestro', 'tok-maestro'],
+    ] as const)
+      assert.deepEqual(stage(run, name).output, {
+        token: reversed(token),
+        env: reversed(token),
+        file: reversed('{"v":"default"}'),
+        written: true,
+      })
+    // A graph stored before stages had configs (the run reuses it by commit): every stage gets the default.
+    db.prepare(
+      "UPDATE graphs SET graph=json_remove(json_remove(json_remove(graph,'$.workflows[0].stages[0].configs'),'$.workflows[0].stages[1].configs'),'$.workflows[0].stages[2].configs') WHERE project_id=(SELECT id FROM projects WHERE slug='configs')",
+    ).run()
+    const old = await finished(
+      c,
+      (await c.api('POST', '/api/jobs', { app: 'configs', branch: 'master' }))
+        .json.id,
+    )
+    assert.equal(old.status, 'succeeded', JSON.stringify(old))
+    assert.equal(stage(old, 'maestro').output.token, reversed('tok-default'))
+    // Without a default, a stage whose configs have no variant cannot declare the name.
+    db.prepare(
+      "DELETE FROM project_secrets WHERE name='API_TOKEN' AND configs=''",
+    ).run()
+    const refused = await c.api('POST', '/api/jobs', {
+      app: 'configs',
+      branch: 'master',
+    })
+    const failed = await finished(c, refused.json.id)
+    assert.equal(failed.status, 'failed')
+    assert.match(
+      JSON.stringify(failed),
+      /Stage plain declares secret API_TOKEN, which has no variant for configs \(none\) and no default/,
+    )
+  })
+
+  it('U7.27 a dead worker’s secret files are cleaned before the next checkout, so the stage sees the new commit’s tracked file', async () => {
+    await project('recover', {
+      'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('read', { on: 'linux', workspace: { path: 'recover', mode: 'clean' }, run: read })
+}
+export async function read(ctx: Stage) {
+  return await ctx.fs.read('google-services.json')
+}
+`,
+      'google-services.json': 'placeholder from the new commit',
+    })
+    // On every worker: a dead stage wrote over the tracked file, and its
+    // manifest kept the earlier commit's copy.
+    const manifests: string[] = []
+    for (const node of c.workers.values()) {
+      const root = path.join(node.dir, 'workspaces')
+      mkdirSync(path.join(root, 'recover'), { recursive: true })
+      const dir = path.join(realpathSync(root), 'recover')
+      writeFileSync(path.join(dir, 'google-services.json'), 'secret')
+      // Where the worker's stage directories are: tmp/stage-<key>.
+      const { manifest, originals } = secretFilesPaths(
+        dir,
+        path.join(node.dir, 'tmp', 'stage-any'),
+      )
+      mkdirSync(originals, { recursive: true })
+      writeFileSync(`${originals}/1`, 'placeholder from the old commit')
+      writeFileSync(
+        manifest,
+        JSON.stringify([
+          {
+            target: path.join(dir, 'google-services.json'),
+            original: `${originals}/1`,
+            mode: 0o644,
+          },
+        ]),
+      )
+      manifests.push(manifest)
+    }
+    const created = await c.api('POST', '/api/jobs', {
+      app: 'recover',
+      branch: 'master',
+    })
+    assert.equal(created.status, 202, created.text)
+    const run = await finished(c, created.json.id)
+    assert.equal(run.status, 'succeeded', JSON.stringify(run))
+    assert.equal(stage(run, 'read').output, 'placeholder from the new commit')
+    assert(manifests.some((manifest) => !existsSync(manifest)))
+    // A list recovery cannot read is dropped once the clean checkout has
+    // reset the tree, so it does not block the checkout's secret files.
+    for (const manifest of manifests) writeFileSync(manifest, 'not json')
+    const again = await finished(
+      c,
+      (await c.api('POST', '/api/jobs', { app: 'recover', branch: 'master' }))
+        .json.id,
+    )
+    assert.equal(again.status, 'succeeded', JSON.stringify(again))
+    assert.match(
+      c.master.master!.scheduler.logs(again.id)!,
+      /Could not read the secret files an earlier stage left/,
+    )
+    assert(manifests.some((manifest) => !existsSync(manifest)))
+  })
+
+  it('U7.26 a stage recorded before stages had configs gets the default variants', () => {
+    const variants = [
+      { name: 'A', configs: [] as string[] },
+      { name: 'A', configs: ['develop'] },
+    ]
+    assert.equal(
+      stageConfigs({ name: 'old' } as unknown as GraphStage).length,
+      0,
+    )
+    assert.deepEqual(
+      stageConfigs({ configs: ['develop'] } as unknown as GraphStage),
+      ['develop'],
+    )
+    assert.equal(
+      resolveSecrets(variants, ['A'], stageConfigs({} as GraphStage)).get('A'),
+      variants[0],
     )
   })
 })

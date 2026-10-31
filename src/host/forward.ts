@@ -1,8 +1,13 @@
 import { timingSafeEqual } from 'node:crypto'
-import express, { Router, type Request, type Response } from 'express'
+import express, {
+  type ErrorRequestHandler,
+  Router,
+  type Request,
+  type Response,
+} from 'express'
 import { sessionContext } from '../auth/routes.js'
 import type { Stream } from '../link/link.js'
-import { isRunAction, isRunRead } from '../master/forward.js'
+import { clientAddress, isRunAction, isRunRead } from '../master/forward.js'
 import type { HostRuntime } from './runtime.js'
 
 const same = (a: string, b: string): boolean =>
@@ -140,6 +145,8 @@ export function forwardRoutes(host: HostRuntime): Router {
             : { contentType: req.get('content-type') }),
           ...(body.length === 0 ? {} : { body: body.toString('base64') }),
           ...(account == null ? {} : { account }),
+          // Who connected, for the master's audit of secret views and changes.
+          address: clientAddress(req),
         })
         try {
           await relay(stream, res)
@@ -151,5 +158,21 @@ export function forwardRoutes(host: HostRuntime): Router {
       })().catch(next)
     },
   )
+  // A body over the forwarding limit: send larger files to the master directly.
+  router.use(['/api/jobs', '/api/queue', '/api/v2'], ((
+    error,
+    _req,
+    res,
+    next,
+  ) => {
+    if ((error as { type?: string }).type === 'entity.too.large') {
+      res.status(413).json({
+        error:
+          'The request is over the 512 KB a host forwards; send it to the master directly',
+      })
+      return
+    }
+    next(error)
+  }) as ErrorRequestHandler)
   return router
 }

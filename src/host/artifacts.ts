@@ -8,13 +8,12 @@ import {
   statSync,
 } from 'node:fs'
 import path from 'node:path'
-import { Transform, type Readable } from 'node:stream'
+import { PassThrough, Transform, Writable, type Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { promisify } from 'node:util'
 import express, { Router, type Request, type Response } from 'express'
 import { sessionContext } from '../auth/routes.js'
 import { baseEnvironment } from '../builder/config.js'
-import type { Link } from '../link/link.js'
 import {
   formatsFor,
   InvalidClaims,
@@ -24,11 +23,29 @@ import {
   type UploadClaims,
 } from '../master/artifacts.js'
 import type { StorageSetting } from '../master/hostSettings.js'
-import { digest } from '../store.js'
+import { cleanBuild, digest } from '../store.js'
 import { packageIdentity } from '../upload/metadata.js'
 import { inspectProvisioning } from '../devices/provisioning.js'
-import type { UploadHooks } from '../upload/routes.js'
-import type { Build, Format } from '../validation.js'
+import {
+  asBoolean,
+  asJSON,
+  asNumber,
+  asObject,
+  asOptional,
+  asString,
+  asValue,
+} from 'cleaners'
+import { LinkError, type Link, type Stream } from '../link/link.js'
+import {
+  alreadyPublished,
+  asBuild,
+  asDigest,
+  asFileKey,
+  asVariant,
+  outsideBlock,
+  type Build,
+  type Format,
+} from '../validation.js'
 import type { HostCache } from './cache.js'
 import type { Outbox } from './outbox.js'
 import { DiskStorage, S3Storage, type StorageDriver } from './storage.js'
@@ -177,6 +194,102 @@ export class HostObjects {
     await this.driverOf(key).delete(key)
     this.cache.db.prepare('DELETE FROM host_objects WHERE key=?').run(key)
   }
+
+  /** The stores whose S3 settings name this bucket at this endpoint. */
+  private storesOf(store: { bucket: string; endpoint: string }): number[] {
+    return (
+      this.cache.db
+        .prepare('SELECT id,config FROM host_object_stores')
+        .all() as Array<{ id: number; config: string }>
+    )
+      .filter((row) => {
+        try {
+          const s3 = JSON.parse(row.config) as {
+            bucket?: unknown
+            endpoint?: unknown
+          }
+          return s3.bucket === store.bucket && s3.endpoint === store.endpoint
+        } catch {
+          return false
+        }
+      })
+      .map((row) => row.id)
+  }
+
+  /** The keys of the files written to a store. */
+  keys(store: { bucket: string; endpoint: string }): string[] {
+    const ids = this.storesOf(store)
+    if (ids.length === 0) return []
+    return (
+      this.cache.db
+        .prepare(
+          `SELECT key FROM host_objects WHERE store IN (${ids.map(() => '?').join(',')}) ORDER BY key`,
+        )
+        .all(...ids) as Array<{ key: string }>
+    ).map((row) => row.key)
+  }
+
+  /** Drops the records of a store's files and the store; the files themselves stay where they are. */
+  forget(store: { bucket: string; endpoint: string }): number {
+    const ids = this.storesOf(store)
+    let removed = 0
+    for (const id of ids) {
+      const keys = (
+        this.cache.db
+          .prepare('SELECT key FROM host_objects WHERE store=?')
+          .all(id) as Array<{ key: string }>
+      ).map((row) => row.key)
+      // Saved artifacts the host listed from that store go with it.
+      for (const key of keys)
+        try {
+          this.cache.db
+            .prepare('DELETE FROM host_artifacts WHERE storage_key=?')
+            .run(key)
+        } catch {}
+      removed += Number(
+        this.cache.db.prepare('DELETE FROM host_objects WHERE store=?').run(id)
+          .changes,
+      )
+      this.cache.db.prepare('DELETE FROM host_object_stores WHERE id=?').run(id)
+    }
+    return removed
+  }
+
+  /** Files and bytes per store, and on the host's disk. */
+  usage(): Array<{
+    bucket?: string
+    endpoint?: string
+    files: number
+    bytes: number
+  }> {
+    const rows = this.cache.db
+      .prepare(
+        'SELECT o.driver, s.config, count(*) AS files, coalesce(sum(o.size),0) AS bytes FROM host_objects o LEFT JOIN host_object_stores s ON s.id=o.store GROUP BY o.driver, s.config',
+      )
+      .all() as Array<{
+      driver: string
+      config: string | null
+      files: number
+      bytes: number
+    }>
+    // Files written before stores were recorded name no store: left out.
+    return rows
+      .filter((row) => row.driver !== 's3' || row.config != null)
+      .map((row) => {
+        if (row.driver !== 's3' || row.config == null)
+          return { files: Number(row.files), bytes: Number(row.bytes) }
+        const s3 = JSON.parse(row.config) as {
+          bucket: string
+          endpoint: string
+        }
+        return {
+          bucket: s3.bucket,
+          endpoint: s3.endpoint,
+          files: Number(row.files),
+          bytes: Number(row.bytes),
+        }
+      })
+  }
 }
 
 /** Streams a request body to a file, hashing it, up to a limit. */
@@ -222,20 +335,134 @@ export interface ArtifactRoutesOptions {
   link: () => Link | undefined
   online: () => boolean
   masterKey: () => KeyObject | undefined
+  log?: (line: string) => void
 }
 
+/** The file a staged publication put in storage, and whose its record is. */
+const asStagedFile = asObject({
+  reservation: asString,
+  variant: asVariant,
+  digest: asDigest,
+  fileKey: asFileKey,
+  /** This request stored the file: no earlier upload of it is in storage. */
+  fresh: asOptional(asBoolean, false),
+  /** When this upload recorded it in `host_staged`: a later upload of the file records it anew. */
+  stagedAt: asOptional(asNumber),
+})
+type StagedFile = ReturnType<typeof asStagedFile>
+
+/** A staged publication's outbox payload, as the set-aside listener reads it back. */
+const asSetAsideStaged = asJSON(
+  asObject({ action: asValue('staged'), staged: asStagedFile }),
+)
+
 /**
- * Uploads from stages and the Zealot API, downloads by grant, saved
- * artifacts and the report viewer.
+ * Uploads from stages, downloads by grant, saved artifacts and the report
+ * viewer.
  */
 export class HostArtifacts {
+  /** The upload in progress for each reservation and variant. */
+  private readonly publishing = new Map<string, Promise<void>>()
+
   constructor(private readonly options: ArtifactRoutesOptions) {
-    options.cache.db.exec(`CREATE TABLE IF NOT EXISTS host_staged(
-      reservation TEXT PRIMARY KEY, digest TEXT NOT NULL, staged_at INTEGER NOT NULL) STRICT;
+    const db = options.cache.db
+    // A reservation stages one file per variant; rows from before are the default's.
+    if (
+      db
+        .prepare("SELECT 1 FROM sqlite_master WHERE name='host_staged'")
+        .get() != null &&
+      !db
+        .prepare('PRAGMA table_info(host_staged)')
+        .all()
+        .some((column) => column.name === 'variant')
+    ) {
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        db.exec(`ALTER TABLE host_staged RENAME TO host_staged_old;
+        CREATE TABLE host_staged(reservation TEXT NOT NULL, variant TEXT NOT NULL, digest TEXT NOT NULL,
+          staged_at INTEGER NOT NULL, PRIMARY KEY(reservation, variant)) STRICT;
+        INSERT INTO host_staged SELECT reservation,'',digest,staged_at FROM host_staged_old;
+        DROP TABLE host_staged_old;`)
+        db.exec('COMMIT')
+      } catch (error) {
+        db.exec('ROLLBACK')
+        throw error
+      }
+    }
+    db.exec(`CREATE TABLE IF NOT EXISTS host_staged(
+      reservation TEXT NOT NULL, variant TEXT NOT NULL, digest TEXT NOT NULL, staged_at INTEGER NOT NULL,
+      PRIMARY KEY(reservation, variant)) STRICT;
     CREATE TABLE IF NOT EXISTS host_artifacts(
       run TEXT NOT NULL, name TEXT NOT NULL, stage TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL,
       digest TEXT NOT NULL, visible_to TEXT, entry TEXT, storage_key TEXT NOT NULL, created_at INTEGER NOT NULL,
       PRIMARY KEY(run, name)) STRICT`)
+    // A staged publication the master refused for good: its file goes, when
+    // this upload stored it and no build uses it (see `discard`).
+    options.outbox.onSetAside((kind, payload, code) => {
+      if (kind !== 'artifact' || code !== 'refused') return
+      let message
+      try {
+        message = asSetAsideStaged(payload)
+      } catch {
+        return
+      }
+      const staged = message.staged
+      // Under the slot, so no upload of this variant is midway.
+      this.inSlot(`${staged.reservation}/${staged.variant}`, () =>
+        this.discard(staged),
+      ).catch((error: unknown) => {
+        this.options.log?.(
+          `Could not discard ${staged.fileKey}: ${(error as Error).message}`,
+        )
+      })
+    })
+  }
+
+  /**
+   * Forgets a staged file the master refused: its record at once, then the
+   * file, logging a delete that fails. Only a file this upload stored
+   * (`fresh`) that nothing else uses goes: a key carries its file's digest,
+   * so a repeat of the same file shares it: published (a `builds` row),
+   * waiting in the outbox for its own confirmation, or sent straight to the
+   * master after this one (it recorded the file anew in `host_staged`, so
+   * this upload's record is gone). Checked now, not when the upload was
+   * staged, and in the upload's slot, so no repeat is midway.
+   */
+  private discard(staged: StagedFile): void {
+    const db = this.options.cache.db
+    if (
+      !staged.fresh ||
+      staged.stagedAt == null ||
+      db
+        .prepare("SELECT 1 FROM builds WHERE file_key=? AND state<>'deleted'")
+        .get(staged.fileKey) != null ||
+      db
+        .prepare(
+          "SELECT 1 FROM host_outbox WHERE kind='artifact' AND delivered_at IS NULL AND refused IS NULL AND json_extract(payload,'$.fileKey')=?",
+        )
+        .get(staged.fileKey) != null
+    )
+      return
+    try {
+      // A later upload of the same file (sent straight to the master, whose
+      // build the host may not have yet) recorded it anew: the file is its.
+      const forgotten = db
+        .prepare(
+          'DELETE FROM host_staged WHERE reservation=? AND variant=? AND digest=? AND staged_at=?',
+        )
+        .run(staged.reservation, staged.variant, staged.digest, staged.stagedAt)
+      if (Number(forgotten.changes) === 0) return
+    } catch (error) {
+      this.options.log?.(
+        `Could not forget staged ${staged.fileKey}: ${(error as Error).message}`,
+      )
+      return
+    }
+    this.options.objects.delete(staged.fileKey).catch((error: unknown) => {
+      this.options.log?.(
+        `Could not delete refused upload ${staged.fileKey}: ${(error as Error).message}`,
+      )
+    })
   }
 
   private key(): KeyObject {
@@ -257,18 +484,49 @@ export class HostArtifacts {
     }
   }
 
-  /** Tells the master about a staged upload: at once while the link is up, through the outbox otherwise. */
+  /**
+   * Tells the master about a staged upload: at once while the link is up,
+   * through the outbox otherwise. The master's refusal is final and may
+   * discard the file (`discard`); any other error (a timeout, a failure, a
+   * closed link) leaves the outbox to settle it, since the master may have
+   * published it or may yet. When the master answers with an earlier upload
+   * of the same file (a retried stage), this copy goes.
+   */
   private async confirm(
-    payload: Record<string, unknown>,
+    payload: Record<string, unknown> & StagedFile,
   ): Promise<Build | undefined> {
     const link = this.options.link()
-    if (this.options.online() && link != null)
+    if (this.options.online() && link != null) {
+      let answer: unknown
       try {
-        return (await link.request('artifacts.staged', payload)) as Build
+        answer = await link.request('artifacts.staged', payload)
       } catch (error) {
-        if (!link.closed) throw new Refused(409, (error as Error).message)
+        if (error instanceof LinkError && error.code === 'refused') {
+          this.discard(payload)
+          throw new Refused(409, error.message)
+        }
+        if (error instanceof LinkError && error.code === 'not_allowed')
+          throw new Refused(409, error.message)
+        answer = undefined
       }
-    this.options.outbox.enqueue('artifact', { action: 'staged', ...payload })
+      if (answer !== undefined) {
+        const build = asBuild(answer)
+        if (build.file_key !== payload.fileKey) this.discard(payload)
+        return build
+      }
+    }
+    this.options.outbox.enqueue('artifact', {
+      action: 'staged',
+      ...payload,
+      staged: {
+        reservation: payload.reservation,
+        variant: payload.variant,
+        digest: payload.digest,
+        fileKey: payload.fileKey,
+        fresh: payload.fresh,
+        ...(payload.stagedAt == null ? {} : { stagedAt: payload.stagedAt }),
+      },
+    })
     void this.options.outbox.flush(this.options.link())
     return undefined
   }
@@ -286,11 +544,13 @@ export class HostArtifacts {
       req.get('authorization') ?? '',
     )?.[1]
     let expected: {
+      run: string
       app: string
       platform: string
       format: Format
       version: string
       buildNumber: string
+      variant: string
       digest?: string
       size?: number
       limit: number
@@ -299,7 +559,12 @@ export class HostArtifacts {
       const grant = this.claims<GrantClaims>(authorization, 'grant')
       if (grant.reservation !== reservation)
         throw new Refused(401, 'The grant is for another reservation')
-      expected = { ...grant, limit: grant.size }
+      // The master checked the number against the run's block.
+      expected = {
+        ...grant,
+        variant: asVariant(grant.variant),
+        limit: grant.size,
+      }
     } else {
       const token = this.claims<UploadClaims>(req.get('x-mason-token'), 'stage')
       const listed = token.reservations.find(
@@ -311,28 +576,91 @@ export class HostArtifacts {
       if (!(formatsFor[listed.platform] ?? []).includes(format))
         throw new Refused(400, `A ${listed.platform} build is not ${format}`)
       const buildNumber = String(req.get('x-mason-build-number') ?? '')
-      if (buildNumber !== listed.buildNumber)
-        throw new Refused(
-          400,
-          `The build number ${buildNumber} is not the reserved ${listed.buildNumber}`,
-        )
+      const outside = outsideBlock(
+        buildNumber,
+        listed.buildNumber,
+        listed.block ?? 1,
+      )
+      if (outside != null) throw new Refused(400, outside)
+      let variant: string
+      try {
+        variant = asVariant(req.get('x-mason-variant'))
+      } catch (error) {
+        throw new Refused(400, (error as Error).message)
+      }
       expected = {
         app: listed.app,
         platform: listed.platform,
         format,
+        run: token.run,
         version: String(req.get('x-mason-version') ?? ''),
         buildNumber,
+        variant,
         limit: token.bytes,
       }
     }
+    // One upload per variant of a reservation at a time, so `used` (and
+    // with it whether this upload stored its file) is never read stale.
+    await this.inSlot(
+      `${reservation}/${expected.variant}`,
+      async () => await this.stagePublication(req, res, reservation, expected),
+    )
+  }
+
+  /**
+   * Runs `work` once the uploads and discards before it for this
+   * reservation and variant are done, holding the slot until it finishes.
+   */
+  private async inSlot(
+    slot: string,
+    work: () => Promise<void> | void,
+  ): Promise<void> {
+    const before = this.publishing.get(slot)
+    let done!: () => void
+    const mine = new Promise<void>((resolve) => {
+      done = resolve
+    })
+    this.publishing.set(slot, mine)
+    await before
+    try {
+      await work()
+    } finally {
+      done()
+      if (this.publishing.get(slot) === mine) this.publishing.delete(slot)
+    }
+  }
+
+  private async stagePublication(
+    req: Request,
+    res: Response,
+    reservation: string,
+    expected: {
+      run: string
+      app: string
+      platform: string
+      format: Format
+      version: string
+      buildNumber: string
+      variant: string
+      digest?: string
+      size?: number
+      limit: number
+    },
+  ): Promise<void> {
     const used = this.options.cache.db
-      .prepare('SELECT digest FROM host_staged WHERE reservation=?')
-      .get(reservation) as { digest: string } | undefined
+      .prepare(
+        'SELECT digest FROM host_staged WHERE reservation=? AND variant=?',
+      )
+      .get(reservation, expected.variant) as { digest: string } | undefined
+    const name =
+      expected.variant === ''
+        ? reservation
+        : `${reservation}-${expected.variant}`
     const staging = path.join(
       this.options.dir,
       'storage',
       'staging',
-      `${reservation}-${randomBytes(4).toString('hex')}.${expected.format}`,
+      `${name}-${randomBytes(4).toString('hex')}.${expected.format}`,
     )
     const received = await receive(req, staging, expected.limit)
     try {
@@ -342,7 +670,7 @@ export class HostArtifacts {
       )
         throw new Refused(400, 'The file does not match its grant')
       if (used != null && used.digest !== received.sha256)
-        throw new Refused(409, 'The reservation is already used')
+        throw new Refused(409, alreadyPublished(expected.variant))
       // IPA and APK identity comes from the package; a desktop package's from the publication and its app.
       const desktop = !['ipa', 'apk'].includes(expected.format)
       let identity
@@ -382,16 +710,44 @@ export class HostArtifacts {
           : undefined
       if (provisioning != null && provisioning.appId !== identity.bundleId)
         throw new Refused(400, 'The provisioning profile is for another app')
-      const fileKey = `${reservation}.${expected.format}`
+      const origin = this.options.cache.store.config.origin
+      const published = (build: Build): void => {
+        res.status(201).json({
+          buildId: build.id,
+          url: `${origin}/apps/${build.app_id}`,
+          installUrl: `${origin}/apps/${build.app_id}/branches/${Buffer.from(build.branch).toString('base64url')}?platform=${build.platform}`,
+          visible: true,
+        })
+      }
+      // A retried stage sending the file its run already published under
+      // the same number gets that build; nothing more is stored.
+      const earlier = this.options.cache.db
+        .prepare(
+          "SELECT * FROM builds WHERE run=? AND variant=? AND digest=? AND build_number=? AND bundle_id=? AND state='ready'",
+        )
+        .get(
+          expected.run,
+          expected.variant,
+          received.sha256,
+          identity.buildNumber,
+          identity.bundleId,
+        )
+      if (earlier != null) {
+        published(cleanBuild(earlier))
+        return
+      }
+      const fileKey = `${name}-${received.sha256.slice(0, 16)}.${expected.format}`
       await this.options.objects.put(fileKey, staging, received.sha256)
+      const stagedAt = this.options.cache.now()
       this.options.cache.db
         .prepare(
-          'INSERT OR REPLACE INTO host_staged(reservation,digest,staged_at) VALUES(?,?,?)',
+          'INSERT OR REPLACE INTO host_staged(reservation,variant,digest,staged_at) VALUES(?,?,?,?)',
         )
-        .run(reservation, received.sha256, this.options.cache.now())
+        .run(reservation, expected.variant, received.sha256, stagedAt)
       const changelog = req.get('x-mason-changelog')
       const build = await this.confirm({
         reservation,
+        variant: expected.variant,
         digest: received.sha256,
         size: received.size,
         format: expected.format,
@@ -403,8 +759,9 @@ export class HostArtifacts {
           ? {}
           : { changelog: decodeURIComponent(changelog) }),
         ...(provisioning == null ? {} : { provisioning }),
+        fresh: used == null,
+        stagedAt,
       })
-      const origin = this.options.cache.store.config.origin
       if (build == null) {
         res.status(202).json({
           staged: true,
@@ -414,12 +771,7 @@ export class HostArtifacts {
         })
         return
       }
-      res.status(201).json({
-        buildId: build.id,
-        url: `${origin}/apps/${build.app_id}`,
-        installUrl: `${origin}/apps/${build.app_id}/branches/${Buffer.from(build.branch).toString('base64url')}?platform=${build.platform}`,
-        visible: true,
-      })
+      published(build)
     } finally {
       rmSync(staging, { force: true })
     }
@@ -547,6 +899,116 @@ export class HostArtifacts {
       'X-Mason-Digest': claims.digest,
     })
     await pipeline(found.stream, res)
+  }
+
+  /**
+   * A stage's publication, saved artifact or download, relayed by the
+   * master over the host's link (nodes never reach the host). It runs the
+   * route's own handler and answers on the stream as the route would: a
+   * JSON header line, `{ status, headers }`, then the body.
+   */
+  async linkRequest(params: unknown, stream: Stream): Promise<void> {
+    const request = (params ?? {}) as {
+      method?: unknown
+      path?: unknown
+      headers?: unknown
+      query?: unknown
+    }
+    const strings = (value: unknown): Record<string, string> =>
+      Object.fromEntries(
+        Object.entries(
+          value != null && typeof value === 'object' ? value : {},
+        ).filter(
+          (entry): entry is [string, string] => typeof entry[1] === 'string',
+        ),
+      )
+    const headers = Object.fromEntries(
+      Object.entries(strings(request.headers)).map(([name, value]) => [
+        name.toLowerCase(),
+        value,
+      ]),
+    )
+    const query = strings(request.query)
+    const route = String(request.path ?? '')
+    const publication = /^\/api\/artifacts\/([^/]+)$/.exec(route)
+    const saved = /^\/api\/runs\/([^/]+)\/artifacts\/([^/]+)$/.exec(route)
+    const body = new PassThrough()
+    stream.on('data', (chunk: Buffer) => body.write(chunk))
+    stream.once('end', () => body.end())
+    stream.once('abort', (reason: string) => body.destroy(new Error(reason)))
+    let status = 200
+    const answerHeaders: Record<string, string> = {}
+    let sent = false
+    const head = async (): Promise<void> => {
+      if (sent) return
+      sent = true
+      await stream.write(
+        Buffer.from(JSON.stringify({ status, headers: answerHeaders }) + '\n'),
+      )
+    }
+    const res = new Writable({
+      write(chunk: Buffer, _encoding, callback): void {
+        head()
+          .then(async () => await stream.write(chunk))
+          .then(() => callback(), callback)
+      },
+      final(callback): void {
+        head().then(() => {
+          stream.end()
+          callback()
+        }, callback)
+      },
+    })
+    Object.defineProperty(res, 'headersSent', { get: () => sent })
+    Object.assign(res, {
+      status: (code: number) => {
+        status = code
+        return res
+      },
+      set: (values: Record<string, string>) => {
+        Object.assign(answerHeaders, values)
+        return res
+      },
+      json: (value: unknown) => {
+        answerHeaders['Content-Type'] = 'application/json'
+        res.end(JSON.stringify(value))
+        return res
+      },
+    })
+    const req = Object.assign(body, {
+      method: String(request.method ?? ''),
+      params:
+        publication != null
+          ? { reservation: decodeURIComponent(publication[1]!) }
+          : saved != null
+            ? {
+                run: decodeURIComponent(saved[1]!),
+                name: decodeURIComponent(saved[2]!),
+              }
+            : {},
+      query,
+      headers,
+      get: (name: string) => headers[name.toLowerCase()],
+    }) as unknown as Request
+    const response = res as unknown as Response
+    try {
+      if (request.method === 'POST' && publication != null)
+        await this.publication(req, response)
+      else if (request.method === 'POST' && saved != null)
+        await this.save(req, response)
+      else if (request.method === 'GET' && route === '/api/artifacts/download')
+        await this.download(req, response)
+      else throw new Refused(404, 'Not an artifact request')
+    } catch (error) {
+      if (sent) {
+        stream.abort((error as Error).message)
+        return
+      }
+      const known = error instanceof Refused
+      response
+        .status(known ? error.status : 500)
+        .json({ error: known ? error.message : 'The request failed' })
+    }
   }
 
   routes(accounts: Parameters<typeof sessionContext>[1]): Router {
@@ -685,40 +1147,6 @@ export class HostArtifacts {
       }),
     )
     return router
-  }
-
-  /**
-   * The Zealot API on the host: keys and channels from the cache, the file
-   * into storage, the build published by the master; 503 while it is away.
-   */
-  uploadHooks(): UploadHooks {
-    return {
-      channelKey: (raw): string => digest(Buffer.from(raw)),
-      available: (): boolean => this.options.online(),
-      publish: async (reservation, input): Promise<Build> => {
-        const link = this.options.link()
-        if (link == null || !this.options.online())
-          throw new Error('The master is unreachable')
-        const publication = input.publication as {
-          format: Format
-          digest: string
-        }
-        const fileKey = `${reservation}.${publication.format}`
-        await this.options.objects.put(fileKey, input.file, publication.digest)
-        try {
-          return (await link.request('artifacts.zealot', {
-            ...publication,
-            keyId: input.keyId,
-            fileKey,
-          })) as Build
-        } catch (error) {
-          await this.options.objects.delete(fileKey).catch(() => undefined)
-          if ((error as Error).message === 'Build publication conflict')
-            throw new Error('Build publication conflict')
-          throw error
-        }
-      },
-    }
   }
 
   /** Builds the master marked `deleting` and saved artifacts it expired: the files go, then the outbox says so once. */

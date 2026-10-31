@@ -1,3 +1,4 @@
+import { locationsWithUsage } from './storageApi.js'
 import type express from 'express'
 import { cookie } from '../auth/routes.js'
 import {
@@ -10,14 +11,16 @@ import {
   masonfileView,
   nodesView,
   peopleView,
+  projectRunsView,
   projectView,
+  secretsView,
   cloudView,
   settingsView,
   type SignInMethodView,
   wizardView,
   type NodeRow,
 } from '../view/admin.js'
-import { artifactsView } from '../view/artifacts.js'
+import { artifactsView, runsTable } from '../view/artifacts.js'
 import { fqdn } from './cloud/hosts.js'
 import { DEFAULT_MONTHLY_BUDGET } from './cloud/pools.js'
 import { methodsOf } from './hostSettings.js'
@@ -41,6 +44,8 @@ import { can } from './permissions.js'
 import { sessionActor } from './auth.js'
 import type { Master } from './runtime.js'
 import { repository, version } from '../version.js'
+import { clientAddress } from './forward.js'
+import { ProjectNotFound } from './projects.js'
 
 /** The signed-in person as the views see them. */
 function viewerOf(session: MasterSession): Viewer {
@@ -97,6 +102,7 @@ function masterPage(
   content: string,
   session?: MasterSession,
   active?: string,
+  scripts: string[] = [],
 ): string {
   // The backup reminder is for those who may configure backups; an
   // administrator who skipped confirming the key is reminded of it too.
@@ -136,7 +142,7 @@ function masterPage(
         }),
     ...(active == null ? {} : { active }),
     banners: testBanner(context) + banner,
-    scripts: ['/assets/master.js', '/assets/run.js'],
+    scripts: ['/assets/master.js', '/assets/run.js', ...scripts],
   })
 }
 
@@ -173,7 +179,7 @@ function backupsPage(master: Master, session: MasterSession): string {
     deployKey?: { publicKey: string }
   }
   const state = backups.backedUp
-    ? `<p>Last backup ${escape(new Date(backups.lastSuccess!.at).toISOString())} (${escape(backups.lastSuccess!.commit.slice(0, 12))}).</p>`
+    ? `<p>Last backup ${escape(new Date(backups.lastSuccess!.at).toISOString())} (${escape(backups.lastSuccess!.commit.slice(0, 12))})${backups.lastSuccess!.auth == null ? '' : `, pushed with ${backups.lastSuccess!.auth === 'github' ? 'the GitHub connection' : 'the deploy key'}`}.</p>`
     : backups.lastFailure != null
       ? `<p>The last backup failed: ${escape(backups.lastFailure.error)}</p>`
       : '<p>No backup has run yet.</p>'
@@ -228,10 +234,13 @@ export function masterPages(
     current?: MasterSession,
     code = 200,
     active?: string,
+    scripts: string[] = [],
   ): void => {
     res
       .status(code)
-      .send(masterPage(context, master, title, content, current, active))
+      .send(
+        masterPage(context, master, title, content, current, active, scripts),
+      )
   }
   // Only the pages that hash a password run the Argon2id WebAssembly.
   const hashing = (res: express.Response): void => {
@@ -589,22 +598,25 @@ export function masterPages(
         nodeType: row.node_type,
         labels: JSON.parse(row.labels) as string[],
       })),
-      storage: ((): {
-        driver: 'disk' | 's3'
-        bucket?: string
-        endpoint?: string
-      } => {
-        const value = master.settings.value('storage') as
-          | { driver?: string; s3?: { bucket: string; endpoint: string } }
-          | undefined
-        return value?.driver === 's3' && value.s3 != null
-          ? {
-              driver: 's3',
-              bucket: value.s3.bucket,
-              endpoint: value.s3.endpoint,
-            }
-          : { driver: 'disk' }
-      })(),
+      storage: {
+        ...((): {
+          driver: 'disk' | 's3'
+          bucket?: string
+          endpoint?: string
+        } => {
+          const value = master.settings.value('storage') as
+            | { driver?: string; s3?: { bucket: string; endpoint: string } }
+            | undefined
+          return value?.driver === 's3' && value.s3 != null
+            ? {
+                driver: 's3',
+                bucket: value.s3.bucket,
+                endpoint: value.s3.endpoint,
+              }
+            : { driver: 'disk' }
+        })(),
+        locations: await locationsWithUsage(master),
+      },
       poolAccounts: await Promise.all(
         master.cloudAccounts.all().map(async (account) => {
           // NoMac has no catalog or DNS: its pools take no region or size.
@@ -732,12 +744,9 @@ export function masterPages(
               format: key.format,
             }))
           : [],
-        apps: (
-          master.database.db
-            .prepare('SELECT id,name FROM apps ORDER BY position,id')
-            .all() as Array<{ id: number; name: string }>
-        ).map((app) => ({ id: Number(app.id), name: String(app.name) })),
-        ...((): Partial<Parameters<typeof settingsView>[0]> => {
+        ...(await (async (): Promise<
+          Partial<Parameters<typeof settingsView>[0]>
+        > => {
           if (!can(actor, 'settings.change')) return {}
           const github = master.settings.get(actor, 'github')
           const host = master.settings.value('host') as
@@ -764,10 +773,10 @@ export function masterPages(
                 : {}),
             },
             ...(host == null ? {} : { host }),
-            storage:
-              storage?.driver === 's3'
+            storage: {
+              ...(storage?.driver === 's3'
                 ? {
-                    driver: 's3',
+                    driver: 's3' as const,
                     ...(storage.s3?.bucket == null
                       ? {}
                       : { bucket: storage.s3.bucket }),
@@ -775,7 +784,9 @@ export function masterPages(
                       ? {}
                       : { endpoint: storage.s3.endpoint }),
                   }
-                : { driver: 'disk' },
+                : { driver: 'disk' as const }),
+              locations: await locationsWithUsage(master),
+            },
             storageAccounts: master.cloudAccounts.all().map((account) => ({
               id: account.id,
               name: account.name,
@@ -805,7 +816,7 @@ export function masterPages(
               )?.monthlyBudget ?? DEFAULT_MONTHLY_BUDGET,
             ),
           }
-        })(),
+        })()),
         canChange: can(actor, 'settings.change'),
         canCreate: can(actor, 'keys.create'),
         canRevoke: can(actor, 'keys.revoke'),
@@ -854,40 +865,63 @@ export function masterPages(
       })
     },
   )
-  app.get('/projects/:slug', (req, res, next) => {
-    if (req.params.slug === 'new') {
-      next()
-      return
-    }
+  /**
+   * The project a project page is about, for a signed-in developer or more;
+   * otherwise the page answers (sign-in, 403 or 404) and this returns nothing.
+   */
+  const projectFor = (
+    req: express.Request,
+    res: express.Response,
+    title: string,
+  ):
+    | {
+        current: MasterSession
+        actor: ReturnType<typeof sessionActor>
+        project: ReturnType<Master['projects']['get']>
+      }
+    | undefined => {
     const current = session(req)
     if (current == null) {
       res.redirect(303, master.configured() ? '/sign-in' : '/')
-      return
+      return undefined
     }
     const actor = sessionActor(current)
     if (!can(actor, 'projects.read')) {
       send(
         res,
-        'Project',
+        title,
         '<p>Projects are for developers and up.</p>',
         current,
         403,
       )
-      return
+      return undefined
     }
-    let project
     try {
-      project = master.projects.get(String(req.params.slug))
-    } catch {
+      return {
+        current,
+        actor,
+        project: master.projects.get(String(req.params.slug)),
+      }
+    } catch (error) {
+      if (!(error instanceof ProjectNotFound)) throw error
       send(
         res,
-        'Project',
+        title,
         '<p class="empty-state">There is no such project.</p>',
         current,
         404,
       )
+      return undefined
+    }
+  }
+  app.get('/projects/:slug', (req, res, next) => {
+    if (req.params.slug === 'new') {
+      next()
       return
     }
+    const found = projectFor(req, res, 'Project')
+    if (found == null) return
+    const { current, actor, project } = found
     send(
       res,
       project.name,
@@ -906,13 +940,10 @@ export function masterPages(
           pattern: rule.pattern,
           mode: rule.mode,
         })),
-        env: project.env,
-        files: project.files,
         webhook: project.webhookSecret.set,
         ...(project.signingLabel == null
           ? {}
           : { signingLabel: project.signingLabel }),
-        canChangeSecrets: can(actor, 'secrets.change'),
         buildNumbers: master.buildNumbers
           .sequences(project.id)
           .map((sequence) => ({
@@ -926,6 +957,68 @@ export function masterPages(
       current,
       200,
       'dashboard',
+    )
+  })
+  app.get('/projects/:slug/runs', (req, res) => {
+    const found = projectFor(req, res, 'Runs and builds')
+    if (found == null) return
+    const { current, project } = found
+    const branch =
+      typeof req.query.branch === 'string' && req.query.branch !== ''
+        ? req.query.branch
+        : undefined
+    const origin = (
+      (master.settings.value('host') ?? {}) as { origin?: string }
+    ).origin
+    send(
+      res,
+      `${project.name} · Runs and builds`,
+      projectRunsView(
+        {
+          slug: project.slug,
+          name: project.name,
+          ...(branch == null ? {} : { branch }),
+        },
+        runsTable(
+          {
+            db: master.database.db,
+            viewer: viewerOf(current),
+            now: master.database.now(),
+            appVisible: appVisible(master, current),
+            artifactBase: origin ?? '',
+          },
+          { project: project.slug, ...(branch == null ? {} : { branch }) },
+        ),
+      ),
+      current,
+      200,
+      'dashboard',
+    )
+  })
+  app.get('/projects/:slug/secrets', (req, res) => {
+    const found = projectFor(req, res, 'Secrets')
+    if (found == null) return
+    const { current, actor, project } = found
+    const caller = { actor, address: clientAddress(req) }
+    send(
+      res,
+      `${project.name} · Secrets`,
+      secretsView({
+        slug: project.slug,
+        name: project.name,
+        format: project.format,
+        secrets: project.secrets,
+        canChange: can(actor, 'secrets.change'),
+        backups: master.backups.status().configured,
+        ...(can(actor, 'secrets.read')
+          ? { audit: master.secrets.audit(caller, project.slug) }
+          : {}),
+      }),
+      current,
+      200,
+      'dashboard',
+      // The tab's script is for those who may view and change secrets.
+      can(actor, 'secrets.read') ? ['/assets/secrets.js'] : [],
     )
   })
   app.get('/projects/:slug/masonfile', (req, res, next) => {

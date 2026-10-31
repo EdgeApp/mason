@@ -2,6 +2,7 @@ import { bytes, platformChip, statusDot } from './dashboard.js'
 import { ago, escape } from './html.js'
 import { icon } from './icons.js'
 import { spacesRegions } from '../master/cloud/regions.js'
+import { SETUP_LABEL } from '../pipeline/graph.js'
 
 const statusLine =
   '<p class="notice" role="status" data-field="status" hidden></p>'
@@ -19,12 +20,12 @@ export function action(
   body: string,
   options: {
     id?: string
-    kind?: 'primary' | 'secondary'
+    kind?: 'primary' | 'secondary' | 'danger'
     open?: boolean
     className?: string
   } = {},
 ): string {
-  return `<details class="action${options.className == null ? '' : ` ${options.className}`}"${options.id == null ? '' : ` id="${escape(options.id)}"`}${options.open === true ? ' open' : ''}><summary class="button${options.kind === 'secondary' ? ' secondary' : ''}">${label}</summary><div class="action-body">${body}</div></details>`
+  return `<details class="action${options.className == null ? '' : ` ${options.className}`}"${options.id == null ? '' : ` id="${escape(options.id)}"`}${options.open === true ? ' open' : ''}><summary class="button${options.kind === 'secondary' ? ' secondary' : options.kind === 'danger' ? ' danger-fill' : ''}">${label}</summary><div class="action-body">${body}</div></details>`
 }
 
 /** A form field: its title, an optional description in smaller text, then the control. */
@@ -237,8 +238,8 @@ function poolFields(
     row(
       'labels',
       'Labels',
-      text('labels', (pool.labels ?? []).join(', ')),
-      'Extra labels its machines carry, comma-separated, for stages that ask for them.',
+      text('labels', (pool.labels ?? [SETUP_LABEL]).join(', ')),
+      `Labels its machines carry, comma-separated, for stages that ask for them. Machines labelled ${SETUP_LABEL} run setup.`,
     ),
     row(
       'maxNodes',
@@ -318,7 +319,7 @@ function hostFields(
     `<input type="hidden" name="account" value="${escape(account.id)}">`,
     role === 'host'
       ? `<label for="${prefix}-name">Name</label>${text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="builds"')}`
-      : `${field(`${prefix}-name`, 'Name', text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-node"'), 'The node’s name on this master and its droplet’s.')}${field(`${prefix}-type`, 'Node type', text('type', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-x86"'), 'Type of node as specified in the Masonfile.')}${field(`${prefix}-labels`, 'Labels', text('labels', ''), 'Extra labels it carries, comma-separated, for stages that ask for them.')}`,
+      : `${field(`${prefix}-name`, 'Name', text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-node"'), 'The node’s name on this master and its droplet’s.')}${field(`${prefix}-type`, 'Node type', text('type', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-x86"'), 'Type of node as specified in the Masonfile.')}${field(`${prefix}-labels`, 'Labels', text('labels', SETUP_LABEL), `Labels it carries, comma-separated, for stages that ask for them. A node labelled ${SETUP_LABEL} runs setup.`)}`,
     `<label for="${prefix}-region">Region</label>${
       catalog == null
         ? text('region', 'sfo3', ' required')
@@ -371,14 +372,35 @@ function hostFields(
 }
 
 /** Where the host keeps builds: a new Space Mason makes, an existing Space, or the host's disk. */
+/** One place builds are stored, as the Storage card lists it. */
+export interface StorageLocationView {
+  id: string
+  kind: 'disk' | 'space'
+  active: boolean
+  bucket?: string
+  region?: string
+  origin?: 'made' | 'added' | 'host'
+  bucketOwned?: boolean
+  host?: string
+  usage?: { files: number; bytes: number }
+}
+
+/** Where the host keeps builds: a row per location, and adding a Space. */
 function storageCard(options: {
-  storage?: { driver: 'disk' | 's3'; bucket?: string; endpoint?: string }
+  storage?: {
+    driver: 'disk' | 's3'
+    bucket?: string
+    endpoint?: string
+    locations?: StorageLocationView[]
+  }
   accounts: PoolAccount[]
   heading: 'h2' | 'h3'
 }): string {
   const spaceAccounts = options.accounts.filter(
     (account) => account.provider !== 'nomac',
   )
+  const useField = (id: string): string =>
+    `<label class="check">${checkbox(id, 'use', true)} Use it for new builds</label>`
   // Mason makes the Space and a key that can use only it, from a DigitalOcean account.
   const newSpace =
     spaceAccounts.length === 0
@@ -387,24 +409,96 @@ function storageCard(options: {
           `${icon('add')} Make a new Space`,
           apiForm(
             '/api/v2/storage/space/new',
-            `<p><small class="hint">A Space is DigitalOcean’s storage, billed by use from $5 a month for 250 GB, so there is no machine size to choose. Mason makes it and a key that can use only it, then stores new builds there.</small></p>${field('new-space-account', 'DigitalOcean account', `<select id="new-space-account" name="account">${spaceAccounts.map((account) => `<option value="${escape(account.id)}">${escape(account.name)}</option>`).join('')}</select>`)}${field('new-space-bucket', 'Space name', '<input id="new-space-bucket" name="bucket" required value="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">', '3 to 63 lowercase letters, digits and dashes; unique across DigitalOcean.')}${field('new-space-region', 'Region', spacesRegionSelect('new-space-region', 'sfo3').replace('name="space.region"', 'name="region"'))}`,
+            `<p><small class="hint">A Space is DigitalOcean’s storage, billed by use from $5 a month for 250 GB, so there is no machine size to choose. Mason makes it and a key that can use only it; it becomes a row above, beside the others.</small></p>${field('new-space-account', 'DigitalOcean account', `<select id="new-space-account" name="account">${spaceAccounts.map((account) => `<option value="${escape(account.id)}">${escape(account.name)}</option>`).join('')}</select>`)}${field('new-space-bucket', 'Space name', '<input id="new-space-bucket" name="bucket" required value="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">', '3 to 63 lowercase letters, digits and dashes; unique across DigitalOcean.')}${field('new-space-region', 'Region', spacesRegionSelect('new-space-region', 'sfo3').replace('name="space.region"', 'name="region"'))}${useField('new-space-use')}`,
             `${icon('storage')} Make the Space`,
-            { fields: ['account', 'bucket', 'region'], then: 'reload' },
+            {
+              fields: ['account', 'bucket', 'region', 'use'],
+              then: 'reload',
+            },
           ),
           { id: 'storage-new' },
         )
-  const storage = options.storage
-  const h = options.heading
-  return `<section class="panel" id="storage"><${h}>${icon('storage')}Storage</${h}><p>${storage?.driver === 's3' ? `Builds are stored in <span class="mono">${escape(storage.bucket ?? '')}</span> at <span class="mono">${escape(storage.endpoint ?? '')}</span>.` : 'Builds are stored on the host’s disk.'} New builds go to the storage chosen here; earlier ones are still served from where they were written.</p>${newSpace}${action(
-    `${icon('storage')} Use an existing Space`,
+  const existing = action(
+    `${icon('storage')} Add an existing Space`,
     apiForm(
       '/api/v2/storage/space',
-      '<label for="storage-url">Space URL</label><input id="storage-url" name="url" required placeholder="https://name.sfo3.digitaloceanspaces.com"><label for="storage-key">Access key</label><input id="storage-key" name="accessKeyId" required autocomplete="off"><label for="storage-secret">Secret</label><input id="storage-secret" name="secretAccessKey" type="password" required autocomplete="off"><p><small>Mason writes, reads and deletes a check object with the key before saving; a key that cannot is refused and nothing changes.</small></p>',
-      `${icon('check')} Check and save`,
-      { fields: ['url', 'accessKeyId', 'secretAccessKey'] },
+      `<label for="storage-url">Space URL</label><input id="storage-url" name="url" required placeholder="https://name.sfo3.digitaloceanspaces.com"><label for="storage-key">Access key</label><input id="storage-key" name="accessKeyId" required autocomplete="off"><label for="storage-secret">Secret</label><input id="storage-secret" name="secretAccessKey" type="password" required autocomplete="off">${useField('storage-use')}<p><small>Mason writes, reads and deletes a check object with the key before saving; a key that cannot is refused and nothing changes.</small></p>`,
+      `${icon('check')} Check and add`,
+      {
+        fields: ['url', 'accessKeyId', 'secretAccessKey', 'use'],
+        then: 'reload',
+      },
     ),
     { id: 'storage-existing' },
-  )}${storage?.driver === 's3' ? apiForm('/api/v2/storage/disk', '', `${icon('storage')} Store on the host’s disk`, { className: 'secondary', then: 'reload' }) : ''}</section>`
+  )
+  const storage = options.storage
+  const locations: StorageLocationView[] = storage?.locations ?? [
+    { id: 'disk', kind: 'disk', active: storage?.driver !== 's3' },
+    ...(storage?.driver === 's3' && storage.bucket != null
+      ? [
+          {
+            id: 'current',
+            kind: 'space' as const,
+            active: true,
+            bucket: storage.bucket,
+          },
+        ]
+      : []),
+  ]
+  const origin = (location: StorageLocationView): string =>
+    location.origin === 'made'
+      ? 'made by Mason'
+      : location.origin === 'host'
+        ? location.host == null
+          ? 'made for a host'
+          : `made for host ${escape(location.host)}`
+        : 'added'
+  const rows = locations
+    .map((location) => {
+      const id = encodeURIComponent(location.id)
+      const name =
+        location.kind === 'disk'
+          ? 'Host’s disk'
+          : `<span class="mono">${escape(location.bucket ?? '')}</span>${location.region == null ? '' : ` · ${escape(location.region)}`} · ${origin(location)}`
+      const files = location.usage?.files
+      const use = location.active
+        ? `${icon('check_circle')} New builds go here`
+        : apiForm(
+            location.kind === 'disk'
+              ? '/api/v2/storage/disk'
+              : `/api/v2/storage/locations/${id}/use`,
+            '',
+            'Use for new builds',
+            { className: 'secondary', then: 'reload' },
+          )
+      const deletes = location.bucketOwned === true
+      const remove =
+        location.kind === 'disk' || location.active
+          ? ''
+          : action(
+              `${icon('delete')} ${deletes ? 'Delete' : 'Forget'}`,
+              apiForm(
+                `/api/v2/storage/locations/${id}`,
+                `<p><small>${
+                  deletes
+                    ? `Deletes the Space ${escape(location.bucket ?? '')} from DigitalOcean with its key, and its ${files ?? 'stored'} builds and artifacts leave Mason.`
+                    : `Mason stops using ${escape(location.bucket ?? '')}; the Space and its files stay in DigitalOcean, and its ${files ?? 'stored'} builds and artifacts leave Mason.`
+                }</small></p><label for="remove-location-${escape(location.id)}">Type ${escape(location.bucket ?? '')} to ${deletes ? 'delete' : 'forget'} it</label><input id="remove-location-${escape(location.id)}" name="confirm" required autocomplete="off">`,
+                `${icon('delete')} ${deletes ? 'Delete the Space' : 'Forget the Space'}`,
+                {
+                  method: 'DELETE',
+                  fields: ['confirm'],
+                  className: 'danger-fill',
+                  then: 'reload',
+                },
+              ),
+              { kind: 'danger' },
+            )
+      return `<tr data-location="${escape(location.id)}"><td>${name}</td><td>${use}</td><td>${files == null ? '—' : String(files)}</td><td>${location.usage == null ? '—' : escape(bytes(location.usage.bytes))}</td><td>${remove}</td></tr>`
+    })
+    .join('')
+  const h = options.heading
+  return `<section class="panel" id="storage"><${h}>${icon('storage')}Storage</${h}><p>Every place builds are stored. New builds go to one of them; each keeps serving the builds already in it.</p><table class="compact storage-locations"><thead><tr><th>Location</th><th>New builds</th><th>Files</th><th>Size</th><th></th></tr></thead><tbody>${rows}</tbody></table>${newSpace}${existing}</section>`
 }
 
 const poolFieldNames = [
@@ -437,6 +531,9 @@ function typeSummary(value: unknown): string {
     ...(software.node == null ? [] : [`Node ${software.node}`]),
     ...(software.java == null ? [] : [`Java ${software.java}`]),
     ...(software.rust == null ? [] : [`Rust ${software.rust}`]),
+    ...(software.python == null ? [] : [`Python ${software.python}`]),
+    ...(software.go == null ? [] : [`Go ${software.go}`]),
+    ...(software.ruby == null ? [] : [`Ruby ${software.ruby}`]),
     ...count(
       [...(software.brew?.formulae ?? []), ...(software.brew?.casks ?? [])],
       'Homebrew package',
@@ -463,7 +560,12 @@ export function nodesView(data: {
   /** Permanent worker nodes the master made on a cloud provider. */
   cloudNodes?: CloudHostView[]
   /** Where the host keeps builds. */
-  storage?: { driver: 'disk' | 's3'; bucket?: string; endpoint?: string }
+  storage?: {
+    driver: 'disk' | 's3'
+    bucket?: string
+    endpoint?: string
+    locations?: StorageLocationView[]
+  }
   budget: { monthly: number; notice?: string }
   host?: string
   /** The master's own release, installable from GitHub when no host serves one. */
@@ -501,29 +603,28 @@ export function nodesView(data: {
       }</article>`
     })
     .join('')
-  const installCommand =
-    data.host != null
+  /** One line that installs Mason and starts it as `role`, from the master's release on GitHub. */
+  const installCommand = (role: 'worker' | 'host'): string =>
+    data.release != null
       ? command(
-          `/bin/bash -c "$(curl -fsSL ${data.host}/install.sh)" -- --from ${data.host}`,
+          `curl -fsSL https://github.com/${data.release.repository}/releases/download/v${data.release.version}/install.sh | bash -s -- --version ${data.release.version} ${role}`,
         )
-      : data.release != null
-        ? command(
-            `/bin/bash -c "$(curl -fsSL https://github.com/${data.release.repository}/releases/latest/download/install.sh)" -- --version ${data.release.version}`,
-          )
-        : '<p>Set the host’s origin in <a href="/settings#host">Settings</a> to see the install command.</p>'
+      : '<p>This master runs no GitHub release of Mason, so there is no install command to give.</p>'
   const installFrom =
-    data.host != null
-      ? 'It installs Mason from the host.'
-      : data.release != null
-        ? `It installs Mason ${escape(data.release.version)}, the master’s version.`
-        : ''
+    data.release != null
+      ? `It installs Mason ${escape(data.release.version)}, the master’s version, from GitHub,`
+      : ''
   /** A numbered step: its title on its own line, then what to do. */
   const step = (title: string, body: string): string =>
     `<li><strong>${title}</strong>${body}</li>`
-  const installStep = (where: string): string =>
+  const installStep = (
+    title: string,
+    where: string,
+    role: 'worker' | 'host',
+  ): string =>
     step(
-      'Install Mason',
-      `<small class="hint">${where} ${installFrom}</small>${installCommand}`,
+      title,
+      `<small class="hint">${where} ${installFrom} and starts it as a ${role} service under your account; it asks for your password once.</small>${installCommand(role)}<small class="hint">It prints the pairing key.</small>`,
     )
   const pairForm = (
     prefix: string,
@@ -541,12 +642,12 @@ export function nodesView(data: {
       (host) =>
         `<section class="panel cloud-host" id="host-${escape(host.name)}" data-state="${escape(host.state)}"><h3>${icon('cloud')}<span class="mono">${escape(host.name)}</span> <small>${escape(host.state)}</small></h3><p>${escape(host.region)} · ${escape(host.size)}${host.address == null ? '' : ` · <span class="mono">${escape(host.address)}</span>`}${host.dnsName == null ? '' : ` · <span class="mono">${escape(host.dnsName)}</span>`}${host.version == null || host.state === 'updating' ? '' : ` · Mason ${escape(host.version)}`}</p>${host.state === 'updating' && host.version != null ? `<p class="notice">Updating to Mason ${escape(host.version)}, as the master asked over its link; it reconnects on its own.</p>` : ''}${host.origin == null ? '' : `<p>Serves <a href="${escape(host.origin)}">${escape(host.origin)}</a></p>`}${host.certificate === 'waiting' ? '<p class="notice">Waiting for its certificate: Caddy asks Let’s Encrypt once the DNS name resolves.</p>' : ''}${host.space == null ? '' : `<p>Builds Space <span class="mono">${escape(host.space.bucket)}</span> (${escape(host.space.region)})</p>`}${host.error == null ? '' : `<p class="state-failed">${escape(host.error)}</p>`}${
           data.canChange
-            ? `${host.space == null ? action(`${icon('storage')} Store builds in a new DigitalOcean Space`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/space`, `<label for="space-${escape(host.name)}">Space name</label><input id="space-${escape(host.name)}" name="bucket" required value="mason-${escape(host.name)}" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"><label for="space-region-${escape(host.name)}">Space region</label>${spacesRegionSelect(`space-region-${escape(host.name)}`, host.region).replace('name="space.region"', 'name="region"')}<p><small>Mason makes the Space and a key that can use only it. New builds are stored there; earlier ones stay where they are.</small></p>`, `${icon('storage')} Make the Space`, { fields: ['bucket', 'region'] })) : ''}<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div>${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">${host.space == null ? '' : `<label for="remove-space-${escape(host.name)}">Its Space ${escape(host.space.bucket)}</label><select id="remove-space-${escape(host.name)}" name="deleteSpace"><option value="keep">Keep the Space and its builds</option><option value="delete">Also delete the Space and every build in it</option></select>`}`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: host.space == null ? ['confirm'] : ['confirm', 'deleteSpace'], className: 'secondary' }), { kind: 'secondary' })}`
+            ? `${host.space == null ? action(`${icon('storage')} Store builds in a new DigitalOcean Space`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/space`, `<label for="space-${escape(host.name)}">Space name</label><input id="space-${escape(host.name)}" name="bucket" required value="mason-${escape(host.name)}" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"><label for="space-region-${escape(host.name)}">Space region</label>${spacesRegionSelect(`space-region-${escape(host.name)}`, host.region).replace('name="space.region"', 'name="region"')}<p><small>Mason makes the Space and a key that can use only it. New builds are stored there; earlier ones stay where they are.</small></p>`, `${icon('storage')} Make the Space`, { fields: ['bucket', 'region'] })) : ''}<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">${host.space == null ? '' : `<label for="remove-space-${escape(host.name)}">Its Space ${escape(host.space.bucket)}</label><select id="remove-space-${escape(host.name)}" name="deleteSpace"><option value="keep">Keep the Space and its builds as a storage location</option><option value="delete">Also delete the Space and every build in it</option></select>`}`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: host.space == null ? ['confirm'] : ['confirm', 'deleteSpace'], className: 'danger-fill' }), { kind: 'danger' })}</div>`
             : ''
         }</section>`,
     )
     .join('')
-  const hostCommands = `<ol class="howto">${installStep('On a computer the internet can reach.')}${step('Start it as the host', `${command('sudo mason host --install')}<small class="hint">It prints its pairing key. To put it behind TLS on port 443, see the README’s public-server command.</small>`)}${step('Pair it here', pairForm('host', 'builds.example.com:9310', `${icon('lan')} Pair host`))}</ol>`
+  const hostCommands = `<ol class="howto">${installStep('Install and start Mason as the host', 'On a computer the internet can reach.', 'host')}${step('Pair it here', `<small class="hint">To put the host behind TLS on port 443, see the README’s public-server command.</small>${pairForm('host', 'builds.example.com:9310', `${icon('lan')} Pair host`)}`)}</ol>`
   // Hosts run on DigitalOcean; a NoMac account makes only pool Macs.
   const hostAccounts = (data.poolAccounts ?? [])
     .filter((account) => account.provider !== 'nomac')
@@ -587,7 +688,7 @@ export function nodesView(data: {
             ' · ',
           )} · ${escape(node.region)} · ${escape(node.size)}${node.address == null ? '' : ` · <span class="mono">${escape(node.address)}</span>`}${node.version == null || node.state === 'updating' ? '' : ` · Mason ${escape(node.version)}`}</p>${node.state === 'updating' && node.version != null ? `<p class="notice">Updating to Mason ${escape(node.version)}, as the master asked over its link; it reconnects on its own.</p>` : ''}${node.error == null ? '' : `<p class="state-failed">${escape(node.error)}</p>`}${
           data.canChange
-            ? `<div class="actions">${apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}</div>${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}`, `<label for="remove-node-${escape(node.name)}">Type ${escape(node.name)} to destroy its droplet and unpair it</label><input id="remove-node-${escape(node.name)}" name="confirm" required autocomplete="off">`, `${icon('delete')} Remove node`, { method: 'DELETE', fields: ['confirm'], className: 'secondary' }), { kind: 'secondary' })}`
+            ? `<div class="actions">${apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/nodes/${encodeURIComponent(node.name)}`, `<label for="remove-node-${escape(node.name)}">Type ${escape(node.name)} to destroy its droplet and unpair it</label><input id="remove-node-${escape(node.name)}" name="confirm" required autocomplete="off">`, `${icon('delete')} Remove node`, { method: 'DELETE', fields: ['confirm'], className: 'danger-fill' }), { kind: 'danger' })}</div>`
             : ''
         }</section>`,
     )
@@ -604,7 +705,7 @@ export function nodesView(data: {
     )
     .join('')
   const add = data.canChange
-    ? `<section class="panel" id="add-node"><h2>${icon('add')}Nodes</h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks. Run the following commands to start Mason on a Linux or macOS computer (Windows coming).</p>${cloudNodes}<ol class="howto">${installStep('On the new computer.')}${step('Start as a worker', `${command('sudo mason worker --install --link-port 9410')}<small class="hint">It prints its pairing key.</small>`)}${step('Pair it here', pairForm('node', '192.168.1.20:9410', `${icon('lan')} Pair node`))}</ol>${nodeAccounts}</section>`
+    ? `<section class="panel" id="add-node"><h2>${icon('add')}Nodes</h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks. Run the following commands to start Mason on a Linux or macOS computer (Windows coming).</p>${cloudNodes}<ol class="howto">${installStep('Install and start Mason as a worker', 'On the new computer.', 'worker')}${step('Pair it here', pairForm('node', '192.168.1.20:9310', `${icon('lan')} Pair node`))}</ol>${nodeAccounts}</section>`
     : cloudNodes === ''
       ? ''
       : `<section class="panel" id="add-node"><h2>${icon('cloud')}Cloud nodes</h2>${cloudNodes}</section>`
@@ -701,8 +802,6 @@ export function settingsView(data: {
     /** `builder` for a key imported from the builder, whose token has no id in it. */
     format?: 'v1' | 'builder'
   }>
-  /** Apps an upload key may be limited to. */
-  apps: Array<{ id: number; name: string }>
   /** How Mason reaches GitHub, without its secrets. */
   github?: {
     kind?: string
@@ -711,7 +810,12 @@ export function settingsView(data: {
     publicKey?: string
   }
   host?: { origin?: string; workerOrigin?: string; offlineGraceHours?: number }
-  storage?: { driver: 'disk' | 's3'; bucket?: string; endpoint?: string }
+  storage?: {
+    driver: 'disk' | 's3'
+    bucket?: string
+    endpoint?: string
+    locations?: StorageLocationView[]
+  }
   /** DigitalOcean accounts a new Space can be made in. */
   storageAccounts?: PoolAccount[]
   /** Sign-in methods, without their client secrets. */
@@ -762,17 +866,13 @@ export function settingsView(data: {
     const prefix = `mason_v1_${key.id.slice(0, 5)}…`
     return `<button type="button" class="secondary copy icon-only" data-copy="${escape(prefix)}" aria-label="Copy ${escape(prefix)}">${icon('content_copy')}<span data-copy-label hidden>Copy</span></button><span class="mono">${escape(prefix)}</span>`
   }
-  const roles = ['developer', 'tester', 'manager', 'admin', 'upload']
+  const roles = ['developer', 'tester', 'manager', 'admin']
   const createKey = data.canCreate
     ? action(
         `${icon('add')} Create API key`,
         apiForm(
           '/api/v2/keys',
-          `${field('key-name', 'Name', '<input id="key-name" name="name" required maxlength="120" placeholder="ci-uploads">', 'What uses it, so you can find it later.')}${field('key-role', 'Role', `<select id="key-role" name="role">${roles.map((role) => `<option value="${role}">${role}</option>`).join('')}</select>`, 'What it may do: the same as a person with that role. An upload key may only publish builds of the apps chosen below.')}${
-            data.apps.length === 0
-              ? ''
-              : `<fieldset><legend>Apps an upload key may publish</legend>${data.apps.map((app) => `<label><input type="checkbox" name="app" value="${app.id}"> ${escape(app.name)}</label>`).join('')}</fieldset>`
-          }<div data-field="token" hidden><p class="notice">Copy it now. Mason stores only a hash of it and cannot show it again. If it is lost, revoke it and create a new one.</p><div class="command"><pre class="mono"></pre><button type="button" class="secondary copy" data-copy="">${icon('content_copy')}<span data-copy-label>Copy</span></button></div><p><a href="/settings?key=created#keys">Done</a></p></div>`,
+          `${field('key-name', 'Name', '<input id="key-name" name="name" required maxlength="120" placeholder="ci-uploads">', 'What uses it, so you can find it later.')}${field('key-role', 'Role', `<select id="key-role" name="role">${roles.map((role) => `<option value="${role}">${role}</option>`).join('')}</select>`, 'What it may do: the same as a person with that role.')}<div data-field="token" hidden><p class="notice">Copy it now. Mason stores only a hash of it and cannot show it again. If it is lost, revoke it and create a new one.</p><div class="command"><pre class="mono"></pre><button type="button" class="secondary copy" data-copy="">${icon('content_copy')}<span data-copy-label>Copy</span></button></div><p><a href="/settings?key=created#keys">Done</a></p></div>`,
           `${icon('key')} Create key`,
           { fields: ['name', 'role'], then: 'token' },
         ),
@@ -1147,6 +1247,9 @@ export interface NodeTypeView {
     node?: string
     java?: string
     rust?: string
+    python?: string
+    go?: string
+    ruby?: string
     android: string[]
   }
   settings: {
@@ -1211,7 +1314,7 @@ function nodeTypesCard(types: Record<string, NodeTypeView>): string {
         ),
         description,
       )
-    return `<h3>Software</h3>${list('software.xcode', 'Xcode versions', sw?.xcode, 'Kept installed side by side.', '26.1, 16.4')}${ver('software.xcodeDefault', 'Default Xcode', sw?.xcodeDefault, 'The Xcode a stage uses when it names none and the repository has no .xcode-version; one of the versions above.', '26.1')}${flag('software.allowBeta', 'Allow beta Xcodes', sw?.allowBeta, 'Whether latest-beta may pick a beta.')}${list('software.simulators', 'Simulator runtimes', sw?.simulators, 'Runtimes to keep, such as iOS 26.1.', 'iOS 26.1')}${flag('software.commandLineTools', 'Command Line Tools', sw?.commandLineTools, 'Apple’s command line developer tools.')}${flag('software.rosetta', 'Rosetta', sw?.rosetta, 'Runs Intel binaries on Apple silicon.')}${list('software.brew.formulae', 'Homebrew formulae', sw?.brew.formulae, 'Installed with brew install.')}${list('software.brew.casks', 'Homebrew casks', sw?.brew.casks, 'Installed with brew install --cask.')}${list('software.apt', 'apt packages', sw?.apt, 'On Debian and Ubuntu nodes.', 'jq, zip')}${list('software.dnf', 'dnf packages', sw?.dnf, 'On Fedora and Red Hat nodes.')}${flag('software.docker', 'Docker', sw?.docker, 'Docker Engine, for stages that run containers.')}${ver('software.node', 'Node.js version', sw?.node, 'Empty: Node.js is not managed.', '24')}${ver('software.java', 'Java version', sw?.java, 'Empty: Java is not managed.', '21')}${ver('software.rust', 'Rust version', sw?.rust, 'Empty: Rust is not managed.', 'stable')}${list('software.android', 'Android SDK packages', sw?.android, 'sdkmanager package names. Their licences are accepted on a node’s page.', 'platforms;android-35')}<h3>Settings</h3>${flag('settings.noSleep', 'Keep awake', type?.settings.noSleep, 'The node never sleeps while Mason runs.')}${flag('settings.devToolsSecurity', 'Developer tools security', type?.settings.devToolsSecurity, 'Lets tools debug and automate apps without a password prompt (macOS).')}${flag('settings.automationMode', 'Automation mode', type?.settings.automationMode, 'Lets UI tests drive the Mac without prompts (macOS).')}${field(id('diskThresholdGb'), 'Disk threshold (GB)', input(id('diskThresholdGb'), 'diskThresholdGb', String(type?.diskThresholdGb ?? 40), ' required type="number" min="0" data-kind="number"'), 'Unused Xcodes and runtimes are removed when free disk falls below this.')}`
+    return `<h3>Software</h3>${list('software.xcode', 'Xcode versions', sw?.xcode, 'Kept installed side by side.', '26.1, 16.4')}${ver('software.xcodeDefault', 'Default Xcode', sw?.xcodeDefault, 'The Xcode a stage uses when it names none and the repository has no .xcode-version; one of the versions above.', '26.1')}${flag('software.allowBeta', 'Allow beta Xcodes', sw?.allowBeta, 'Whether latest-beta may pick a beta.')}${list('software.simulators', 'Simulator runtimes', sw?.simulators, 'Runtimes to keep, such as iOS 26.1.', 'iOS 26.1')}${flag('software.commandLineTools', 'Command Line Tools', sw?.commandLineTools, 'Apple’s command line developer tools.')}${flag('software.rosetta', 'Rosetta', sw?.rosetta, 'Runs Intel binaries on Apple silicon.')}${list('software.brew.formulae', 'Homebrew formulae', sw?.brew.formulae, 'Installed with brew install.')}${list('software.brew.casks', 'Homebrew casks', sw?.brew.casks, 'Installed with brew install --cask.')}${list('software.apt', 'apt packages', sw?.apt, 'On Debian and Ubuntu nodes.', 'jq, zip')}${list('software.dnf', 'dnf packages', sw?.dnf, 'On Fedora and Red Hat nodes.')}${flag('software.docker', 'Docker', sw?.docker, 'Docker Engine, for stages that run containers.')}${ver('software.node', 'Node.js version', sw?.node, 'Empty: Node.js is not managed.', '24')}${ver('software.java', 'Java version', sw?.java, 'Empty: Java is not managed.', '21')}${ver('software.rust', 'Rust version', sw?.rust, 'Empty: Rust is not managed.', 'stable')}${ver('software.python', 'Python version', sw?.python, 'Empty: Python is not managed.', '3.12')}${ver('software.go', 'Go version', sw?.go, 'Empty: Go is not managed.', '1.23')}${ver('software.ruby', 'Ruby version', sw?.ruby, 'Empty: Ruby is not managed. Built from source once per node.', '3.3')}${list('software.android', 'Android SDK packages', sw?.android, 'sdkmanager package names. Their licences are accepted on a node’s page.', 'platforms;android-35')}<h3>Settings</h3>${flag('settings.noSleep', 'Keep awake', type?.settings.noSleep, 'The node never sleeps while Mason runs.')}${flag('settings.devToolsSecurity', 'Developer tools security', type?.settings.devToolsSecurity, 'Lets tools debug and automate apps without a password prompt (macOS).')}${flag('settings.automationMode', 'Automation mode', type?.settings.automationMode, 'Lets UI tests drive the Mac without prompts (macOS).')}${field(id('diskThresholdGb'), 'Disk threshold (GB)', input(id('diskThresholdGb'), 'diskThresholdGb', String(type?.diskThresholdGb ?? 40), ' required type="number" min="0" data-kind="number"'), 'Unused Xcodes and runtimes are removed when free disk falls below this.')}`
   }
   const names = [
     'software.xcode',
@@ -1228,6 +1331,9 @@ function nodeTypesCard(types: Record<string, NodeTypeView>): string {
     'software.node',
     'software.java',
     'software.rust',
+    'software.python',
+    'software.go',
+    'software.ruby',
     'software.android',
     'settings.noSleep',
     'settings.devToolsSecurity',
@@ -1407,7 +1513,7 @@ export function masonfileView(data: {
   error?: string
 }): string {
   const lines = (data.text ?? '').split('\n')
-  return `${head(`${data.name} · Masonfile`, 'The Masonfile is the project’s configuration; it changes with the code.', [data.name, 'Masonfile'])}<form method="get" class="actions"><label for="commit" class="sr-only">Commit</label><select id="commit" name="commit">${data.commits.map((entry) => `<option value="${escape(entry.sha)}"${entry.sha === data.commit ? ' selected' : ''}>${escape(entry.sha.slice(0, 12))} · ${escape(entry.branch)}</option>`).join('')}</select><button class="secondary">Show</button></form>${
+  return `${head(`${data.name} · Masonfile`, 'The Masonfile is the project’s configuration; it changes with the code.', [data.name, 'Masonfile'])}${projectTabs(data.slug, 'masonfile')}<form method="get" class="actions"><label for="commit" class="sr-only">Commit</label><select id="commit" name="commit">${data.commits.map((entry) => `<option value="${escape(entry.sha)}"${entry.sha === data.commit ? ' selected' : ''}>${escape(entry.sha.slice(0, 12))} · ${escape(entry.branch)}</option>`).join('')}</select><button class="secondary">Show</button></form>${
     data.error != null
       ? `<p class="empty-state">${escape(data.error)}</p>`
       : data.text == null
@@ -1416,7 +1522,146 @@ export function masonfileView(data: {
   }`
 }
 
-/** A project on the master: repository, app IDs, branch rules, webhook and secrets (names only; values are write-only). */
+/** The tabs of a project's pages. */
+export function projectTabs(
+  slug: string,
+  current: 'overview' | 'runs' | 'masonfile' | 'secrets',
+): string {
+  const path = `/projects/${encodeURIComponent(slug)}`
+  const tab = (key: string, href: string, label: string): string =>
+    `<a href="${escape(href)}"${key === current ? ' aria-current="page"' : ''}>${label}</a>`
+  return `<nav class="tabs" aria-label="Project">${[
+    tab('overview', path, 'Overview'),
+    tab('runs', `${path}/runs`, 'Runs and builds'),
+    tab('masonfile', `${path}/masonfile`, 'Masonfile'),
+    tab('secrets', `${path}/secrets`, 'Secrets'),
+  ].join('')}</nav>`
+}
+
+/** One secret variant as the Secrets tab lists it. */
+export interface SecretRowView {
+  id: number
+  name: string
+  kind: 'value' | 'file'
+  configs: string[]
+  text: boolean
+  masked: boolean
+  pathEnv?: string
+  destination?: string
+  bytes: number
+}
+
+/** One audit entry as the Secrets tab lists it. */
+export interface SecretAuditView {
+  name: string
+  configs: string[]
+  action: string
+  who: string
+  address: string
+  at: number
+  detail?: string
+}
+
+const pillsOf = (configs: string[], button: boolean): string =>
+  (configs.length === 0 ? ['all'] : configs)
+    .map((config) =>
+      button
+        ? `<button type="button" class="pill" data-secret-pill title="Edit build configs">${escape(config)}</button>`
+        : `<span class="pill">${escape(config)}</span>`,
+    )
+    .join('')
+
+/**
+ * The Secrets tab: the add buttons and help, one row per variant, the
+ * audit for administrators and managers, and the text-file editor. Every
+ * control is in the page, hidden until the tab's script shows it.
+ */
+export function secretsView(data: {
+  slug: string
+  name: string
+  format: 'pipeline' | 'script'
+  secrets: SecretRowView[]
+  /** Administrators and managers: add, edit, replace, delete, and the audit. */
+  canChange: boolean
+  /** Changes need a configured backup. */
+  backups: boolean
+  audit?: SecretAuditView[]
+}): string {
+  const script = data.format === 'script'
+  const manage = data.canChange
+  const changeable = manage && data.backups
+  const help = script
+    ? `<p class="hint">This is a script project: its build stage gets every value as an environment variable, and every file written into the checkout at its name, a path such as <code>android/app/google-services.json</code>. Script projects have no build configs.</p>`
+    : `<p class="hint">Values are set as environment variables for the shell commands of stages that declare them in <code>secrets</code>, and the Masonfile reads them with <code>ctx.secret(name)</code>. Files are written by the Masonfile with <code>await ctx.writeSecretFile(name, directory)</code>. A secret’s build configs limit it to stages that list one of them in <code>configs</code>; one with none is used by every other stage.</p>`
+  // Script projects take only default variants, so they have no configs to set.
+  const configsField = (id: string): string =>
+    script
+      ? ''
+      : field(
+          id,
+          'Build configs',
+          `<input id="${id}" name="configs" autocomplete="off" placeholder="all">`,
+          'Comma-separated; empty means all.',
+        )
+  const notice =
+    manage && !data.backups
+      ? `<p class="notice" role="status">Configure backups before changing secrets: every change is pushed in a backup before it is saved. <a href="/backups">Backups</a></p>`
+      : ''
+  const buttons = manage
+    ? `<div class="actions"><button type="button" data-secret-add="value"${changeable ? '' : ' disabled'}>${icon('add')}Add secret value</button><button type="button" data-secret-add="file"${changeable ? '' : ' disabled'}>${icon('upload')}Add secret file</button></div>`
+    : ''
+  const addValue = changeable
+    ? `<form class="secret-add" data-secret-add-form="value" hidden><h3>Add secret value</h3>${field('secret-value-name', 'Name', '<input id="secret-value-name" name="name" class="mono" required autocomplete="off" spellcheck="false" placeholder="API_TOKEN">', 'Capital letters, digits and underscores: the environment variable it becomes.')}${configsField('secret-value-configs')}${field('secret-value-value', 'Value', '<input id="secret-value-value" name="value" type="password" class="mono" autocomplete="off" spellcheck="false" required><textarea data-secret-value-lines hidden rows="6" class="mono" autocomplete="off" spellcheck="false" aria-label="Value"></textarea>')}<label class="check" data-secret-reveal><input type="checkbox" data-secret-show> Show the value</label>${script ? '<label class="check"><input type="checkbox" name="masked" checked> Mask in logs</label>' : ''}<div class="actions"><button>Save</button><button type="button" class="secondary" data-secret-add-cancel>Cancel</button></div><output data-secret-output></output></form>`
+    : ''
+  const addFile = changeable
+    ? `<form class="secret-add" data-secret-add-form="file" hidden><h3>Add secret file</h3><div class="drop" data-secret-drop tabindex="0" role="button" aria-label="Drop a file, or choose one">${icon('upload')}<span>Drop a file here, or click to choose one</span><strong data-secret-chosen></strong></div><input type="file" data-secret-add-file hidden>${field('secret-file-text', 'Or paste its text', '<textarea id="secret-file-text" name="text" rows="6" class="mono" spellcheck="false" placeholder="{ … }"></textarea>')}${field('secret-file-name', script ? 'Path in the checkout' : 'File name', `<input id="secret-file-name" name="name" class="mono" required autocomplete="off" spellcheck="false" placeholder="${script ? 'android/app/google-services.json' : 'config.json'}">`, script ? 'Letters, digits, dots, dashes and underscores, with / between directories: where the build stage finds the file.' : 'Letters, digits, dots, dashes and underscores. The Masonfile chooses the directory.')}${configsField('secret-file-configs')}${script ? field('secret-file-path-env', 'Path variable', '<input id="secret-file-path-env" name="pathEnv" class="mono" autocomplete="off" spellcheck="false">', 'Optional: the variable that holds the file’s path in the build.') : ''}<div class="actions"><button>Save</button><button type="button" class="secondary" data-secret-add-cancel>Cancel</button></div><output data-secret-output></output></form>`
+    : ''
+  const rows = data.secrets
+    .map((variant) => {
+      const notes = [
+        variant.kind === 'value' && !variant.masked
+          ? '<small class="hint">not masked</small>'
+          : '',
+        variant.pathEnv == null
+          ? ''
+          : `<small class="hint">→ $${escape(variant.pathEnv)}</small>`,
+        variant.destination != null && variant.destination !== variant.name
+          ? `<small class="hint">at ${escape(variant.destination)}</small>`
+          : '',
+        variant.kind === 'file'
+          ? `<small class="hint">${escape(bytes(variant.bytes))}${variant.text ? ' · text' : ''}</small>`
+          : '',
+      ].join('')
+      const editable = variant.kind === 'value' || variant.text
+      const actions = manage
+        ? `<span class="row-actions" data-secret-view>${
+            editable
+              ? `<button type="button" class="secondary" data-secret-edit>${icon('edit')}Edit</button>`
+              : `<button type="button" class="secondary" data-secret-replace>${icon('upload')}Replace</button>`
+          }<button type="button" class="secondary danger" data-secret-delete>${icon('delete')}Delete</button></span><span class="row-actions" data-secret-editing hidden><button type="button" data-secret-save>Save</button><button type="button" class="secondary" data-secret-cancel>Cancel</button></span><output data-secret-output></output>`
+        : ''
+      return `<tr data-secret-id="${variant.id}" data-kind="${variant.kind}" data-name="${escape(variant.name)}" data-configs="${escape(variant.configs.join(','))}"><td class="secret-name">${icon(variant.kind === 'value' ? 'key' : 'description')}<span class="mono">${escape(variant.name)}</span>${notes}${manage && variant.kind === 'value' ? `<input class="mono" data-secret-value hidden autocomplete="off" spellcheck="false" aria-label="Value of ${escape(variant.name)}">` : ''}</td><td class="secret-configs"><span class="pills" data-secret-pills>${pillsOf(variant.configs, manage && !script)}</span>${manage && !script ? `<input data-secret-configs-input hidden autocomplete="off" placeholder="all" aria-label="Build configs of ${escape(variant.name)}">` : ''}</td><td class="secret-actions">${actions}</td></tr>`
+    })
+    .join('')
+  const table = `<table class="list secrets"><thead><tr><th>Name</th><th>Build configs</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>${rows || '<tr><td colspan="3" class="empty-state">No secrets yet.</td></tr>'}</tbody></table>${manage ? '<input type="file" data-secret-file hidden>' : ''}`
+  const audit =
+    manage && data.audit != null
+      ? `<section class="panel"><h2>${icon('history')}Audit</h2><p class="hint">Every view of a value or file, every change and every refusal. Values are never recorded.</p><table class="list audit"><thead><tr><th>When</th><th>Who</th><th>Secret</th><th>Action</th><th>Address</th></tr></thead><tbody>${
+          data.audit
+            .map(
+              (entry) =>
+                `<tr><td><time datetime="${new Date(entry.at).toISOString()}" data-at="${entry.at}">${escape(new Date(entry.at).toISOString().replace('T', ' ').slice(0, 19))} UTC</time></td><td>${escape(entry.who)}</td><td><span class="mono">${escape(entry.name)}</span> <span class="pills">${pillsOf(entry.configs, false)}</span></td><td>${escape(entry.action)}${entry.detail == null ? '' : ` <small class="hint">${escape(entry.detail)}</small>`}</td><td class="mono">${escape(entry.address)}</td></tr>`,
+            )
+            .join('') ||
+          '<tr><td colspan="5" class="empty-state">Nothing yet.</td></tr>'
+        }</tbody></table></section>`
+      : ''
+  const editor = manage
+    ? `<div class="secret-editor" data-secret-editor hidden role="dialog" aria-modal="true" aria-labelledby="secret-editor-title"><div class="secret-editor-head"><h2 id="secret-editor-title" class="mono" data-secret-editor-title></h2><span class="pill" data-secret-editor-configs></span><span class="spacer"></span><button type="button" data-secret-editor-save>Save</button><button type="button" class="secondary" data-secret-editor-cancel>Cancel</button></div><textarea class="mono" data-secret-editor-text spellcheck="false" aria-labelledby="secret-editor-title"></textarea><output data-secret-editor-output></output></div>`
+    : ''
+  return `${head(`${data.name} · Secrets`, 'Values and files the project’s stages may read, each limited to build configs.', [data.name, 'Secrets'])}${projectTabs(data.slug, 'secrets')}<section class="panel"${manage ? ` data-secrets="/api/v2/projects/${escape(encodeURIComponent(data.slug))}/secrets"` : ''}>${notice}${buttons}${help}${addValue}${addFile}${table}</section>${audit}${editor}`
+}
+
 /** A project's build-number sequences, and where a manager sets one's last number. */
 function buildNumbersPanel(data: {
   slug: string
@@ -1461,6 +1706,19 @@ function buildNumbersPanel(data: {
   }${form}</section>`
 }
 
+/** A project's Runs and builds tab: its latest runs, each with its published builds and saved artifacts. */
+export function projectRunsView(
+  data: { slug: string; name: string; branch?: string },
+  runs: string,
+): string {
+  return `${head(`${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch, with the builds each published.' : `The latest runs on ${data.branch}, with the builds each published.`, [data.name, 'Runs and builds'])}${projectTabs(data.slug, 'runs')}${
+    data.branch == null
+      ? ''
+      : `<p><a href="/projects/${encodeURIComponent(data.slug)}/runs">${icon('close')} Every branch</a></p>`
+  }<section class="panel">${runs}</section>`
+}
+
+/** A project on the master: repository, app IDs, branch rules, build numbers, and its tabs. */
 export function projectView(data: {
   slug: string
   name: string
@@ -1473,11 +1731,8 @@ export function projectView(data: {
     apple?: { team: string }
   }>
   rules: Array<{ pattern: string; mode: string }>
-  env: Array<{ name: string; secret: boolean }>
-  files: Array<{ destination: string; env?: string }>
   webhook: boolean
   signingLabel?: string
-  canChangeSecrets: boolean
   buildNumbers: Array<{
     key: string
     format: string
@@ -1486,14 +1741,7 @@ export function projectView(data: {
   }>
   canSeed: boolean
 }): string {
-  const keep = {
-    env: data.env.map((entry) => ({ name: entry.name, keep: true })),
-    files: data.files.map((file) => ({
-      destination: file.destination,
-      keep: true,
-    })),
-  }
-  return `${head(data.name, data.repository, ['Projects', data.slug])}<p><a href="/?project=${encodeURIComponent(data.slug)}">Runs and builds</a> · <a href="/projects/${encodeURIComponent(data.slug)}/masonfile">Masonfile</a></p><div class="columns"><div><section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
+  return `${head(data.name, data.repository, ['Projects', data.slug])}${projectTabs(data.slug, 'overview')}<section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
     data.apps
       .map(
         (app) =>
@@ -1507,32 +1755,7 @@ export function projectView(data: {
           `<tr><td class="mono">${escape(rule.pattern)}</td><td>${escape(rule.mode)}</td></tr>`,
       )
       .join('') || '<tr><td>No rules: nothing builds.</td></tr>'
-  }</tbody></table><p>Default branch <span class="mono">${escape(data.defaultBranch)}</span> · ${escape(data.format)} Masonfile · webhook ${data.webhook ? 'set' : 'not set'}${data.signingLabel == null ? '' : ` · signs on nodes labelled <span class="mono">${escape(data.signingLabel)}</span>`}</p></section>${buildNumbersPanel(data)}</div><aside><section class="panel"><h2>${icon('key')}Secrets</h2><ul class="plain">${
-    [
-      ...data.env.map(
-        (entry) =>
-          `<li><span class="mono">${escape(entry.name)}</span> <small>${entry.secret ? 'secret' : 'environment'} · set</small></li>`,
-      ),
-      ...data.files.map(
-        (file) =>
-          `<li><span class="mono">${escape(file.env ?? file.destination)}</span> <small>file · set</small></li>`,
-      ),
-    ].join('') || '<li>None.</li>'
-  }</ul>${
-    data.canChangeSecrets
-      ? apiForm(
-          `/api/v2/projects/${data.slug}/secrets`,
-          `<label for="secrets">Secrets (JSON). Stored values are never shown: keep one with {"keep": true}, replace it with a new "value" or "contents".</label><textarea id="secrets" name="value" rows="8" class="mono">${escape(JSON.stringify(keep, null, 2))}</textarea>`,
-          `${icon('lock')} Save secrets`,
-          {
-            method: 'PUT',
-            json: 'value',
-            then: 'reload',
-            className: 'secondary',
-          },
-        )
-      : ''
-  }</section></aside></div>`
+  }</tbody></table><p>Default branch <span class="mono">${escape(data.defaultBranch)}</span> · ${escape(data.format)} Masonfile · webhook ${data.webhook ? 'set' : 'not set'}${data.signingLabel == null ? '' : ` · signs on nodes labelled <span class="mono">${escape(data.signingLabel)}</span>`}</p></section>${buildNumbersPanel(data)}`
 }
 
 /** One cloud account on the Cloud page: its provider, what its last check found, and its actions. */

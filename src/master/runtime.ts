@@ -4,7 +4,7 @@ import ssh2 from 'ssh2'
 import type { DatabaseSync } from 'node:sqlite'
 import type { ControlHandler } from '../node/control.js'
 import type { Identity } from '../node/identity.js'
-import type { MethodTable } from '../link/link.js'
+import type { MethodTable, Stream } from '../link/link.js'
 import { createFirstAdmin } from '../setup/setup.js'
 import { MasterDatabase } from './database.js'
 import { MasterKeys } from './keys.js'
@@ -57,6 +57,7 @@ import {
   cloudArea,
   Pools,
   type CloudSetting,
+  type PoolAnswer,
   type PoolsOptions,
 } from './cloud/pools.js'
 import {
@@ -82,9 +83,12 @@ import {
   hostProjection,
   signInArea,
   storageArea,
+  type StorageSetting,
 } from './hostSettings.js'
+import { StorageLocations } from './storageLocations.js'
 import { Artifacts } from './artifacts.js'
 import type { Graph } from '../pipeline/graph.js'
+import { Secrets } from './secrets.js'
 
 const sshUtils = ssh2.utils
 
@@ -198,6 +202,14 @@ function mergeMethods(a: MethodTable, b: MethodTable): MethodTable {
   }
 }
 
+/** A NoMac Mac runs its worker without root, so it never has a helper. */
+export const NOMAC_HELPER: ChecklistItem = {
+  id: 'helper',
+  title:
+    'NoMac Mac: no helper by design, so Mason cannot install Xcode, simulators or Homebrew packages here; stages use the Xcode NoMac provides',
+  blocks: ['system'],
+}
+
 /** The master role's parts, shared by its web listener and control socket. */
 export class Master {
   readonly database: MasterDatabase
@@ -239,7 +251,10 @@ export class Master {
   readonly masterId: string
   readonly appleSetup: AppleSetup
   readonly artifacts: Artifacts
+  readonly storageLocations: StorageLocations
   readonly backups: Backups
+  /** Project secrets: variants, their audit, and changes gated on a pushed backup. */
+  readonly secrets: Secrets
   private expiry: NodeJS.Timeout | undefined
   private backupTimer: NodeJS.Timeout | undefined
   private stopped = false
@@ -375,6 +390,9 @@ export class Master {
     })
     this.scheduler = new Scheduler({
       artifacts: this.artifacts,
+      // The host links are made below; a relay asks for them when it runs.
+      toHost: (method, params): Stream =>
+        this.hosts.openHostStream(method, params),
       apple: {
         signing: async (project, stage): Promise<StageSigning> =>
           await this.appleSigning.signing(project, stage),
@@ -403,7 +421,8 @@ export class Master {
       masterChecklist: (): ChecklistItem[] =>
         masterChecklist(this.apple.status(), this.nodeStates.wantsXcode()),
       cloud: {
-        demand: (type): string | undefined => this.pools.demand(type),
+        demand: (type): PoolAnswer | undefined => this.pools.demand(type),
+        makesMacs: (type): boolean | undefined => this.pools.makesMacs(type),
         draining: (fingerprint): boolean => this.pools.draining(fingerprint),
         setupDemand: (): string | undefined => this.pools.setupDemand(),
       },
@@ -462,7 +481,14 @@ export class Master {
       'cloud',
       cloudArea(() => this.cloudAccounts.all()),
     )
-    this.settings.register('storage', storageArea)
+    this.storageLocations = new StorageLocations(this.database, this.settings)
+    // Every Space new builds go to becomes a storage location that stays.
+    this.settings.register('storage', {
+      ...storageArea,
+      changed: (value): void => {
+        this.storageLocations.remember(value as unknown as StorageSetting)
+      },
+    })
     this.settings.register('signIn', signInArea)
     this.backups = new Backups({
       master: this.database,
@@ -477,10 +503,13 @@ export class Master {
         url: string
         env: NodeJS.ProcessEnv
       }> => await this.github.gitAccess(repository, options.scratch ?? '/tmp'),
+      hasGitHub: (): boolean =>
+        storedConnection(this.settings.value('github')) != null,
       ...(options.backupAttempts == null
         ? {}
         : { attempts: options.backupAttempts }),
     })
+    this.secrets = new Secrets(this.database, this.backups)
     this.settings.register('backup', {
       ...backupArea,
       changed: (): void => {
@@ -494,14 +523,13 @@ export class Master {
       identity,
       version,
     )
-    this.changes = new Changes(this.database, hostProjection, this.releases)
+    this.changes = new Changes(this.database, hostProjection)
     this.hosts = new HostLinks({
       master: this.database,
       registry: this.registry,
       changes: this.changes,
       projects: this.projects,
       jobs: this.jobs,
-      releases: this.releases,
       artifacts: this.artifacts,
       privateKey: identity.privateKey,
       onDevices: (): void => {
@@ -547,16 +575,6 @@ export class Master {
       accountProvider: (account): 'digitalocean' | 'nomac' | undefined =>
         this.cloudAccounts.get(account)?.provider,
       busy: (fingerprint): boolean => this.scheduler.busy(fingerprint),
-      release: (): string | undefined => this.releases.current(),
-      releasePlatforms: (version: string): string[] =>
-        this.releases.platforms(version),
-      hostOrigin: (): string | undefined => {
-        const host = (this.settings.value('host') ?? {}) as {
-          origin?: string
-          workerOrigin?: string
-        }
-        return host.workerOrigin ?? host.origin
-      },
       github: (): { repository: string; version: string } | undefined =>
         repository == null ? undefined : { repository, version },
       publicAddress: async (): Promise<string | undefined> => {
@@ -645,6 +663,7 @@ export class Master {
       dns: new HostDns(this.database),
       space: (this.hostSpace = new HostSpace({
         master: this.database,
+        locations: this.storageLocations,
         storage: {
           get: (): SpaceStorage | undefined => {
             const value = this.settings.value('storage') as
@@ -792,6 +811,8 @@ export class Master {
     await this.cloudHosts.stop()
     clearInterval(this.compaction)
     clearInterval(this.backupTimer)
+    // A change waiting on its backup is applied before the database closes.
+    await this.backups.stop()
     this.provisioning.stop()
     this.apple.stop()
     await this.poller.close()
@@ -803,8 +824,9 @@ export class Master {
   }
 
   /**
-   * Saves a project from one document: its fields, and optionally `apps`,
-   * `rules` and `secrets`, as `mason projects set` sends it.
+   * Saves a project from one document: its fields, and optionally `apps`
+   * and `rules`, as `mason projects set` sends it. Secrets are not part of
+   * it: each variant is its own change, backed up before it is saved.
    */
   saveProject(
     actor: typeof localOperator,
@@ -816,10 +838,13 @@ export class Master {
       rules?: unknown
       secrets?: unknown
     }
+    if (secrets != null)
+      throw new Error(
+        "Set secrets one variant at a time: the project's Secrets tab or /api/v2/projects/:slug/secrets",
+      )
     this.projects.save(actor, slug, fields)
     for (const app of apps ?? []) this.projects.addApp(actor, slug, app)
     if (rules != null) this.projects.setRules(actor, slug, rules)
-    if (secrets != null) this.projects.setSecrets(actor, slug, secrets)
     return this.projects.get(slug)
   }
 
@@ -898,8 +923,11 @@ export class Master {
   nodeDetails(fingerprint: string): Record<string, unknown> {
     const inventory = this.scheduler.inventoryOf(fingerprint)
     const update = this.updates.state(fingerprint)
+    const nomac = this.registry.get(fingerprint)?.host.startsWith('nomac:')
     const checklist = [
-      ...(inventory?.checklist ?? []),
+      ...(inventory?.checklist ?? []).map((item) =>
+        nomac === true && item.id === 'helper' ? NOMAC_HELPER : item,
+      ),
       ...masterChecklist(this.apple.status(), this.nodeStates.wantsXcode()),
     ]
     return {

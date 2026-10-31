@@ -1,6 +1,4 @@
 import { createHmac, sign, timingSafeEqual, type KeyObject } from 'node:crypto'
-import { createReadStream, existsSync } from 'node:fs'
-import path from 'node:path'
 import {
   LinkError,
   type Link,
@@ -13,9 +11,11 @@ import type { Jobs } from './jobs.js'
 import { repositoryName } from './mirrors.js'
 import type { NodeRegistry } from './nodes.js'
 import type { Projects } from './projects.js'
-import type { Releases } from './releases.js'
-import type { Artifacts, HostAccess } from './artifacts.js'
-import type { Format } from '../validation.js'
+import {
+  PublicationRefused,
+  type Artifacts,
+  type HostAccess,
+} from './artifacts.js'
 import { ruleFor } from './rules.js'
 
 /** The only writes a host makes to the master. */
@@ -59,7 +59,6 @@ export class HostLinks {
       changes: Changes
       projects: Projects
       jobs: Jobs
-      releases: Releases
       /** Signs download grants for the host's Xcode mirror. */
       privateKey: KeyObject
       /** The host's public origins, from the `host` setting. */
@@ -197,10 +196,31 @@ export class HostLinks {
       payload?: unknown
     }
     if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{8,64}$/.test(id))
-      throw new LinkError('An outbox message needs an idempotency ID', 'failed')
+      throw new LinkError(
+        'An outbox message needs an idempotency ID',
+        'refused',
+      )
     if (!(outboxKinds as readonly unknown[]).includes(kind))
-      throw new LinkError(`${String(kind)} is not an outbox message`, 'failed')
+      throw new LinkError(`${String(kind)} is not an outbox message`, 'refused')
     const db = this.options.master.db
+    try {
+      return this.receive(db, id, kind as string, payload, fingerprint)
+    } catch (error) {
+      if (!(error instanceof PublicationRefused)) throw error
+      // The delivery rolled back; what the refused confirmation stood for
+      // goes on its own, and the host hears a refusal rather than a failure.
+      this.options.artifacts?.forgetRefused(payload)
+      throw new LinkError(error.message, 'refused')
+    }
+  }
+
+  private receive(
+    db: MasterDatabase['db'],
+    id: string,
+    kind: string,
+    payload: unknown,
+    fingerprint: string,
+  ): { receipt: string; duplicate: boolean } {
     return this.options.master.transaction(() => {
       if (db.prepare('SELECT 1 FROM host_receipts WHERE id=?').get(id) != null)
         return { receipt: id, duplicate: true }
@@ -229,13 +249,13 @@ export class HostLinks {
     const text = (field: string, max = 200): string => {
       const out = value[field]
       if (typeof out !== 'string' || out.length === 0 || out.length > max)
-        throw new LinkError(`device.${field} is required`, 'failed')
+        throw new LinkError(`device.${field} is required`, 'refused')
       return out
     }
     const udid = text('udid', 100)
     const account = Number(value.accountId)
     if (!Number.isSafeInteger(account))
-      throw new LinkError('device.accountId is required', 'failed')
+      throw new LinkError('device.accountId is required', 'refused')
     const db = this.options.master.db
     const now = this.options.master.now()
     const action = value.action ?? 'register'
@@ -260,7 +280,10 @@ export class HostLinks {
           'DELETE FROM account_devices WHERE account_id=? AND device_id=?',
         ).run(account, row.id)
       else
-        throw new LinkError(`Unknown device action ${String(action)}`, 'failed')
+        throw new LinkError(
+          `Unknown device action ${String(action)}`,
+          'refused',
+        )
       this.options.master.change('device', row.id)
       this.options.master.change('account', account)
       return
@@ -291,13 +314,12 @@ export class HostLinks {
       string,
       unknown
     >
-    if (value.action === 'staged')
-      artifacts.staged(value as unknown as Parameters<Artifacts['staged']>[0])
+    if (value.action === 'staged') artifacts.staged(value)
     else if (value.action === 'saved')
       artifacts.saved(value as unknown as Parameters<Artifacts['saved']>[0])
     else if (value.action === 'deleted')
       artifacts.deleted(value as Parameters<Artifacts['deleted']>[0])
-    else throw new LinkError('Unknown artifact message', 'failed')
+    else throw new LinkError('Unknown artifact message', 'refused')
   }
 
   /** "Prepare for this device": the master queues the build request; the device milestone turns it into a pinned job. */
@@ -311,13 +333,36 @@ export class HostLinks {
     if (![account, device, build].every((n) => Number.isSafeInteger(n)))
       throw new LinkError(
         'prepare needs accountId, deviceId and buildId',
-        'failed',
+        'refused',
       )
     this.options.master.db
       .prepare(
         'INSERT OR IGNORE INTO device_build_requests(account_id,device_id,build_id,created_at) VALUES(?,?,?,?)',
       )
       .run(account!, device!, build!, this.options.master.now())
+  }
+
+  /**
+   * Asks the host something about its storage: undefined when the cluster has
+   * no host; an error when it has one that is not connected.
+   */
+  async askHost<T>(
+    method: string,
+    params: unknown,
+    timeoutMs = 30_000,
+  ): Promise<T | undefined> {
+    if (!this.options.registry.list().some((node) => node.role === 'host'))
+      return undefined
+    const host = this.connectedHost()
+    if (host == null) throw new Error('the host is not connected')
+    return (await host.link.request(method, params, timeoutMs)) as T
+  }
+
+  /** Opens a stream to the connected host, for a relay of a node's; with none connected it throws. */
+  openHostStream(method: string, params: unknown): Stream {
+    const host = this.connectedHost()
+    if (host == null) throw new Error('No host is connected')
+    return host.link.openStream(method, params)
   }
 
   /** A connected host and its link, for relaying an Xcode to its mirror. */
@@ -518,24 +563,12 @@ export class HostLinks {
           if (this.options.artifacts == null)
             throw new LinkError('Artifacts are unavailable', 'failed')
           try {
-            return this.options.artifacts.staged(
-              params as Parameters<Artifacts['staged']>[0],
-            )
+            return this.options.artifacts.staged(params)
           } catch (error) {
-            throw new LinkError((error as Error).message, 'failed')
-          }
-        },
-        /** A Zealot-API upload the host staged, published through the master. */
-        'artifacts.zealot': (params, link): unknown => {
-          this.host(link)
-          if (this.options.artifacts == null)
-            throw new LinkError('Artifacts are unavailable', 'failed')
-          try {
-            return this.options.artifacts.zealot(
-              params as Parameters<Artifacts['zealot']>[0] & { format: Format },
-            )
-          } catch (error) {
-            throw new LinkError((error as Error).message, 'failed')
+            if (!(error instanceof PublicationRefused))
+              throw new LinkError((error as Error).message, 'failed')
+            this.options.artifacts.forgetRefused(params)
+            throw new LinkError(error.message, 'refused')
           }
         },
       },
@@ -553,28 +586,6 @@ export class HostLinks {
             return
           }
           await this.options.forward(params, stream)
-        },
-        /** A file of the current release, for the host to serve `/install.sh` and the tarballs. */
-        'release.get': async (stream, params, link): Promise<void> => {
-          try {
-            this.host(link)
-            const version = this.options.releases.current()
-            const name = String((params as { file?: unknown })?.file ?? '')
-            if (version == null) throw new Error('No current release')
-            if (
-              !(name in this.options.releases.files(version)) &&
-              name !== 'SHA256SUMS'
-            )
-              throw new Error('Not a file of the current release')
-            const file = path.join(this.options.releases.root, version, name)
-            if (!existsSync(file))
-              throw new Error('The release file is not stored')
-            for await (const chunk of createReadStream(file))
-              await stream.write(chunk as Buffer)
-            stream.end()
-          } catch (error) {
-            stream.abort((error as Error).message)
-          }
         },
       },
     }

@@ -9,6 +9,7 @@ import { cluster, type Cluster } from '../test/cluster.js'
 import { MASTER_SESSION_COOKIE } from './auth.js'
 import { localOperator } from './roles.js'
 import { declaredApps, slugFor } from './wizard.js'
+import { seedSecret } from '../test/secrets.js'
 
 // Rows and replies are read field by field.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -329,6 +330,24 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       } as never),
       [],
     )
+    // A stage that may run on Windows, alone or in a list, publishes for windows.
+    for (const on of [{ os: 'windows' }, ['linux', { os: 'windows' }]])
+      assert.deepEqual(
+        declaredApps({
+          apiVersion: 1,
+          workflows: [
+            {
+              stages: [
+                { on, publishes: ['app.example.win'], buildNumbers: [] },
+              ],
+              post: [],
+            },
+          ],
+          buildNumbers: {},
+          warnings: [],
+        } as never),
+        [{ bundleId: 'app.example.win', platforms: ['windows'] }],
+      )
     // A build-number sequence keyed by an app ID names that app ID.
     assert.deepEqual(
       declaredApps({
@@ -681,17 +700,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     assert.match(managerPeople, /tester person/)
     // A project's page names its secrets and never shows their values.
     const manager2 = signIn('manager')
-    assert.equal(
-      (
-        await request(c.master, 'PUT', '/api/v2/projects/wizard/secrets', {
-          ...manager2,
-          body: {
-            env: [{ name: 'SIGNING_TOKEN', value: 'secret-value-fixture' }],
-          },
-        })
-      ).status,
-      200,
-    )
+    seedSecret(c.master.master!.database.db, 'wizard', {
+      name: 'SIGNING_TOKEN',
+      kind: 'value',
+      value: 'secret-value-fixture',
+    })
     // Build numbers: each sequence and its last number; a manager sets where one stands.
     const wizard = c.master.master!.projects.get('wizard')
     c.master.master!.buildNumbers.declare(wizard.id, 'app.example.ui', {
@@ -718,10 +731,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     assert.match(projectPage, /app\.example\.ui<\/td><td class="mono">YYMMDDCC/)
     assert.match(projectPage, /master<\/span> 26102107/)
     assert.match(projectPage, /data-path="\/api\/v2\/build-numbers\/seed"/)
-    assert.match(projectPage, /SIGNING_TOKEN/)
-    assert.match(
+    // Secrets are on their own tab, not the overview.
+    assert.doesNotMatch(projectPage, /SIGNING_TOKEN/)
+    assert.doesNotMatch(
       projectPage,
-      /data-path="\/api\/v2\/projects\/wizard\/secrets"/,
+      /data-path="\/api\/v2\/projects\/wizard\/secrets"|data-secrets/,
     )
     assert(!projectPage.includes('secret-value-fixture'))
     const developerProject = (
@@ -738,6 +752,98 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
         .status,
       403,
     )
+    // The Secrets tab: names and configs for developers, controls and the audit for managers.
+    const managerSecrets = await request(
+      c.master,
+      'GET',
+      '/projects/wizard/secrets',
+      manager2,
+    )
+    assert.equal(managerSecrets.status, 200)
+    assert.match(managerSecrets.text, /aria-current="page">Secrets</)
+    assert.match(managerSecrets.text, /data-secret-name|SIGNING_TOKEN/)
+    assert.match(managerSecrets.text, /data-secret-edit/)
+    assert.match(managerSecrets.text, /<h2><span[^>]*>[^<]*<\/span>Audit<\/h2>/)
+    assert.match(managerSecrets.text, /src="\/assets\/secrets\.js"/)
+    assert(!managerSecrets.text.includes('secret-value-fixture'))
+    const developerSecrets = (
+      await request(
+        c.master,
+        'GET',
+        '/projects/wizard/secrets',
+        signIn('developer'),
+      )
+    ).text
+    assert.match(developerSecrets, /SIGNING_TOKEN/)
+    assert.doesNotMatch(
+      developerSecrets,
+      /data-secret-edit|Audit|data-secrets|assets\/secrets\.js/,
+    )
+    assert.equal(
+      (
+        await request(
+          c.master,
+          'GET',
+          '/projects/wizard/secrets',
+          signIn('tester'),
+        )
+      ).status,
+      403,
+    )
+    assert.equal(
+      (await request(c.master, 'GET', '/projects/nope/secrets', manager2))
+        .status,
+      404,
+    )
+    assert.equal(
+      (await request(c.master, 'GET', '/projects/wizard/secrets')).status,
+      303,
+    )
+    // Runs and builds is a project tab: the project's runs, under the same tabs.
+    const runsTab = await request(
+      c.master,
+      'GET',
+      '/projects/wizard/runs',
+      signIn('developer'),
+    )
+    assert.equal(runsTab.status, 200)
+    assert.match(runsTab.text, /aria-current="page">Runs and builds</)
+    assert.match(runsTab.text, /<table class="list">|No runs yet/)
+    assert.match(
+      (
+        await request(
+          c.master,
+          'GET',
+          '/projects/wizard/runs?branch=master',
+          signIn('developer'),
+        )
+      ).text,
+      /The latest runs on master/,
+    )
+    assert.equal(
+      (
+        await request(
+          c.master,
+          'GET',
+          '/projects/wizard/runs',
+          signIn('tester'),
+        )
+      ).status,
+      403,
+    )
+    assert.equal(
+      (await request(c.master, 'GET', '/projects/nope/runs', manager2)).status,
+      404,
+    )
+    assert.equal(
+      (await request(c.master, 'GET', '/projects/wizard/runs')).status,
+      303,
+    )
+    assert.doesNotMatch(projectPage, /src="\/assets\/secrets\.js"/)
+    assert.match(projectPage, /aria-current="page">Overview</)
+    const bundle = await request(c.master, 'GET', '/assets/secrets.js')
+    assert.equal(bundle.status, 200)
+    assert.match(bundle.text, /data-secrets/)
     assert.equal(
       (await request(c.master, 'GET', '/projects/none', manager2)).status,
       404,

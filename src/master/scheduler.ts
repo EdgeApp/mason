@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import type { PoolAnswer } from './cloud/pools.js'
 import {
   appendFileSync,
   existsSync,
@@ -8,7 +9,13 @@ import {
   statSync,
 } from 'node:fs'
 import path from 'node:path'
-import type { Json, ParamValue, Role } from '../../types/mason/index.js'
+import type {
+  Json,
+  NodeSelector,
+  ParamValue,
+  Role,
+} from '../../types/mason/index.js'
+import { bridge } from '../link/bridge.js'
 import {
   LinkError,
   type Link,
@@ -32,6 +39,7 @@ import {
   scriptGraph,
   validateGraph,
   validateParams,
+  alternatives,
   GraphError,
   ParamsError,
   type Graph,
@@ -41,7 +49,7 @@ import {
 } from '../pipeline/graph.js'
 import type { FullInventory } from '../worker/inventory.js'
 import { missingTools, type InstallRequest } from '../worker/tools/index.js'
-import { selectXcode } from '../worker/tools/versions.js'
+import { launchingXcode, selectXcode } from '../worker/tools/versions.js'
 import type { ChecklistItem } from '../worker/system/reconcile.js'
 import type { AppleXcode } from './apple/developerDownloads.js'
 import type { NodeType } from './nodeTypes.js'
@@ -57,6 +65,10 @@ import type { Project, Projects } from './projects.js'
 import { matches, ruleFor } from './rules.js'
 import type { Stashes } from './stash.js'
 import { cronMatches, masterTimeZone, parseCron } from './triggers.js'
+import { projectFiles, projectTools } from '../worker/tools/projectTools.js'
+import { resolveSecrets, unresolvedSecret } from '../pipeline/variants.js'
+import { storedVariants } from './secrets.js'
+import { SETUP_LABEL } from '../pipeline/graph.js'
 
 type Row = Record<string, unknown>
 
@@ -131,6 +143,8 @@ export interface SchedulerOptions {
   masterChecklist?: () => ChecklistItem[]
   /** Publication: reservations and upload tokens at assignment, grants and queries from stages. */
   artifacts?: Artifacts
+  /** Opens a stream to the host, which the master relays a stage's artifact requests to. */
+  toHost?: (method: string, params: unknown) => Stream
   /** Apple signing: a signing stage's identity and profiles, and its TestFlight and notary calls. */
   apple?: {
     signing(project: Project, stage: GraphStage): Promise<StageSigning>
@@ -138,19 +152,28 @@ export interface SchedulerOptions {
   }
   /** Cloud pools: a machine for a type no free node serves, and machines that are retiring. */
   cloud?: {
-    demand(type: string): string | undefined
+    demand(type: string): PoolAnswer | undefined
+    /** Whether a type's pool makes Macs; undefined when no pool backs it. */
+    makesMacs?(type: string): boolean | undefined
     draining(fingerprint: string): boolean
     /** A setup with no connected worker asks a pool for a machine. */
     setupDemand?(): string | undefined
   }
 }
 
-/** A stage needs an Xcode when it has an `apple` option or asks for macOS. */
+/**
+ * A stage needs an Xcode when it has an `apple` option, asks for CocoaPods
+ * or asks for macOS (every one of its selectors, when it lists several).
+ */
 export function needsXcode(stage: GraphStage): boolean {
+  const choices = alternatives(stage.on)
   return (
     stage.tools?.xcode != null ||
+    // CocoaPods compiles its native gems with the stage's Xcode.
+    stage.tools?.cocoapods != null ||
     stage.apple != null ||
-    (typeof stage.on === 'object' && stage.on.os === 'macos')
+    (choices.length > 0 &&
+      choices.every((on) => typeof on === 'object' && on.os === 'macos'))
   )
 }
 
@@ -187,6 +210,36 @@ export function applyXcodeVersion(
   return undefined
 }
 
+/**
+ * The repository's pinned versions, for stages that set a tool to
+ * `'project'`. Returns why the run cannot start when such a stage of the
+ * workflow it runs has no usable pin.
+ */
+export function applyProjectTools(
+  graph: Graph,
+  found: RunReport['projectTools'],
+  running: string,
+): string | undefined {
+  for (const workflow of graph.workflows)
+    for (const stage of workflow.stages)
+      for (const tool of projectTools) {
+        const tools = stage.tools as Record<string, unknown> | undefined
+        if (tools?.[tool] !== 'project') continue
+        const pin = found?.[tool]
+        const version =
+          typeof pin?.version === 'string' &&
+          /^[\w.<>= -]{1,64}$/.test(pin.version)
+            ? pin.version
+            : undefined
+        if (version != null) stage.tools = { ...stage.tools, [tool]: version }
+        else if (workflow.name === running)
+          return pin == null
+            ? `${stage.name}: tools.${tool} is 'project' but the repository has no ${projectFiles[tool]}`
+            : `${stage.name}: tools.${tool} is 'project' but ${pin.file} cannot be used: ${pin.problem ?? `it names no ${tool} version`}`
+      }
+  return undefined
+}
+
 const hash = (value: string): string =>
   createHash('sha256').update(value).digest('hex')
 const sortedParams = (params: Record<string, unknown>): string =>
@@ -214,14 +267,138 @@ interface Fit {
   blocked?: string
 }
 
-const noTools = { node: [], rust: [], java: [], android: [] }
+/** A stage's build configs; graphs recorded before stages had them have none. */
+export function stageConfigs(stage: GraphStage): string[] {
+  return (stage as { configs?: string[] }).configs ?? []
+}
+
+const noTools = {
+  node: [],
+  rust: [],
+  java: [],
+  python: [],
+  go: [],
+  ruby: [],
+  android: [],
+  cocoapods: [],
+}
 
 /**
- * The master's scheduler: resolves each job's commit, gets its validated
- * graph (from the cache or a secret-free setup run on any idle worker), and
- * assigns ready stages to workers whose inventory matches, recording every
- * transition in the database before it takes effect.
+ * A stage's installs in the order they run: CocoaPods last, after any Xcode
+ * or runtime before it, carrying the stage's Xcode spec so its native gems
+ * compile with that Xcode.
  */
+export function orderInstalls(
+  missing: InstallRequest[],
+  xcode: string | undefined,
+): InstallRequest[] {
+  return [
+    ...missing.filter((request) => request.tool !== 'cocoapods'),
+    ...missing
+      .filter((request) => request.tool === 'cocoapods')
+      .map((request) => ({
+        ...request,
+        ...(xcode == null ? {} : { xcode }),
+      })),
+  ]
+}
+
+/**
+ * Why a node cannot install the CocoaPods a stage asks for: a worker from
+ * before CocoaPods installs reports no `cocoapods` in its inventory, and
+ * would refuse the install, so the stage waits for an updated node.
+ */
+export function cocoapodsUnsupported(
+  stage: GraphStage,
+  inventory: { tools?: { cocoapods?: string[] } },
+): string | undefined {
+  return stage.tools?.cocoapods != null && inventory.tools?.cocoapods == null
+    ? 'Update this worker to install CocoaPods'
+    : undefined
+}
+
+/** Android SDK licences are accepted for the node's type by an administrator, or by the stage's Masonfile. */
+export function acceptsAndroidLicences(
+  stage: GraphStage,
+  byNodeType: boolean,
+): boolean {
+  return byNodeType || stage.tools?.androidLicenses === 'accept'
+}
+
+/**
+ * Asks the cloud pools for a machine for a stage no free node took: its node
+ * types in order, stopping at the first pool that is serving it (starting,
+ * waiting for or full of machines), so one machine, never one per selector.
+ * A pool that cannot serve it now (its account gone, no installer, backing
+ * off, the budget spent) passes to the next type. Answers why the stage
+ * waits, or nothing when no pool backs it.
+ */
+export function stageDemand(
+  stage: GraphStage,
+  demand: (type: string) => PoolAnswer | undefined,
+  makesMacs?: (type: string) => boolean | undefined,
+): string | undefined {
+  const xcode = needsXcode(stage)
+  let first: string | undefined
+  for (const on of alternatives(stage.on)) {
+    const type = typeof on === 'string' ? on : on.type
+    if (type == null || type === 'master') continue
+    // A stage that needs Xcode asks only for Macs: never a pool, or an
+    // entry, that can only give it another system.
+    if (
+      xcode &&
+      ((typeof on === 'object' && on.os != null && on.os !== 'macos') ||
+        makesMacs?.(type) === false)
+    )
+      continue
+    const answer = demand(type)
+    if (answer == null) continue
+    if (answer.serving) return answer.reason
+    first ??= answer.reason
+  }
+  return first
+}
+
+/**
+ * Why a stage that needs Xcode (or CocoaPods, which builds with it) fails at
+ * once: connected macOS nodes match its selectors, yet none has or can
+ * install its Xcode. Only Macs count, so a list that also names Linux, with
+ * no Mac connected, waits for a Mac (a pool's) instead of failing.
+ */
+export function xcodeUnplaceable(
+  stage: GraphStage,
+  matchingMacs: number,
+  fitting: number,
+): string | undefined {
+  if (!needsXcode(stage) || matchingMacs === 0 || fitting > 0) return undefined
+  const spec = stage.tools?.xcode ?? 'its node type’s default'
+  return `No connected macOS node for this stage has or can install an Xcode matching ${spec}${stage.tools?.cocoapods != null && stage.tools.xcode == null ? ', which CocoaPods builds with' : ''}`
+}
+
+/**
+ * Why the Xcode a stage asks for can run on none of the nodes its selectors
+ * match: every matching Mac has it, but it does not launch there. Only Macs
+ * count, as in `fit`; a matching node that is not a Mac neither proves nor
+ * disproves it. Nothing when no Xcode is asked for, or one may launch.
+ */
+export function xcodeNeverLaunches(
+  nodes: Array<{
+    name: string
+    inventory: Pick<FullInventory, 'os' | 'osVersion' | 'xcodes'>
+    spec: string | undefined
+  }>,
+): string | undefined {
+  let reason: string | undefined
+  for (const { name, inventory, spec } of nodes) {
+    if (spec == null) return undefined
+    if (inventory.os !== 'macos') continue
+    const install = selectXcode(spec, inventory.xcodes ?? [])
+    if (install?.launches !== false) return undefined
+    reason ??= `Xcode ${install.version} does not launch on ${name} (macOS ${inventory.osVersion}): ${install.launchError ?? 'it does not start'}`
+  }
+  return reason
+}
+
 /**
  * A signing stage runs only on nodes with the project's signing label, when
  * the project sets one.
@@ -232,17 +409,26 @@ export function withSigningLabel(
 ): GraphStage {
   const label = project.signingLabel
   if (stage.apple == null || label == null) return stage
+  const labelled = (on: NodeSelector): NodeSelector =>
+    on === 'master'
+      ? on
+      : typeof on === 'string'
+        ? { type: on, labels: [label] }
+        : { ...on, labels: [...new Set([...(on.labels ?? []), label])] }
   const on = stage.on
-  if (on === 'master') return stage
   if (on == null) return { ...stage, on: { labels: [label] } }
-  if (typeof on === 'string')
-    return { ...stage, on: { type: on, labels: [label] } }
   return {
     ...stage,
-    on: { ...on, labels: [...new Set([...(on.labels ?? []), label])] },
+    on: Array.isArray(on) ? on.map(labelled) : labelled(on),
   }
 }
 
+/**
+ * The master's scheduler: resolves each job's commit, gets its validated
+ * graph (from the cache or a secret-free setup run on any idle worker), and
+ * assigns ready stages to workers whose inventory matches, recording every
+ * transition in the database before it takes effect.
+ */
 export class Scheduler {
   private timer: NodeJS.Timeout | undefined
   private ticking: Promise<void> | undefined
@@ -550,11 +736,19 @@ export class Scheduler {
     const project = this.project(job)
     const worker = this.pick(undefined, id)
     if (worker == null) {
-      // With no worker connected at all, only a cloud machine can run it.
+      // With no node for setup connected, only a cloud machine can run it.
       const connected = this.options.registry
         .list()
-        .some((node) => node.role === 'worker' && node.connected)
-      const reason = connected ? undefined : this.options.cloud?.setupDemand?.()
+        .some(
+          (node) =>
+            node.role === 'worker' &&
+            node.connected &&
+            node.labels.includes(SETUP_LABEL),
+        )
+      const reason = connected
+        ? undefined
+        : (this.options.cloud?.setupDemand?.() ??
+          `No connected node is labelled ${SETUP_LABEL}, and no cloud pool's machines are: label a node or pool ${SETUP_LABEL} to run setup`)
       if (reason != null && this.stage(id, SETUP)?.reason !== reason) {
         this.db
           .prepare(
@@ -687,10 +881,10 @@ export class Scheduler {
             .filter((app) => app.apple != null)
             .map((app) => [app.bundleId, app.apple!.bundleIds]),
         ),
-        secrets: [
-          ...project.env.map((entry) => entry.name),
-          ...project.files.map((file) => file.env ?? file.destination),
-        ],
+        secrets: project.secrets.map((variant) => ({
+          name: variant.name,
+          configs: variant.configs,
+        })),
       })
       // A discovery's graph is never run, so its schemes are not declared.
       if (!discover)
@@ -711,6 +905,23 @@ export class Scheduler {
     }
     const ignored = applyXcodeVersion(graph, report.xcodeVersion)
     if (ignored != null) graph.warnings.push(ignored)
+    const unpinned = applyProjectTools(
+      graph,
+      report.projectTools,
+      String(job.workflow),
+    )
+    if (unpinned != null) {
+      this.appendLog(id, SETUP, `${unpinned}\n`)
+      this.finishJob(id, 'failed', unpinned)
+      return
+    }
+    for (const [tool, pin] of Object.entries(report.projectTools ?? {}))
+      if (pin.version != null)
+        this.appendLog(
+          id,
+          SETUP,
+          `${tool} ${pin.version} from ${pin.file} for tools.${tool} 'project'\n`,
+        )
     for (const warning of graph.warnings)
       this.appendLog(id, SETUP, `warning: ${warning}\n`)
     // An Xcode that launches on none of the nodes a stage can use fails the run now.
@@ -1083,6 +1294,8 @@ export class Scheduler {
         ).n,
       )
       if (load >= Math.min(node.slots, inventory.slots)) continue
+      // Setup runs the branch's Masonfile: only on nodes labelled for it.
+      if (stage == null && !node.labels.includes(SETUP_LABEL)) continue
       if (stage != null && !this.matches(stage, node, inventory)) continue
       const fit: Fit | undefined =
         stage == null ? { missing: [] } : this.fit(stage, node, inventory)
@@ -1101,7 +1314,9 @@ export class Scheduler {
   /**
    * Whether a worker can run a stage: the Xcode it asks for must launch on
    * the node, or be one Apple offers to install; node, rust, java, Android,
-   * simulator runtimes and packages may be installed first. A checklist item
+   * simulator runtimes, packages and CocoaPods may be installed first.
+   * CocoaPods, like Xcode, keeps the stage off a node that is not macOS
+   * (`needsXcode`). A checklist item
    * that blocks one of those installs keeps the stage off the node for now.
    */
   private fit(
@@ -1117,10 +1332,7 @@ export class Scheduler {
     const spec = xcodeSpec(stage, type)
     if (spec != null) {
       if (inventory.os !== 'macos') return undefined
-      const launching = (inventory.xcodes ?? []).filter(
-        (install) => install.launches !== false,
-      )
-      const xcode = selectXcode(spec, launching)
+      const xcode = launchingXcode(spec, inventory.xcodes ?? [])
       if (xcode != null)
         developerDir = path.join(xcode.path, 'Contents', 'Developer')
       else {
@@ -1184,32 +1396,37 @@ export class Scheduler {
         needs.add('system')
       }
     }
-    const blocked = [
-      ...(inventory.checklist ?? []),
-      ...(this.options.masterChecklist?.() ?? []),
-    ].find((item) => item.blocks.some((tag) => needs.has(tag)))
+    const blocked =
+      cocoapodsUnsupported(stage, inventory) ??
+      [
+        ...(inventory.checklist ?? []),
+        ...(this.options.masterChecklist?.() ?? []),
+      ].find((item) => item.blocks.some((tag) => needs.has(tag)))?.title
     return {
-      missing,
+      missing: orderInstalls(missing, spec),
       ...(developerDir == null ? {} : { developerDir }),
-      ...(blocked == null ? {} : { blocked: blocked.title }),
+      ...(blocked == null ? {} : { blocked }),
     }
   }
 
   /** Why an Xcode a stage asks for runs on no connected node, when every match fails to launch. */
   private neverLaunches(stage: GraphStage): string | undefined {
-    let reason: string | undefined
-    for (const node of this.options.registry.list()) {
-      const inventory = this.inventory(node.fingerprint)
-      if (node.role !== 'worker' || inventory == null) continue
-      if (!this.matches(stage, node, inventory)) continue
-      const spec = xcodeSpec(stage, this.options.nodeType?.(node.type))
-      if (spec == null || inventory.os !== 'macos') return undefined
-      if (selectXcode(spec, inventory.xcodes ?? [])?.launches !== false)
-        return undefined
-      const install = selectXcode(spec, inventory.xcodes ?? [])!
-      reason ??= `Xcode ${install.version} does not launch on ${node.name} (macOS ${inventory.osVersion}): ${install.launchError ?? 'it does not start'}`
-    }
-    return reason
+    return xcodeNeverLaunches(
+      this.options.registry.list().flatMap((node) => {
+        const inventory = this.inventory(node.fingerprint)
+        return node.role !== 'worker' ||
+          inventory == null ||
+          !this.matches(stage, node, inventory)
+          ? []
+          : [
+              {
+                name: node.name,
+                inventory,
+                spec: xcodeSpec(stage, this.options.nodeType?.(node.type)),
+              },
+            ]
+      }),
+    )
   }
 
   /** Connected workers whose selector and Xcode fit a stage, whatever their load. */
@@ -1226,13 +1443,14 @@ export class Scheduler {
     }).length
   }
 
-  /** Connected workers a stage's selector matches, whatever their tools and load. */
-  private selectable(stage: GraphStage): number {
+  /** Connected workers a stage's selector matches, whatever their tools and load; only those on `os` when given. */
+  private selectable(stage: GraphStage, os?: string): number {
     return this.options.registry.list().filter((node) => {
       const inventory = this.inventory(node.fingerprint)
       return (
         node.role === 'worker' &&
         inventory != null &&
+        (os == null || inventory.os === os) &&
         this.options.registry.link(node.fingerprint) != null &&
         this.matches(stage, node, inventory)
       )
@@ -1326,9 +1544,11 @@ export class Scheduler {
             ? {
                 ...request,
                 nodeType: worker.node.type,
-                acceptLicences:
+                acceptLicences: acceptsAndroidLicences(
+                  stage,
                   this.options.androidLicencesAccepted?.(worker.node.type) ===
-                  true,
+                    true,
+                ),
               }
             : request,
           (system ? 6 : 1) * 60 * 60 * 1000,
@@ -1416,14 +1636,18 @@ export class Scheduler {
     node: NodeRecord,
     inventory: FullInventory,
   ): boolean {
-    const on = stage.on
-    if (on == null) return true
-    if (typeof on === 'string')
-      return on === 'master' ? node.host === IN_PROCESS : node.type === on
-    if (on.type != null && node.type !== on.type) return false
-    if (on.os != null && inventory.os !== on.os) return false
-    if (on.arch != null && inventory.arch !== on.arch) return false
-    return (on.labels ?? []).every((label) => node.labels.includes(label))
+    const choices = alternatives(stage.on)
+    return (
+      choices.length === 0 ||
+      choices.some((on) => {
+        if (typeof on === 'string')
+          return on === 'master' ? node.host === IN_PROCESS : node.type === on
+        if (on.type != null && node.type !== on.type) return false
+        if (on.os != null && inventory.os !== on.os) return false
+        if (on.arch != null && inventory.arch !== on.arch) return false
+        return (on.labels ?? []).every((label) => node.labels.includes(label))
+      })
+    )
   }
 
   private pick(
@@ -1498,38 +1722,51 @@ export class Scheduler {
     env: Record<string, string>
     inject: NonNullable<StageAssignment['inject']>
   } {
-    const stored = this.options.projects.secrets(project.id)
-    if (stage.kind === 'script')
+    const stored = storedVariants(this.options.projects.master.db, project.id)
+    if (stage.kind === 'script') {
+      // Script stages have no configs: they take every default variant, values
+      // as environment and files injected at their destination, as before.
+      const defaults = stored.filter((variant) => variant.configs.length === 0)
+      const values = defaults.filter((variant) => variant.kind === 'value')
       return {
         env: Object.fromEntries(
-          stored.env
-            .filter((entry) => !entry.secret)
-            .map((entry) => [entry.name, entry.value]),
+          values
+            .filter((variant) => !variant.masked)
+            .map((variant) => [variant.name, variant.contents]),
         ),
         secrets: Object.fromEntries(
-          stored.env
-            .filter((entry) => entry.secret)
-            .map((entry) => [entry.name, entry.value]),
+          values
+            .filter((variant) => variant.masked)
+            .map((variant) => [variant.name, variant.contents]),
         ),
         files: {},
-        inject: stored.files.map((file) => ({
-          destination: file.destination,
-          contents: file.contents,
-          ...(file.env == null ? {} : { env: file.env }),
-        })),
+        inject: defaults
+          .filter((variant) => variant.kind === 'file')
+          .map((variant) => ({
+            destination: variant.destination ?? variant.name,
+            contents: variant.contents,
+            ...(variant.pathEnv == null ? {} : { env: variant.pathEnv }),
+          })),
       }
-    const declared = new Set(stage.secrets)
+    }
+    const configs = stageConfigs(stage)
+    const chosen = resolveSecrets(stored, stage.secrets, configs)
+    for (const name of stage.secrets) {
+      const refused = unresolvedSecret(stage.name, name, stored, configs)
+      if (refused != null) throw new Error(refused)
+    }
+    const resolved = [...chosen.values()]
     return {
       env: {},
       secrets: Object.fromEntries(
-        stored.env
-          .filter((entry) => declared.has(entry.name))
-          .map((entry) => [entry.name, entry.value]),
+        resolved
+          .filter((variant) => variant.kind === 'value')
+          .map((variant) => [variant.name, variant.contents]),
       ),
       files: Object.fromEntries(
-        stored.files
-          .filter((file) => declared.has(file.env ?? file.destination))
-          .map((file) => [file.env ?? file.destination, file.contents]),
+        resolved
+          .filter((variant) => variant.kind === 'file')
+          .map((variant) => [variant.name, variant.contents]),
       ),
       inject: [],
     }
@@ -1574,24 +1811,31 @@ export class Scheduler {
     const stage = withSigningLabel(graphStage, this.project(job))
     const worker = this.pick(stage, id)
     if (worker == null) {
-      // Connected workers match the selector but none has an Xcode the range accepts.
-      if (
-        needsXcode(stage) &&
-        this.selectable(stage) > 0 &&
-        this.candidatesIgnoringLoad(stage) === 0
+      const unplaceable = xcodeUnplaceable(
+        stage,
+        this.selectable(stage, 'macos'),
+        this.candidatesIgnoringLoad(stage),
       )
+      if (unplaceable != null)
         this.finishStage(
           id,
           stage.name,
           'failed',
-          this.neverLaunches(stage) ??
-            `No connected node for this stage has or can install an Xcode matching ${stage.tools?.xcode ?? 'its node type’s default'}`,
+          this.neverLaunches(stage) ?? unplaceable,
         )
       else {
         // A type backed by a cloud pool starts a machine; the stage shows why it waits.
-        const type = typeof stage.on === 'string' ? stage.on : stage.on?.type
+        const cloud = this.options.cloud
         const reason =
-          type == null ? undefined : this.options.cloud?.demand(type)
+          cloud == null
+            ? undefined
+            : stageDemand(
+                stage,
+                (type) => cloud.demand(type),
+                cloud.makesMacs == null
+                  ? undefined
+                  : (type): boolean | undefined => cloud.makesMacs!(type),
+              )
         if (reason != null && this.stage(id, stage.name)?.reason !== reason) {
           this.db
             .prepare(
@@ -1633,7 +1877,12 @@ export class Scheduler {
     const token = randomBytes(24).toString('hex')
     const graph = this.workflowOf(job)!.graph
     const buildNumbers: Record<string, string> = {}
+    // How many numbers from each one the run holds (its `block`).
+    const blocks: Record<string, number> = {}
+    let secrets: ReturnType<Scheduler['secretFacts']>
     try {
+      // A graph cached by commit was checked when it was made; a variant may have gone since.
+      secrets = this.secretFacts(project, stage)
       // An app ID listed in a sequence's `apps` takes its number from that sequence.
       const sequenceOf = (key: string): string =>
         Object.entries(graph.buildNumbers).find(([, scheme]) =>
@@ -1643,15 +1892,16 @@ export class Scheduler {
         ...new Set([...stage.publishes, ...stage.buildNumbers]),
       ]) {
         const sequence = sequenceOf(key)
-        // One number per sequence per run: a run's stages share it; a new run gets the next.
-        buildNumbers[key] = this.options.buildNumbers.reserve(
+        // One reservation per sequence per run (N, or N..N+block−1): a run's stages share N; a new run starts after the block.
+        const reserved = this.options.buildNumbers.reserve(
           project.id,
           sequence,
           String(job.branch),
           graph.buildNumbers[sequence] ?? {},
           id,
         )
-        buildNumbers[sequence] = buildNumbers[key]
+        buildNumbers[key] = buildNumbers[sequence] = reserved.value
+        blocks[key] = blocks[sequence] = reserved.block
       }
     } catch (error) {
       this.unlock(id, stage.name)
@@ -1671,7 +1921,6 @@ export class Scheduler {
               {},
           )
       }
-    const secrets = this.secretFacts(project, stage)
     const node = this.options.registry.get(worker.node.fingerprint)!
     const request = JSON.parse(String(job.request)) as {
       platforms?: string[]
@@ -1689,6 +1938,7 @@ export class Scheduler {
         reserved,
         stage.publishes,
         buildNumbers,
+        blocks,
       ) ?? []
     const upload = this.options.artifacts?.uploadToken(
       reserved,
@@ -2483,6 +2733,106 @@ export class Scheduler {
     })
   }
 
+  /**
+   * Relays a stage's artifact request to the host over the master's own
+   * link to it, so a node never reaches the host: the node's stream and the
+   * host's are joined both ways. The host answers as its HTTP route would,
+   * with a JSON header line and the body. A request the master refuses
+   * (an unknown ticket, a publication its reservation does not allow, no
+   * host) is answered the same way, so the stage tells it from a dropped
+   * link, which it retries.
+   */
+  private relayArtifact(
+    kind: 'publish' | 'save' | 'download',
+    stream: Stream,
+    params: unknown,
+    link: Link,
+  ): void {
+    const answer = (status: number, error: string): void => {
+      void stream
+        .write(
+          Buffer.from(
+            `${JSON.stringify({ status, headers: {} })}\n${JSON.stringify({ error })}`,
+          ),
+        )
+        .then(() => stream.end())
+        .catch(() => undefined)
+    }
+    let request: {
+      method: 'GET' | 'POST'
+      path: string
+      headers: Record<string, string>
+      query?: Record<string, string>
+    }
+    try {
+      const { job, name, attempt } = this.authorize(params, link)
+      const fields = (params ?? {}) as Record<string, unknown>
+      const text = (key: string): string | undefined =>
+        typeof fields[key] === 'string' ? fields[key] : undefined
+      if (kind === 'publish') {
+        const artifacts = this.options.artifacts
+        if (artifacts == null) throw new Error('Publication is unavailable')
+        const grant = artifacts.grant(
+          { job: String(job.id), stage: name, attempt },
+          params as Parameters<Artifacts['grant']>[1],
+        )
+        const changelog = text('changelog')
+        request = {
+          method: 'POST',
+          path: `/api/artifacts/${encodeURIComponent(grant.reservation)}`,
+          headers: {
+            authorization: `Bearer ${grant.grant}`,
+            ...(changelog == null
+              ? {}
+              : {
+                  'x-mason-changelog': encodeURIComponent(
+                    changelog.slice(0, 60_000),
+                  ),
+                }),
+          },
+        }
+      } else if (kind === 'save') {
+        const artifact = text('name')
+        const token = text('uploadToken')
+        if (artifact == null || token == null)
+          throw new Error('An artifact needs its name and the stage’s token')
+        const entry = text('entry')
+        const visibleTo = text('visibleTo')
+        request = {
+          method: 'POST',
+          path: `/api/runs/${encodeURIComponent(String(job.id))}/artifacts/${encodeURIComponent(artifact)}`,
+          headers: {
+            'x-mason-token': token,
+            'x-mason-kind': text('kind') ?? 'file',
+            ...(entry == null ? {} : { 'x-mason-entry': entry }),
+            ...(visibleTo == null ? {} : { 'x-mason-visible-to': visibleTo }),
+          },
+        }
+      } else {
+        const grant = text('grant')
+        if (grant == null) throw new Error('A download needs its grant')
+        request = {
+          method: 'GET',
+          path: '/api/artifacts/download',
+          headers: {},
+          query: { grant },
+        }
+      }
+    } catch (error) {
+      answer(400, (error as Error).message)
+      return
+    }
+    let host: Stream
+    try {
+      if (this.options.toHost == null) throw new Error('No host is configured')
+      host = this.options.toHost('artifacts.request', request)
+    } catch (error) {
+      answer(503, (error as Error).message)
+      return
+    }
+    void bridge(stream, host).catch(() => undefined)
+  }
+
   /** Methods the master accepts from workers. */
   methods(): MethodTable {
     return {
@@ -2508,8 +2858,15 @@ export class Scheduler {
                 reservation: string
                 app: string
                 platform: string
+                variant?: string
+                digest?: string
               }
-              this.options.artifacts?.markStaged(id, staged.reservation)
+              this.options.artifacts?.markStaged(
+                id,
+                staged.reservation,
+                staged.variant,
+                staged.digest,
+              )
               this.appendLog(
                 id,
                 name,
@@ -2531,13 +2888,14 @@ export class Scheduler {
                 title: string
                 status: string
                 ms?: number
+                parent?: number
               }
               // The step's lines are those its stage log gains while it runs.
               const offset = this.logSize(id, name)
               const done = String(step.status) !== 'running'
               this.db
                 .prepare(
-                  'INSERT INTO job_steps(job_id,stage,attempt,id,kind,title,status,ms,at,log_start,log_end) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,stage,attempt,id) DO UPDATE SET status=excluded.status,ms=excluded.ms,log_end=excluded.log_end',
+                  'INSERT INTO job_steps(job_id,stage,attempt,id,kind,title,status,ms,at,log_start,log_end,parent) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,stage,attempt,id) DO UPDATE SET status=excluded.status,ms=excluded.ms,log_end=excluded.log_end',
                 )
                 .run(
                   id,
@@ -2551,6 +2909,9 @@ export class Scheduler {
                   this.now(),
                   offset,
                   done ? offset : null,
+                  Number.isSafeInteger(step.parent) && Number(step.parent) > 0
+                    ? Number(step.parent)
+                    : null,
                 )
             }
             acked = record.seq
@@ -2601,6 +2962,32 @@ export class Scheduler {
             if (Date.now() > deadline) return { pending: true }
             await new Promise((resolve) => setTimeout(resolve, 250))
           }
+        },
+        /**
+         * The Masonfile at the run's commit, for a stage with no checkout:
+         * the node runs it without fetching the repository.
+         */
+        'stage.masonfile': async (
+          params,
+          link,
+        ): Promise<{ path: string; text: string }> => {
+          const { job, project } = this.authorize(params, link)
+          const commit = String(job.commit_sha)
+          for (const file of project.entrypoint == null
+            ? ['Masonfile.ts', 'Masonfile.js']
+            : [project.entrypoint]) {
+            const text = await this.options.mirrors.show(
+              project.slug,
+              project.repository,
+              commit,
+              file,
+            )
+            if (text != null) return { path: file, text }
+          }
+          throw new LinkError(
+            `The commit ${commit.slice(0, 12)} has no Masonfile`,
+            'failed',
+          )
         },
         /** A grant for one publication into the stage's reservation. */
         'artifacts.grant': (params, link): unknown => {
@@ -2810,6 +3197,18 @@ export class Scheduler {
         },
       },
       streams: {
+        /** `ctx.publish`: the file, relayed to the host under the master's grant. */
+        'artifacts.publish': (stream, params, link): void => {
+          this.relayArtifact('publish', stream, params, link)
+        },
+        /** `ctx.artifacts.save`: the archive, relayed to the host with the stage's token. */
+        'artifacts.save': (stream, params, link): void => {
+          this.relayArtifact('save', stream, params, link)
+        },
+        /** `ctx.artifacts.fetch`: the granted object, relayed from the host. */
+        'artifacts.download': (stream, params, link): void => {
+          this.relayArtifact('download', stream, params, link)
+        },
         'git.upload-pack': async (stream, params, link): Promise<void> => {
           try {
             const { project } = this.authorize(params, link)

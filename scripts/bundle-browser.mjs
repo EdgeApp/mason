@@ -8,6 +8,7 @@ await build({
     'password-worker': 'src/browser/passwordWorker.ts',
     master: 'src/browser/master.ts',
     run: 'src/browser/run.ts',
+    secrets: 'src/browser/secrets.ts',
   },
   bundle: true,
   format: 'esm',

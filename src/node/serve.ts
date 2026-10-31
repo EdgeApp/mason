@@ -126,6 +126,7 @@ export interface NodeOptions {
     | 'appleExec'
     | 'appleFetch'
     | 'applePollMs'
+    | 'helperWatchMs'
     | 'home'
   >
 }

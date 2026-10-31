@@ -230,7 +230,7 @@ describe('Permanent cloud nodes on DigitalOcean', function () {
     assert.match(nodes, /Waiting for its certificate/)
     assert.match(
       nodes,
-      /<section class="panel" id="storage"><h3>.*Builds are stored in <span class="mono">mason-page<\/span>/,
+      /<section class="panel" id="storage"><h3>[\s\S]*?<span class="mono">mason-page<\/span>[^<]*<\/td><td>[^<]*<span class="icon"[^>]*>[^<]*<\/span> New builds go here/,
     )
     assert.match(
       nodes,
@@ -267,7 +267,7 @@ describe('Permanent cloud nodes on DigitalOcean', function () {
       )
       assert.match(
         settings,
-        /Builds are stored in <span class="mono">mason-page<\/span>/,
+        /<span class="mono">mason-page<\/span>[^<]*<\/td><td>[^<]*<span class="icon"[^>]*>[^<]*<\/span> New builds go here/,
       )
       assert.match(
         settings,

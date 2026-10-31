@@ -87,16 +87,6 @@ export function projectsApi(master: Master): Router {
     }),
   )
   router.put(
-    '/api/v2/projects/:slug/secrets',
-    json((req, res) =>
-      master.projects.setSecrets(
-        actorOf(res),
-        String(req.params.slug),
-        req.body,
-      ),
-    ),
-  )
-  router.put(
     '/api/v2/projects/:slug/rules',
     json((req, res) =>
       master.projects.setRules(actorOf(res), String(req.params.slug), req.body),

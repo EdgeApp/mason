@@ -140,7 +140,11 @@ export class Jobs {
     )
       throw new BranchRefused('Unsupported platforms')
     const injected = new Set(
-      project.files.flatMap((file) => (file.env == null ? [] : [file.env])),
+      project.secrets.flatMap((variant) =>
+        variant.kind === 'file' && variant.pathEnv != null
+          ? [variant.pathEnv]
+          : [],
+      ),
     )
     if (
       request.envVars.some((entry) =>

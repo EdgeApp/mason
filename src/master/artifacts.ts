@@ -1,7 +1,47 @@
 import { randomBytes, sign, verify, type KeyObject } from 'node:crypto'
-import { checkPublication, insertBuild } from '../store.js'
-import type { Build, Format } from '../validation.js'
+import { asObject, asOptional, asString, asUnknown } from 'cleaners'
+import {
+  checkPublication,
+  cleanBuild,
+  insertBuild,
+  PublicationConflict,
+} from '../store.js'
+import {
+  alreadyPublished,
+  asDigest,
+  asFileKey,
+  asFormat,
+  asVariant,
+  integer,
+  outsideBlock,
+  type Build,
+  type Format,
+} from '../validation.js'
 import type { MasterDatabase } from './database.js'
+
+/**
+ * The master's deliberate refusal of a publication: the same answer however
+ * often it is asked (another file for a published variant, a number outside
+ * the block, the wrong app). Any other error is a failure worth retrying.
+ */
+export class PublicationRefused extends Error {}
+
+/** A staged publication the host confirms, as it arrives over the link. */
+const asStagedPayload = asObject({
+  reservation: asString,
+  variant: asVariant,
+  digest: asDigest,
+  size: integer(1),
+  format: asFormat,
+  version: asString,
+  buildNumber: asString,
+  bundleId: asString,
+  fileKey: asFileKey,
+  changelog: asOptional(asString),
+  metadata: asOptional(asObject(asUnknown)),
+  provisioning: asUnknown,
+})
+export type StagedPayload = ReturnType<typeof asStagedPayload>
 
 /** The formats each platform publishes. */
 export const formatsFor: Record<string, Format[]> = {
@@ -21,7 +61,10 @@ export interface Reservation {
   id: string
   app: string
   platform: string
+  /** The run's number for the app, N. */
   buildNumber: string
+  /** How many numbers the run holds, N to N+block−1; absent means 1. */
+  block?: number
 }
 
 /** A stage's upload token: its run, its reservations and how much it may upload. */
@@ -47,7 +90,10 @@ export interface GrantClaims extends HostAccess {
   digest: string
   size: number
   version: string
+  /** The publication's own number, inside the run's block. */
   buildNumber: string
+  /** `''` for the default variant. */
+  variant: string
   expires: number
 }
 
@@ -133,11 +179,12 @@ export class Artifacts {
     return this.options.master.now()
   }
 
-  /** One reservation per declared app and its enabled platforms, with the stage's reserved number. */
+  /** One reservation per declared app and its enabled platforms, with the run's number and block for it. */
   reserve(
     run: { job: string; stage: string; attempt: number; project: number },
     publishes: string[],
     buildNumbers: Record<string, string>,
+    blocks: Record<string, number> = {},
   ): Reservation[] {
     const out: Reservation[] = []
     for (const app of publishes) {
@@ -152,9 +199,10 @@ export class Artifacts {
         )
         .all(row.id) as Array<{ platform: string }>) {
         const id = randomBytes(16).toString('hex')
+        const block = blocks[app] ?? 1
         this.db
           .prepare(
-            'INSERT INTO build_reservations(id,job_id,stage,attempt,project_id,app_id,platform,build_number,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+            'INSERT INTO build_reservations(id,job_id,stage,attempt,project_id,app_id,platform,build_number,block,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
           )
           .run(
             id,
@@ -165,9 +213,16 @@ export class Artifacts {
             row.id,
             channel.platform,
             number,
+            block,
             this.now(),
           )
-        out.push({ id, app, platform: channel.platform, buildNumber: number })
+        out.push({
+          id,
+          app,
+          platform: channel.platform,
+          buildNumber: number,
+          ...(block === 1 ? {} : { block }),
+        })
       }
     }
     return out
@@ -195,7 +250,39 @@ export class Artifacts {
     return { token: signClaims(claims, this.options.privateKey), ...host }
   }
 
-  /** A grant for one publication of a stage, into its unused reservation for that app and platform. */
+  /**
+   * A variant of an app and platform is published once per run, from any of
+   * its stages or attempts. Another file is refused, and so is the same file
+   * under another number; the same file under its build's own number is that
+   * build. Undefined while the variant is free, or staged with this file.
+   */
+  private prior(
+    job: string,
+    appId: number,
+    platform: string,
+    publication: { variant: string; digest: string; buildNumber: string },
+  ): Build | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT p.digest,p.build_id FROM build_publications p JOIN build_reservations r ON r.id=p.reservation_id
+         WHERE r.job_id=? AND r.app_id=? AND r.platform=? AND p.variant=? ORDER BY p.build_id IS NULL LIMIT 1`,
+      )
+      .get(job, appId, platform, publication.variant) as
+      | { digest: string | null; build_id: number | null }
+      | undefined
+    const refused = new PublicationRefused(
+      alreadyPublished(publication.variant),
+    )
+    if (row?.digest != null && row.digest !== publication.digest) throw refused
+    if (row?.build_id == null) return undefined
+    const build = cleanBuild(
+      this.db.prepare('SELECT * FROM builds WHERE id=?').get(row.build_id),
+    )
+    if (build.build_number !== publication.buildNumber) throw refused
+    return build
+  }
+
+  /** A grant for one publication of a stage: a variant of an app and platform, into its reservation. */
   grant(
     run: { job: string; stage: string; attempt: number },
     request: {
@@ -206,8 +293,10 @@ export class Artifacts {
       size: number
       version: string
       buildNumber?: string
+      variant?: string
     },
   ): { grant: string; url: string; pin?: string; reservation: string } {
+    const variant = asVariant(request.variant)
     const host = this.options.host()
     if (host == null)
       throw new Error('No host is configured: set the host setting')
@@ -224,20 +313,28 @@ export class Artifacts {
       throw new Error('A publication needs the file’s SHA-256 and size')
     const row = this.db
       .prepare(
-        `SELECT r.id,r.build_number FROM build_reservations r JOIN apps a ON a.id=r.app_id
-         WHERE r.job_id=? AND r.stage=? AND r.attempt=? AND a.slug=? AND r.platform=? AND r.build_id IS NULL AND r.staged_at IS NULL`,
+        `SELECT r.id,r.app_id,r.build_number,r.block FROM build_reservations r JOIN apps a ON a.id=r.app_id
+         WHERE r.job_id=? AND r.stage=? AND r.attempt=? AND a.slug=? AND r.platform=?`,
       )
       .get(run.job, run.stage, run.attempt, request.app, request.platform) as
-      | { id: string; build_number: string }
+      | { id: string; app_id: number; build_number: string; block: number }
       | undefined
     if (row == null)
       throw new Error(
         `This stage has no ${request.platform} reservation for ${request.app}; list it in publishes`,
       )
-    if (request.buildNumber != null && request.buildNumber !== row.build_number)
-      throw new Error(
-        `The build number ${request.buildNumber} is not the reserved ${row.build_number}`,
-      )
+    const buildNumber = request.buildNumber ?? row.build_number
+    const outside = outsideBlock(
+      buildNumber,
+      row.build_number,
+      Number(row.block),
+    )
+    if (outside != null) throw new Error(outside)
+    this.prior(run.job, row.app_id, request.platform, {
+      variant,
+      digest: request.digest,
+      buildNumber,
+    })
     const claims: GrantClaims = {
       kind: 'grant',
       run: run.job,
@@ -248,7 +345,8 @@ export class Artifacts {
       digest: request.digest,
       size: request.size,
       version: request.version,
-      buildNumber: row.build_number,
+      buildNumber,
+      variant,
       expires: this.now() + GRANT_MS,
       ...host,
     }
@@ -261,24 +359,46 @@ export class Artifacts {
   }
 
   /**
-   * A staged upload the host checked: the reservation's `builds` row with
-   * its reserved build number and the staged file's digest, size, version
-   * and bundle ID. A used reservation, a version or build number that
-   * differs from it, or an app outside the reservation is refused.
+   * A staged upload the host checked: a `builds` row for one variant of the
+   * reservation's app and platform, with the staged file's digest, size,
+   * version, number and bundle ID. The same file under its build's own
+   * number returns that build. Another file for a variant the run published,
+   * the same file under another number, a number outside the run's block, or
+   * an app outside the reservation is refused (`PublicationRefused`).
    */
-  staged(payload: {
-    reservation: string
-    digest: string
-    size: number
-    format: Format
-    version: string
-    buildNumber: string
-    bundleId: string
-    fileKey: string
-    changelog?: string
-    metadata?: Record<string, unknown>
-    provisioning?: unknown
-  }): Build {
+  staged(value: unknown): Build {
+    let payload: StagedPayload
+    try {
+      payload = asStagedPayload(value)
+    } catch (error) {
+      throw new PublicationRefused(
+        `Invalid staged publication: ${(error as Error).message}`,
+      )
+    }
+    return this.publishStaged(payload)
+  }
+
+  /**
+   * Forgets what a refused confirmation stood for: an offline stage's
+   * unconfirmed record of that file (or one from before digests were kept),
+   * so the variant is open to the run again and `release` can drop the
+   * reservation. Called outside any transaction the refusal rolls back.
+   */
+  forgetRefused(value: unknown): void {
+    let payload: StagedPayload
+    try {
+      payload = asStagedPayload(value)
+    } catch {
+      return
+    }
+    this.db
+      .prepare(
+        'DELETE FROM build_publications WHERE reservation_id=? AND variant=? AND build_id IS NULL AND (digest=? OR digest IS NULL)',
+      )
+      .run(payload.reservation, payload.variant, payload.digest)
+  }
+
+  private publishStaged(payload: StagedPayload): Build {
     return this.options.master.transaction(() => {
       const reservation = this.db
         .prepare(
@@ -290,7 +410,7 @@ export class Artifacts {
             app_id: number
             platform: string
             build_number: string
-            build_id: number | null
+            block: number
             slug: string
             branch: string
             commit_sha: string
@@ -298,28 +418,31 @@ export class Artifacts {
             stage: string
           }
         | undefined
-      if (reservation == null) throw new Error('Unknown reservation')
-      if (reservation.build_id != null) {
-        const existing = this.db
-          .prepare('SELECT * FROM builds WHERE id=?')
-          .get(reservation.build_id)
-        const build = existing as unknown as Build
-        if (build.digest === payload.digest) return build
-        throw new Error('The reservation is already used')
-      }
-      if (payload.buildNumber !== reservation.build_number)
-        throw new Error(
-          `The build number ${payload.buildNumber} is not the reserved ${reservation.build_number}`,
-        )
+      if (reservation == null)
+        throw new PublicationRefused('Unknown reservation')
+      const variant = payload.variant
+      const prior = this.prior(
+        reservation.job_id,
+        reservation.app_id,
+        reservation.platform,
+        payload,
+      )
+      if (prior != null) return prior
+      const outside = outsideBlock(
+        payload.buildNumber,
+        reservation.build_number,
+        Number(reservation.block),
+      )
+      if (outside != null) throw new PublicationRefused(outside)
       if (payload.bundleId !== reservation.slug)
-        throw new Error('The package is not the reservation’s app')
+        throw new PublicationRefused('The package is not the reservation’s app')
       const channel = this.db
         .prepare('SELECT id FROM channels WHERE app_id=? AND platform=?')
         .get(reservation.app_id, reservation.platform) as
         | { id: number }
         | undefined
       if (channel == null)
-        throw new Error('The app has no channel for that platform')
+        throw new PublicationRefused('The app has no channel for that platform')
       const input = {
         channelId: channel.id,
         branch: reservation.branch,
@@ -332,6 +455,8 @@ export class Artifacts {
         digest: payload.digest,
         changelog: payload.changelog ?? '',
         source: 'pipeline',
+        variant,
+        run: reservation.job_id,
         customFields: JSON.stringify({
           mason: {
             run: reservation.job_id,
@@ -341,17 +466,28 @@ export class Artifacts {
         }),
       }
       const now = this.now()
+      // The store's refusals (format, app, another build of this file or
+      // number on the branch) are final; any other error is a failure.
+      let existing
+      try {
+        existing = checkPublication(this.db, input, now)
+      } catch (error) {
+        if (error instanceof PublicationConflict)
+          throw new PublicationRefused(error.message)
+        throw error
+      }
       const build =
-        checkPublication(this.db, input, now) ??
+        existing ??
         insertBuild(this.db, input, payload.fileKey, {
           now,
           retentionDays: this.options.retentionDays(),
         })
       this.db
         .prepare(
-          'UPDATE build_reservations SET build_id=?,staged_at=COALESCE(staged_at,?) WHERE id=?',
+          `INSERT INTO build_publications(reservation_id,variant,digest,build_id,staged_at) VALUES(?,?,?,?,?)
+           ON CONFLICT(reservation_id,variant) DO UPDATE SET digest=excluded.digest,build_id=excluded.build_id,staged_at=COALESCE(staged_at,excluded.staged_at)`,
         )
-        .run(build.id, now, reservation.id)
+        .run(reservation.id, variant, payload.digest, build.id, now)
       this.recordProvisioning(build, payload.provisioning)
       this.options.master.change('build', build.id)
       return build
@@ -377,74 +513,14 @@ export class Artifacts {
       typeof p.team !== 'string' ||
       p.appId !== build.bundle_id
     )
-      throw new Error('The provisioning profile does not match the build')
+      throw new PublicationRefused(
+        'The provisioning profile does not match the build',
+      )
     this.db
       .prepare(
         'INSERT INTO build_provisioning(build_id,devices,expires_at,team) VALUES(?,?,?,?) ON CONFLICT(build_id) DO UPDATE SET devices=excluded.devices,expires_at=excluded.expires_at,team=excluded.team',
       )
       .run(build.id, JSON.stringify(p.devices), Number(p.expiresAt), p.team)
-  }
-
-  /** A Zealot-API upload the host staged: published like the standalone server, through the master. */
-  zealot(payload: {
-    channelId: number
-    keyId: string
-    branch: string
-    commit: string
-    bundleId: string
-    version: string
-    buildNumber: string
-    format: Format
-    size: number
-    digest: string
-    fileKey: string
-    changelog: string
-    source: string
-    customFields: string
-  }): Build {
-    return this.options.master.transaction(() => {
-      const key = this.db
-        .prepare('SELECT apps,revoked,expires_at,role FROM api_keys WHERE id=?')
-        .get(payload.keyId) as
-        | {
-            apps: string
-            revoked: number
-            expires_at: number | null
-            role: string
-          }
-        | undefined
-      const channel = this.db
-        .prepare('SELECT app_id FROM channels WHERE id=?')
-        .get(payload.channelId) as { app_id: number } | undefined
-      if (
-        key == null ||
-        key.revoked === 1 ||
-        (key.expires_at != null && key.expires_at <= this.now()) ||
-        channel == null
-      )
-        throw new Error('Valid token and channel_key must precede the file')
-      const scope = JSON.parse(key.apps) as 'all' | number[]
-      if (
-        !['upload', 'admin'].includes(key.role) ||
-        (scope !== 'all' && !scope.includes(channel.app_id))
-      )
-        throw new Error('Valid token and channel_key must precede the file')
-      const { keyId: _key, fileKey, ...input } = payload
-      void _key
-      const now = this.now()
-      const build =
-        checkPublication(this.db, input, now) ??
-        insertBuild(this.db, input, fileKey, {
-          now,
-          retentionDays: this.options.retentionDays(),
-        })
-      this.recordProvisioning(
-        build,
-        (payload as { provisioning?: unknown }).provisioning,
-      )
-      this.options.master.change('build', build.id)
-      return build
-    })
   }
 
   /** A saved artifact the host stored for a run. */
@@ -502,6 +578,55 @@ export class Artifacts {
         .run(payload.run, payload.name)
       this.options.master.change('job', payload.run)
     }
+  }
+
+  /**
+   * Files that left Mason with their storage location: the builds and saved
+   * artifacts stored in them are gone, on the master and, through the change
+   * log, on the host. A saved artifact's files live under
+   * `runs/<run>/<name>/`.
+   */
+  forgetFiles(keys: string[]): { builds: number; artifacts: number } {
+    let builds = 0
+    let artifacts = 0
+    const runs = new Set<string>()
+    const now = this.now()
+    this.options.master.transaction(() => {
+      for (const key of keys) {
+        const build = this.db
+          .prepare(
+            "SELECT id FROM builds WHERE file_key=? AND state<>'deleted'",
+          )
+          .get(key) as { id: number } | undefined
+        if (build != null) {
+          this.db
+            .prepare(
+              "UPDATE builds SET state='deleted',deleted_at=? WHERE id=?",
+            )
+            .run(now, build.id)
+          this.options.master.change('build', build.id, 'delete')
+          builds++
+        }
+        const match = /^runs\/([^/]+)\/([^/]+)\//.exec(key)
+        const owners = this.db
+          .prepare(
+            'SELECT job_id,name FROM run_artifacts WHERE storage_key=? OR (job_id=? AND name=?)',
+          )
+          .all(key, match?.[1] ?? '', match?.[2] ?? '') as Array<{
+          job_id: string
+          name: string
+        }>
+        for (const owner of owners) {
+          this.db
+            .prepare('DELETE FROM run_artifacts WHERE job_id=? AND name=?')
+            .run(owner.job_id, owner.name)
+          runs.add(owner.job_id)
+          artifacts++
+        }
+      }
+      for (const run of runs) this.options.master.change('job', run)
+    })
+    return { builds, artifacts }
   }
 
   /** A stage's parsed test results, kept with the run. */
@@ -594,23 +719,34 @@ export class Artifacts {
   }
 
   /**
-   * A stage's journal says the host staged an upload into this reservation
-   * while the master was away: it stays reserved for the host's confirmation,
-   * which can arrive after the run ends.
+   * A stage's journal says the host staged a file for one variant of this
+   * reservation while the master was away: it is recorded with its digest,
+   * so the run's other files for that variant are refused, and the
+   * reservation stays for the host's confirmation, which can arrive after
+   * the run ends (a refused one forgets the record).
    */
-  markStaged(job: string, reservation: string): void {
+  markStaged(
+    job: string,
+    reservation: string,
+    variant: unknown = '',
+    digest?: string,
+  ): void {
+    const name = asVariant(variant)
     this.db
       .prepare(
-        'UPDATE build_reservations SET staged_at=? WHERE id=? AND job_id=? AND build_id IS NULL AND staged_at IS NULL',
+        `INSERT INTO build_publications(reservation_id,variant,digest,staged_at)
+         SELECT id,?,?,? FROM build_reservations WHERE id=? AND job_id=?
+         ON CONFLICT(reservation_id,variant) DO NOTHING`,
       )
-      .run(this.now(), reservation, job)
+      .run(name, digest ?? null, this.now(), reservation, job)
   }
 
-  /** Unused reservations of a finished run; staged ones wait for the host. */
+  /** Reservations of a finished run that published nothing; staged ones wait for the host. */
   release(job: string): void {
     this.db
       .prepare(
-        'DELETE FROM build_reservations WHERE job_id=? AND build_id IS NULL AND staged_at IS NULL',
+        `DELETE FROM build_reservations WHERE job_id=?
+         AND NOT EXISTS (SELECT 1 FROM build_publications p WHERE p.reservation_id=build_reservations.id)`,
       )
       .run(job)
   }

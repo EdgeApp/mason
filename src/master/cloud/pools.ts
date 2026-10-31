@@ -14,6 +14,7 @@ import {
   type CloudProvider,
   type ProviderMachine,
 } from './digitalocean.js'
+import { SETUP_LABEL } from '../../pipeline/graph.js'
 
 /** One pool: machines of one node type, made on demand and reused like in-house computers. */
 export interface PoolSetting {
@@ -84,7 +85,8 @@ function asPool(value: unknown, accounts: CloudAccount[]): PoolSetting {
     )
   // NoMac runs one Mac at a time for up to eight hours, in its one profile.
   const nomac = account.provider === 'nomac'
-  const labels = input.labels ?? []
+  // A pool's machines run setup unless its labels leave the label out.
+  const labels = input.labels ?? [SETUP_LABEL]
   if (
     !Array.isArray(labels) ||
     labels.some((label) => typeof label !== 'string' || !slug.test(label))
@@ -171,6 +173,13 @@ interface MachineRow {
   error: string | null
 }
 
+/** Why a stage waits for a pool, and whether the pool is serving it or cannot now. */
+export interface PoolAnswer {
+  reason: string
+  /** Starting, waiting for or full of machines: the stage waits on this pool. */
+  serving: boolean
+}
+
 export interface PoolsOptions {
   master: MasterDatabase
   registry: NodeRegistry
@@ -188,13 +197,7 @@ export interface PoolsOptions {
   provider?: (token: string) => CloudProvider
   /** Whether a worker is running or preparing a stage. */
   busy: (fingerprint: string) => boolean
-  /** The release a new machine installs, from the host. */
-  release: () => string | undefined
-  /** The platforms a stored release has tarballs for, `linux-x64`. */
-  releasePlatforms?: (version: string) => string[]
-  /** Where machines download the installer: the host's worker origin or origin. */
-  hostOrigin: () => string | undefined
-  /** With no host, machines install the master's own release from GitHub. */
+  /** The master's own release on GitHub, which new machines install. */
   github?: () => { repository: string; version: string } | undefined
   /** A GitHub release's asset names; the GitHub API by default. */
   releaseAssets?: (repository: string, version: string) => Promise<string[]>
@@ -214,10 +217,8 @@ export interface PoolsOptions {
   log?: (line: string) => void
 }
 
-/** Where a machine installs Mason from: the host, or a GitHub release. */
-type Installer =
-  | { origin: string; version: string }
-  | { repository: string; version: string }
+/** The GitHub release a machine installs Mason from. */
+type Installer = { repository: string; version: string }
 
 /** A release's asset names from the GitHub API (public repositories need no token). */
 async function gitHubReleaseAssets(
@@ -237,6 +238,25 @@ async function gitHubReleaseAssets(
 }
 
 const TAG = 'mason-pool'
+
+/** NoMac's largest session limits: eight hours, and an hour idle. */
+const NOMAC_MAX_SECONDS = 8 * 3600
+const NOMAC_MAX_IDLE_SECONDS = 3600
+
+/**
+ * The limits a NoMac session is created with: the pool's hours per machine,
+ * and NoMac's own idle stop ten minutes after the pool would retire the Mac,
+ * both within what NoMac allows. The idle stop only backs up the pool's.
+ */
+export function nomacLimits(pool: {
+  maxHoursPerNode: number
+  ttlMinutes: number
+}): { maxSeconds: number; idleSeconds: number } {
+  return {
+    maxSeconds: Math.min(pool.maxHoursPerNode * 3600, NOMAC_MAX_SECONDS),
+    idleSeconds: Math.min((pool.ttlMinutes + 10) * 60, NOMAC_MAX_IDLE_SECONDS),
+  }
+}
 /** Cloud machines are x86-64 Linux droplets. */
 const machinePlatform = 'linux-x64'
 
@@ -339,6 +359,12 @@ export class Pools {
   }
   forType(type: string): PoolSetting | undefined {
     return this.pools().find((pool) => pool.type === type)
+  }
+
+  /** Whether the pool for a type makes Macs (NoMac) rather than Linux machines. */
+  makesMacs(type: string): boolean | undefined {
+    const pool = this.forType(type)
+    return pool == null ? undefined : pool.provider === 'nomac'
   }
 
   machines(pool?: string): MachineRow[] {
@@ -453,19 +479,25 @@ export class Pools {
 
   /**
    * A stage of `type` found no free node. Starts a machine when the type has
-   * a pool with room; answers why the stage waits otherwise.
+   * a pool with room; answers why the stage waits, and whether the pool is
+   * serving it (starting, waiting for or full of machines) or cannot now.
    */
-  demand(type: string): string | undefined {
+  demand(type: string): PoolAnswer | undefined {
     const pool = this.forType(type)
     if (pool == null) return undefined
     const backoff = this.backoff.get(pool.name)
-    if (backoff != null && backoff.until > this.now()) return backoff.reason
+    if (backoff != null && backoff.until > this.now())
+      return { reason: backoff.reason, serving: false }
     const budget = this.budgetReason()
-    if (budget != null) return budget
+    if (budget != null) return { reason: budget, serving: false }
     if (this.provider(pool.account) == null)
-      return `The ${pool.name} pool's cloud account ${pool.account} is gone: add it on the Cloud page`
+      return {
+        reason: `The ${pool.name} pool's cloud account ${pool.account} is gone: add it on the Cloud page`,
+        serving: false,
+      }
     const installer = this.installer(pool)
-    if (typeof installer === 'string') return installer
+    if (typeof installer === 'string')
+      return { reason: installer, serving: false }
     const machines = this.machines(pool.name)
     if (
       machines.some(
@@ -473,28 +505,36 @@ export class Pools {
           machine.state === 'creating' || machine.state === 'pairing',
       )
     )
-      return `Waiting for a ${pool.name} machine to start`
+      return {
+        reason: `Waiting for a ${pool.name} machine to start`,
+        serving: true,
+      }
     if (
       machines.filter(
         (machine) =>
           machine.state !== 'retiring' && machine.state !== 'snapshotting',
       ).length >= pool.maxNodes
     )
-      return `The ${pool.name} pool is at its ${pool.maxNodes}-machine limit`
+      return {
+        reason: `The ${pool.name} pool is at its ${pool.maxNodes}-machine limit`,
+        serving: true,
+      }
     void this.create(pool, installer)
-    return `Starting a ${pool.name} machine`
+    return { reason: `Starting a ${pool.name} machine`, serving: true }
   }
 
   /**
-   * A job's setup when no worker is connected: a master whose only nodes are
-   * cloud machines starts one from its first pool to run it.
+   * A job's setup when no node for setup is connected: a master whose only
+   * such nodes are cloud machines starts one from the first pool whose
+   * machines are labelled for setup.
    */
   setupDemand(): string | undefined {
+    const pools = this.pools().filter((entry) =>
+      entry.labels.includes(SETUP_LABEL),
+    )
     // A DigitalOcean pool's machine is cheaper and quicker for a setup than a Mac.
-    const pool =
-      this.pools().find((entry) => entry.provider !== 'nomac') ??
-      this.pools()[0]
-    return pool == null ? undefined : this.demand(pool.type)
+    const pool = pools.find((entry) => entry.provider !== 'nomac') ?? pools[0]
+    return pool == null ? undefined : this.demand(pool.type)?.reason
   }
 
   /** A stream to a NoMac machine's link port, by its `nomac:<session>` host. */
@@ -519,37 +559,17 @@ export class Pools {
   >()
   private readonly fetching = new Set<string>()
 
-  /** Where a new machine installs Mason from, or why it cannot yet. */
+  /**
+   * The master's own release on GitHub, which a new machine installs as the
+   * public install command does, or why it cannot yet.
+   */
   private installer(pool: PoolSetting): Installer | string {
     // A NoMac Mac is Apple silicon; every other machine is x86-64 Linux.
     const platform =
       pool.provider === 'nomac' ? 'darwin-arm64' : machinePlatform
-    const origin = this.options.hostOrigin()
-    if (origin != null) {
-      const release = this.options.release()
-      if (release == null)
-        return 'The release store is empty: add the release machines install with mason releases add'
-      // The copy beside a master's own install holds only its platform; the
-      // master's release on GitHub has every platform.
-      if (
-        this.options.releasePlatforms != null &&
-        !this.options.releasePlatforms(release).includes(platform)
-      ) {
-        const github = this.fromGitHub(pool, platform)
-        return typeof github !== 'string'
-          ? github
-          : `Release ${release} has no ${platform} tarball for ${pool.name} machines: store the whole release with mason releases fetch v${release}`
-      }
-      return { origin, version: release }
-    }
-    return this.fromGitHub(pool, platform)
-  }
-
-  /** The master's own release on GitHub, once its assets list the platform's tarball. */
-  private fromGitHub(pool: PoolSetting, platform: string): Installer | string {
     const github = this.options.github?.()
     if (github == null)
-      return 'Cloud machines install from the host or from the master’s GitHub release: set the host setting first'
+      return 'This master runs no GitHub release of Mason, so cloud machines have none to install'
     const key = `${github.repository}@${github.version}`
     const known = this.assets.get(key)
     const stale =
@@ -597,17 +617,12 @@ export class Pools {
   }
 
   /**
-   * First-boot data: install Mason from the host, or with no host the
-   * master's own release from GitHub, then pair with the material the master
-   * made.
+   * First-boot data: install the master's own release of Mason from GitHub,
+   * then pair with the material the master made.
    */
   userData(installer: Installer, pairing: string, slots: number): string {
     const port = this.options.linkPort ?? 9310
-    const install =
-      'origin' in installer
-        ? `curl -fsSL ${installer.origin}/install.sh -o /root/mason-install.sh
-bash /root/mason-install.sh --from ${installer.origin}`
-        : `curl -fsSL https://github.com/${installer.repository}/releases/latest/download/install.sh -o /root/mason-install.sh
+    const install = `curl -fsSL https://github.com/${installer.repository}/releases/latest/download/install.sh -o /root/mason-install.sh
 bash /root/mason-install.sh --version ${installer.version}`
     return `#!/bin/bash
 set -euo pipefail
@@ -624,16 +639,12 @@ mason worker --install --pairing-file /root/mason-pairing.json --link-port ${por
 
   /**
    * A NoMac Mac's first boot, run as a NoMac job once the Mac is ready:
-   * Mason installed for the user from the host or GitHub, and the worker run
+   * Mason installed for the user from the master's GitHub release, and the worker run
    * as a NoMac service that keeps it going between commands. Tool caches sit
    * on the account's drive, which NoMac keeps between sessions.
    */
   nomacUserData(installer: Installer, pairing: string, slots: number): string {
-    const install =
-      'origin' in installer
-        ? `curl -fsSL ${installer.origin}/install.sh -o ~/mason-install.sh
-bash ~/mason-install.sh --user --from ${installer.origin}`
-        : `curl -fsSL https://github.com/${installer.repository}/releases/latest/download/install.sh -o ~/mason-install.sh
+    const install = `curl -fsSL https://github.com/${installer.repository}/releases/latest/download/install.sh -o ~/mason-install.sh
 bash ~/mason-install.sh --user --version ${installer.version}`
     // The release's install.sh may predate making ~/.mason, the worker's
     // data directory, private.
@@ -710,14 +721,7 @@ nomac-service start mason-worker -- ~/.local/bin/mason worker --pairing-file ~/m
           pool.provider === 'nomac'
             ? this.nomacUserData(installer, pairing, pool.slots)
             : this.userData(installer, pairing, pool.slots),
-        ...(pool.provider === 'nomac'
-          ? {
-              limits: {
-                maxSeconds: Math.min(pool.maxHoursPerNode, 8) * 3600,
-                idleSeconds: (pool.ttlMinutes + 10) * 60,
-              },
-            }
-          : {}),
+        ...(pool.provider === 'nomac' ? { limits: nomacLimits(pool) } : {}),
       })
       this.db
         .prepare(
@@ -906,7 +910,7 @@ nomac-service start mason-worker -- ~/.local/bin/mason worker --pairing-file ~/m
               snapshot.id,
               row.id,
               snapshot.sizeGb,
-              this.options.release() ?? this.options.github?.()?.version ?? '',
+              this.options.github?.()?.version ?? '',
               this.now(),
             )
           for (const old of previous) {

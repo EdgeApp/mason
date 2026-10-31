@@ -59,17 +59,7 @@ interface Entity {
 /** The master's view of a setting as the host may hold it (a hook strips what the host must not see). */
 export type SettingProjection = (area: string, value: Row) => Row
 
-/** What the change log needs from the release store. */
-export interface ReleaseSource {
-  current(): string | undefined
-  /** File name → SHA-256 of a stored release. */
-  files(version: string): Record<string, string>
-}
-
-export function entities(
-  setting: SettingProjection,
-  releases: ReleaseSource,
-): Record<string, Entity> {
+export function entities(setting: SettingProjection): Record<string, Entity> {
   return {
     project: {
       keys: (db): string[] =>
@@ -197,19 +187,6 @@ export function entities(
         return row == null ? undefined : { row }
       },
     },
-    api_key: {
-      keys: (db): string[] =>
-        all(db, 'SELECT id FROM api_keys').map((row) => String(row.id)),
-      project: (db, id): Projected | undefined => {
-        // `hash` is already a digest of the token; the token itself is never stored.
-        const row = one(
-          db,
-          'SELECT id,hash,name,apps,created_at,expires_at,revoked,role,projects,branches,format FROM api_keys WHERE id=?',
-          id,
-        )
-        return row == null ? undefined : { row }
-      },
-    },
     job: {
       keys: (db): string[] =>
         all(db, 'SELECT id FROM jobs').map((row) => String(row.id)),
@@ -241,7 +218,7 @@ export function entities(
             ),
             job_steps: all(
               db,
-              'SELECT job_id,stage,attempt,id,kind,title,status,ms,log_start,log_end FROM job_steps WHERE job_id=?',
+              'SELECT job_id,stage,attempt,id,kind,title,status,ms,log_start,log_end,parent FROM job_steps WHERE job_id=?',
               id,
             ),
             run_artifacts: all(
@@ -275,21 +252,6 @@ export function entities(
         }
       },
     },
-    // The host serves exactly the current release: one row, whatever key changed.
-    release: {
-      keys: (): string[] => ['current'],
-      project: (): Projected | undefined => {
-        const version = releases.current()
-        if (version == null) return undefined
-        return {
-          row: {
-            id: 'current',
-            version,
-            files: JSON.stringify(releases.files(version)),
-          },
-        }
-      },
-    },
   }
 }
 
@@ -302,9 +264,8 @@ export class Changes {
   constructor(
     private readonly master: MasterDatabase,
     setting: SettingProjection,
-    releases: ReleaseSource,
   ) {
-    this.entities = entities(setting, releases)
+    this.entities = entities(setting)
   }
 
   revision(): number {

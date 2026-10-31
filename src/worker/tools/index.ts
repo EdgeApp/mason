@@ -8,25 +8,51 @@ import {
   sdkRoot,
 } from './android.js'
 import { brewPath } from '../system/index.js'
+import { cocoapodsEnvironment, installCocoapods } from './cocoapods.js'
 import { readMarker, type InstallContext } from './common.js'
 import { installJava, javaEnvironment, javaHome } from './java.js'
+import { goEnvironment, installGo } from './go.js'
 import { installNode, nodeEnvironment } from './node.js'
+import { installPython, pythonEnvironment } from './python.js'
+import { installRuby, rubyEnvironment } from './ruby.js'
 import { installRust, rustEnvironment } from './rust.js'
 import { compareVersions, newestMatch } from './versions.js'
 
 /** The only tools a master can ask a worker to install. There is no remote-command RPC. */
-export const installable = ['node', 'rust', 'java', 'android'] as const
+export const installable = [
+  'node',
+  'rust',
+  'java',
+  'python',
+  'go',
+  'ruby',
+  'android',
+  'cocoapods',
+] as const
 export type InstallableTool = (typeof installable)[number]
+
+/** Tools installed per version in the tools directory, side by side. */
+export const versioned = [
+  'node',
+  'rust',
+  'java',
+  'python',
+  'go',
+  'ruby',
+] as const
+export type VersionedTool = (typeof versioned)[number]
 
 export interface InstallRequest {
   /** A tools-directory installer, or a system install (`xcode`, `simulators`, `brew`, `apt`, `dnf`) the worker does through its helper. */
   tool: InstallableTool | 'xcode' | 'simulators' | 'brew' | 'apt' | 'dnf'
-  /** A version for node, rust, java and xcode; sdkmanager packages for android; names for the system tools. */
+  /** A version for node, rust, java, python, go, ruby and xcode, an exact one for cocoapods; sdkmanager packages for android; names for the system tools. */
   version?: string
   packages?: string[]
-  /** For android: whether the node's type records an administrator's licence acceptance. */
+  /** For android: whether the licences are accepted, by the node's type or the stage. */
   acceptLicences?: boolean
   nodeType?: string
+  /** For cocoapods: the stage's Xcode spec; the worker compiles native gems with it. */
+  xcode?: string
 }
 
 /** Tools in the tools directory: versions per tool, Android packages. */
@@ -34,7 +60,12 @@ export interface InstalledTools {
   node: string[]
   rust: string[]
   java: string[]
+  python: string[]
+  go: string[]
+  ruby: string[]
   android: string[]
+  /** Absent from workers older than CocoaPods installs. */
+  cocoapods?: string[]
 }
 
 function versions(toolsDir: string, tool: string): string[] {
@@ -57,7 +88,11 @@ export function installedTools(toolsDir: string): InstalledTools {
     node: versions(toolsDir, 'node'),
     rust: versions(toolsDir, 'rust'),
     java: versions(toolsDir, 'java'),
+    python: versions(toolsDir, 'python'),
+    go: versions(toolsDir, 'go'),
+    ruby: versions(toolsDir, 'ruby'),
     android: installedPackages(sdkRoot(toolsDir)),
+    cocoapods: versions(toolsDir, 'cocoapods'),
   }
 }
 
@@ -74,6 +109,14 @@ export async function install(
       return await installRust(version, context)
     case 'java':
       return await installJava(version, context)
+    case 'python':
+      return await installPython(version, context)
+    case 'go':
+      return await installGo(version, context)
+    case 'ruby':
+      return await installRuby(version, context)
+    case 'cocoapods':
+      return await installCocoapods(version, context)
     case 'android': {
       const java = installedTools(context.toolsDir).java.pop()
       await installAndroid(request.packages ?? [], {
@@ -100,11 +143,16 @@ export function missingTools(
 ): InstallRequest[] {
   if (tools == null) return []
   const out: InstallRequest[] = []
-  for (const tool of ['node', 'rust', 'java'] as const) {
+  for (const tool of versioned) {
     const version = tools[tool]
     if (version != null && newestMatch(version, installed[tool]) == null)
       out.push({ tool, version })
   }
+  if (
+    tools.cocoapods != null &&
+    !(installed.cocoapods ?? []).includes(tools.cocoapods)
+  )
+    out.push({ tool: 'cocoapods', version: tools.cocoapods })
   const packages = (tools.android ?? []).filter(
     (pkg) => !installed.android.includes(pkg),
   )
@@ -131,7 +179,7 @@ export function toolEnvironment(
     paths.push(...part.path)
     Object.assign(env, part.env)
   }
-  const pick = (tool: 'node' | 'rust' | 'java'): string | undefined =>
+  const pick = (tool: VersionedTool): string | undefined =>
     tools[tool] == null ? undefined : newestMatch(tools[tool], installed[tool])
   const node = pick('node')
   if (node != null) add(nodeEnvironment(path.join(toolsDir, 'node', node)))
@@ -139,7 +187,19 @@ export function toolEnvironment(
   if (rust != null) add(rustEnvironment(path.join(toolsDir, 'rust', rust)))
   const java = pick('java')
   if (java != null) add(javaEnvironment(path.join(toolsDir, 'java', java)))
+  const python = pick('python')
+  if (python != null)
+    add(pythonEnvironment(path.join(toolsDir, 'python', python)))
+  const go = pick('go')
+  if (go != null) add(goEnvironment(path.join(toolsDir, 'go', go)))
+  const ruby = pick('ruby')
+  if (ruby != null) add(rubyEnvironment(path.join(toolsDir, 'ruby', ruby)))
   if (tools.android != null) add(androidEnvironment(toolsDir))
+  if (
+    tools.cocoapods != null &&
+    (installed.cocoapods ?? []).includes(tools.cocoapods)
+  )
+    add(cocoapodsEnvironment(toolsDir, tools.cocoapods))
   if ((tools.brew ?? []).length > 0 && brew != null)
     paths.push(path.dirname(brew))
   if (paths.length === 0) return env

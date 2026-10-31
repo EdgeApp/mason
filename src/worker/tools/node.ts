@@ -74,10 +74,16 @@ export async function installNode(
   return resolved
 }
 
-/** A stage's environment for an installed Node.js. */
+/**
+ * A stage's environment for an installed Node.js: its `bin` on `PATH`, and
+ * `NODE_BINARY`, which React Native's Xcode build phases run.
+ */
 export function nodeEnvironment(dir: string): {
   path: string[]
   env: Record<string, string>
 } {
-  return { path: [path.join(dir, 'bin')], env: {} }
+  return {
+    path: [path.join(dir, 'bin')],
+    env: { NODE_BINARY: path.join(dir, 'bin', 'node') },
+  }
 }

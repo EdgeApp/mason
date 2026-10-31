@@ -10,6 +10,7 @@ import { dialWire, parseAddress, type Address } from '../link/network.js'
 import type { Wire } from '../link/wire.js'
 import { version as masonVersion } from '../version.js'
 import { migrateMaster } from './schema.js'
+import { SETUP_LABEL } from '../pipeline/graph.js'
 
 export interface NodeRecord {
   id: number
@@ -229,11 +230,12 @@ export class NodeRegistry extends EventEmitter {
       const now = this.now()
       this.db
         .prepare(
-          `INSERT INTO nodes(fingerprint,public_key,certificate_hash,role,host,port,name,added_at,last_seen,version)
-           VALUES(?,?,?,?,?,?,?,?,?,?)
+          // A new node runs setup until an administrator removes the label.
+          `INSERT INTO nodes(fingerprint,public_key,certificate_hash,role,host,port,name,added_at,last_seen,version,labels)
+           VALUES(?,?,?,?,?,?,?,?,?,?,'["${SETUP_LABEL}"]')
            ON CONFLICT(fingerprint) DO UPDATE SET public_key=excluded.public_key,certificate_hash=excluded.certificate_hash,
              role=excluded.role,host=excluded.host,port=excluded.port,name=excluded.name,added_at=excluded.added_at,
-             last_seen=excluded.last_seen,version=excluded.version,removed=0,type='',labels='[]'`,
+             last_seen=excluded.last_seen,version=excluded.version,removed=0,type='',labels=excluded.labels`,
         )
         .run(
           peer.fingerprint,
@@ -263,8 +265,8 @@ export class NodeRegistry extends EventEmitter {
   ): Promise<void> {
     this.db
       .prepare(
-        `INSERT INTO nodes(fingerprint,public_key,certificate_hash,role,host,port,name,added_at,last_seen,version)
-         VALUES(?,'','','worker',?,0,?,?,?,?)
+        `INSERT INTO nodes(fingerprint,public_key,certificate_hash,role,host,port,name,added_at,last_seen,version,labels)
+         VALUES(?,'','','worker',?,0,?,?,?,?,'["${SETUP_LABEL}"]')
          ON CONFLICT(fingerprint) DO UPDATE SET last_seen=excluded.last_seen,version=excluded.version,removed=0`,
       )
       .run(fingerprint, IN_PROCESS, name, this.now(), this.now(), masonVersion)

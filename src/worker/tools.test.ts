@@ -25,6 +25,7 @@ import { LicencesNotAccepted } from './tools/android.js'
 import {
   ChecksumMismatch,
   extract,
+  readMarker,
   type InstallContext,
 } from './tools/common.js'
 import {
@@ -33,9 +34,12 @@ import {
   missingTools,
   toolEnvironment,
 } from './tools/index.js'
+import { RUBY_BUILD } from './tools/ruby.js'
 import {
   compareVersions,
   newestMatch,
+  portableRuby,
+  rubyBottle,
   selectXcode,
   type XcodeInstall,
 } from './tools/versions.js'
@@ -86,6 +90,8 @@ async function toolServer(dir: string): Promise<{
   server: Server
   base: string
   corrupt: Set<string>
+  rubyBuildDigest: string
+  portableRubyDigests: Record<string, string>
 }> {
   const files = new Map<string, Buffer>()
   const corrupt = new Set<string>()
@@ -115,9 +121,9 @@ async function toolServer(dir: string): Promise<{
     '/node/index.json',
     Buffer.from(
       JSON.stringify([
-        { version: 'v24.11.1' },
-        { version: 'v24.9.0' },
-        { version: 'v22.20.0' },
+        { version: 'v24.11.1', lts: 'Krypton' },
+        { version: 'v24.9.0', lts: false },
+        { version: 'v22.20.0', lts: 'Jod' },
       ]),
     ),
   )
@@ -145,6 +151,24 @@ async function toolServer(dir: string): Promise<{
     script(path.join(home, 'bin', 'java'), 'echo openjdk 21.0.5')
   })
   files.set('/adoptium/jdk.tar.gz', jdk)
+  // Homebrew's portable Ruby, as a bottle: portable-ruby/<version>/bin/gem.
+  // Its gem records how it ran and makes the bin/pod CocoaPods would.
+  const ruby = tarball('ruby', 'portable-ruby/3.4.5', (top) => {
+    script(
+      path.join(top, 'bin', 'gem'),
+      [
+        'for a; do case "$prev" in --bindir) bin=$a;; esac; prev=$a; done',
+        'mkdir -p "$bin" && printf "#!/bin/sh\\necho 1.16.2\\n" > "$bin/pod" && chmod +x "$bin/pod"',
+        'mkdir -p "$GEM_HOME/gems/cocoapods-1.16.2" "$GEM_HOME/gems/xcodeproj-1.28.1"',
+        'echo "gem $* DEVELOPER_DIR=$DEVELOPER_DIR GEM_HOME=$GEM_HOME"',
+      ].join('\n'),
+    )
+  })
+  const rubyName = rubyBottle(arch)
+  files.set(`/portable-ruby/${portableRuby.version}/${rubyName}`, ruby)
+  const portableRubyDigests = {
+    [rubyName]: createHash('sha256').update(ruby).digest('hex'),
+  }
   const toolsZip = path.join(dir, 'build', 'cmdline.zip')
   script(
     path.join(dir, 'build', 'zip', 'cmdline-tools', 'bin', 'sdkmanager'),
@@ -160,6 +184,67 @@ async function toolServer(dir: string): Promise<{
   })
   const zip = readFileSync(toolsZip)
   files.set('/android/commandlinetools.zip', zip)
+  const cpu = arch === 'arm64' ? 'aarch64' : 'x86_64'
+  const triple = `${cpu}-${os === 'macos' ? 'apple-darwin' : 'unknown-linux-gnu'}`
+  const sums: string[] = [
+    `${'0'.repeat(64)}  cpython-3.12.9+20261026-other-install_only.tar.gz`,
+  ]
+  for (const version of ['3.12.4', '3.12.7', '3.13.1']) {
+    const name = `cpython-${version}+20261026-${triple}-install_only.tar.gz`
+    const build = tarball(`python-${version}`, 'python', (top) => {
+      script(path.join(top, 'bin', 'python3'), `echo Python ${version}`)
+    })
+    files.set(`/python/download/${encodeURIComponent(name)}`, build)
+    sums.push(`${createHash('sha256').update(build).digest('hex')}  ${name}`)
+  }
+  files.set('/python/download/SHA256SUMS', Buffer.from(sums.join('\n') + '\n'))
+  const goOs = os === 'macos' ? 'darwin' : 'linux'
+  const goArch = arch === 'arm64' ? 'arm64' : 'amd64'
+  const goReleases: Json[] = []
+  for (const [version, stable] of [
+    ['1.24rc1', false],
+    ['1.23.4', true],
+    ['1.22.9', true],
+  ] as const) {
+    const filename = `go${version}.${goOs}-${goArch}.tar.gz`
+    const build = tarball(`go-${version}`, 'go', (top) => {
+      script(path.join(top, 'bin', 'go'), `echo go version go${version}`)
+    })
+    files.set(`/go/${filename}`, build)
+    goReleases.push({
+      version: `go${version}`,
+      stable,
+      files: [
+        {
+          filename: `go${version}.src.tar.gz`,
+          os: '',
+          arch: '',
+          sha256: '0'.repeat(64),
+          kind: 'source',
+        },
+        {
+          filename,
+          os: goOs,
+          arch: goArch,
+          sha256: createHash('sha256').update(build).digest('hex'),
+          kind: 'archive',
+        },
+      ],
+    })
+  }
+  const rubyBuild = tarball('ruby-build', 'ruby-build-20261013', (top) => {
+    script(
+      path.join(top, 'bin', 'ruby-build'),
+      [
+        'if [ "$1" = --definitions ]; then printf "3.3.4\\n3.3.5\\n3.4.1\\njruby-9.4.8.0\\n"; exit 0; fi',
+        '[ -d "$TMPDIR" ] && [ -d "$RUBY_BUILD_CACHE_PATH" ] || { echo "no TMPDIR or cache"; exit 1; }',
+        '[ "$1" = 3.4.1 ] && { echo "BUILD FAILED (no libyaml)"; exit 1; }',
+        'mkdir -p "$2/bin" && printf "#!/bin/sh\\necho ruby $1 \\$GEM_HOME\\n" > "$2/bin/ruby" && chmod +x "$2/bin/ruby"',
+        'echo "Installed ruby-$1 to $2"',
+      ].join('\n'),
+    )
+  })
+  files.set('/ruby-build/v20261013.tar.gz', rubyBuild)
   let server!: Server
   const base = await new Promise<string>((resolve) => {
     server = createServer((req, res) => {
@@ -182,6 +267,21 @@ async function toolServer(dir: string): Promise<{
             },
           ]),
         )
+        return
+      }
+      if (url.pathname === '/python/latest-release.json') {
+        res.end(
+          JSON.stringify({
+            tag: '20261026',
+            asset_url_prefix: corrupt.has('python-index')
+              ? 'file:///etc'
+              : `${base}/python/download`,
+          }),
+        )
+        return
+      }
+      if (url.pathname === '/go/' && url.searchParams.get('mode') === 'json') {
+        res.end(JSON.stringify(goReleases))
         return
       }
       if (url.pathname === '/android/repository2-3.xml') {
@@ -214,7 +314,13 @@ async function toolServer(dir: string): Promise<{
       resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)
     })
   })
-  return { server, base, corrupt }
+  return {
+    server,
+    base,
+    corrupt,
+    rubyBuildDigest: createHash('sha256').update(rubyBuild).digest('hex'),
+    portableRubyDigests,
+  }
 }
 
 describe('Worker tooling', function () {
@@ -228,6 +334,11 @@ describe('Worker tooling', function () {
       rust: `${served.base}/rust`,
       adoptium: `${served.base}/adoptium`,
       android: `${served.base}/android`,
+      python: `${served.base}/python`,
+      go: `${served.base}/go`,
+      rubyBuild: `${served.base}/ruby-build`,
+      portableRuby: `${served.base}/portable-ruby`,
+      portableRubyDigests: served.portableRubyDigests,
     }
   })
   after(() => {
@@ -291,7 +402,11 @@ describe('Worker tooling', function () {
       node: ['24.9.0'],
       rust: [],
       java: [],
+      python: [],
+      go: [],
+      ruby: [],
       android: ['platform-tools', 'platforms;android-35'],
+      cocoapods: [],
     })
     assert.deepEqual(
       fullInventory({ ...inventory, os: 'linux' }, { toolsDir: tools }).xcodes,
@@ -334,6 +449,130 @@ describe('Worker tooling', function () {
     }
     assert.deepEqual(installedTools(fresh).node, [])
     assert.equal(existsSync(path.join(fresh, 'node', '24.11.1')), false)
+  })
+
+  it('U2.1/U2.2 installs Python and Go side by side after their checksums, newest match first', async () => {
+    const tools = path.join(root(), 'tools')
+    const log: string[] = []
+    assert.equal(
+      await install({ tool: 'python', version: '3.12' }, context(tools, log)),
+      '3.12.7',
+    )
+    assert.equal(
+      await install({ tool: 'python', version: '3.12.4' }, context(tools)),
+      '3.12.4',
+    )
+    assert.equal(
+      await install({ tool: 'go', version: '1.23' }, context(tools)),
+      '1.23.4',
+    )
+    assert.equal(
+      await install({ tool: 'go', version: '1.22.9' }, context(tools)),
+      '1.22.9',
+    )
+    assert.match(log.join(''), /Verified sha256 [0-9a-f]{64}/)
+    assert.deepEqual(installedTools(tools).python, ['3.12.4', '3.12.7'])
+    assert.deepEqual(installedTools(tools).go, ['1.22.9', '1.23.4'])
+    assert.equal(
+      execFileSync(path.join(tools, 'python', '3.12.4', 'bin', 'python3'), {
+        encoding: 'utf8',
+      }).trim(),
+      'Python 3.12.4',
+    )
+    const env = toolEnvironment(
+      { python: '3.12', go: '1.22' },
+      tools,
+      '/usr/bin',
+      null,
+    )
+    assert.equal(env.GOROOT, path.join(tools, 'go', '1.22.9'))
+    assert.equal(env.GOTOOLCHAIN, 'local')
+    assert.equal(env.PYTHONNOUSERSITE, '1')
+    assert(env.PATH!.startsWith(path.join(tools, 'python', '3.12.7', 'bin')))
+    assert.deepEqual(
+      missingTools(
+        { python: '3.13', go: '1.23' },
+        { ...installedTools(tools) },
+      ),
+      [{ tool: 'python', version: '3.13' }],
+    )
+    await assert.rejects(
+      install({ tool: 'python', version: '3.11' }, context(tools)),
+      /Python 3\.11 is not in python-build-standalone 20261026/,
+    )
+    await assert.rejects(
+      install({ tool: 'python', version: '3' }, context(tools)),
+      /Invalid Python version/,
+    )
+    await assert.rejects(
+      install({ tool: 'go', version: '1.24' }, context(tools)),
+      /No Go release matches 1\.24/,
+    )
+    await assert.rejects(
+      install({ tool: 'go', version: 'x' }, context(tools)),
+      /Invalid Go version/,
+    )
+    served.corrupt.add('python-index')
+    served.corrupt.add(
+      `/go/go1.23.4.${os === 'macos' ? 'darwin' : 'linux'}-${arch === 'arm64' ? 'arm64' : 'amd64'}.tar.gz`,
+    )
+    const fresh = path.join(root(), 'tools')
+    try {
+      await assert.rejects(
+        install({ tool: 'python', version: '3.13' }, context(fresh)),
+        /names no download location/,
+      )
+      await assert.rejects(
+        install({ tool: 'go', version: '1.23' }, context(fresh)),
+        ChecksumMismatch,
+      )
+    } finally {
+      served.corrupt.clear()
+    }
+    assert.deepEqual(installedTools(fresh).go, [])
+  })
+
+  it('U3.1 builds Ruby with the pinned ruby-build, once per version, and refuses another ruby-build', async () => {
+    const pinned = RUBY_BUILD.sha256
+    const tools = path.join(root(), 'tools')
+    const log: string[] = []
+    await assert.rejects(
+      install({ tool: 'ruby', version: '3.3' }, context(tools)),
+      ChecksumMismatch,
+    )
+    RUBY_BUILD.sha256 = served.rubyBuildDigest
+    try {
+      assert.equal(
+        await install({ tool: 'ruby', version: '3.3' }, context(tools, log)),
+        '3.3.5',
+      )
+      assert.equal(
+        await install({ tool: 'ruby', version: '3.3.4' }, context(tools)),
+        '3.3.4',
+      )
+      assert.match(
+        log.join(''),
+        /Installed ruby-3\.3\.5 to .*tools\/ruby\/3\.3\.5/,
+      )
+      assert.deepEqual(installedTools(tools).ruby, ['3.3.4', '3.3.5'])
+      const env = toolEnvironment({ ruby: '3.3' }, tools, '/usr/bin', null)
+      assert(env.PATH!.startsWith(path.join(tools, 'ruby', '3.3.5', 'bin')))
+      await assert.rejects(
+        install({ tool: 'ruby', version: '3.4' }, context(tools)),
+        /ruby-build exited/,
+      )
+      assert.equal(existsSync(path.join(tools, 'ruby', '3.4.1')), false)
+      await assert.rejects(
+        install({ tool: 'ruby', version: '3.2' }, context(tools)),
+        /defines no Ruby 3\.2/,
+      )
+      await assert.rejects(
+        install({ tool: 'ruby', version: 'jruby' }, context(tools)),
+        /Invalid Ruby version/,
+      )
+    } finally {
+      RUBY_BUILD.sha256 = pinned
+    }
   })
 
   it('U8.3 installs Rust and Java after their checksums, and Android only where the node type accepted its licences', async () => {
@@ -402,11 +641,15 @@ describe('Worker tooling', function () {
       node: [],
       rust: ['1.82.0'],
       java: ['21.0.5'],
+      python: [],
+      go: [],
+      ruby: [],
       android: [
         'build-tools;35.0.0',
         'cmdline-tools;latest',
         'platforms;android-35',
       ],
+      cocoapods: [],
     })
     await assert.rejects(
       install(
@@ -540,6 +783,100 @@ describe('Worker tooling', function () {
     assert(!existsSync(path.join(dir, 'outside')))
   })
 
+  it('U8.7 installs CocoaPods with a portable Ruby, compiling with the given Xcode, on macOS only', async () => {
+    const dir = root()
+    const log: string[] = []
+    const developerDir = '/Applications/Xcode-26.1.app/Contents/Developer'
+    assert.equal(
+      await install(
+        { tool: 'cocoapods', version: '1.16.2' },
+        { ...context(dir, log), os: 'macos', developerDir },
+      ),
+      '1.16.2',
+    )
+    const ran = log.join('')
+    assert.match(ran, /Installed portable Ruby 3\.4\.5/)
+    assert.match(
+      ran,
+      new RegExp(
+        `gem install cocoapods -v 1\\.16\\.2 --no-document --install-dir .*cocoapods/1\\.16\\.2\\.installing .*DEVELOPER_DIR=${developerDir.replace(/\./g, '\\.')}`,
+      ),
+    )
+    assert.deepEqual(installedTools(dir).cocoapods, ['1.16.2'])
+    // The marker records the gems RubyGems resolved, since only CocoaPods is pinned.
+    assert.deepEqual(
+      readMarker(path.join(dir, 'cocoapods', '1.16.2'))?.resolved,
+      ['cocoapods-1.16.2', 'xcodeproj-1.28.1'],
+    )
+    // A stage gets its pod and Ruby first on PATH, and its gems.
+    const env = toolEnvironment({ cocoapods: '1.16.2' }, dir, '/usr/bin', null)
+    assert(env.PATH!.startsWith(path.join(dir, 'cocoapods', '1.16.2', 'bin')))
+    assert(env.PATH!.includes(path.join(dir, 'portable-ruby', '3.4.5', 'bin')))
+    assert.equal(env.GEM_HOME, path.join(dir, 'cocoapods', '1.16.2'))
+    assert.deepEqual(
+      missingTools({ cocoapods: '1.16.2' }, installedTools(dir)),
+      [],
+    )
+    assert.deepEqual(
+      missingTools({ cocoapods: '1.15.2' }, installedTools(dir)),
+      [{ tool: 'cocoapods', version: '1.15.2' }],
+    )
+    // The Ruby is installed once; a second CocoaPods reuses it.
+    log.length = 0
+    await install(
+      { tool: 'cocoapods', version: '1.15.2' },
+      { ...context(dir, log), os: 'macos' },
+    )
+    assert.doesNotMatch(log.join(''), /portable Ruby/)
+    // A repeat request for an installed version leaves it alone: no gem
+    // runs and the directory a running stage may use is not replaced.
+    const marker = readMarker(path.join(dir, 'cocoapods', '1.16.2'))
+    log.length = 0
+    assert.equal(
+      await install(
+        { tool: 'cocoapods', version: '1.16.2' },
+        { ...context(dir, log), os: 'macos' },
+      ),
+      '1.16.2',
+    )
+    assert.doesNotMatch(log.join(''), /gem install/)
+    assert.deepEqual(readMarker(path.join(dir, 'cocoapods', '1.16.2')), marker)
+    // A bottle that is not the pinned one, another system, or an inexact version is refused.
+    await assert.rejects(
+      install(
+        { tool: 'cocoapods', version: '1.16.2' },
+        {
+          ...context(root()),
+          os: 'macos',
+          sources: {
+            ...sources,
+            portableRubyDigests: Object.fromEntries(
+              Object.keys(served.portableRubyDigests).map((name) => [
+                name,
+                'f'.repeat(64),
+              ]),
+            ),
+          },
+        },
+      ),
+      /Checksum mismatch/,
+    )
+    await assert.rejects(
+      install(
+        { tool: 'cocoapods', version: '1.16.2' },
+        { ...context(root()), os: 'linux' },
+      ),
+      /CocoaPods installs on macOS only/,
+    )
+    await assert.rejects(
+      install(
+        { tool: 'cocoapods', version: '1.16' },
+        { ...context(root()), os: 'macos' },
+      ),
+      /exact version/,
+    )
+  })
+
   it('U8.4 picks the newest Xcode a range accepts', () => {
     const installs: XcodeInstall[] = [
       { version: '26.0.1', build: '17A400', path: '/A/Xcode.app', beta: false },
@@ -580,8 +917,8 @@ describe('Worker tooling', function () {
 
   it('U8.6 calls only the closed set of installers', async () => {
     await assert.rejects(
-      install({ tool: 'python' as never, version: '3' }, context(root())),
-      /python is not a tool Mason installs/,
+      install({ tool: 'perl' as never, version: '5' }, context(root())),
+      /perl is not a tool Mason installs/,
     )
     assert.deepEqual(
       missingTools(
@@ -597,13 +934,24 @@ describe('Worker tooling', function () {
           node: ['24.1.0'],
           java: [],
           rust: ['1.82.0'],
+          python: [],
+          go: [],
+          ruby: [],
           android: ['platforms;android-35'],
         },
       ),
       [{ tool: 'java', version: '21' }],
     )
     assert.deepEqual(
-      missingTools(undefined, { node: [], java: [], rust: [], android: [] }),
+      missingTools(undefined, {
+        node: [],
+        java: [],
+        rust: [],
+        python: [],
+        go: [],
+        ruby: [],
+        android: [],
+      }),
       [],
     )
   })
@@ -633,6 +981,11 @@ describe('Worker tooling', function () {
       })
       const repo = c.repo('fixtures/tools')
       repo.commit({
+        '.nvmrc': 'lts/*\n',
+        'rust-toolchain.toml': '[toolchain]\nchannel = "1.82.0"\n',
+        '.python-version': '3.13\n',
+        '.ruby-version': 'ruby-3.3.4\n',
+        'go.mod': 'module example.com/x\n\ngo 1.22\n',
         'Masonfile.ts': `
 import type { Setup, Stage } from '@mason/types'
 export function setup(m: Setup) {
@@ -641,9 +994,14 @@ export function setup(m: Setup) {
   const want = String(m.params.want)
   const tools =
     want === 'node' ? { node: '24', java: '21' } :
+    want === 'project' ? { node: 'project', rust: 'project' } :
+    want === 'pygo' ? { python: 'project', go: 'project' } :
+    want === 'py312' ? { python: '3.12' } :
+    want === 'ruby' ? { ruby: 'project' } :
     want === 'android' ? { android: ['platforms;android-35'] } :
     want === 'xcode' ? { xcode: '26.1' } :
-    want === 'nox' ? { xcode: '99' } : {}
+    want === 'nox' ? { xcode: '99' } :
+    want === 'pods' ? { cocoapods: '1.16.2' } : {}
   m.stage('use', { on: 'mac-xcode', tools, run: use })
 }
 export async function use(ctx: Stage) {
@@ -651,6 +1009,11 @@ export async function use(ctx: Stage) {
   return {
     node: ctx.node.name,
     nodeVersion: await sh('node --version'),
+    python: await sh('python3 --version'),
+    go: await sh('go version'),
+    ruby: await sh('ruby'),
+    nodeBinary: process.env.NODE_BINARY ?? null,
+    cargo: process.env.CARGO_HOME ?? null,
     javaHome: process.env.JAVA_HOME ?? null,
     developerDir: process.env.DEVELOPER_DIR ?? null,
     android: process.env.ANDROID_HOME ?? null,
@@ -699,6 +1062,7 @@ export async function use(ctx: Stage) {
       assert(run.seen.has('use:preparing'), [...run.seen].join(' '))
       const output = use(run).output
       assert.equal(output.nodeVersion, 'v24.11.1')
+      assert.match(output.nodeBinary, /tools\/node\/24\.11\.1\/bin\/node$/)
       assert.match(output.javaHome, /tools\/java\/21\.0\.5/)
       const log = c.master.master!.scheduler.logs(run.id)!
       assert.match(
@@ -721,6 +1085,50 @@ export async function use(ctx: Stage) {
       const again = await runWith('node')
       assert.equal(use(again).output.node, worker)
       assert(!again.seen.has('use:preparing'))
+    })
+
+    it('U1.3 a stage with tools project runs with the Node.js and Rust the repository pins', async () => {
+      const run = await runWith('project')
+      const log = c.master.master!.scheduler.logs(run.id)!
+      assert.equal(run.status, 'succeeded', log)
+      assert.match(log, /node 24 from \.nvmrc for tools\.node 'project'/)
+      assert.match(
+        log,
+        /rust 1\.82\.0 from rust-toolchain\.toml for tools\.rust 'project'/,
+      )
+      assert.match(use(run).output.cargo, /tools\/rust\/1\.82\.0\/cargo$/)
+      const output = use(run).output
+      assert.equal(output.nodeVersion, 'v24.11.1')
+      assert.match(output.nodeBinary, /tools\/node\/24\.11\.1\/bin\/node$/)
+    })
+
+    it('U2.3 Python and Go come from .python-version and go.mod; another stage on the node runs its own Python', async () => {
+      const run = await runWith('pygo')
+      const log = c.master.master!.scheduler.logs(run.id)!
+      assert.equal(run.status, 'succeeded', log)
+      assert.match(log, /python 3\.13 from \.python-version/)
+      assert.match(log, /go 1\.22 from go\.mod/)
+      assert.equal(use(run).output.python, 'Python 3.13.1')
+      assert.equal(use(run).output.go, 'go version go1.22.9')
+      const other = await runWith('py312')
+      assert.equal(other.status, 'succeeded')
+      assert.equal(use(other).output.node, use(run).output.node)
+      assert.equal(use(other).output.python, 'Python 3.12.7')
+    })
+
+    it('U3.2 a stage with ruby project builds and runs the Ruby the repository’s .ruby-version names', async () => {
+      const pinned = RUBY_BUILD.sha256
+      RUBY_BUILD.sha256 = served.rubyBuildDigest
+      try {
+        const run = await runWith('ruby')
+        const log = c.master.master!.scheduler.logs(run.id)!
+        assert.equal(run.status, 'succeeded', log)
+        assert.match(log, /ruby 3\.3\.4 from \.ruby-version/)
+        assert.match(log, /installing ruby 3\.3\.4/)
+        assert.match(use(run).output.ruby, /^ruby 3\.3\.4/)
+      } finally {
+        RUBY_BUILD.sha256 = pinned
+      }
     })
 
     it('U8.5 fails the stage with the installer log when an install fails', async () => {
@@ -812,23 +1220,108 @@ export async function use(ctx: Stage) {
       assert.equal(none.status, 'failed')
       assert.equal(
         use(none).reason,
-        'No connected node for this stage has or can install an Xcode matching 99',
+        'No connected macOS node for this stage has or can install an Xcode matching 99',
+      )
+    })
+
+    it('U8.7 installs CocoaPods over the link with the Xcode its request names, or refuses', async () => {
+      const link = c.master.master!.registry.link(c.fingerprint('tooled'))!
+      const answer = (await link.request('tools.install', {
+        tool: 'cocoapods',
+        version: '1.16.2',
+        xcode: '>=26',
+      })) as Json
+      assert.equal(answer.ok, true, answer.error)
+      assert(
+        String(answer.log).includes(
+          `DEVELOPER_DIR=${path.join(apps, 'Xcode-26.1.app', 'Contents', 'Developer')}`,
+        ),
+        answer.log,
+      )
+      assert.deepEqual(answer.inventory.tools.cocoapods, ['1.16.2'])
+      const none = (await link.request('tools.install', {
+        tool: 'cocoapods',
+        version: '1.15.2',
+        xcode: '99',
+      })) as Json
+      assert.equal(none.ok, false)
+      assert.equal(
+        none.error,
+        "No installed Xcode matches 99, which CocoaPods' native gems compile with",
+      )
+    })
+
+    it('U8.7 a CocoaPods stage waits while no connected Mac matches, then runs on a Mac', async () => {
+      const db = c.master.master!.database.db
+      const nodes = [c.fingerprint('tooled'), c.fingerprint('bare')]
+      // The scheduler reads each worker's stored inventory on every pass.
+      const reportAs = (os: string): void => {
+        for (const fingerprint of nodes)
+          db.prepare(
+            "UPDATE worker_inventory SET inventory=json_set(inventory,'$.os',?) WHERE fingerprint=?",
+          ).run(os, fingerprint)
+      }
+      reportAs('linux')
+      let id: string
+      try {
+        const created = await c.api('POST', '/api/v2/runs', {
+          project: 'tools',
+          params: { want: 'pods' },
+        })
+        assert.equal(created.status, 202, created.text)
+        id = created.json.id as string
+        await c.until(
+          () =>
+            (c.master.master!.run(id) as Json).stages.some(
+              (stage: Json) => stage.name === 'use',
+            ) || undefined,
+          30000,
+          'the pods stage queued',
+        )
+        await new Promise((resolve) => setTimeout(resolve, 1500))
+        const waiting = c.master.master!.run(id) as Json
+        assert.equal(
+          use(waiting).status,
+          'queued',
+          JSON.stringify(waiting.stages),
+        )
+      } finally {
+        reportAs('macos')
+      }
+      const done = await c.until(
+        () => {
+          const run = c.master.master!.run(id) as Json
+          return ['succeeded', 'failed', 'cancelled'].includes(run.status)
+            ? run
+            : undefined
+        },
+        60000,
+        'the pods run',
+      )
+      assert.equal(
+        done.status,
+        'succeeded',
+        c.master.master!.scheduler.logs(done.id),
       )
     })
 
     it('U8.6 refuses an install outside the closed set over the link', async () => {
       const link = c.master.master!.registry.link(c.fingerprint('bare'))!
       const answer = (await link.request('tools.install', {
-        tool: 'python',
-        version: '3',
+        tool: 'perl',
+        version: '5',
       })) as Json
       assert.equal(answer.ok, false)
-      assert.equal(answer.error, 'python is not a tool Mason installs')
+      assert.equal(answer.error, 'perl is not a tool Mason installs')
       assert.deepEqual(Object.keys(answer.inventory.tools), [
         'node',
         'rust',
         'java',
+        'python',
+        'go',
+        'ruby',
         'android',
+        'cocoapods',
       ])
     })
   })
