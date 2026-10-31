@@ -30,7 +30,12 @@ import {
   type ProcessIdentity,
 } from '../builder/execution.js'
 import { noSymlinks } from '../config.js'
-import { LinkError, type Link, type MethodTable } from '../link/link.js'
+import {
+  LinkError,
+  type Link,
+  type MethodTable,
+  type Stream,
+} from '../link/link.js'
 import { globExpression } from '../master/rules.js'
 import {
   redact,
@@ -1715,6 +1720,12 @@ export class WorkerRuntime {
       scratch: this.path('tmp', 'artifacts'),
       request: async <T>(method: string, params: unknown): Promise<T> =>
         await this.request<T>(method, params, 5 * 60_000),
+      stream: (method: string, params: unknown): Stream => {
+        const link = this.options.link()
+        if (link == null || link.closed)
+          throw new LinkError('The master is not connected', 'closed')
+        return link.openStream(method, params)
+      },
       connected: async (): Promise<void> => {
         const controller = this.controllers.get(assignment.key)
         await this.connected(controller?.signal ?? new AbortController().signal)

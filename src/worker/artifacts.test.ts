@@ -1,10 +1,17 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
-import { createServer, type Server } from 'node:http'
-import type { AddressInfo } from 'node:net'
+import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs'
 import path from 'node:path'
-import { after, before, describe, it } from 'mocha'
-import { LinkError } from '../link/link.js'
+import { describe, it } from 'mocha'
+import { Link, LinkError, type Stream } from '../link/link.js'
+import { memoryPair } from '../link/wire.js'
 import type { StageAssignment } from '../pipeline/assignment.js'
 import { desktop, manifest, zip } from '../upload/fixtures.test.js'
 import {
@@ -23,29 +30,60 @@ const root = (): string =>
     path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'worker-artifacts-'),
   )
 
-/** A host that answers each upload with the next scripted reply. */
-class Host {
-  server!: Server
-  origin = ''
-  readonly replies: Array<{ status: number; body: string }> = []
-  readonly headers: Array<Record<string, string | string[] | undefined>> = []
-  async start(port = 0): Promise<void> {
-    this.server = createServer((req, res) => {
-      this.headers.push(req.headers)
-      req.resume()
-      req.on('end', () => {
+/**
+ * The master's end of a worker's link: each artifact stream is read to its
+ * end, recorded, and answered with the next scripted reply, as the master
+ * relays the host's.
+ */
+class Master {
+  readonly replies: Array<{ status: number; body: string | Buffer }> = []
+  readonly sent: Array<{
+    method: string
+    params: Record<string, unknown>
+    bytes: number
+  }> = []
+  readonly worker: Link
+  constructor() {
+    const [a, b] = memoryPair()
+    const answer =
+      (method: string) =>
+      async (stream: Stream, params: unknown): Promise<void> => {
+        const bytes = (await stream.collect()).length
+        this.sent.push({
+          method,
+          params: params as Record<string, unknown>,
+          bytes,
+        })
         const reply = this.replies.shift() ?? {
           status: 500,
-          body: 'no reply scripted',
+          body: JSON.stringify({ error: 'no reply scripted' }),
         }
-        res.writeHead(reply.status)
-        res.end(reply.body)
-      })
+        await stream.write(
+          Buffer.concat([
+            Buffer.from(`${JSON.stringify({ status: reply.status })}\n`),
+            Buffer.from(reply.body),
+          ]),
+        )
+        stream.end()
+      }
+    new Link(a, {
+      localRole: 'master',
+      peerRole: 'worker',
+      dialer: true,
+      methods: {
+        streams: {
+          'artifacts.publish': answer('artifacts.publish'),
+          'artifacts.save': answer('artifacts.save'),
+          'artifacts.download': answer('artifacts.download'),
+        },
+      },
     })
-    await new Promise<void>((resolve) =>
-      this.server.listen(port, '127.0.0.1', resolve),
-    )
-    this.origin = `http://127.0.0.1:${(this.server.address() as AddressInfo).port}`
+    this.worker = new Link(b, {
+      localRole: 'worker',
+      peerRole: 'master',
+      dialer: false,
+      methods: {},
+    })
   }
 }
 
@@ -61,13 +99,7 @@ describe('Stage file names', () => {
 
 describe('Worker artifact calls', function () {
   this.timeout(30_000)
-  const host = new Host()
-  before(async () => {
-    await host.start()
-  })
-  after(() => {
-    host.server.close()
-  })
+  const master = new Master()
 
   const context = (
     overrides: Partial<ArtifactContext> = {},
@@ -89,7 +121,7 @@ describe('Worker artifact calls', function () {
           : {
               uploads: uploads ?? {
                 token: 'stage-token',
-                origin: host.origin,
+                origin: 'https://host.example',
                 reservations: [
                   {
                     id: 'a'.repeat(32),
@@ -106,6 +138,7 @@ describe('Worker artifact calls', function () {
       request: async (): Promise<never> => {
         throw new LinkError('The master is not connected', 'closed')
       },
+      stream: (method, params) => master.worker.openStream(method, params),
       connected: async (): Promise<void> => undefined,
       journal: (kind, data): void => {
         journalled.push([kind, data])
@@ -120,7 +153,7 @@ describe('Worker artifact calls', function () {
     }
   }
 
-  it('U12.16 publishes a variant with its package’s own number inside the run’s block, and refuses one outside it before uploading', async () => {
+  it('U12.16 publishes a variant with its package’s own number inside the run’s block, and refuses one outside it before sending', async () => {
     const reservation = {
       id: 'b'.repeat(32),
       app: 'test.example.app',
@@ -132,7 +165,7 @@ describe('Worker artifact calls', function () {
       {},
       {
         token: 'stage-token',
-        origin: host.origin,
+        origin: 'https://host.example',
         reservations: [reservation],
       },
     )
@@ -140,19 +173,37 @@ describe('Worker artifact calls', function () {
       zip([['AndroidManifest.xml', manifest(false, false, code)]])
     writeFileSync(path.join(ctx.dir, 'arm64.apk'), apk(102))
     writeFileSync(path.join(ctx.dir, 'past.apk'), apk(103))
-    const uploads = host.headers.length
-    host.replies.push({ status: 202, body: JSON.stringify({ staged: true }) })
+    const sends = master.sent.length
+    master.replies.push({
+      status: 201,
+      body: JSON.stringify({
+        buildId: 9,
+        url: 'https://host.example/apps/1',
+        installUrl: 'https://host.example/apps/1/branches/bWFpbg',
+        visible: true,
+      }),
+    })
     const result = await publish(ctx, {
       app: 'test.example.app',
       platform: 'android',
       path: 'arm64.apk',
       variant: 'arm64-v8a',
     })
-    assert.equal(result.variant, 'arm64-v8a')
-    const sent = host.headers.at(-1)!
-    assert.equal(sent['x-mason-build-number'], '102')
-    assert.equal(sent['x-mason-variant'], 'arm64-v8a')
-    assert.match(ctx.journalled.at(-1)![1], /"variant":"arm64-v8a"/)
+    assert.deepEqual(result, {
+      buildId: 9,
+      url: 'https://host.example/apps/1',
+      installUrl: 'https://host.example/apps/1/branches/bWFpbg',
+      visible: true,
+      variant: 'arm64-v8a',
+    })
+    // The whole file goes to the master, with what it grants it by.
+    const sent = master.sent.at(-1)!
+    assert.equal(sent.method, 'artifacts.publish')
+    assert.equal(sent.bytes, apk(102).length)
+    assert.equal(sent.params.buildNumber, '102')
+    assert.equal(sent.params.variant, 'arm64-v8a')
+    assert.equal(sent.params.key, 'job/ship/1')
+    assert.match(String(sent.params.digest), /^[0-9a-f]{64}$/)
     // Refused before anything is sent: past the block, a mismatched number, a bad name.
     await assert.rejects(
       publish(ctx, {
@@ -180,13 +231,24 @@ describe('Worker artifact calls', function () {
       }),
       /A variant is 1 to 32 letters/,
     )
-    assert.equal(host.headers.length, uploads + 1)
+    assert.equal(master.sent.length, sends + 1)
   })
 
-  it('U12.7 publishes by the stage token while the master is away and journals the staged publication once', async () => {
-    const ctx = context()
+  it('U12.7 waits while the master is away, then publishes through it; a staged publication is journalled once', async () => {
+    let away = 2
+    let waited = 0
+    const ctx = context({
+      stream: (method, params) => {
+        if (away-- > 0)
+          throw new LinkError('The master is not connected', 'closed')
+        return master.worker.openStream(method, params)
+      },
+      connected: async () => {
+        waited++
+      },
+    })
     writeFileSync(path.join(ctx.dir, 'app.dmg'), desktop('dmg'))
-    host.replies.push({
+    master.replies.push({
       status: 202,
       body: JSON.stringify({ staged: true, url: 'https://host/' }),
     })
@@ -204,17 +266,22 @@ describe('Worker artifact calls', function () {
       visible: false,
       variant: '',
     })
-    const sent = host.headers.at(-1)!
-    assert.equal(sent['x-mason-token'], 'stage-token')
-    assert.equal(sent['x-mason-build-number'], '7')
-    assert.equal(sent['x-mason-changelog'], 'Fixes')
+    assert.equal(waited, 2)
+    const sent = master.sent.at(-1)!
+    assert.equal(sent.params.buildNumber, '7')
+    assert.equal(sent.params.changelog, 'Fixes')
+    // The stage's token stays on the node: the master grants the file.
+    assert.equal(sent.params.uploadToken, undefined)
     assert.deepEqual(
       ctx.journalled.map(([kind]) => kind),
       ['publication'],
     )
-    assert.match(ctx.logs.join(''), /uploading app\.dmg with the stage’s token/)
+    assert.match(
+      ctx.logs.join(''),
+      /The master is unreachable; waiting to send artifacts\.publish/,
+    )
     // An absolute path inside the checkout, as ctx.apple.archive gives, is the same file.
-    host.replies.push({
+    master.replies.push({
       status: 202,
       body: JSON.stringify({ staged: true, url: 'https://host/' }),
     })
@@ -236,7 +303,7 @@ describe('Worker artifact calls', function () {
     assert.equal(checkoutPath(ctx.dir, 'a/b'), 'a/b')
     // An export named after its product, with a space.
     writeFileSync(path.join(ctx.dir, 'TS App.dmg'), desktop('dmg'))
-    host.replies.push({
+    master.replies.push({
       status: 202,
       body: JSON.stringify({ staged: true, url: 'https://host/' }),
     })
@@ -252,7 +319,7 @@ describe('Worker artifact calls', function () {
     assert.throws(() => checkoutFile('a\0b'), /Invalid text/)
     assert.throws(() => checkoutPath(ctx.dir, ctx.dir), /outside the checkout/)
     // A refusal names the host's reason, even when it is not JSON.
-    host.replies.push({ status: 400, body: 'not json' })
+    master.replies.push({ status: 400, body: 'not json' })
     await assert.rejects(
       publish(ctx, {
         app: 'test.example.app',
@@ -264,7 +331,7 @@ describe('Worker artifact calls', function () {
     )
   })
 
-  it('U12.1 refuses a publication the stage cannot make', async () => {
+  it('U12.1 refuses a publication the stage cannot make, and one the master refuses', async () => {
     const ctx = context()
     writeFileSync(path.join(ctx.dir, 'app.dmg'), desktop('dmg'))
     await assert.rejects(
@@ -292,24 +359,38 @@ describe('Worker artifact calls', function () {
       }),
       /needs its version/,
     )
-    const failing = context({
-      request: async () => {
-        throw new LinkError('Refused', 'failed')
-      },
+    master.replies.push({
+      status: 400,
+      body: JSON.stringify({ error: 'Already published' }),
     })
-    writeFileSync(path.join(failing.dir, 'app.dmg'), desktop('dmg'))
     await assert.rejects(
-      publish(failing, {
+      publish(ctx, {
         app: 'test.example.app',
         platform: 'macos',
         path: 'app.dmg',
         version: '1',
       }),
-      /Refused/,
+      /refused app\.dmg: Already published/,
+    )
+    // Anything but the link going away fails the call at once.
+    const broken = context({
+      stream: () => {
+        throw new Error('boom')
+      },
+    })
+    writeFileSync(path.join(broken.dir, 'app.dmg'), desktop('dmg'))
+    await assert.rejects(
+      publish(broken, {
+        app: 'test.example.app',
+        platform: 'macos',
+        path: 'app.dmg',
+        version: '1',
+      }),
+      /boom/,
     )
   })
 
-  it('U12.8 saves artifacts, retrying while the host is unreachable, and reports refusals', async () => {
+  it('U12.8 saves artifacts through the master, waiting while it is away, and reports refusals', async () => {
     const ctx = context()
     mkdirSync(path.join(ctx.dir, 'out'))
     writeFileSync(path.join(ctx.dir, 'out', 'a.txt'), 'a')
@@ -321,7 +402,7 @@ describe('Worker artifact calls', function () {
       save(context({}, null), 'x', 'out/**', {}),
       /cannot save/,
     )
-    host.replies.push({
+    master.replies.push({
       status: 403,
       body: JSON.stringify({ error: 'The token is for another run' }),
     })
@@ -329,35 +410,56 @@ describe('Worker artifact calls', function () {
       save(ctx, 'out', 'out/**', { kind: 'data' }),
       /another run/,
     )
-    // A host that is down at first, then answers.
-    const late = new Host()
-    await late.start()
-    const port = Number(new URL(late.origin).port)
-    late.server.close()
-    const offline = context(
-      {},
-      { token: 't', origin: `http://127.0.0.1:${port}`, reservations: [] },
-    )
+    // The link drops mid-stream once, then the master answers.
+    let dropped = false
+    const offline = context({
+      stream: (method, params) => {
+        const stream = master.worker.openStream(method, params)
+        if (!dropped) {
+          dropped = true
+          stream.abort('Link closed')
+        }
+        return stream
+      },
+    })
     mkdirSync(path.join(offline.dir, 'out'))
     writeFileSync(path.join(offline.dir, 'out', 'a.txt'), 'a')
-    setTimeout(() => {
-      void late
-        .start(port)
-        .then(() => late.replies.push({ status: 201, body: '{}' }))
-    }, 500)
+    // The master has no host for a moment, then relays the archive.
+    master.replies.push(
+      { status: 503, body: JSON.stringify({ error: 'No host is connected' }) },
+      { status: 201, body: '{}' },
+    )
     await save(offline, 'out', 'out/**', {
       kind: 'report',
       entry: 'a.txt',
       visibleTo: 'testers',
     })
-    assert.equal(late.headers[0]!['x-mason-visible-to'], 'testers')
-    assert.equal(late.headers[0]!['x-mason-entry'], 'a.txt')
-    late.server.close()
+    const sent = master.sent.at(-1)!
+    assert.equal(sent.method, 'artifacts.save')
+    assert.deepEqual(
+      [sent.params.name, sent.params.kind, sent.params.entry],
+      ['out', 'report', 'a.txt'],
+    )
+    assert.equal(sent.params.visibleTo, 'testers')
+    assert.equal(sent.params.uploadToken, 'stage-token')
+    assert(sent.bytes > 0)
+    assert.match(offline.logs.join(''), /Saved artifact out \(1 files\)/)
+    assert.match(
+      offline.logs.join(''),
+      /The host is unreachable \(No host is connected\); waiting to send artifacts\.save/,
+    )
   })
 
-  it('U12.14/U12.9 waits for the master before fetching, reports a host refusal, and journals test results while it is away', async () => {
+  it('U12.14/U12.9 waits for the master before fetching, unpacks what it relays, reports a refusal, and journals test results while it is away', async () => {
     let calls = 0
     let waited = 0
+    const packed = root()
+    mkdirSync(path.join(packed, 'report'))
+    writeFileSync(path.join(packed, 'report', 'index.html'), '<p>ok</p>')
+    const archive = path.join(packed, 'report.tar.gz')
+    execFileSync('tar', ['-czf', archive, '-C', packed, 'report'])
+    const bytes = readFileSync(archive)
+    const digest = createHash('sha256').update(bytes).digest('hex')
     const ctx = context({
       request: async <T>(): Promise<T> => {
         calls++
@@ -365,9 +467,9 @@ describe('Worker artifact calls', function () {
           throw new LinkError('The master is not connected', 'closed')
         return {
           grant: 'g',
-          url: `${host.origin}/api/artifacts/download?grant=g`,
-          digest: 'd',
-          size: 1,
+          url: 'https://host.example/api/artifacts/download?grant=g',
+          digest,
+          size: bytes.length,
           name: 'results',
         } as T
       },
@@ -375,12 +477,25 @@ describe('Worker artifact calls', function () {
         waited++
       },
     })
-    host.replies.push({ status: 404, body: 'gone' })
+    master.replies.push({ status: 200, body: bytes })
+    const files = await fetchArtifacts(
+      ctx,
+      { workflow: 'build', name: 'results' },
+      'got',
+    )
+    assert.deepEqual(files, [path.join(ctx.dir, 'got', 'report', 'index.html')])
+    assert.equal(waited, 1)
+    assert.deepEqual(master.sent.at(-1)!.params.grant, 'g')
+    master.replies.push({ status: 404, body: 'gone' })
     await assert.rejects(
       fetchArtifacts(ctx, { workflow: 'build', name: 'results' }, 'got'),
-      /refused artifact results: HTTP 404/,
+      /refused artifact results: gone/,
     )
-    assert.equal(waited, 1)
+    master.replies.push({ status: 200, body: 'other bytes' })
+    await assert.rejects(
+      fetchArtifacts(ctx, { workflow: 'build', name: 'results' }, 'got'),
+      /does not match its digest/,
+    )
     const refusing = context({
       request: async () => {
         throw new LinkError('No run matches', 'failed')

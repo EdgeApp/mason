@@ -15,6 +15,7 @@ import type {
   ParamValue,
   Role,
 } from '../../types/mason/index.js'
+import { bridge } from '../link/bridge.js'
 import {
   LinkError,
   type Link,
@@ -140,6 +141,8 @@ export interface SchedulerOptions {
   masterChecklist?: () => ChecklistItem[]
   /** Publication: reservations and upload tokens at assignment, grants and queries from stages. */
   artifacts?: Artifacts
+  /** Opens a stream to the host, which the master relays a stage's artifact requests to. */
+  toHost?: (method: string, params: unknown) => Stream
   /** Apple signing: a signing stage's identity and profiles, and its TestFlight and notary calls. */
   apple?: {
     signing(project: Project, stage: GraphStage): Promise<StageSigning>
@@ -2662,6 +2665,106 @@ export class Scheduler {
     })
   }
 
+  /**
+   * Relays a stage's artifact request to the host over the master's own
+   * link to it, so a node never reaches the host: the node's stream and the
+   * host's are joined both ways. The host answers as its HTTP route would,
+   * with a JSON header line and the body. A request the master refuses
+   * (an unknown ticket, a publication its reservation does not allow, no
+   * host) is answered the same way, so the stage tells it from a dropped
+   * link, which it retries.
+   */
+  private relayArtifact(
+    kind: 'publish' | 'save' | 'download',
+    stream: Stream,
+    params: unknown,
+    link: Link,
+  ): void {
+    const answer = (status: number, error: string): void => {
+      void stream
+        .write(
+          Buffer.from(
+            `${JSON.stringify({ status, headers: {} })}\n${JSON.stringify({ error })}`,
+          ),
+        )
+        .then(() => stream.end())
+        .catch(() => undefined)
+    }
+    let request: {
+      method: 'GET' | 'POST'
+      path: string
+      headers: Record<string, string>
+      query?: Record<string, string>
+    }
+    try {
+      const { job, name, attempt } = this.authorize(params, link)
+      const fields = (params ?? {}) as Record<string, unknown>
+      const text = (key: string): string | undefined =>
+        typeof fields[key] === 'string' ? fields[key] : undefined
+      if (kind === 'publish') {
+        const artifacts = this.options.artifacts
+        if (artifacts == null) throw new Error('Publication is unavailable')
+        const grant = artifacts.grant(
+          { job: String(job.id), stage: name, attempt },
+          params as Parameters<Artifacts['grant']>[1],
+        )
+        const changelog = text('changelog')
+        request = {
+          method: 'POST',
+          path: `/api/artifacts/${encodeURIComponent(grant.reservation)}`,
+          headers: {
+            authorization: `Bearer ${grant.grant}`,
+            ...(changelog == null
+              ? {}
+              : {
+                  'x-mason-changelog': encodeURIComponent(
+                    changelog.slice(0, 60_000),
+                  ),
+                }),
+          },
+        }
+      } else if (kind === 'save') {
+        const artifact = text('name')
+        const token = text('uploadToken')
+        if (artifact == null || token == null)
+          throw new Error('An artifact needs its name and the stage’s token')
+        const entry = text('entry')
+        const visibleTo = text('visibleTo')
+        request = {
+          method: 'POST',
+          path: `/api/runs/${encodeURIComponent(String(job.id))}/artifacts/${encodeURIComponent(artifact)}`,
+          headers: {
+            'x-mason-token': token,
+            'x-mason-kind': text('kind') ?? 'file',
+            ...(entry == null ? {} : { 'x-mason-entry': entry }),
+            ...(visibleTo == null ? {} : { 'x-mason-visible-to': visibleTo }),
+          },
+        }
+      } else {
+        const grant = text('grant')
+        if (grant == null) throw new Error('A download needs its grant')
+        request = {
+          method: 'GET',
+          path: '/api/artifacts/download',
+          headers: {},
+          query: { grant },
+        }
+      }
+    } catch (error) {
+      answer(400, (error as Error).message)
+      return
+    }
+    let host: Stream
+    try {
+      if (this.options.toHost == null) throw new Error('No host is configured')
+      host = this.options.toHost('artifacts.request', request)
+    } catch (error) {
+      answer(503, (error as Error).message)
+      return
+    }
+    void bridge(stream, host).catch(() => undefined)
+  }
+
   /** Methods the master accepts from workers. */
   methods(): MethodTable {
     return {
@@ -2996,6 +3099,18 @@ export class Scheduler {
         },
       },
       streams: {
+        /** `ctx.publish`: the file, relayed to the host under the master's grant. */
+        'artifacts.publish': (stream, params, link): void => {
+          this.relayArtifact('publish', stream, params, link)
+        },
+        /** `ctx.artifacts.save`: the archive, relayed to the host with the stage's token. */
+        'artifacts.save': (stream, params, link): void => {
+          this.relayArtifact('save', stream, params, link)
+        },
+        /** `ctx.artifacts.fetch`: the granted object, relayed from the host. */
+        'artifacts.download': (stream, params, link): void => {
+          this.relayArtifact('download', stream, params, link)
+        },
         'git.upload-pack': async (stream, params, link): Promise<void> => {
           try {
             const { project } = this.authorize(params, link)

@@ -705,10 +705,13 @@ await ctx.publish({
 })
 ```
 
-The file is uploaded to the host, verified (bundle identity, format, digest),
-and becomes installable once the master confirms it. `publish` resolves when
-the host has the file with `{ buildId, url, installUrl, visible, variant }`;
-the run's Artifacts page lists what it published.
+The file goes over the node's link to the master, which grants it and relays
+it to the host over its own link: a node never reaches the host. The host
+verifies it (bundle identity, format, digest), and it becomes installable once
+the master confirms it. `publish` resolves when the host has the file with
+`{ buildId, url, installUrl, visible, variant }`; the run's Artifacts page
+lists what it published. `ctx.artifacts.save` and `ctx.artifacts.fetch` go
+through the master the same way.
 
 **Which number.** An IPA's or APK's number is its own (`CFBundleVersion`,
 `versionCode`); `buildNumber`, if given, must match it. A desktop file's is
@@ -1021,14 +1024,15 @@ export async function buildMac(ctx: Stage) {
 ## 9. Running while the master is away
 
 When a stage starts, its node already has everything it needs: the stage
-definition, the checked-out source, its secrets, its stashes, its reserved
-build numbers, and an upload token for the host. If the master's link drops:
+definition, the checked-out source, its secrets, its stashes and its reserved
+build numbers. If the master's link drops:
 
 - the stage keeps running to completion and enforces its own timeout;
 - the log, result, return value, stashes it creates and artifacts are kept on
   the node and delivered when the link returns;
-- `publish` and `artifacts.save` upload to the host directly; the master
-  confirms publication when it reconnects;
+- `publish` and `artifacts.save` wait for the link and send their file once
+  it is back, since files reach the host only through the master; they wait
+  the same way while the master has no host to relay to;
 - the master shows the stage as `running (disconnected)` until it hears back
   or the stage's timeout passes with no word, when it marks it `interrupted`;
 - calls that need the master during a stage — `artifacts.fetch` from another
