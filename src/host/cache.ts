@@ -75,7 +75,7 @@ const order = [
   'job',
 ]
 
-const HOST_SCHEMA = 4
+const HOST_SCHEMA = 5
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -99,9 +99,16 @@ function migrateHost(db: DatabaseSync): void {
     INSERT INTO host_meta(key,value) VALUES('host_schema','3') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
   // The host no longer serves the Zealot upload API, the only reader of keys.
-  db.exec(`BEGIN IMMEDIATE;
+  if (current < 4)
+    db.exec(`BEGIN IMMEDIATE;
     DELETE FROM api_keys;
     INSERT INTO host_meta(key,value) VALUES('host_schema','4') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  // The section step each step ran in, replicated with the step.
+  const columns = db.prepare('PRAGMA table_info(job_steps)').all()
+  db.exec(`BEGIN IMMEDIATE;
+    ${columns.some((column) => column.name === 'parent') ? '' : 'ALTER TABLE job_steps ADD COLUMN parent INTEGER;'}
+    INSERT INTO host_meta(key,value) VALUES('host_schema','5') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
 }
 

@@ -2877,13 +2877,14 @@ export class Scheduler {
                 title: string
                 status: string
                 ms?: number
+                parent?: number
               }
               // The step's lines are those its stage log gains while it runs.
               const offset = this.logSize(id, name)
               const done = String(step.status) !== 'running'
               this.db
                 .prepare(
-                  'INSERT INTO job_steps(job_id,stage,attempt,id,kind,title,status,ms,at,log_start,log_end) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,stage,attempt,id) DO UPDATE SET status=excluded.status,ms=excluded.ms,log_end=excluded.log_end',
+                  'INSERT INTO job_steps(job_id,stage,attempt,id,kind,title,status,ms,at,log_start,log_end,parent) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id,stage,attempt,id) DO UPDATE SET status=excluded.status,ms=excluded.ms,log_end=excluded.log_end',
                 )
                 .run(
                   id,
@@ -2897,6 +2898,9 @@ export class Scheduler {
                   this.now(),
                   offset,
                   done ? offset : null,
+                  Number.isSafeInteger(step.parent) && Number(step.parent) > 0
+                    ? Number(step.parent)
+                    : null,
                 )
             }
             acked = record.seq

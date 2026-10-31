@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 22
+export const MASTER_SCHEMA = 23
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -606,6 +606,12 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     INSERT OR IGNORE INTO build_publications(reservation_id,variant,digest,build_id,staged_at)
       SELECT r.id,'',b.digest,r.build_id,r.staged_at FROM build_reservations r LEFT JOIN builds b ON b.id=r.build_id
       WHERE r.build_id IS NOT NULL OR r.staged_at IS NOT NULL;`)
+  },
+  // 23: the section step each step ran in, so the run page nests it there.
+  (db): void => {
+    const columns = db.prepare('PRAGMA table_info(job_steps)').all()
+    if (!columns.some((column) => column.name === 'parent'))
+      db.exec('ALTER TABLE job_steps ADD COLUMN parent INTEGER')
   },
 ]
 

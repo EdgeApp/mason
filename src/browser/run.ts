@@ -2,7 +2,8 @@
 // live stream of stages, steps and log lines, the log's wrap toggle, the
 // stage list's filters, the graph's zoom and its highlighted rails, and the
 // dashboard's queue, which reloads when the queue changes.
-import { ansiLine, plainLog } from '../view/log.js'
+import { ansiLine } from '../view/log.js'
+import { stepItems } from '../view/steps.js'
 
 /** The body an action form sends: known fields at the top, the rest as parameters. */
 export function actionBody(
@@ -43,6 +44,7 @@ export interface Snapshot {
     title: string
     status: string
     ms: number | null
+    parent?: number | null
   }>
 }
 
@@ -270,12 +272,6 @@ export async function submitAction(
 }
 
 /** The step list's items, as the server renders them. */
-function stepHtml(stage: string, step: Snapshot['steps'][number]): string {
-  const escape = (text: string): string =>
-    text.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
-  const ms = step.ms == null ? '' : ` · ${Math.round(step.ms / 1000)}s`
-  return `<li class="step"><a href="?stage=${encodeURIComponent(stage)}&amp;step=${step.id}"><span class="dot ${escape(step.status)}" aria-hidden="true"></span><span class="mono">${escape(plainLog(step.title))}</span><small>${escape(step.kind)}${ms}</small></a></li>`
-}
 
 /** The real page's parts. */
 export function domRunPage(
@@ -328,8 +324,7 @@ export function domRunPage(
     },
     setSteps: (steps): void => {
       const list = doc.querySelector('[data-steps]')
-      if (list != null)
-        list.innerHTML = steps.map((step) => stepHtml(stage, step)).join('')
+      if (list != null) list.innerHTML = stepItems(stage, steps)
     },
     appendLog: (html): void => {
       const code = doc.querySelector('[data-log] code')
