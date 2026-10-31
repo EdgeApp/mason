@@ -280,7 +280,7 @@ describe('Secret variants: changes, views and their audit', function () {
       contents: b64('{"a": 1}\n'),
     })
     const keystore = await secrets.add(manager, 'app', {
-      name: 'keystores/release.jks',
+      name: 'release.jks',
       kind: 'file',
       contents: b64(Buffer.from([0xfe, 0xed, 0, 1])),
     })
@@ -297,7 +297,7 @@ describe('Secret variants: changes, views and their audit', function () {
         ['API_TOKEN', 'value', [], true, 19],
         ['API_TOKEN', 'value', ['develop'], true, 19],
         ['config.json', 'file', ['beta', 'develop'], true, 9],
-        ['keystores/release.jks', 'file', [], false, 4],
+        ['release.jks', 'file', [], false, 4],
       ],
     )
     // The pushed backup holds every change so far.
@@ -327,7 +327,7 @@ describe('Secret variants: changes, views and their audit', function () {
       ['API_TOKEN', '', 1, '10.0.0.5'],
       ['API_TOKEN', 'develop', 1, '10.0.0.5'],
       ['config.json', 'beta,develop', 1, '10.0.0.5'],
-      ['keystores/release.jks', '', 1, '10.0.0.5'],
+      ['release.jks', '', 1, '10.0.0.5'],
     ]
     assert.deepEqual(
       added.map((row) => [row.name, row.configs, row.account_id, row.address]),
@@ -418,6 +418,14 @@ describe('Secret variants: changes, views and their audit', function () {
         { name: '../x', kind: 'file', contents: b64('x') },
         /Unsafe relative path/,
       ],
+      [
+        {
+          name: 'android/app/google-services.json',
+          kind: 'file',
+          contents: b64('x'),
+        },
+        /android\/app\/google-services\.json is a path: a secret file is named by its file name/,
+      ],
       [{ name: 'A', kind: 'secret', value: 'x' }, /kind is value or file/],
       [
         { name: 'A', kind: 'value', value: 'x', masked: false },
@@ -498,7 +506,7 @@ describe('Secret variants: changes, views and their audit', function () {
     assert.deepEqual(secrets.contents(manager, 'app', config), {
       text: '{"a": 2}\n',
     })
-    const keystore = id('keystores/release.jks')
+    const keystore = id('release.jks')
     assert.deepEqual(secrets.contents(manager, 'app', keystore), {
       contents: b64(Buffer.from([0xfe, 0xed, 0, 1])),
     })
@@ -545,7 +553,7 @@ describe('Secret variants: changes, views and their audit', function () {
     const last = (action: string): Json =>
       rows.filter((row) => row.action === action).at(-1)
     assert.equal(last('edited').name, 'config.json')
-    assert.equal(last('replaced').name, 'keystores/release.jks')
+    assert.equal(last('replaced').name, 'release.jks')
     assert.equal(last('configs changed').detail, 'beta, develop → beta')
     assert.equal(last('configs changed').configs, 'beta')
     assert.equal(last('deleted').name, 'TWO')
