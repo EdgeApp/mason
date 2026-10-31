@@ -96,6 +96,8 @@ import {
 } from './system/xcode.js'
 import { xcodeLaunches } from './system/index.js'
 import { checkout } from './checkout.js'
+import { localImports } from '../pipeline/localImports.js'
+import { duration } from '../view/html.js'
 import {
   fetchArtifacts,
   publish,
@@ -971,6 +973,13 @@ export class WorkerRuntime {
     let release: (() => void) | undefined
     let source: string | undefined
     let report: RunReport
+    // The stage's timeout covers its checkout too, not only its function.
+    const deadline =
+      assignment.kind === 'setup'
+        ? undefined
+        : AbortSignal.timeout(assignment.timeout * 1000)
+    const preparing =
+      deadline == null ? signal : AbortSignal.any([signal, deadline])
     try {
       const dir = this.workspace(assignment, slot)
       if (assignment.kind !== 'setup' && assignment.workspace.path != null)
@@ -1000,26 +1009,15 @@ export class WorkerRuntime {
           bridge: this.bridge,
           ticket,
           log: say,
+          signal: preparing,
         })
       else {
-        // No checkout: the workspace starts empty (or as left, with reuse), and
-        // the Masonfile comes from a separate copy of the pinned commit.
+        // No checkout: the workspace starts empty (or as left, with reuse).
         if (assignment.workspace.mode === 'clean')
           rmSync(dir, { recursive: true, force: true })
         mkdirSync(dir, { recursive: true, mode: 0o700 })
         source = this.path('sources', String(slot), assignment.project)
-        await checkout({
-          dir: source,
-          repository: assignment.repository,
-          commit: assignment.commit,
-          repositories: [],
-          submodules: false,
-          lfs: false,
-          mode: 'clean',
-          bridge: this.bridge,
-          ticket,
-          log: say,
-        })
+        await this.stageSource(assignment, source, ticket, say, preparing)
       }
       // A clean checkout reset the tree: whatever recovery could not clean is gone.
       if (assignment.kind !== 'setup' && assignment.workspace.mode === 'clean')
@@ -1046,10 +1044,15 @@ export class WorkerRuntime {
             )
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
+      const late = deadline?.aborted === true && !signal.aborted
+      const message = late
+        ? `The checkout ran past the stage's timeout of ${duration(assignment.kind === 'setup' ? 0 : assignment.timeout * 1000)}`
+        : error instanceof Error
+          ? error.message
+          : String(error)
       say(`${message}\n`)
       report = {
-        status: signal.aborted ? 'cancelled' : 'failed',
+        status: signal.aborted ? 'cancelled' : late ? 'timed_out' : 'failed',
         reason: message,
       }
     } finally {
@@ -1274,6 +1277,60 @@ export class WorkerRuntime {
         ? {}
         : { simulatorSet: prepared.simulatorSet }),
     }
+  }
+
+  /**
+   * Where a stage with no checkout finds its Masonfile: the master sends
+   * the file itself, so the node gets none of the repository. A Masonfile
+   * that imports other files of the repository at run time gets a shallow
+   * copy of the pinned commit instead, without its history.
+   */
+  private async stageSource(
+    assignment: StageAssignment,
+    source: string,
+    ticket: { key: string; token: string },
+    say: (text: string) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let given: { path: string; text: string } | undefined
+    try {
+      given = await this.request<{ path: string; text: string }>(
+        'stage.masonfile',
+        ticket,
+        60_000,
+      )
+    } catch (error) {
+      // A master too old to send it: the shallow copy below.
+      if (!(error instanceof LinkError) || error.code === 'closed') throw error
+      say(`The master sent no Masonfile (${error.message})\n`)
+    }
+    const imports = given == null ? [] : localImports(given.text)
+    if (given != null && imports.length === 0) {
+      rmSync(source, { recursive: true, force: true })
+      const file = path.join(source, relativePath(given.path))
+      mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+      writeFileSync(file, given.text + '\n', { mode: 0o600 })
+      say(`Running ${given.path} from the master, with no checkout\n`)
+      return
+    }
+    if (imports.length > 0)
+      say(
+        `${given!.path} imports ${imports.join(', ')}: fetching the pinned commit alone\n`,
+      )
+    await checkout({
+      dir: source,
+      repository: assignment.repository,
+      commit: assignment.commit,
+      repositories: [],
+      depth: 1,
+      submodules: false,
+      lfs: false,
+      mode: 'clean',
+      bridge: this.bridge,
+      ticket,
+      log: say,
+      signal,
+    })
   }
 
   private async stage(

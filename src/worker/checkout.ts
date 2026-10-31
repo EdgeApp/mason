@@ -41,6 +41,8 @@ export interface CheckoutOptions {
   bridge: GitBridge
   ticket: Ticket
   log: (text: string) => void
+  /** Stops the checkout's git commands: the stage cancelled, or out of time. */
+  signal?: AbortSignal
 }
 
 /**
@@ -64,14 +66,22 @@ export async function checkout(options: CheckoutOptions): Promise<void> {
     args: string[],
     env: NodeJS.ProcessEnv = bridged,
   ): Promise<string> => {
-    const { stdout, stderr } = await run('git', args, {
-      cwd: dir,
-      env,
-      maxBuffer: 16 * 1024 * 1024,
-      timeout: 60 * 60 * 1000,
-    })
-    if (stderr.trim() !== '') options.log(stderr)
-    return stdout.trim()
+    try {
+      const { stdout, stderr } = await run('git', args, {
+        cwd: dir,
+        env,
+        maxBuffer: 16 * 1024 * 1024,
+        timeout: 60 * 60 * 1000,
+        ...(options.signal == null ? {} : { signal: options.signal }),
+      })
+      if (stderr.trim() !== '') options.log(stderr)
+      return stdout.trim()
+    } catch (error) {
+      // What git said is the reason; the error's message is only the command.
+      const said = String((error as { stderr?: unknown }).stderr ?? '').trim()
+      if (said !== '') options.log(said + '\n')
+      throw error
+    }
   }
   try {
     if (!existsSync(path.join(dir, '.git'))) {

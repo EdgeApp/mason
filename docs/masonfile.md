@@ -431,7 +431,7 @@ other nodes; this keeps every stage able to finish without the master.
 | `apple` | Apple signing for this stage (section 12): `{ distribution, app?, bundleIds? }`. |
 | `publishes` | App IDs this stage may publish. Build numbers are reserved for them before the stage starts (section 8). |
 | `buildNumbers` | Other build-number sequences this stage needs (section 8). |
-| `checkout` | `true` (default), `false`, or `{ submodules?: boolean, depth?: number, lfs?: boolean }`. The source comes from the master (below). |
+| `checkout` | `true` (default), `false`, or `{ submodules?: boolean, depth?: number, lfs?: boolean }`. The source comes from the master (below); with `false`, only the Masonfile does. |
 | `workspace` | `'clean'` (default: reset to the pinned commit), `'reuse'` (keep untracked files from the node's last run of this stage), or `{ path, mode? }` (below). |
 | `cache` | `[{ key: string, paths: string[] }]` restored before and saved after, per node. |
 | `continueOnError` | A failure marks the stage and run `unstable` instead of failed. |
@@ -479,6 +479,16 @@ from the master:
   the project lists, the same way.
 - Because the checkout finishes before the stage starts, a stage never needs
   the master for source code, even if the link drops.
+- A stage with `checkout: false` gets an empty workspace and none of the
+  repository: the master sends the Masonfile alone, read from its mirror at the
+  pinned commit, and the stage function runs from it. A Masonfile that imports
+  other files of the repository at run time (`import { x } from './x.ts'`;
+  type-only imports do not count) gets a shallow copy of the pinned commit
+  instead, without its history. A signing stage that only takes stashed files
+  needs nothing more.
+- A stage's `timeout` covers its checkout as well as its function; a checkout
+  that outlasts it ends the stage `timed_out`. When a git command fails, what
+  git said is in the stage's log.
 - `ctx.git.tag(name, { message?, push?: boolean })` creates a tag on the pinned
   commit. With `push: true` the **master** pushes it to GitHub with its own
   credentials, if the project's settings allow tag pushes; the worker never
