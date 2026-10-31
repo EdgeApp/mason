@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { spawn } from 'node:child_process'
 import { existsSync, realpathSync, writeFileSync } from 'node:fs'
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
@@ -118,6 +119,9 @@ export function createContext(
     process.stdout.write(text.endsWith('\n') ? text : text + '\n')
   }
   let steps = 0
+  // The section step a step runs in; work started inside it, even
+  // concurrently, keeps that section as its parent.
+  const sections = new AsyncLocalStorage<number>()
   const step = async <T>(
     kind: string,
     title: string,
@@ -125,22 +129,23 @@ export function createContext(
   ): Promise<T> => {
     const started = Date.now()
     const id = ++steps
-    channel.notify('step', { id, kind, title, status: 'running' })
+    const parent = sections.getStore()
+    const record = { id, kind, title, ...(parent == null ? {} : { parent }) }
+    channel.notify('step', { ...record, status: 'running' })
     try {
-      const value = await body()
+      const value =
+        kind === 'section'
+          ? await sections.run(id, async () => await body())
+          : await body()
       channel.notify('step', {
-        id,
-        kind,
-        title,
+        ...record,
         status: 'succeeded',
         ms: Date.now() - started,
       })
       return value
     } catch (error) {
       channel.notify('step', {
-        id,
-        kind,
-        title,
+        ...record,
         status: 'failed',
         ms: Date.now() - started,
       })

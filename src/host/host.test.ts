@@ -297,7 +297,7 @@ describe('Host outbox failures', () => {
 })
 
 describe('Host cache schema', () => {
-  it('host schema 4 forgets the keys a schema 3 cache replicated, and keeps its step log columns', async () => {
+  it('host schema 4 forgets the keys a schema 3 cache replicated, keeps its step log columns, and schema 5 adds each step’s section', async () => {
     const dir = mkdtempSync(
       path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'schema-'),
     )
@@ -321,15 +321,17 @@ describe('Host cache schema', () => {
             .prepare("SELECT value FROM host_meta WHERE key='host_schema'")
             .get() as { value: string }
         ).value,
-        '4',
+        '5',
       )
       assert.deepEqual(
         db
           .prepare('PRAGMA table_info(job_steps)')
           .all()
           .map((column) => column.name)
-          .filter((name) => name === 'log_start' || name === 'log_end'),
-        ['log_start', 'log_end'],
+          .filter((name) =>
+            ['log_start', 'log_end', 'parent'].includes(String(name)),
+          ),
+        ['log_start', 'log_end', 'parent'],
       )
     } finally {
       await again.stop()

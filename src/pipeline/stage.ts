@@ -109,6 +109,8 @@ export interface StepRecord {
   title: string
   status: 'running' | 'succeeded' | 'failed'
   ms?: number
+  /** The section step it runs in, when it runs in one. */
+  parent?: number
 }
 
 export interface StageResult {

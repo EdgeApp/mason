@@ -419,7 +419,7 @@ describe('Run view script', () => {
       { id: 3, kind: 'section', title: 'x', status: 'running', ms: null },
     ])
     assert.match(steps.innerHTML, /href="\?stage=build%2Fios&amp;step=2"/)
-    assert.match(steps.innerHTML, /npm &#60;test&#62; ok</)
+    assert.match(steps.innerHTML, /npm &lt;test&gt; ok</)
     assert.match(steps.innerHTML, /exec · 4s/)
     real.appendLog([])
     real.appendLog(['<span>one</span>'])

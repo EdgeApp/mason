@@ -1915,6 +1915,47 @@ export async function main(ctx: Stage) {
     )
   })
 
+  it('U6.8 a step records the section it runs in, even when two sections run at once', async () => {
+    const out = await stage(
+      `
+import type { Stage } from '@mason/types'
+export async function main(ctx: Stage) {
+  await ctx.sh('true')
+  await Promise.all([
+    ctx.log.section('A', async () => {
+      await ctx.sh('sleep 0.2; echo a1')
+      await ctx.log.section('A inner', async () => await ctx.sh('echo a2'))
+    }),
+    ctx.log.section('B', async () => await ctx.sh('echo b1')),
+  ])
+}
+`,
+      {},
+    )
+    assert.equal(out.result.status, 'succeeded', out.log)
+    const done = out.steps.filter((step) => step.status !== 'running')
+    const title = (id: number | undefined): string | undefined =>
+      done.find((step) => step.id === id)?.title
+    assert.deepEqual(
+      Object.fromEntries(done.map((step) => [step.title, title(step.parent)])),
+      {
+        true: undefined,
+        A: undefined,
+        B: undefined,
+        'sleep 0.2; echo a1': 'A',
+        'A inner': 'A',
+        'echo a2': 'A inner',
+        'echo b1': 'B',
+      },
+    )
+    // A step's start and end carry the same parent.
+    for (const step of out.steps.filter((step) => step.status === 'running'))
+      assert.equal(
+        step.parent,
+        done.find((other) => other.id === step.id)?.parent,
+      )
+  })
+
   it('passes worker services over the step channel and refuses ones the node lacks', async () => {
     const calls: unknown[] = []
     const out = await stage(
