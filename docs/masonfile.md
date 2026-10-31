@@ -571,7 +571,9 @@ export async function buildIos(ctx: Stage) {
 A project's secrets are on its **Secrets** tab: values and files, each with
 build configs. A secret with no configs is the default variant, for every
 config; the same name can have other variants for other configs, with other
-values. No config is in two variants of one name.
+values. No config is in two variants of one name. A file is named by its file
+name alone (`google-services.json`, not `android/app/google-services.json`):
+the Masonfile says which directory it is written to.
 
 - A stage lists `configs` in order. For each secret it declares, it gets the
   variant holding the latest of those configs that some variant holds, else

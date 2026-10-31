@@ -719,14 +719,20 @@ export class Secrets {
     input: AddBody,
   ): Parameters<typeof variantRow>[0] {
     const kind = input.kind
+    const script = this.format(projectId) === 'script'
     const name =
       kind === 'value' ? envName(input.name) : relativePath(input.name)
+    // A script project's file is injected at its name; a Masonfile writes a
+    // file into the directory its stage names, so the name is a file name.
+    if (kind === 'file' && !script && name.includes('/'))
+      throw new Error(
+        `${name} is a path: a secret file is named by its file name, and the Masonfile writes it into the directory it belongs in`,
+      )
     if (kind === 'value' && isReservedName(name))
       throw new Error(
         `${name} is set by the build environment; give the secret another name`,
       )
     const configs = input.configs
-    const script = this.format(projectId) === 'script'
     if (!script && (input.masked != null || input.pathEnv != null))
       throw new Error('masked and pathEnv are for script projects')
     if (kind === 'value' && input.pathEnv != null)
