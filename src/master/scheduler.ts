@@ -2788,6 +2788,32 @@ export class Scheduler {
             await new Promise((resolve) => setTimeout(resolve, 250))
           }
         },
+        /**
+         * The Masonfile at the run's commit, for a stage with no checkout:
+         * the node runs it without fetching the repository.
+         */
+        'stage.masonfile': async (
+          params,
+          link,
+        ): Promise<{ path: string; text: string }> => {
+          const { job, project } = this.authorize(params, link)
+          const commit = String(job.commit_sha)
+          for (const file of project.entrypoint == null
+            ? ['Masonfile.ts', 'Masonfile.js']
+            : [project.entrypoint]) {
+            const text = await this.options.mirrors.show(
+              project.slug,
+              project.repository,
+              commit,
+              file,
+            )
+            if (text != null) return { path: file, text }
+          }
+          throw new LinkError(
+            `The commit ${commit.slice(0, 12)} has no Masonfile`,
+            'failed',
+          )
+        },
         /** A grant for one publication into the stage's reservation. */
         'artifacts.grant': (params, link): unknown => {
           const { job, name, attempt } = this.authorize(params, link)

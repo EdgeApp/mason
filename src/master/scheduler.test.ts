@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   writeFileSync,
@@ -2085,6 +2086,86 @@ export async function reader(ctx: Stage) { await ctx.unstash('late'); return awa
       stage(two, 'cached').output.before,
       true,
       'the cache was restored before the stage',
+    )
+  })
+
+  it('U7.28 a stage with no checkout runs the Masonfile the master sends, or a shallow copy when it imports other files', async () => {
+    await project('bare', {
+      'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+import { join } from 'node:path'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('sign', { on: 'linux', checkout: false, run: sign })
+}
+// A comment that mentions import './nothing.ts' loads nothing.
+export async function sign(ctx: Stage) {
+  return { files: await ctx.fs.glob('**'), joined: join('a', 'b') }
+}
+`,
+      'big.bin': 'not for the signer',
+    })
+    const bare = await finished(c, await request('bare'))
+    assert.equal(
+      bare.status,
+      'succeeded',
+      c.master.master!.scheduler.logs(bare.id),
+    )
+    assert.deepEqual(stage(bare, 'sign').output, { files: [], joined: 'a/b' })
+    const bareLog = c.master.master!.scheduler.logs(bare.id)!
+    assert.match(
+      bareLog,
+      /Running Masonfile\.ts from the master, with no checkout/,
+    )
+    assert.doesNotMatch(
+      bareLog.split('── Stage sign')[1] ?? '',
+      /Fetching [0-9a-f]{40} from the master/,
+    )
+    await project('helped', {
+      'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+import { greet } from './helper.ts'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('sign', { on: 'linux', checkout: false, run: sign })
+}
+export async function sign(ctx: Stage) {
+  return { greeting: greet(), files: await ctx.fs.glob('**') }
+}
+`,
+      'helper.ts': `export function greet(): string { return 'hello' }\n`,
+    })
+    c.repo('fixtures/helped').commit({ 'later.txt': 'a second commit' })
+    const helped = await finished(c, await request('helped'))
+    assert.equal(
+      helped.status,
+      'succeeded',
+      c.master.master!.scheduler.logs(helped.id),
+    )
+    assert.deepEqual(stage(helped, 'sign').output, {
+      greeting: 'hello',
+      files: [],
+    })
+    assert.match(
+      c.master.master!.scheduler.logs(helped.id)!,
+      /Masonfile\.ts imports \.\/helper\.ts: fetching the pinned commit alone/,
+    )
+    // Only the pinned commit, without its history.
+    const worker = stageRow(helped.id, 'sign').worker as string
+    const name = [...['alpha', 'beta']].find(
+      (entry) => c.fingerprint(entry) === worker,
+    )!
+    const sources = path.join(c.workers.get(name)!.dir, 'sources')
+    const copy = path.join(sources, readdirSync(sources)[0]!, 'helped')
+    assert.equal(
+      execFileSync(
+        'git',
+        ['-C', copy, 'rev-parse', '--is-shallow-repository'],
+        {
+          encoding: 'utf8',
+        },
+      ).trim(),
+      'true',
     )
   })
 
