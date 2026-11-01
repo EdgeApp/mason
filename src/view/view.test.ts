@@ -921,6 +921,27 @@ describe('Nodes page', () => {
       nodes: [{ ...node, role: 'worker' }],
     })
     assert(!viewer.includes('data-method="PUT"'))
+    // A browser ignores a pattern it cannot compile with the v flag.
+    const patterns = [...html.matchAll(/pattern="([^"]*)"/g)].map(
+      (match) => match[1]!,
+    )
+    assert(patterns.length >= 2)
+    for (const pattern of patterns)
+      assert.doesNotThrow(() => new RegExp(`^(?:${pattern})$`, 'v'), pattern)
+  })
+
+  it('writes every form pattern so a browser can compile it with the v flag', () => {
+    const files = ['../../src/view/admin.ts', '../../src/master/pages.ts']
+    const patterns = files.flatMap((file) =>
+      [
+        ...readFileSync(new URL(file, import.meta.url), 'utf8').matchAll(
+          /pattern="([^"$]*)"/g,
+        ),
+      ].map((match) => match[1]!.replaceAll('\\\\', '\\')),
+    )
+    assert(patterns.length > 10)
+    for (const pattern of patterns)
+      assert.doesNotThrow(() => new RegExp(`^(?:${pattern})$`, 'v'), pattern)
   })
 
   it('U2.1 explains the host and the node steps: title above command, Copy right, pairing-key note, address and port', () => {
