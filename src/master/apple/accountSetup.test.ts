@@ -753,4 +753,83 @@ describe('Apple setup on a master', function () {
     assert.deepEqual(signingNotices(), [])
     assert.equal(master.apple.status().state, 'signedIn')
   })
+
+  it('U8.12 a 401 from App Store Connect ends the session; a 403 does not', async () => {
+    const master = c.master.master!
+    // A 403 is the Apple ID's role or the team's API access.
+    web.refuse = 403
+    await assert.rejects(
+      master.appleSetup.teams(),
+      /must be the team’s Account Holder or an Admin/,
+    )
+    assert.equal(master.apple.status().state, 'signedIn')
+    // Apple no longer takes the session: it is expired, and says sign in again.
+    web.refuse = 401
+    const refused = await c.api('GET', '/api/v2/apple/setup')
+    assert.equal(refused.status, 400)
+    assert.match(refused.text, /sign in with the Apple ID again/)
+    const session = await c.api('GET', '/api/v2/apple/session')
+    assert.equal(session.json.state, 'expired')
+    assert.match(session.json.notice, /has lapsed: sign in again/)
+    assert.match(session.json.error, /401 from \/olympus\/v1\/session/)
+    assert(master.notices().some((notice) => /has lapsed/.test(notice)))
+    const html = await settingsPage()
+    assert.match(html, /Not signed in\./)
+    assert.doesNotMatch(html, /Signing for a team/)
+    // A sign-in whose setup Apple answers 401 ends the same way, with no team notice.
+    await signInTrusted()
+    await c.until(
+      () => master.apple.status().state === 'expired',
+      20_000,
+      'the session expired',
+    )
+    assert.deepEqual(signingNotices(), [])
+    web.refuse = undefined
+
+    // A session that ends during the first team's setup stops the rest.
+    for (const team of [
+      { id: 'ABCDE12345', name: 'Example Team' },
+      { id: 'ZYXWV98765', name: 'Other Team' },
+    ])
+      master.appleSigning.setupFailed(team, 'Apple was down')
+    web.refuse = 401
+    web.refusePath = /^\/iris\//
+    const from = web.calls.length
+    // The master logs to the console.
+    const logs: string[] = []
+    const log = console.log
+    console.log = (line: unknown): void => {
+      logs.push(String(line))
+    }
+    try {
+      await signInTrusted()
+      await c.until(
+        () => master.apple.status().state === 'expired',
+        20_000,
+        'the session expired during the setup',
+      )
+      await c.until(
+        () => master.appleTeamsInSetup().length === 0,
+        20_000,
+        'the team setup',
+      )
+      await new Promise((resolve) => setTimeout(resolve, 300))
+    } finally {
+      console.log = log
+    }
+    assert.deepEqual(
+      web.calls.slice(from).filter((call) => call.startsWith('GET /iris/')),
+      ['GET /iris/v1/apiKeys'],
+    )
+    // Said once, not again for each team left.
+    assert.deepEqual(
+      logs.filter((line) => /^Apple setup/.test(line)),
+      [
+        'Apple setup of Example Team (ABCDE12345) failed: The Apple session ended: sign in with the Apple ID again',
+        'Apple setup stopped: the Apple ID session ended',
+      ],
+    )
+    web.refuse = undefined
+    web.refusePath = undefined
+  })
 })

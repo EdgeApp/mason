@@ -1265,6 +1265,10 @@ master.
   access) becomes a notice naming the team and what to do, in `mason
   status`, the dashboard and Settings → Apple, until a later setup of that
   team succeeds or the Apple ID no longer belongs to it.
+- Apple answering 401 to any of the master's App Store Connect website calls
+  moves the session to `expired`, with the call in `error`: sign in again.
+  A 403 (the Apple ID's role or the team's API access) leaves the session
+  signed in.
 - **`GET …/setup`** answers `{ "keyName", "teams": [{ "id", "name" }] }`.
   **`POST …/setup`** ("Check signing again") takes `{ "team": "ABCDE12345" }`
   (optional with one team) and runs the same setup now: it keeps what still

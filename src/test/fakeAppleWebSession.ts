@@ -28,6 +28,8 @@ export class FakeAppleWebSession {
   }> = []
   /** Answer this status to every call, as Apple does for a role without access. */
   refuse: number | undefined
+  /** With `refuse`, only to the calls to these paths. */
+  refusePath: RegExp | undefined
   readonly calls: string[] = []
   /** The next keys Apple makes, as a fake App Store Connect API trusts them; else new ones. */
   readonly nextKeys: Array<{ keyId: string; privateKey: string }> = []
@@ -59,7 +61,8 @@ export class FakeAppleWebSession {
         status,
         headers: { 'content-type': 'application/json' },
       })
-    if (this.refuse != null) return json(this.refuse, {})
+    if (this.refuse != null && this.refusePath?.test(target.pathname) !== false)
+      return json(this.refuse, {})
     const type = Object.entries(init.headers ?? {}).find(
       ([name]) => name.toLowerCase() === 'content-type',
     )?.[1]

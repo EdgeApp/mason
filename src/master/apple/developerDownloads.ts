@@ -765,7 +765,15 @@ export class AppleDownloads {
         throw new AppleError('Sign in with the Apple ID first')
       const response = await this.request(stored, url, init)
       const body = await response.text()
-      this.save(stored)
+      // Apple no longer takes the session; a 403 is the team's role or access instead.
+      if (response.status === 401) {
+        this.releases = undefined
+        this.setState(
+          stored,
+          'expired',
+          `App Store Connect no longer accepts the session (401 from ${new URL(url).pathname})`,
+        )
+      } else this.save(stored)
       // A 204 or 304 takes no body, even an empty one.
       return new Response(
         [204, 205, 304].includes(response.status) ? null : body,

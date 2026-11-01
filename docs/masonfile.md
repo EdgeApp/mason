@@ -1240,7 +1240,9 @@ Mason does the equivalent with one sign-in, on the master:
 - An administrator stores the Apple ID and password in the master's settings
   and signs in from the master UI, typing the two-factor code there when Apple
   asks. Apple then trusts that session for roughly two to four weeks; the
-  master asks an administrator for a new code only when Apple ends it.
+  master asks an administrator for a new code only when Apple ends it, or
+  when App Store Connect stops accepting it (a 401), which the master shows
+  as an expired session.
 - When a node must install an Xcode version, the master uses its session to
   obtain Apple's **download-only** authorization for that file (the
   `ADCDownloadAuth` cookie Apple's own download flow issues) and sends just
