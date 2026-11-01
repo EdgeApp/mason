@@ -784,27 +784,48 @@ export function nodesView(data: {
 }
 
 /** Settings: every area the master keeps, edited as JSON with secrets write-only, plus the Apple ID session. */
-/** The teams signing is set up for, and the form for the others (or to check again). */
+/** Each team's signing: set up, being set up, or why not; and checking again. */
 function signing(
   setup: NonNullable<Parameters<typeof settingsView>[0]['apple']['setup']>,
+  failures: Record<string, string>,
+  settingUp: string[],
 ): string {
   if (setup.error != null)
     return `<p class="state-failed">${escape(setup.error)}</p>`
-  const done = new Set(setup.configured.map((team) => team.id))
-  const status = setup.configured
-    .map(
-      (team) =>
-        `<p class="state-succeeded">${icon('check')} Signing is set up for ${escape(team.name)} (<span class="mono">${escape(team.id)}</span>): App Store Connect API key <span class="mono">${escape(setup.keyName)}</span> (<span class="mono">${escape(team.keyId)}</span>), ${team.certificate == null ? 'no distribution certificate yet' : `${escape(team.certificate.name)}, expires ${new Date(team.certificate.expiresAt).toISOString().slice(0, 10)}`}.</p>`,
+  const configured = new Map(setup.configured.map((team) => [team.id, team]))
+  // The Apple ID's teams, then any set up before that it no longer lists.
+  const teams = [
+    ...setup.teams,
+    ...setup.configured.filter(
+      (team) => !setup.teams.some((entry) => entry.id === team.id),
+    ),
+  ]
+  const state = (team: { id: string; name: string }): string => {
+    const label = `${escape(team.name)} (<span class="mono">${escape(team.id)}</span>)`
+    const done = configured.get(team.id)
+    if (settingUp.includes(team.id))
+      return `<p class="state-running">${icon('hourglass_top')} Setting signing up for ${label}…</p>`
+    // A team not set up, or whose setup failed, has its own button.
+    const button = apiForm(
+      '/api/v2/apple/setup',
+      `<input type="hidden" name="team" value="${escape(team.id)}">`,
+      `${icon('key')} Set up ${escape(team.name)}`,
+      { fields: ['team'], then: 'reload' },
     )
-    .join('')
-  const options = (teams: Array<{ id: string; name: string }>): string =>
-    `<label for="apple-team">Team</label><select id="apple-team" name="team">${teams.map((team) => `<option value="${escape(team.id)}">${escape(team.name)} (${escape(team.id)})</option>`).join('')}</select>`
-  const open = setup.teams.filter((team) => !done.has(team.id))
-  const intro = `<p>Mason makes the team’s App Store Connect API key <span class="mono">${escape(setup.keyName)}</span> and its distribution certificate, and keeps them.${setup.configured.length === 0 ? ' No team is set up yet.' : ''}</p>`
-  if (open.length > 0)
-    return `${status}${intro}${apiForm('/api/v2/apple/setup', options(open), `${icon('key')} Set up signing`, { fields: ['team'], then: 'reload' })}`
-  // Every team is set up: checking again keeps what works and replaces what is gone.
-  return `${status}<p>Checking again asks Apple about the team’s key and certificate and replaces only one that is gone; nothing that still works is revoked.</p>${apiForm('/api/v2/apple/setup', options(setup.teams), `${icon('refresh')} Check signing again`, { fields: ['team'], then: 'reload', className: 'secondary' })}`
+    if (failures[team.id] != null)
+      return `<div><p class="state-failed">${icon('error')} ${escape(failures[team.id]!)}</p>${button}</div>`
+    if (done == null)
+      return `<div><p>Signing is not set up for ${label}.</p>${button}</div>`
+    return `<p class="state-succeeded">${icon('check')} Signing is set up for ${label}: App Store Connect API key <span class="mono">${escape(setup.keyName)}</span> (<span class="mono">${escape(done.keyId)}</span>), ${done.certificate == null ? 'no distribution certificate yet' : `${escape(done.certificate.name)}, expires ${new Date(done.certificate.expiresAt).toISOString().slice(0, 10)}`}.</p>`
+  }
+  const listed =
+    failures[''] == null
+      ? ''
+      : `<p class="state-failed">${icon('error')} ${escape(failures['']!)}</p>`
+  const intro = `<p>When the Apple ID signs in, Mason sets up its team by itself: it makes the team’s App Store Connect API key <span class="mono">${escape(setup.keyName)}</span> and its distribution certificate, and keeps them. With several teams, it sets up by itself only those this master already uses, with a stored key or an app ID assigned to them; set up another here. Checking again asks Apple about a team’s key and certificate and replaces only one that is gone; nothing that still works is revoked.</p>`
+  if (setup.teams.length === 0)
+    return `${listed}${teams.map(state).join('')}${intro}<p>This Apple ID belongs to no developer team.</p>`
+  return `${listed}${teams.map(state).join('')}${intro}${apiForm('/api/v2/apple/setup', `<label for="apple-team">Team</label><select id="apple-team" name="team">${setup.teams.map((team) => `<option value="${escape(team.id)}">${escape(team.name)} (${escape(team.id)})</option>`).join('')}</select>`, `${icon('refresh')} Check signing again`, { fields: ['team'], then: 'reload', className: 'secondary' })}`
 }
 
 export function settingsView(data: {
@@ -826,6 +847,10 @@ export function settingsView(data: {
       }>
       error?: string
     }
+    /** Why each team's last setup failed, by team ID ('' when its teams could not be read). */
+    failures?: Record<string, string>
+    /** Teams being set up now. */
+    settingUp?: string[]
   }
   keys: Array<{
     id: string
@@ -885,8 +910,11 @@ export function settingsView(data: {
       : ''
   }${
     data.canChange && data.apple.signedIn && data.apple.setup != null
-      ? `<h3>${icon('key')}Signing for a team</h3>${signing(data.apple.setup)}`
-      : ''
+      ? `<h3>${icon('key')}Signing for a team</h3>${signing(data.apple.setup, data.apple.failures ?? {}, data.apple.settingUp ?? [])}`
+      : // Signed out, a team whose setup failed is still shown.
+        Object.values(data.apple.failures ?? {})
+          .map((failure) => `<p class="notice">${escape(failure)}</p>`)
+          .join('')
   }</section>`
   /** The key's creation day, in the master's time zone. */
   const day = (ms: number): string => {

@@ -32,6 +32,7 @@ export function appleApi(master: Master): Router {
     express.json({ limit: '2mb' }),
     authenticate(master),
   )
+  const service = master.appleSigning
   // Apple setup from the signed-in Apple ID: the teams, then one set up.
   router.get(
     '/api/v2/apple/setup',
@@ -49,14 +50,17 @@ export function appleApi(master: Master): Router {
       const actor = actorOf(res)
       allow(actor, 'apple.change')
       const team = (req.body as { team?: unknown } | undefined)?.team
-      const result = await master.appleSetup.setup(
+      const result = await master.setupAppleTeam(
+        actor,
         typeof team === 'string' && team !== '' ? team : undefined,
       )
-      master.database.audit(actor, 'apple.setup', result.team.id)
+      // The team's app IDs still missing profiles get them now.
+      master.setupApple(
+        (app) => app.apple?.team === result.team.id && service.incomplete(app),
+      )
       return result
     }),
   )
-  const service = master.appleSigning
   router.get(
     '/api/v2/apple/certificates',
     json((_req, res) => {

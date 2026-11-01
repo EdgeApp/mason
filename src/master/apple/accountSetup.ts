@@ -40,6 +40,17 @@ export type AppleRequest = (
 
 export class AppleWebError extends Error {}
 
+/** A setup that stopped once its team was known, so the master can say which. */
+export class AppleTeamError extends AppleWebError {
+  constructor(
+    readonly team: { id: string; name: string },
+    message: string,
+    options?: { cause: unknown },
+  ) {
+    super(message, options)
+  }
+}
+
 /** `/olympus/v1/session`: the Apple ID's content providers, one of them current. */
 interface OlympusSession {
   provider?: OlympusProvider
@@ -275,6 +286,21 @@ export class AppleSetup {
             ? 'Choose the team to set up'
             : `This Apple ID is not in team ${teamId}`,
       )
+    try {
+      return await this.setupTeam(web, team)
+    } catch (error) {
+      throw new AppleTeamError(
+        { id: team.id, name: team.name },
+        (error as Error).message,
+        { cause: error },
+      )
+    }
+  }
+
+  private async setupTeam(
+    web: AppleWeb,
+    team: { id: string; name: string; providerId: number },
+  ): Promise<SetupResult> {
     await web.selectTeam(team.providerId)
     // The key: this master's, kept while its private key is stored here.
     const listed = (await web.apiKeys()).filter((key) => key.active)
@@ -317,7 +343,7 @@ export class AppleSetup {
           .appleCertificates(team.id)
           .catch((): string[] => [])
         throw new AppleWebError(
-          `Apple allows no more distribution certificates for ${team.name}: ${existing.join(', ') || 'see Certificates in the Apple Developer site'}. Revoke one there that no one uses, or import its .p12 on the Apple page, then set up again.`,
+          `Apple allows no more distribution certificates for ${team.name}: ${existing.join(', ') || 'see Certificates in the Apple Developer site'}. Revoke one there that no one uses, or import its .p12 on the Apple page, then check signing again.`,
         )
       }
       certificate = 'created'

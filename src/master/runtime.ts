@@ -72,8 +72,10 @@ import { CloudHosts, type CloudHostsOptions } from './cloud/hosts.js'
 import { hostView } from './cloudHostsApi.js'
 import {
   AppleSetup,
+  AppleTeamError,
   AppStoreConnectWeb,
   type AppleWeb,
+  type SetupResult,
 } from './apple/accountSetup.js'
 import type { CertificateView } from '../apple/certificates.js'
 import { Changes } from './changes.js'
@@ -261,6 +263,10 @@ export class Master {
   private readonly appleSetups = new Set<Promise<void>>()
   /** The latest Apple setup of each app ID, which the next one follows. */
   private readonly appleQueue = new Map<string, Promise<void>>()
+  /** The latest Apple team setup, which the next one follows. */
+  private appleTeamQueue: Promise<unknown> = Promise.resolve()
+  /** Teams whose setup runs or waits its turn, for the Settings page. */
+  private readonly appleTeamsSettingUp = new Map<string, number>()
   private compaction: NodeJS.Timeout | undefined
   constructor(
     db: DatabaseSync,
@@ -798,9 +804,125 @@ export class Master {
     }
   }
 
+  /**
+   * Sets an Apple team up from the signed-in Apple ID: its App Store Connect
+   * key, then its distribution certificate (`POST /api/v2/apple/setup`, and
+   * after each sign-in). One team at a time, so a key is never made twice.
+   * A failure stays among the master's notices, naming the team, until a
+   * later setup of that team succeeds.
+   */
+  async setupAppleTeam(actor: Actor, team?: string): Promise<SetupResult> {
+    allow(actor, 'apple.change')
+    const run = this.appleTeamQueue.then(
+      async () => await this.appleSetup.setup(team),
+    )
+    this.appleTeamQueue = run.catch(() => undefined)
+    const count = (by: number): void => {
+      if (team == null) return
+      const next = (this.appleTeamsSettingUp.get(team) ?? 0) + by
+      if (next > 0) this.appleTeamsSettingUp.set(team, next)
+      else this.appleTeamsSettingUp.delete(team)
+    }
+    count(1)
+    try {
+      const result = await run
+      this.database.audit(actor, 'apple.setup', result.team.id)
+      this.appleSigning.setupSucceeded(result.team.id)
+      return result
+    } catch (error) {
+      // A session that ended says so itself: sign in again.
+      if (error instanceof AppleTeamError && this.apple.ready())
+        this.appleSigning.setupFailed(error.team, error.message)
+      throw error
+    } finally {
+      count(-1)
+    }
+  }
+
+  /** The teams being set up now. */
+  appleTeamsInSetup(): string[] {
+    return [...this.appleTeamsSettingUp.keys()]
+  }
+
+  /**
+   * Once the Apple ID is signed in, sets up in the background the teams
+   * this master uses: the Apple ID's only team, or of several those with a
+   * stored key or an app ID assigned (another is set up from Settings →
+   * Apple). Of those, each with no stored key or whose last setup failed;
+   * then the app IDs whose Apple setup was incomplete. The sign-in does not
+   * wait; stop() does.
+   */
+  private setupAppleTeams(actor: Actor): void {
+    if (this.stopped) return
+    const log = this.options.log ?? console.log
+    const run: Promise<void> = (async (): Promise<void> => {
+      let teams: Array<{ id: string; name: string }>
+      try {
+        teams = await this.appleSetup.teams()
+      } catch (error) {
+        // One notice for the Apple ID, unless its session ended, which says so itself.
+        if (this.apple.ready())
+          this.appleSigning.setupFailed(undefined, (error as Error).message)
+        log(`Apple setup could not read the teams: ${(error as Error).message}`)
+        return
+      }
+      this.appleSigning.setupListed(teams.map((team) => team.id))
+      const stored = (
+        this.settings.value('apple') as
+          | { teams?: Record<string, unknown> }
+          | undefined
+      )?.teams
+      const assigned = new Set(
+        this.projects
+          .list()
+          .flatMap((project) => project.apps)
+          .flatMap((app) => (app.apple == null ? [] : [app.apple.team])),
+      )
+      const chosen =
+        teams.length === 1
+          ? teams
+          : teams.filter(
+              (team) => stored?.[team.id] != null || assigned.has(team.id),
+            )
+      const failed = this.appleSigning.setupFailures()
+      for (const team of chosen) {
+        if (this.stopped) return
+        // A session that ended stops here, rather than failing each team.
+        if (!this.apple.ready()) {
+          log('Apple setup stopped: the Apple ID session ended')
+          return
+        }
+        if (stored?.[team.id] != null && failed[team.id] == null) continue
+        await this.setupAppleTeam(actor, team.id).then(
+          (result) => {
+            log(
+              `Apple setup of ${team.name} (${team.id}): key ${result.key}, certificate ${result.certificate}`,
+            )
+          },
+          (error: unknown) => {
+            log(
+              `Apple setup of ${team.name} (${team.id}) failed: ${(error as Error).message}`,
+            )
+          },
+        )
+      }
+      if (this.apple.ready())
+        this.setupApple((app) => this.appleSigning.incomplete(app))
+    })()
+      // stop() waits for this; it never rejects.
+      .catch((error: unknown) => {
+        log(`Apple setup stopped: ${(error as Error).message}`)
+      })
+      .finally(() => {
+        this.appleSetups.delete(run)
+      })
+    this.appleSetups.add(run)
+  }
+
   async stop(): Promise<void> {
     this.stopped = true
-    await Promise.all([...this.appleSetups])
+    // A team setup that finishes may start the app IDs' setups.
+    while (this.appleSetups.size > 0) await Promise.all([...this.appleSetups])
     await this.forwarder.close()
     this.registry.stop()
     this.retention.stop()
@@ -902,6 +1024,7 @@ export class Master {
     const status = await this.apple.signIn(id, password)
     this.database.audit(actor, 'apple.signIn', id)
     this.nodeStates.reconcileAll()
+    if (status.state === 'signedIn') this.setupAppleTeams(actor)
     return status
   }
 
@@ -915,6 +1038,7 @@ export class Master {
     if (status.state === 'signedIn') {
       this.nodeStates.reconcileAll()
       this.scheduler.poke()
+      this.setupAppleTeams(actor)
     }
     return status
   }

@@ -31,6 +31,8 @@ export class FakeAppleWebSession {
   readonly calls: string[] = []
   /** The next keys Apple makes, as a fake App Store Connect API trusts them; else new ones. */
   readonly nextKeys: Array<{ keyId: string; privateKey: string }> = []
+  /** While set, calls to the matching paths wait for it, as a slow Apple's do. */
+  hold: { path: RegExp; until: Promise<void> } | undefined
 
   /** The current team: the one selected, else the first. */
   private team(): (typeof this.teams)[number] | undefined {
@@ -51,6 +53,7 @@ export class FakeAppleWebSession {
     const method = init.method ?? 'GET'
     const target = new URL(url)
     this.calls.push(`${method} ${target.pathname}`)
+    if (this.hold?.path.test(target.pathname) === true) await this.hold.until
     const json = (status: number, value: unknown): Response =>
       new Response(JSON.stringify(value), {
         status,

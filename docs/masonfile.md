@@ -1139,7 +1139,22 @@ stage.
 
 ### Setup on the master
 
-An administrator gives the master, per Apple team:
+The quickest way is to sign the master in with an Apple ID that is the
+team's Account Holder or an Admin (Settings → Apple, `mason apple sign-in`
+or `POST /api/v2/apple/session`; see [Apple ID for Xcode
+downloads](#apple-id-for-xcode-downloads)). Once it is signed in, the master
+sets up the Apple ID's team by itself, in the background (of several teams,
+only those it already uses, with a stored key or an app ID assigned to them;
+another is set up with its button on Settings → Apple): it makes
+the team's App Store Connect API key (`Mason` and the start of the master's
+fingerprint, Admin role) and stores it, then makes the distribution
+certificate with it, then the profiles of the app IDs that were waiting for
+them. A team that already has a stored key is left alone. When Apple
+refuses (the certificate limit, a missing role, a team without API access),
+the master's notices and Settings → Apple say which team and what to do;
+**Check signing again** on Settings → Apple runs the setup once more.
+
+Otherwise an administrator gives the master, per Apple team:
 
 - an **App Store Connect API key** (issuer ID, key ID and the `.p8` private
   key, with the App Manager role). It stays on the master; workers never
