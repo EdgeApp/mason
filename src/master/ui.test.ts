@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, realpathSync } from 'node:fs'
+import {
+  appendFileSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs'
 import path from 'node:path'
 import { after, before, describe, it } from 'mocha'
 import { WebSocket } from 'ws'
@@ -626,6 +632,27 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       run,
     )
     scripted.ws.close()
+    // A live page leaves a partial last line to the socket, which sends it once the stage settles.
+    const logFile = c.master.master!.scheduler.logFile(run, 'test')
+    const whole = readFileSync(logFile)
+    appendFileSync(logFile, 'partial')
+    const partial = await request(
+      c.master,
+      'GET',
+      `/runs/${run}?stage=test`,
+      developer,
+    )
+    assert.match(partial.text, new RegExp(`data-offset="${whole.length}"`))
+    assert.doesNotMatch(partial.text, /partial/)
+    const rest = await live(c.master, { authorization: `Bearer ${key.token}` })
+    assert(typeof rest !== 'number')
+    rest.send({ subscribe: 'run', run, stage: 'test', after: whole.length })
+    assert.equal(
+      (await rest.next((frame) => frame.event === 'log')).data.text,
+      'partial',
+    )
+    rest.ws.close()
+    writeFileSync(logFile, whole)
     assert.equal(
       (await request(c.master, 'GET', `/runs/${run}`, signIn('tester'))).status,
       403,
@@ -675,7 +702,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.equal(page.status, 200)
     assert.match(page.text, /<meta name="mason-csrf"/)
-    assert.match(page.text, /data-offset="0"/)
+    assert.match(page.text, /data-offset="tail"/)
     const step = await request(
       host,
       'GET',

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'mocha'
+import { FakeLiveWindow } from '../test/fakeLiveSocket.js'
 import {
   actionBody,
-  applyEvent,
   domRunPage,
   formFields,
   formPath,
@@ -10,6 +10,7 @@ import {
   logLines,
   nestedBody,
   requestBody,
+  RunLive,
   start,
   submitAction,
   type RunPage,
@@ -92,6 +93,10 @@ class El {
   }
   async requestFullscreen(): Promise<void> {
     this.fullscreen = true
+  }
+  removed = false
+  remove(): void {
+    this.removed = true
   }
 }
 
@@ -309,62 +314,136 @@ describe('Run view script', () => {
     assert.deepEqual(visits, ['/runs/r9', '/here', '/projects/new?slug=repo'])
   })
 
-  it('applies stream events to the page and updates its stages, run status, steps and log', () => {
+  it('applies live frames to the page: run status, stages, the shown stage’s steps and its log, following the running stage', () => {
     const recorded: string[] = []
     const page: RunPage = {
       hasStage: (name) => name !== 'new',
       reload: () => recorded.push('reload'),
       setStageStatus: (name, status) => recorded.push(`${name}=${status}`),
       setRunStatus: (status) => recorded.push(`run=${status}`),
-      setSteps: (steps) => recorded.push(`steps=${steps.length}`),
+      follow: (stage) => recorded.push(`follow=${stage}`),
+      setSteps: (stage, steps) =>
+        recorded.push(`steps ${stage}=${steps.length}`),
       appendLog: (html) => recorded.push(`log=${html.length}`),
       ended: () => recorded.push('ended'),
     }
-    applyEvent(
-      page,
-      'stages',
-      JSON.stringify({
-        status: 'running',
-        finished: false,
-        stages: [{ name: 'a', status: 'running' }],
-        steps: [],
-      }),
-    )
-    applyEvent(
-      page,
-      'stages',
-      JSON.stringify({
-        status: 'running',
-        finished: false,
-        stages: [],
-        steps: [
-          { id: 1, kind: 'exec', title: 'x', status: 'running', ms: null },
-        ],
-      }),
-    )
-    applyEvent(page, 'log', JSON.stringify({ text: 'a\nb\n', first: 3 }))
+    const step = {
+      id: 1,
+      kind: 'exec',
+      title: 'x',
+      status: 'running',
+      ms: null,
+    }
+    // A page with a stage selected resumes its log after the offset it has.
+    const selected = new RunLive(page, 'r', 'a', 12)
+    assert.deepEqual(selected.message(), {
+      subscribe: 'run',
+      run: 'r',
+      stage: 'a',
+      after: 12,
+    })
+    selected.apply({ event: 'run', data: { status: 'running' } })
+    selected.apply({
+      event: 'stages',
+      data: [{ name: 'a', status: 'running' }],
+    })
+    selected.apply({ event: 'steps', data: { stage: 'a', steps: [step] } })
+    selected.apply({ event: 'steps', data: { stage: 'b', steps: [step] } })
+    selected.apply({
+      event: 'log',
+      data: { stage: 'a', offset: 16, first: 3, text: 'a\nb\n' },
+    })
+    selected.apply({
+      event: 'log',
+      data: { stage: 'b', offset: 99, first: 1, text: 'other\n' },
+    })
+    assert.equal(selected.message().after, 16)
     // A stage the page does not draw yet (setup just made it) reloads the page.
-    applyEvent(
-      page,
-      'stages',
-      JSON.stringify({
-        status: 'running',
-        finished: false,
-        stages: [{ name: 'new', status: 'queued' }],
-        steps: [],
-      }),
-    )
-    applyEvent(page, 'end', '{}')
-    applyEvent(page, 'other', '{}')
-    assert.deepEqual(recorded, [
+    selected.apply({
+      event: 'stages',
+      data: [{ name: 'new', status: 'queued' }],
+    })
+    selected.apply({ event: 'end' })
+    selected.apply({ event: 'other' })
+    assert.deepEqual(recorded.splice(0), [
       'run=running',
       'a=running',
-      'run=running',
-      'steps=1',
+      'steps a=1',
       'log=2',
       'reload',
       'ended',
     ])
+    // With none selected the panel follows the running stage, and switches.
+    const following = new RunLive(page, 'r', undefined, 0)
+    assert.deepEqual(following.message(), {
+      subscribe: 'run',
+      run: 'r',
+      follow: true,
+    })
+    following.apply({ event: 'steps', data: { stage: 'a', steps: [] } })
+    following.apply({
+      event: 'log',
+      data: { stage: 'a', offset: 4, first: 7, text: 'x\n' },
+    })
+    assert.deepEqual(following.message(), {
+      subscribe: 'run',
+      run: 'r',
+      stage: 'a',
+      after: 4,
+      follow: true,
+    })
+    following.apply({ event: 'steps', data: { stage: 'a', steps: [step] } })
+    following.apply({ event: 'steps', data: { stage: 'b', steps: [] } })
+    following.apply({ event: 'gone' })
+    assert.deepEqual(recorded.splice(0), [
+      'follow=a',
+      'steps a=0',
+      'log=1',
+      'steps a=1',
+      'follow=b',
+      'steps b=0',
+      'ended',
+    ])
+    assert.equal(following.message().after, 0)
+    // A step's lines take no more: the page asks for no log at all.
+    const step2 = new RunLive(page, 'r', 'a', -1)
+    assert.deepEqual(step2.message(), {
+      subscribe: 'run',
+      run: 'r',
+      stage: 'a',
+      log: false,
+    })
+    step2.apply({
+      event: 'log',
+      data: { stage: 'a', offset: 4, first: 1, text: 'x\n' },
+    })
+    assert.deepEqual(recorded, [])
+    // A page with none of the log (the host's) starts at its end, then resumes by offset.
+    const tail = new RunLive(page, 'r', 'a', 'tail')
+    assert.deepEqual(tail.message(), {
+      subscribe: 'run',
+      run: 'r',
+      stage: 'a',
+      tail: true,
+    })
+    // A line longer than a frame comes in pieces, drawn once it is whole.
+    tail.apply({
+      event: 'log',
+      data: {
+        stage: 'a',
+        offset: 90,
+        first: 40,
+        text: 'x\nlong',
+        partial: true,
+      },
+    })
+    assert.deepEqual(recorded, [])
+    assert.equal(tail.message().after, 90)
+    tail.apply({
+      event: 'log',
+      data: { stage: 'a', offset: 99, first: 41, text: ' line\n' },
+    })
+    assert.deepEqual(recorded.splice(0), ['log=2'])
 
     const bubble = new El({ class: 'bubble stage status-queued' })
     const item = new El()
@@ -375,6 +454,8 @@ describe('Run view script', () => {
     const code = new El()
     const pre = new El()
     pre.scrollTop = 40
+    const jump = new El()
+    const title = new El()
     const head = new El()
     const panel = new El()
     panel.dataset.stage = 'build/ios'
@@ -387,6 +468,8 @@ describe('Run view script', () => {
       .set('[data-log] code', code)
       .set('[data-log] pre', pre)
       .set('.run-head', head)
+      .set('[data-jump]', jump)
+      .set('[data-log-title]', title)
     let reloaded = 0
     const real = domRunPage(doc as unknown as Document, () => {
       reloaded++
@@ -408,7 +491,10 @@ describe('Run view script', () => {
     real.setRunStatus('awaiting_approval')
     assert.equal(status.className, 'state-awaiting_approval')
     assert.match(status.innerHTML, /awaiting approval/)
-    real.setSteps([
+    real.setRunStatus('<b>x')
+    assert.match(status.innerHTML, /&lt;b&gt;x/)
+    assert.doesNotMatch(status.innerHTML, /<b>/)
+    real.setSteps('build/ios', [
       {
         id: 2,
         kind: 'exec',
@@ -421,16 +507,87 @@ describe('Run view script', () => {
     assert.match(steps.innerHTML, /href="\?stage=build%2Fios&amp;step=2"/)
     assert.match(steps.innerHTML, /npm &lt;test&gt; ok</)
     assert.match(steps.innerHTML, /exec · 4s/)
+    // The log opened at its end, and follows new lines there.
+    assert.equal(pre.scrollTop, 100)
     real.appendLog([])
+    pre.scrollHeight = 300
     real.appendLog(['<span>one</span>'])
     real.appendLog(['<span>two</span>'])
     assert.equal(code.innerHTML, '<span>one</span><span>two</span>')
+    assert.equal(pre.scrollTop, 300)
+    // Scrolled up, it holds still and offers Jump to latest.
+    pre.scrollHeight = 1000
+    pre.scrollTop = 100
+    pre.fire('scroll')
+    assert.equal(jump.hidden, false)
+    real.appendLog(['<span>three</span>'])
     assert.equal(pre.scrollTop, 100)
+    // A small move up stops it too, though still near the bottom.
+    pre.scrollTop = 900
+    pre.fire('scroll')
+    pre.scrollTop = 880
+    pre.fire('scroll')
+    assert.equal(jump.hidden, false)
+    real.appendLog(['<span>late</span>'])
+    assert.equal(pre.scrollTop, 880)
+    pre.scrollTop = 100
+    pre.fire('scroll')
+    // A taller window moves the log up but leaves it at the bottom: it follows on.
+    pre.scrollTop = 950
+    pre.fire('scroll')
+    pre.clientHeight = 100
+    pre.scrollTop = 900
+    pre.fire('scroll')
+    assert.equal(jump.hidden, true)
+    pre.clientHeight = 50
+    pre.scrollTop = 100
+    pre.fire('scroll')
+    // Back within 80px of the bottom, it follows again.
+    pre.scrollTop = 900
+    pre.fire('scroll')
+    assert.equal(jump.hidden, true)
+    pre.scrollHeight = 1200
+    real.appendLog(['<span>four</span>'])
+    assert.equal(pre.scrollTop, 1200)
+    pre.scrollTop = 0
+    pre.fire('scroll')
+    jump.fire('click')
+    assert.deepEqual([pre.scrollTop, jump.hidden], [1200, true])
+    pre.scrollHeight = 1300
+    real.appendLog(['<span>five</span>'])
+    assert.equal(pre.scrollTop, 1300)
+    // Following a stage relabels the panel and starts its log afresh.
+    pre.scrollTop = 0
+    pre.fire('scroll')
+    steps.hidden = true
+    real.follow('deploy')
+    assert.match(
+      title.innerHTML,
+      /dot running.*deploy.*following the running stage/,
+    )
+    assert.deepEqual(
+      [title.dataset.following, steps.hidden, code.innerHTML, jump.hidden],
+      ['deploy', false, '', true],
+    )
+    real.setStageStatus('deploy', 'failed')
+    assert.match(title.innerHTML, /dot failed/)
     real.ended()
     assert.equal(head.getAttribute('data-live'), '0')
+    // The host's page has no run log; following a stage gives it one.
+    const box = new El()
+    const notice = new El()
+    const hosted = domRunPage(
+      new El()
+        .set('[data-log]', box)
+        .set('[data-log] .empty-state', notice) as unknown as Document,
+    )
+    hosted.follow('deploy')
+    assert.equal(box.innerHTML, '<pre class="log"><code></code></pre>')
+    assert(notice.removed)
     const empty = domRunPage(new El() as unknown as Document)
     empty.setRunStatus('x')
-    empty.setSteps([])
+    empty.setSteps('x', [])
+    empty.follow('x')
     empty.appendLog(['x'])
     empty.ended()
   })
@@ -510,6 +667,8 @@ describe('Run view script', () => {
     panel.dataset.stage = 'test'
     const logBox = new El()
     logBox.dataset.offset = '12'
+    const runStatus = new El()
+    const liveState = new El()
     const csrf = new El()
     ;(csrf as unknown as { content: string }).content = 'proof'
     const doc = new El()
@@ -527,6 +686,8 @@ describe('Run view script', () => {
       .set('.run-head', head)
       .set('.stage-panel', panel)
       .set('[data-log]', logBox)
+      .set('[data-run-status]', runStatus)
+      .set('[data-live-state]', liveState)
     const streams: Array<{
       url: string
       listeners: Map<string, (event: { data: string }) => void>
@@ -534,6 +695,7 @@ describe('Run view script', () => {
     }> = []
     const fetched: string[] = []
     const visits: string[] = []
+    const live = new FakeLiveWindow()
     const win: RunWindow = {
       fetch: (async (url: string) => {
         fetched.push(url)
@@ -543,8 +705,11 @@ describe('Run view script', () => {
       }) as typeof fetch,
       location: {
         href: '/runs/r?stage=test',
+        protocol: 'https:',
+        host: 'mason.example',
         assign: (href) => visits.push(href),
       },
+      live,
       EventSource: class {
         listeners = new Map<string, (event: { data: string }) => void>()
         closed = false
@@ -598,9 +763,27 @@ describe('Run view script', () => {
       sourceCode.innerHTML,
       '<span class="line" data-line="1">line one</span><span class="line" data-line="2">line two</span>',
     )
-    assert.equal(streams[0]!.url, '/api/v2/runs/r/events?stage=test&after=12')
-    streams[0]!.listeners.get('end')!({ data: '{}' })
-    assert(streams[0]!.closed)
+    // The run's socket resumes the log after the offset the page has.
+    const socket = live.socket
+    assert.equal(socket.url, 'wss://mason.example/live')
+    socket.accept()
+    assert.deepEqual(socket.sent, [
+      { subscribe: 'run', run: 'r', stage: 'test', after: 12, key: 'run' },
+    ])
+    socket.frame({ key: 'run', event: 'run', data: { status: 'failed' } })
+    assert.equal(runStatus.className, 'state-failed')
+    // A dropped socket says so, and resubscribes once it is back.
+    socket.drop(1012)
+    assert.deepEqual(
+      [liveState.hidden, liveState.textContent],
+      [false, 'Reconnecting…'],
+    )
+    assert.equal(live.tick(), 1000)
+    live.socket.accept()
+    assert.equal(liveState.hidden, true)
+    assert.equal(live.sockets.length, 2)
+    live.socket.frame({ key: 'run', event: 'end' })
+    assert(live.socket.closed)
 
     // The dashboard: the queue panel reloads after the first snapshot.
     const queue = new El()
@@ -618,7 +801,7 @@ describe('Run view script', () => {
         }
       },
     })
-    const queueStream = streams[1]!
+    const queueStream = streams[0]!
     assert.equal(queueStream.url, '/api/v2/queue/events')
     queueStream.listeners.get('queue')!({ data: '[]' })
     await settle()
@@ -626,10 +809,18 @@ describe('Run view script', () => {
     queueStream.listeners.get('queue')!({ data: '[1]' })
     await settle()
     assert.equal(queue.innerHTML, 'new')
-    // A run page without a selected stage streams stages only.
+    // A run page without a selected stage follows the running one.
     const plain = new El().set('.run-head', head)
     start(plain as unknown as Document, win)
-    assert.equal(streams[2]!.url, '/api/v2/runs/r/events?')
+    live.socket.accept()
+    assert.deepEqual(live.socket.sent, [
+      { subscribe: 'run', run: 'r', follow: true, key: 'run' },
+    ])
+    // A finished run's page opens no socket.
+    const sockets = live.sockets.length
+    head.dataset.live = '0'
+    start(plain as unknown as Document, win)
+    assert.equal(live.sockets.length, sockets)
   })
 })
 

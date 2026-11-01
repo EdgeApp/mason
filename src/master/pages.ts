@@ -439,6 +439,9 @@ export function masterPages(
     } catch {
       log = { unavailable: 'There is no such step.' }
     }
+    // A live log's last partial line comes with the rest of it, over the socket.
+    if (stage != null && step == null && run.finished == null && 'text' in log)
+      log = { ...log, text: log.text.slice(0, log.text.lastIndexOf('\n') + 1) }
     const requester = can(actor, 'runs.request')
     send(
       res,

@@ -13,6 +13,7 @@ import {
   type StageState,
 } from './graph.js'
 import { ansiLine, lineAt, logHtml, plainLog } from './log.js'
+import { stylesheet } from './stylesheet.js'
 import {
   graphFromJson,
   runBuilds,
@@ -376,8 +377,22 @@ describe('Run view', () => {
       ...extra,
     })
     const whole = runView(run, options({}))
-    assert.match(whole, /<h2>.*Whole run log<\/h2>/)
+    assert.match(whole, /<h2 data-log-title>.*Whole run log<\/h2>/)
     assert.match(whole, /data-run="r1" data-live="1"/)
+    // A live run's page says when its socket reconnects, has a step list for
+    // the stage it follows, and can jump back to its log's end.
+    assert.match(
+      whole,
+      /<span class="live-state" data-live-state role="status" hidden>/,
+    )
+    assert.match(
+      whole,
+      /<ol class="steps" data-steps hidden><\/ol><div data-log>/,
+    )
+    assert.match(
+      whole,
+      /<button type="button" class="secondary jump" data-jump hidden>.*Jump to latest<\/button><\/div>/,
+    )
     assert.match(whole, /build #7/)
     assert.match(whole, /Push by dana/)
     assert.match(whole, /1\.0 \(7\)/)
@@ -396,6 +411,11 @@ describe('Run view', () => {
     assert.doesNotMatch(selected, /Whole run log/)
     assert.match(selected, /junit/)
     assert.match(selected, /data-offset="8"/)
+    // A page holding none of the log (the host's) starts its live log at the end.
+    assert.match(
+      runView(run, options({ selected: 'test', logTail: true })),
+      /data-offset="tail"/,
+    )
     assert.match(
       selected,
       /href="\/api\/v2\/runs\/r1\/logs\?plain=1&amp;stage=test" download/,
@@ -417,6 +437,13 @@ describe('Run view', () => {
     assert.match(step, /data-line="2">two/)
     assert.match(step, /data-offset="-1" data-src="\/x"/)
     assert.match(step, /class="step open"/)
+    assert.doesNotMatch(step, /data-jump/)
+    // Hidden means hidden, though buttons are drawn inline-flex.
+    assert.match(stylesheet, /\[data-log\] \.jump\[hidden\]\{display:none\}/)
+    assert.match(selected, /data-jump/)
+    // A finished run's page has no live parts.
+    const finished = runView({ ...run, finished: 3000 }, options({}))
+    assert.doesNotMatch(finished, /data-live-state|data-jump|data-steps/)
     const approval = runView(run, options({ selected: 'approve' }))
     assert.match(approval, /Ship it\?/)
     assert.match(approval, /data-fields="stage,approve,notes"/)
