@@ -189,6 +189,20 @@ function fakeXcodebuild(
       )
       return { code: 0, output: '' }
     }
+    if (name === 'plutil' && args[0] === '-extract') {
+      const value = (
+        JSON.parse(readFileSync(args.at(-1)!, 'utf8')) as Record<
+          string,
+          unknown
+        >
+      )[args[1]!]
+      return value === undefined
+        ? { code: 1, output: 'No value at that key path' }
+        : {
+            code: 0,
+            output: args[2] === 'raw' ? String(value) : JSON.stringify(value),
+          }
+    }
     if (name === 'plutil') {
       const text = readFileSync(args.at(-1)!, 'utf8')
       return {
@@ -198,6 +212,22 @@ function fakeXcodebuild(
           : text,
       }
     }
+    if (name === 'security' && args[0] === 'cms') {
+      writeFileSync(
+        args[args.indexOf('-o') + 1]!,
+        JSON.stringify({
+          TeamIdentifier: [TEAM],
+          Entitlements: {
+            'application-identifier': `${TEAM}.*`,
+            'aps-environment': 'production',
+          },
+        }),
+      )
+      return { code: 0, output: '' }
+    }
+    if (name === 'xattr') return { code: 0, output: '' }
+    if (name === 'codesign' && args[0] === '-d' && args[1] === '--verbose=2')
+      return { code: 0, output: `TeamIdentifier=${TEAM}\n` }
     if (name === 'codesign')
       return {
         code: 0,
@@ -710,6 +740,14 @@ export async function sign(ctx: Stage) {
     const notarized = await ctx.apple.notarize({ path: 'App.dmg' })
     return { built: path.basename(built.ipa!), testflight, notarized }
   }
+  if (ctx.run.params.mode === 'resign') {
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync('build/App.app/PlugIns/Widgets.appex', { recursive: true })
+    writeFileSync('build/App.app/Info.plist', JSON.stringify({ CFBundleIdentifier: 'app.example.signed' }))
+    writeFileSync('build/App.app/PlugIns/Widgets.appex/Info.plist', JSON.stringify({ CFBundleIdentifier: 'app.example.signed.widgets' }))
+    const signed = await ctx.apple.resign({ path: 'build/App.app' })
+    return { ipa: path.relative(ctx.workspace, signed.ipa), bundles: signed.bundles }
+  }
   return { ...signing, keychainExists: existsSync(signing.keychain), exportExists: existsSync(signing.exportOptions) }
 }
 `,
@@ -880,6 +918,55 @@ export async function sign(ctx: Stage) {
         !xcodeCalls.some((call) => /ruby|bundle|fastlane/.test(call.join(' '))),
       )
     })
+    ;(process.platform === 'darwin' ? it : it.skip)(
+      'a stage re-signs a build through ctx.apple.resign with the profiles the master sent',
+      async () => {
+        const created = await c.api('POST', '/api/v2/runs', {
+          project: 'signed',
+          branch: 'master',
+          params: { mode: 'resign' },
+        })
+        assert.equal(created.status, 202, created.text)
+        const run = await c.until(
+          () => {
+            const value = c.master.master!.run(created.json.id) as Json
+            return ['succeeded', 'failed'].includes(value.status)
+              ? value
+              : undefined
+          },
+          60_000,
+          'the re-signing run',
+        )
+        const log = c.master.master!.scheduler.logs(run.id)
+        assert.equal(run.status, 'succeeded', log)
+        const output = run.stages.find(
+          (entry: Json) => entry.name === 'sign',
+        ).output
+        assert.equal(output.ipa, 'build/App-adHoc.ipa')
+        assert.deepEqual(
+          output.bundles.map((bundle: Json) => [bundle.path, bundle.bundleId]),
+          [
+            [
+              'Payload/App.app/PlugIns/Widgets.appex',
+              'app.example.signed.widgets',
+            ],
+            ['Payload/App.app', 'app.example.signed'],
+          ],
+        )
+        assert.match(
+          output.bundles[1].profile,
+          /^Mason AdHoc app\.example\.signed /,
+        )
+        const signed = xcodeCalls.filter(
+          (call) =>
+            path.basename(call[0]!) === 'codesign' && call[1] === '--force',
+        )
+        assert.equal(signed.length, 2)
+        assert.match(signed[0]!.at(-1)!, /Widgets\.appex$/)
+        assert.match(signed[0]![5]!, /mason-stage-.*\.keychain-db$/)
+        assert.match(log!, /Signed Payload\/App\.app \(app\.example\.signed\)/)
+      },
+    )
 
     it('U14.11 saving an app ID sets it up with Apple at once; a new key or certificate checks it again', async () => {
       const master = c.master.master!

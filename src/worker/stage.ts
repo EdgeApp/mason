@@ -115,6 +115,7 @@ import {
   type DistributeContext,
 } from './apple/distribute.js'
 import { spawnExec } from './apple/exec.js'
+import { resign } from './apple/resign.js'
 import {
   createStageKeychain,
   removeStageKeychain,
@@ -170,7 +171,7 @@ export interface WorkerOptions {
   restart?: () => void
   /** Runs system commands (xcodebuild, simctl, pkgutil, …) as the worker's user. */
   systemRun?: SystemRun
-  /** Runs `xcodebuild`, `codesign`, `plutil`, `stapler`; real tools otherwise. */
+  /** Runs `xcodebuild`, `codesign`, `plutil`, `ditto`, `stapler`; real tools otherwise. */
   appleExec?: Exec
   /** Runs `security` and `openssl` for stage keychains. */
   appleCommand?: Command
@@ -1660,6 +1661,11 @@ export class WorkerRuntime {
       }
       case 'apple.archive':
         return await archive(
+          this.appleContext(assignment, dir, say),
+          args[1] as never,
+        )
+      case 'apple.resign':
+        return await resign(
           this.appleContext(assignment, dir, say),
           args[1] as never,
         )

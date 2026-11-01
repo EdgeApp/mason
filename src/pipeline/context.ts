@@ -487,6 +487,8 @@ export function createContext(
       },
       archive: async (options) =>
         await service('apple.archive', options.scheme, options),
+      resign: async (options) =>
+        await service('apple.resign', options.path, options),
       testflight: async (options) =>
         await service('apple.testflight', options.path, options),
       notarize: async (options) =>

@@ -1003,7 +1003,14 @@ export async function build(ctx: Stage) {
       new URL('../../test/masonfile-examples/', import.meta.url),
     )
     const shapes: Record<string, string> = {}
-    for (const name of ['eddy', 'nightly', 'release', 'matrix', 'app']) {
+    for (const name of [
+      'eddy',
+      'nightly',
+      'release',
+      'matrix',
+      'app',
+      'resign',
+    ]) {
       const dir = root()
       copyFileSync(
         path.join(examples, `${name}.masonfile.ts`),
@@ -1029,6 +1036,7 @@ export async function build(ctx: Stage) {
       release: 'release:3+0',
       matrix: 'build:11+0',
       app: 'build:5+1 release:2+0',
+      resign: 'build:2+0',
     })
   })
 
@@ -1973,6 +1981,7 @@ export async function main(ctx: Stage) {
   await ctx.checkout({ repository: 'git@github.com:a/b.git', path: 'b' })
   await ctx.git.tag('v1', { push: true })
   await ctx.apple.archive({ scheme: 'App' })
+  await ctx.apple.resign({ path: 'build/App.xcarchive' })
   await ctx.apple.testflight({ path: 'a.ipa' })
   await ctx.apple.notarize({ path: 'a.dmg' })
   let refused = ''
@@ -2006,11 +2015,16 @@ export async function main(ctx: Stage) {
         'checkout',
         'git.tag',
         'apple.archive',
+        'apple.resign',
         'apple.testflight',
         'apple.notarize',
         'stash',
       ],
     )
+    assert.deepEqual(calls[11], [
+      'apple.resign',
+      ['build/App.xcarchive', { path: 'build/App.xcarchive' }],
+    ])
     assert.deepEqual(calls[0], [
       'stash',
       ['web', 'dist/**', { exclude: ['*.map'] }],

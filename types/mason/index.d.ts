@@ -492,6 +492,25 @@ export type ArchiveResult = {
   dsyms: string
 }
 
+export interface ResignOptions {
+  /** An `.ipa`, `.xcarchive` or `.app` in the workspace, as an earlier stage stashed it. */
+  path: string
+  /** The `.ipa` to write; default `<name>-<distribution>.ipa` beside the input. */
+  output?: string
+  /** Entitlements plists in the workspace, by bundle ID; they win over the input's own. */
+  entitlements?: Record<string, string>
+  /** `CFBundleShortVersionString` of the app and each extension. */
+  version?: string
+  /** `CFBundleVersion` of the app and each extension. */
+  buildNumber?: string
+}
+
+export type ResignResult = {
+  ipa: string
+  /** Every bundle signed, deepest first, by its path in the `.ipa`. */
+  bundles: Array<{ path: string; bundleId?: string; profile?: string }>
+}
+
 export interface TestflightOptions {
   path: string
   whatToTest?: string
@@ -627,6 +646,8 @@ export interface Stage {
   readonly apple: {
     readonly signing: AppleSigning
     archive(options: ArchiveOptions): Promise<ArchiveResult>
+    /** Signs an earlier stage's build with this stage's identity and profiles (macOS only). */
+    resign(options: ResignOptions): Promise<ResignResult>
     testflight(options: TestflightOptions): Promise<{
       buildId: string
       version: string
