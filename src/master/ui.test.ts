@@ -494,6 +494,16 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     const page = await request(c.master, 'GET', `/runs/${run}`, developer)
     assert.equal(page.status, 200)
+    // The header names who requested the run, and the API names them too.
+    assert.match(page.text, /Requested by developer person /)
+    const shown = await request(
+      c.master,
+      'GET',
+      `/api/v2/runs/${run}`,
+      developer,
+    )
+    assert.equal(shown.json.actor, `account:${people.developer}`)
+    assert.equal(shown.json.requestedBy, 'developer person')
     assert.match(page.text, /class="pipeline-graph"/)
     assert.match(page.text, /data-stage="android"/)
     assert.match(page.text, /data-path="\/api\/v2\/runs\/[^/]+\/cancel"/)
@@ -644,6 +654,61 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     rest.ws.close()
     writeFileSync(logFile, whole)
+    // A run a key requested names the key by six characters of its id, off the master too.
+    const keyed = await pinnedFetch(
+      origin(c.master) + '/api/v2/runs',
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${key.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ ...body, params: { seat: 'none' } }),
+      },
+      c.master.web!.certificate!.pin,
+    )
+    const keyedBody = (await keyed.json()) as Json
+    assert.equal(keyed.status, 202, JSON.stringify(keyedBody))
+    const keyedRun = keyedBody.id
+    const keyedShown = await request(
+      c.master,
+      'GET',
+      `/api/v2/runs/${keyedRun}`,
+      developer,
+    )
+    const short = key.id.slice(0, 6)
+    assert.equal(keyedShown.json.actor, `key ${short}`)
+    assert.equal(
+      keyedShown.json.requestedBy,
+      `local operator · key "developer key ${short}" (${short})`,
+    )
+    assert.doesNotMatch(keyedShown.text, new RegExp(key.id))
+    const cached = await c.until(
+      () =>
+        host
+          .host!.cache.db.prepare(
+            'SELECT actor,requested_by FROM jobs WHERE id=?',
+          )
+          .get(keyedRun) as Json,
+      10_000,
+      'the keyed run on the host',
+    )
+    assert.deepEqual(
+      { ...cached },
+      {
+        actor: `key ${short}`,
+        requested_by: `local operator · key "developer key ${short}" (${short})`,
+      },
+    )
+    assert.equal(
+      (
+        await request(c.master, 'POST', `/api/v2/runs/${keyedRun}/cancel`, {
+          ...developer,
+          body: {},
+        })
+      ).status,
+      200,
+    )
     assert.equal(
       (await request(c.master, 'GET', `/runs/${run}`, signIn('tester'))).status,
       403,
@@ -693,6 +758,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.equal(page.status, 200)
     assert.match(page.text, /<meta name="mason-csrf"/)
+    assert.match(page.text, /Requested by developer person /)
     assert.match(page.text, /data-offset="tail"/)
     const step = await request(
       host,

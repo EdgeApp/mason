@@ -96,7 +96,7 @@ export class MasterKeys {
     this.master.transaction(() => {
       this.db
         .prepare(
-          'INSERT INTO api_keys(id,hash,name,apps,created_at,expires_at,role,projects,branches,format,creator) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+          'INSERT INTO api_keys(id,hash,name,apps,created_at,expires_at,role,projects,branches,format,creator,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
         )
         .run(
           id,
@@ -110,6 +110,7 @@ export class MasterKeys {
           JSON.stringify(request.branches),
           'v1',
           actor.accountId ?? null,
+          actor.label,
         )
       this.master.audit(actor, 'key.create', id)
     })

@@ -34,6 +34,7 @@ import { Retention } from './retention.js'
 import { Scheduler } from './scheduler.js'
 import { RunFeed } from './runFeed.js'
 import { masterLiveStream } from './live.js'
+import { requesterName, shownLabel } from './requesters.js'
 import { Stashes } from './stash.js'
 import { Releases } from './releases.js'
 import { Updates } from './updates.js'
@@ -1123,11 +1124,15 @@ export class Master {
     if (job == null) return undefined
     const row = this.database.db
       .prepare(
-        'SELECT description,reason,restart_of,restart_from FROM jobs WHERE id=?',
+        'SELECT description,reason,restart_of,restart_from,actor FROM jobs WHERE id=?',
       )
       .get(id)!
     return {
       ...job,
+      // Who requested it: the actor's label, a key by six characters of its
+      // id at most, and as the pages name them.
+      actor: shownLabel(String(row.actor)),
+      requestedBy: requesterName(this.database.db, String(row.actor)),
       ...(row.description == null
         ? {}
         : { description: String(row.description) }),

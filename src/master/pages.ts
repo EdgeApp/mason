@@ -35,6 +35,7 @@ import {
   notificationsFor,
 } from '../view/notifications.js'
 import { graphFromJson, runData, runView } from '../view/run.js'
+import { requesterName } from './requesters.js'
 import { search } from '../view/search.js'
 import { runLog } from './runsApi.js'
 import { discovery } from './wizard.js'
@@ -409,6 +410,7 @@ export function masterPages(
               .get(project) as { repository: string } | undefined
           )?.repository,
         nodeName: (fingerprint) => master.registry.get(fingerprint)?.name,
+        requester: (label) => requesterName(db, label),
       },
     )
     if (run == null) {

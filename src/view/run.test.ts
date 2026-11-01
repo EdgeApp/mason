@@ -395,6 +395,29 @@ describe('Run view', () => {
     )
     assert.match(whole, /build #7/)
     assert.match(whole, /Push by dana/)
+    // A key's requester is shown by the start of its id at most, or as the master names it.
+    db.prepare("UPDATE jobs SET actor=? WHERE id='r1'").run(
+      'key:830f19b00cf214361f85ac579fa12497',
+    )
+    const keyed = runData(db, 'r1', () => graph)!
+    assert.equal(keyed.actor, 'key:830f19b00cf214361f85ac579fa12497')
+    assert.match(runView(keyed, options({})), /Push by key 830f19 /)
+    assert.doesNotMatch(runView(keyed, options({})), /830f19b/)
+    assert.match(
+      runView(
+        runData(db, 'r1', () => graph, {
+          requester: (label) => `Paul Puey · key "CI" (${label.slice(4, 10)})`,
+        })!,
+        options({}),
+      ),
+      /Push by Paul Puey · key &quot;CI&quot; \(830f19\)/,
+    )
+    // The host's cache holds it as the master named it.
+    db.exec(
+      "ALTER TABLE jobs ADD COLUMN requested_by TEXT; UPDATE jobs SET requested_by='Dana Doe' WHERE id='r1'",
+    )
+    assert.equal(runData(db, 'r1', () => graph)!.requestedBy, 'Dana Doe')
+    db.exec("UPDATE jobs SET actor='dana',requested_by=NULL WHERE id='r1'")
     assert.match(whole, /1\.0 \(7\)/)
     assert.match(whole, /on <span class="mono">buildbox<\/span>/)
     assert.match(

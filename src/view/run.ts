@@ -13,6 +13,7 @@ import { ago, duration, escape, time } from './html.js'
 import { icon } from './icons.js'
 import { logHtml } from './log.js'
 import { stepItems } from './steps.js'
+import { shownLabel } from '../master/requesters.js'
 
 /** A run's graph as its stages and post stages, from the graph its setup recorded. */
 export interface RunGraph {
@@ -68,6 +69,8 @@ export interface RunData {
   commit: string | null
   trigger: string
   actor: string
+  /** Who requested the run, as a page shows them: never a key's whole id. */
+  requestedBy: string
   status: string
   created: number
   started: number | null
@@ -99,6 +102,8 @@ export function runData(
   options: {
     repository?: (projectId: number) => string | undefined
     nodeName?: (fingerprint: string) => string | undefined
+    /** Who an actor label names; the host's cache holds it resolved by the master. */
+    requester?: (label: string) => string
   } = {},
 ): RunData | undefined {
   const job = db
@@ -196,6 +201,11 @@ export function runData(
     commit: job.commit_sha == null ? null : String(job.commit_sha),
     trigger: String(job.trigger),
     actor: String(job.actor ?? ''),
+    requestedBy:
+      options.requester?.(String(job.actor ?? '')) ??
+      (job.requested_by == null
+        ? shownLabel(String(job.actor ?? ''))
+        : String(job.requested_by)),
     status: String(job.status),
     created: Number(job.created),
     started: job.started == null ? null : Number(job.started),
@@ -525,7 +535,7 @@ export function runView(run: RunData, options: RunViewOptions): string {
       )}</div></details>`
     : ''
   const params = Object.entries(run.params)
-  const header = `<div class="page-head run-head" data-run="${escape(run.id)}" data-live="${live ? '1' : '0'}"><div><div class="breadcrumbs"><a href="/projects/${encodeURIComponent(run.project.slug)}">${escape(run.project.name)}</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.project.slug)}&amp;branch=${encodeURIComponent(run.branch)}">${escape(run.branch)}</a></div><h1><a href="?" class="run-title">${escape(run.workflow)} #${run.number}</a> <span class="state-${escape(run.status)}" data-run-status>${statusDot(run.status)} ${escape(run.status.replace('_', ' '))}</span>${live ? '<span class="live-state" data-live-state role="status" hidden></span>' : ''}</h1><p class="run-meta">${icon('fork_right')} <span class="mono">${escape(run.branch)}</span>${run.commit == null ? '' : ` · ${icon('commit')} <span class="mono">${escape(run.commit.slice(0, 12))}</span>`}${run.project.repository == null ? '' : ` · <span class="mono">${escape(run.project.repository)}</span>`} · ${escape(triggerText[run.trigger] ?? run.trigger)}${run.actor === '' ? '' : ` by ${escape(run.actor)}`} ${time(run.created)} · queued ${escape(duration(queued))}${took == null ? '' : ` · took ${escape(duration(took))}`}${nodes.length === 0 ? '' : ` · on <span class="mono">${nodes.map(escape).join(', ')}</span>`}</p>${run.description == null ? '' : `<p class="run-description">${escape(run.description)}</p>`}${run.reason == null ? '' : `<p class="state-failed">${escape(run.reason)}</p>`}${
+  const header = `<div class="page-head run-head" data-run="${escape(run.id)}" data-live="${live ? '1' : '0'}"><div><div class="breadcrumbs"><a href="/projects/${encodeURIComponent(run.project.slug)}">${escape(run.project.name)}</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.project.slug)}&amp;branch=${encodeURIComponent(run.branch)}">${escape(run.branch)}</a></div><h1><a href="?" class="run-title">${escape(run.workflow)} #${run.number}</a> <span class="state-${escape(run.status)}" data-run-status>${statusDot(run.status)} ${escape(run.status.replace('_', ' '))}</span>${live ? '<span class="live-state" data-live-state role="status" hidden></span>' : ''}</h1><p class="run-meta">${icon('fork_right')} <span class="mono">${escape(run.branch)}</span>${run.commit == null ? '' : ` · ${icon('commit')} <span class="mono">${escape(run.commit.slice(0, 12))}</span>`}${run.project.repository == null ? '' : ` · <span class="mono">${escape(run.project.repository)}</span>`} · ${escape(triggerText[run.trigger] ?? run.trigger)}${run.requestedBy === '' ? '' : ` by ${escape(run.requestedBy)}`} ${time(run.created)} · queued ${escape(duration(queued))}${took == null ? '' : ` · took ${escape(duration(took))}`}${nodes.length === 0 ? '' : ` · on <span class="mono">${nodes.map(escape).join(', ')}</span>`}</p>${run.description == null ? '' : `<p class="run-description">${escape(run.description)}</p>`}${run.reason == null ? '' : `<p class="state-failed">${escape(run.reason)}</p>`}${
     params.length === 0
       ? ''
       : `<details><summary>Parameters</summary><ul class="plain">${params.map(([name, value]) => `<li><span class="mono">${escape(name)}</span> = <span class="mono">${escape(JSON.stringify(value))}</span></li>`).join('')}</ul></details>`

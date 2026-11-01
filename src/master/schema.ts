@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 24
+export const MASTER_SCHEMA = 25
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -646,6 +646,20 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     db.prepare("UPDATE settings SET value=? WHERE area='cloud'").run(
       JSON.stringify(value),
     )
+  },
+  // 25: who made each API key, as its actor label, so a run a key requested
+  // names the person behind it. A key made before is credited from its
+  // key.create audit entry, or else from its creating account.
+  (db): void => {
+    const columns = db.prepare('PRAGMA table_info(api_keys)').all()
+    if (!columns.some((column) => column.name === 'created_by'))
+      db.exec('ALTER TABLE api_keys ADD COLUMN created_by TEXT')
+    db.exec(`
+    UPDATE api_keys SET created_by=(
+      SELECT CASE WHEN a.via<>'' THEN a.via WHEN a.actor IS NOT NULL THEN 'account:'||a.actor END
+      FROM audit a WHERE a.action='key.create' AND a.target=api_keys.id ORDER BY a.id LIMIT 1)
+      WHERE created_by IS NULL;
+    UPDATE api_keys SET created_by='account:'||creator WHERE created_by IS NULL AND creator IS NOT NULL;`)
   },
 ]
 

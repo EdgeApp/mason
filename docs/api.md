@@ -421,6 +421,11 @@ in this shape:
   `cancelled`, `timed_out` or `interrupted`.
 - `trigger` is `push`, `request`, `schedule`, `after`, `deviceRegistered` or
   `restart`.
+- `actor` is who requested the run, as a label: `account:<id>`,
+  `host:<account id>`, `key <first 6 characters of its id>`,
+  `local operator`, or the trigger's own name (`poller`). `requestedBy` names
+  them as the pages do: an account by its name, a key by its maker, its name
+  and those six characters, `Paul Puey · key "TeamStation CI" (830f19)`.
 - A run may also have `finished`, `requested_commit`, `exit_code`, `result`,
   `description`, `reason` (why it ended), and, for a restart, `restartOf`
   and `restartFrom`.
