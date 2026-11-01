@@ -733,6 +733,8 @@ export function masterPages(
           ...(apple.appleId == null ? {} : { appleId: apple.appleId }),
           ...(apple.notice == null ? {} : { notice: apple.notice }),
           ...(setup == null ? {} : { setup }),
+          failures: master.appleSigning.setupFailures(),
+          settingUp: master.appleTeamsInSetup(),
         },
         keys: can(actor, 'keys.read')
           ? master.keys.list().map((key) => ({

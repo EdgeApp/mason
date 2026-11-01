@@ -1130,15 +1130,31 @@ publishes moves to a pipeline Masonfile and `ctx.publish`.
 
 ## 12. Apple signing and distribution
 
-Mason does what Fastlane's `match`, `cert`, `sigh`, `produce`, `gym`, `pilot`
-and `notarize` do, natively. Nothing on any node needs Fastlane, Ruby or
-Bundler. The master only makes HTTPS calls to Apple's APIs, so it can run on
-Linux or macOS. Mac workers build and sign with Xcode, and need no setup for
-it: everything they need comes from the master with each stage.
+Mason does what Fastlane's `match`, `cert`, `sigh`, `produce`, `gym`,
+`resign`, `pilot` and `notarize` do, natively. Nothing on any node needs
+Fastlane, Ruby or Bundler. The master only makes HTTPS calls to Apple's APIs,
+so it can run on Linux or macOS. Mac workers build and sign with Xcode, and
+need no setup for it: everything they need comes from the master with each
+stage.
 
 ### Setup on the master
 
-An administrator gives the master, per Apple team:
+The quickest way is to sign the master in with an Apple ID that is the
+team's Account Holder or an Admin (Settings → Apple, `mason apple sign-in`
+or `POST /api/v2/apple/session`; see [Apple ID for Xcode
+downloads](#apple-id-for-xcode-downloads)). Once it is signed in, the master
+sets up the Apple ID's team by itself, in the background (of several teams,
+only those it already uses, with a stored key or an app ID assigned to them;
+another is set up with its button on Settings → Apple): it makes
+the team's App Store Connect API key (`Mason` and the start of the master's
+fingerprint, Admin role) and stores it, then makes the distribution
+certificate with it, then the profiles of the app IDs that were waiting for
+them. A team that already has a stored key is left alone. When Apple
+refuses (the certificate limit, a missing role, a team without API access),
+the master's notices and Settings → Apple say which team and what to do;
+**Check signing again** on Settings → Apple runs the setup once more.
+
+Otherwise an administrator gives the master, per Apple team:
 
 - an **App Store Connect API key** (issuer ID, key ID and the `.p8` private
   key, with the App Manager role). It stays on the master; workers never
@@ -1224,7 +1240,9 @@ Mason does the equivalent with one sign-in, on the master:
 - An administrator stores the Apple ID and password in the master's settings
   and signs in from the master UI, typing the two-factor code there when Apple
   asks. Apple then trusts that session for roughly two to four weeks; the
-  master asks an administrator for a new code only when Apple ends it.
+  master asks an administrator for a new code only when Apple ends it, or
+  when App Store Connect stops accepting it (a 401), which the master shows
+  as an expired session.
 - When a node must install an Xcode version, the master uses its session to
   obtain Apple's **download-only** authorization for that file (the
   `ADCDownloadAuth` cookie Apple's own download flow issues) and sends just
@@ -1308,6 +1326,14 @@ export async function buildIos(ctx: Stage) {
   artifact), and resolves with `{ archive, ipa? , app?, pkg?, dsyms }`.
   Options: `project` or `workspace`, `scheme`, `configuration`, `destination`,
   `version`, `buildNumber`, `sdk`, `xcargs`, `output`.
+- **`ctx.apple.resign(options)`** (Fastlane `resign`) signs an iOS build an
+  earlier stage produced with this stage's identity and profiles, and
+  resolves with `{ ipa, bundles }`: the signed `.ipa` and every bundle
+  signed, deepest first, with its bundle ID and profile. Options: `path` (an
+  `.ipa`, `.xcarchive` or `.app` in the workspace), `output` (the `.ipa`;
+  default `<name>-<distribution>.ipa` beside the input), `entitlements`
+  (plist paths by bundle ID), `version`, `buildNumber`. See
+  [Re-signing a build](#re-signing-a-build).
 - **`ctx.apple.testflight(options)`** (Fastlane `pilot`) uploads the IPA (or
   macOS `.pkg`) through App Store Connect's build-upload API. The **master**,
   holding the API key, creates the build upload and its file record and
@@ -1329,15 +1355,97 @@ export async function buildIos(ctx: Stage) {
   which needs no credentials. A rejection fails the stage with Apple's log attached
   as an artifact. Options: `path`, `staple` (default `true`).
 
+### Re-signing a build
+
+A build can be made once, without signing material, and signed for
+distribution by a later stage of the same run, on whichever Mac holds the
+signing label. The build stage needs no `apple` option; the signing stage
+needs no checkout.
+
+```ts
+import type { Setup, Stage } from '@mason/types'
+
+const APP = 'com.example.app'
+
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.buildNumber(APP, { check: 'apple' })
+  m.stage('ios', { on: 'mac-xcode', buildNumbers: [APP], run: buildIos })
+  m.stage('sign', {
+    on: { type: 'mac-xcode', labels: ['apple-signing'] },
+    checkout: false,
+    apple: { distribution: 'appStore', app: APP },
+    publishes: [APP],
+    run: signIos,
+  })
+}
+
+export async function buildIos(ctx: Stage) {
+  await ctx.sh(
+    `xcodebuild archive -workspace ios/App.xcworkspace -scheme App -destination generic/platform=iOS -archivePath build/App.xcarchive CURRENT_PROJECT_VERSION=${ctx.getBuildNumber(APP)} CODE_SIGNING_ALLOWED=NO`,
+  )
+  await ctx.stash('ios-build', 'build/App.xcarchive/**')
+}
+
+export async function signIos(ctx: Stage) {
+  await ctx.unstash('ios-build')
+  const { ipa } = await ctx.apple.resign({ path: 'build/App.xcarchive' })
+  await ctx.apple.testflight({ path: ipa, groups: ['Internal'] })
+  await ctx.publish({ app: APP, platform: 'ios', path: ipa })
+}
+```
+
+`ctx.apple.resign` runs only on macOS, with Apple's `codesign`, `ditto`,
+`plutil` and `security`. It takes an unsigned build, one signed ad hoc
+(`-`), or one signed for development or another team, and:
+
+1. copies the app out of the `.ipa`, `.xcarchive` or `.app` (with every
+   folder beside an `.ipa`'s `Payload`, such as `SwiftSupport`,
+   `WatchKitSupport2` and `Symbols`, or an archive's `SwiftSupport`); the
+   input is left as it was. The input, `output` and `entitlements` must be in
+   the workspace, also through any symlink on the way, the app is taken only
+   from inside the input, and a symlink in the package that leads out of it
+   or nowhere (followed as the system follows it, an earlier link first), a
+   `Frameworks`, `PlugIns`, `Extensions`, `Watch` or `AppClips` folder that
+   is a symlink, or an app's or extension's `Info.plist` that is a symlink, is
+   refused;
+2. finds what is signed separately — frameworks, dylibs and test bundles in
+   `Frameworks`, extensions in `PlugIns` and `Extensions`, `Watch` apps and
+   `AppClips` — and needs a profile for the bundle ID of every app and
+   extension; a missing one is an error naming the bundle IDs the stage must
+   sign (the app ID's bundle IDs and the stage's `apple.bundleIds`);
+3. takes each bundle's entitlements from `options.entitlements`, else from
+   its own signature, else from its profile (wildcards left out), and
+   rewrites them for the profile: `application-identifier` and the team
+   identifier from the profile, values prefixed with an App ID prefix moved to
+   the profile's prefix, `get-task-allow`, `aps-environment` and
+   `beta-reports-active` as the profile has them, and keys the profile does
+   not grant left out. Of a key's values (app groups, iCloud containers and
+   services, keychain groups, associated domains, …) only those the profile
+   grants are kept, `*` in a grant matching anything; each value left out is
+   named in the log. Keys left out go to the master first, as an archive's do: it adds the capabilities
+   to the bundle IDs, makes new profiles, and the stage signs with them;
+4. sets `CFBundleShortVersionString` and `CFBundleVersion` of the app and its
+   extensions from `version` and `buildNumber`, when given;
+5. embeds each profile, signs deepest first with the stage's identity and
+   keychain so each outer signature seals the inner ones, checks the app with
+   `codesign --verify --deep --strict` and each bundle's team and profile,
+   and zips `Payload` (and `SwiftSupport`) into the `.ipa`, symlinks kept.
+
+The log has a line per bundle signed; a tool's output appears only when it
+fails, and the failure stops the stage. The certificate is the one the master
+holds for the stage's distribution; nothing about it changes for re-signing.
+
 ### Fastlane coverage
 
 | Fastlane | Mason |
 | --- | --- |
-| `match` (certificates and profiles from a repository) | Certificates stored on the master; Match repositories importable |
+| `match` (certificates and profiles from a repository) | Certificates and profiles kept in the master's database, which reaches git only inside the master's encrypted backup (Mason's equivalent of Match's encrypted repository); Match repositories importable |
 | `cert`, `sigh` | Automatic certificates and profiles on the master |
 | `register_devices` | Devices registered on the host are added automatically |
 | `produce` | Missing bundle IDs created; capabilities synced from entitlements |
 | `gym` / `build_app` | `ctx.apple.archive` |
+| `resign` | `ctx.apple.resign`: an earlier stage's `.ipa`, `.xcarchive` or `.app`, signed with the stage's certificate and profiles |
 | `increment_build_number`, `increment_version_number` | `buildNumber` and `version` passed to `archive` (project files untouched) |
 | `pilot` / `upload_to_testflight` | `ctx.apple.testflight` |
 | `notarize` | `ctx.apple.notarize` |

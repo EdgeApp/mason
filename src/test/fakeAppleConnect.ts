@@ -152,6 +152,11 @@ export class FakeAppleConnect {
   processingPolls = 1
   profileDays = 365
   readonly team: string
+  /** Other teams' keys it trusts, each for its own team, as one Apple ID's several teams. */
+  readonly teamKeys: Array<{
+    team: string
+    key: { issuerId: string; keyId: string; privateKey: string }
+  }> = []
   private nextId = 1
 
   constructor(
@@ -202,7 +207,20 @@ export class FakeAppleConnect {
     }
   }
 
-  private authorized(req: IncomingMessage): boolean {
+  /** The team whose key signed the request's JWT, if one did. */
+  private authorized(req: IncomingMessage): string | undefined {
+    for (const { team, key } of [
+      { team: this.team, key: this.key },
+      ...this.teamKeys,
+    ])
+      if (this.signedBy(req, key)) return team
+    return undefined
+  }
+
+  private signedBy(
+    req: IncomingMessage,
+    key: { issuerId: string; keyId: string; privateKey: string },
+  ): boolean {
     const match = /^Bearer ([^.]+)\.([^.]+)\.([^.]+)$/.exec(
       req.headers.authorization ?? '',
     )
@@ -217,7 +235,7 @@ export class FakeAppleConnect {
       .update(`${match[1]}.${match[2]}`)
       .verify(
         {
-          key: createPublicKey(this.key.privateKey),
+          key: createPublicKey(key.privateKey),
           dsaEncoding: 'ieee-p1363',
         },
         Buffer.from(match[3]!, 'base64url'),
@@ -225,8 +243,8 @@ export class FakeAppleConnect {
     return (
       verified &&
       header.alg === 'ES256' &&
-      header.kid === this.key.keyId &&
-      claims.iss === this.key.issuerId &&
+      header.kid === key.keyId &&
+      claims.iss === key.issuerId &&
       claims.aud === 'appstoreconnect-v1' &&
       claims.exp - claims.iat <= 1200
     )
@@ -280,7 +298,8 @@ export class FakeAppleConnect {
       path: p + url.search,
       ...(json == null ? {} : { body: json }),
     })
-    if (!this.authorized(req))
+    const team = this.authorized(req)
+    if (team == null)
       return {
         status: 401,
         json: {
@@ -328,9 +347,9 @@ export class FakeAppleConnect {
         kind === 'DEVELOPMENT'
           ? 'Apple Development: Fake Developer (XYZ1234567)'
           : kind === 'DEVELOPER_ID_APPLICATION'
-            ? `Developer ID Application: Fake Team (${this.team})`
-            : `Apple Distribution: Fake Team (${this.team})`
-      const made = fakeSigningCertificate(name, this.team, {
+            ? `Developer ID Application: Fake Team (${team})`
+            : `Apple Distribution: Fake Team (${team})`
+      const made = fakeSigningCertificate(name, team, {
         csr: data!.attributes.csrContent as string,
       })
       const der = new X509Certificate(made.certificate).raw

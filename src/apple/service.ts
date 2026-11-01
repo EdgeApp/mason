@@ -376,10 +376,60 @@ export class AppleService {
     )
   }
 
-  /** What needs a person: expiring certificates and app IDs whose Apple setup is incomplete. */
+  /**
+   * A team's setup from the Apple ID failed (no team: its teams could not be
+   * read); it stays among the notices until a setup of the team succeeds.
+   */
+  setupFailed(
+    team: { id: string; name: string } | undefined,
+    error: string,
+  ): void {
+    const notice =
+      team == null
+        ? `Mason could not read the Apple ID’s teams to set signing up: ${error}`
+        : `Signing for ${team.name} (${team.id}) is not set up: ${error}`
+    this.master.db
+      .prepare(
+        'INSERT INTO apple_cache(key,value,fetched_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,fetched_at=excluded.fetched_at',
+      )
+      .run(`setup:${team?.id ?? ''}`, JSON.stringify(notice), this.master.now())
+  }
+
+  setupSucceeded(team: string | undefined): void {
+    this.master.db
+      .prepare('DELETE FROM apple_cache WHERE key=?')
+      .run(`setup:${team ?? ''}`)
+  }
+
+  /**
+   * The Apple ID's teams were read: the teams' list is readable again, and
+   * a team no longer among them has nothing left to set up.
+   */
+  setupListed(teams: string[]): void {
+    for (const team of Object.keys(this.setupFailures()))
+      if (!teams.includes(team)) this.setupSucceeded(team)
+  }
+
+  /** Why each team's last setup failed, by team ID ('' for reading the teams). */
+  setupFailures(): Record<string, string> {
+    return Object.fromEntries(
+      this.master.db
+        .prepare(
+          "SELECT key,value FROM apple_cache WHERE key LIKE 'setup:%' ORDER BY key",
+        )
+        .all()
+        .map((row) => [
+          String(row.key).slice('setup:'.length),
+          JSON.parse(String(row.value)) as string,
+        ]),
+    )
+  }
+
+  /** What needs a person: expiring certificates, teams not set up and app IDs whose Apple setup is incomplete. */
   notices(): string[] {
     return [
       ...this.certificates.expiring(),
+      ...Object.values(this.setupFailures()),
       ...this.master.db
         .prepare(
           "SELECT value FROM apple_cache WHERE key LIKE 'app:%' ORDER BY key",

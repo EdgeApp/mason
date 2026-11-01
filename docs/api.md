@@ -1240,7 +1240,7 @@ master.
 | `POST /api/v2/apple/session` | Signs the Apple ID in; Apple usually asks for a code next. |
 | `POST /api/v2/apple/session/code` | Sends Apple's two-factor code. |
 | `GET /api/v2/apple/setup` | The teams the signed-in Apple ID belongs to. |
-| `POST /api/v2/apple/setup` | Sets a team up: its App Store Connect key and distribution certificate. |
+| `POST /api/v2/apple/setup` | Checks a team's signing again: its App Store Connect key and distribution certificate. |
 | `GET /api/v2/apple/certificates` | The signing certificates, without private keys. |
 | `POST /api/v2/apple/certificates` | Imports or creates a certificate. 201. |
 | `DELETE /api/v2/apple/certificates/:id` | Removes a certificate. |
@@ -1252,12 +1252,31 @@ master.
   **`POST …/session`** takes `{ "appleId": "ada@example.test", "password":
   "…" }` (`appleId` defaults to the stored one). **`…/session/code`** takes
   `{ "code": "123456" }`, six digits; 400 when no sign-in waits for a code.
+- Once the Apple ID is signed in (directly, or after the code), the master
+  sets up in the background the teams it uses: the Apple ID's only team, or
+  of several, those with a stored key or an app ID assigned to them (another
+  is set up with `POST …/setup` or its button on Settings → Apple). Of
+  those, each with no stored key, or whose last setup failed: the team's App
+  Store Connect API key, then its
+  distribution certificate, then the profiles of app IDs whose Apple setup
+  was incomplete. The sign-in answers without waiting. Each setup is audited
+  as `apple.setup` by the person who signed in. A failure (Apple's
+  certificate limit, an Apple ID without the Admin role, a team without API
+  access) becomes a notice naming the team and what to do, in `mason
+  status`, the dashboard and Settings → Apple, until a later setup of that
+  team succeeds or the Apple ID no longer belongs to it.
+- Apple answering 401 to any of the master's App Store Connect website calls
+  moves the session to `expired`, with the call in `error`: sign in again.
+  A 403 (the Apple ID's role or the team's API access) leaves the session
+  signed in.
 - **`GET …/setup`** answers `{ "keyName", "teams": [{ "id", "name" }] }`.
-  **`POST …/setup`** takes `{ "team": "ABCDE12345" }` (optional with one
-  team) and answers `{ "team": { "id", "name" }, "key", "keyId",
-  "certificate" }`, where `key` is `created`, `kept` or `replaced` and
-  `certificate` `created` or `kept`. 400 when the Apple ID is in no such
-  team or Apple allows no more distribution certificates.
+  **`POST …/setup`** ("Check signing again") takes `{ "team": "ABCDE12345" }`
+  (optional with one team) and runs the same setup now: it keeps what still
+  works and makes what is missing, then sets up the profiles of the team's
+  app IDs that still lack them. It answers `{ "team": { "id", "name" },
+  "key", "keyId", "certificate" }`, where `key` is `created`, `kept` or
+  `replaced` and `certificate` `created` or `kept`. 400 when the Apple ID is
+  in no such team or Apple allows no more distribution certificates.
 - **`POST …/certificates`** takes `team` (ten capitals and digits) and one
   of:
   - `p12` (base64) and its `password`;
