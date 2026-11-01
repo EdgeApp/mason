@@ -13,7 +13,14 @@ each the same `mason` program:
   It holds no secrets.
 
 The Masonfile reference, with every option and the stage API, is
-[docs/masonfile.md](docs/masonfile.md).
+[docs/masonfile.md](docs/masonfile.md). The master's HTTP API is
+[docs/api.md](docs/api.md).
+
+Nodes link only to the master. Workers report their stages and logs over
+their link, and the files a stage publishes, saves or fetches travel over it
+too, so a worker needs no route to the host. The host has its own link to the
+master, over which it receives the master's replicated data and the files
+stages publish, and forwards its pages' requests for live run updates.
 
 ## Installing
 
@@ -23,8 +30,14 @@ Mason and starts its role as a service:
 ```sh
 curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh | bash -s -- master
 curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh | bash -s -- worker
+curl -fsSL https://github.com/EdgeApp/mason/releases/latest/download/install.sh | bash -s -- host
 mason status        # role, state, version, fingerprint, web address
 ```
+
+A cluster needs a master and at least one worker; a host is needed to serve
+installs and published builds. The master can also make its host and its
+workers itself on a cloud account (the Cloud and Nodes pages), installing
+this same release on them.
 
 - It asks for your password once (or run it as `… | sudo bash -s -- master`).
   The service runs as the account that ran the command, with its data in
@@ -39,6 +52,29 @@ mason status        # role, state, version, fingerprint, web address
   the program, and `sudo mason <role> --install` starts it later.
 - `… | bash -s -- uninstall worker` stops the service and removes the program
   (`/opt/mason`, `/usr/local/bin/mason`); the data directory is kept.
+
+### A worker on the master's computer
+
+`master --worker` runs a worker inside the master's process. It is the
+simplest, but its stages run as the master's account, which can read the
+master's database and every secret in it. A worker that runs only trusted
+work (signing, say) on the same computer is better installed under an account
+of its own. The installer's own `--user` means "no sudo" and does not apply
+here, so this takes two steps: the one-line install of the master puts the
+`mason` program in place, then
+
+```sh
+sudo useradd --system --create-home --home-dir /home/mason-node --shell /usr/sbin/nologin mason-node
+sudo mason worker --install --user mason-node --listen 127.0.0.1 --link-port 9310
+```
+
+installs the worker as that account, with its data in `/home/mason-node/.mason`,
+listening on loopback so only the master on that computer reaches it. Pair it
+with the address `127.0.0.1:9310` and the pairing key the install prints (it is
+also in the worker's first log lines). Without `--user`, `sudo mason worker
+--install` installs for the account that ran `sudo`, and reuses that account's
+`~/.mason`, which on the master's computer is the master's own: the worker
+then refuses to start because the directory is in use.
 
 A host on a public server can leave TLS to a terminator on the same machine,
 such as Caddy with `builds.example.test { reverse_proxy 127.0.0.1:9200 }`:
@@ -65,9 +101,31 @@ the master's Nodes page (**Add node**), or from the master's computer:
 
 ```sh
 mason nodes add --address 192.168.1.20:9310 --key mason1:…
-mason nodes set second --type mac-xcode --label apple-signing --slots 2
+mason nodes set second --type mac-xcode --label setup --label apple-signing --slots 2
 mason settings set host --file host.json     # {"origin": "https://builds.example.test"}
 ```
+
+A stage runs on a node that matches its `on` selector: the node's type, OS and
+architecture, and every label the selector names. `mason nodes set` replaces a
+node's labels with the `--label`s it is given.
+
+A run's setup, which executes the branch's Masonfile, runs only on nodes
+labelled `setup`. Every new node, permanent cloud node and pool carries that
+label until an administrator removes it. A node dedicated to some stages
+takes a type and a label of its own and no `setup`: it then never runs a
+setup, and takes a stage only when the stage's selector matches it, by its
+type or label, or by OS and architecture alone. Stages that should stay off
+it select by type. A signing node that holds an Android keystore, for example:
+
+```sh
+mason nodes set jack3 --name android-signer --type android-signer --label android-signing --slots 1
+```
+
+with the signing stage `on: { labels: ['android-signing'] }` and
+`checkout: false`, so the node gets the stashed packages and the Masonfile
+but none of the repository (see [docs/masonfile.md](docs/masonfile.md)).
+A secret reaches only the node running a stage that declares it, so a
+keystore only the signing stage declares reaches only the signing node.
 
 Node types (`mason settings set nodeTypes`) list the software every node of
 that type keeps: Xcode versions, Node, Java, the Android SDK packages (their
@@ -158,6 +216,10 @@ standalone builder and distribution server, which the cluster replaces; their
 upload API and keys are theirs alone.
 
 ## Builder role
+
+The builder role and the distribution server below are the standalone
+programs the cluster replaces. Their APIs and keys do not apply to a
+cluster; the cluster's API is [docs/api.md](docs/api.md).
 
 Mason can also run a trusted build worker on a separate machine. It does not
 need distribution storage or OAuth configuration. Node 24 and Git are required;
