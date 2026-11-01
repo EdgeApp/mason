@@ -1255,6 +1255,67 @@ describe('Projects, branch rules and build numbers', function () {
     }
   })
 
+  it('takes a project body up to 1 MB, while the wizard keeps its own 64 KB limit', async () => {
+    const { node, admin } = await master()
+    try {
+      assert.equal(
+        (
+          await api(node, 'PUT', '/api/v2/projects/big', admin, {
+            repository: 'https://github.com/a/big',
+          })
+        ).status,
+        201,
+      )
+      // Fields a route does not know are ignored, so they only add size.
+      const padding = 'x'.repeat(200 * 1024)
+      const large = await api(node, 'PUT', '/api/v2/projects/big', admin, {
+        name: 'Big',
+        padding,
+      })
+      assert.equal(large.status, 200, JSON.stringify(large.json))
+      assert.equal(
+        (
+          await api(node, 'PUT', '/api/v2/projects/big', admin, {
+            padding: 'x'.repeat(1100 * 1024),
+          })
+        ).status,
+        413,
+      )
+      const checked = await api(node, 'POST', '/api/v2/projects/check', admin, {
+        repository: 'https://github.com/a/other',
+        padding,
+      })
+      assert.equal(checked.status, 413)
+      assert.equal(typeof checked.json.error, 'string')
+      // A wizard route below a project, and its JSON error.
+      const apps = await api(
+        node,
+        'POST',
+        '/api/v2/projects/big/wizard/apps',
+        admin,
+        { padding },
+      )
+      assert.equal(apps.status, 413)
+      assert.equal(typeof apps.json.error, 'string')
+      // A project slugged check is a project like any other.
+      assert.equal(
+        (
+          await api(node, 'PUT', '/api/v2/projects/check', admin, {
+            repository: 'https://github.com/a/check',
+          })
+        ).status,
+        201,
+      )
+      const named = await api(node, 'PUT', '/api/v2/projects/check', admin, {
+        name: 'Check',
+        padding,
+      })
+      assert.equal(named.status, 200, JSON.stringify(named.json))
+    } finally {
+      await node.close()
+    }
+  })
+
   it('answers API errors with 400, 403, 404 and 409 and audits every change', async () => {
     const { node, admin } = await master()
     try {

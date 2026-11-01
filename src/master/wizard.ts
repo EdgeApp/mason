@@ -140,14 +140,28 @@ export function discovery(
   }
 }
 
+/**
+ * The wizard's own routes. Its body limit and errors apply to these alone,
+ * so the other `/api/v2/projects` routes keep the limits their routers set.
+ * The repository check parses its body on its own POST route, as `check`
+ * is also a project slug.
+ */
+const checkPath = '/api/v2/projects/check'
+const wizardPaths = [
+  '/api/v2/projects/:slug/discover',
+  '/api/v2/projects/:slug/wizard',
+  '/api/v2/projects/:slug/webhook',
+  '/api/v2/projects/:slug/masonfile',
+]
+
 /** The add-project wizard's API and a project's Masonfile at a commit, for managers and administrators. */
 export function wizardApi(master: Master): Router {
   const router = Router()
-  router.use(
-    ['/api/v2/projects'],
+  const body = [
     express.json({ limit: '64kb', strict: true }),
     authenticate(master),
-  )
+  ]
+  router.use(wizardPaths, ...body)
   const project = (
     slug: string,
   ): { id: number; repository: string; defaultBranch: string } => {
@@ -165,7 +179,8 @@ export function wizardApi(master: Master): Router {
   }
   // 1. Repository: the master reads it with its own credentials.
   router.post(
-    '/api/v2/projects/check',
+    checkPath,
+    ...body,
     json(async (req, res) => {
       allowRole(actorOf(res), 'projects.change')
       const repository = String(
@@ -312,6 +327,6 @@ export function wizardApi(master: Master): Router {
       return { commit, file: entry, text }
     }),
   )
-  router.use('/api/v2/projects', apiErrors)
+  router.use([checkPath, ...wizardPaths], apiErrors)
   return router
 }

@@ -34,7 +34,8 @@ clients still use. The host forwards most of these routes to the master
   | --- | --- |
   | `/api/v2/projects/:slug/secrets…` | 8 MB |
   | `/api/v2/apple/certificates`, `…/profiles`, `…/setup` | 2 MB |
-  | other `/api/v2/projects…` | 64 KB |
+  | the wizard's routes: `POST /api/v2/projects/check` (that path alone, so a project slugged `check` takes the next limit), `…/:slug/discover`, `…/:slug/wizard/…`, `…/:slug/webhook`, `…/:slug/masonfile` | 64 KB |
+  | other `/api/v2/projects…` | 1 MB |
   | `/api/v2/build-numbers/…` | 1 MB |
   | `/api/v2/runs…`, `/api/v2/queue…` | 16 KB |
   | `/api/v2/session…`, `/api/v2/people…`, `/api/v2/groups…`, `/api/v2/settings/backup…`, `/api/v2/backups`, `/api/v2/storage…`, `/api/v2/cloud…` | 64 KB |
