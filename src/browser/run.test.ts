@@ -688,11 +688,6 @@ describe('Run view script', () => {
       .set('[data-log]', logBox)
       .set('[data-run-status]', runStatus)
       .set('[data-live-state]', liveState)
-    const streams: Array<{
-      url: string
-      listeners: Map<string, (event: { data: string }) => void>
-      closed: boolean
-    }> = []
     const fetched: string[] = []
     const visits: string[] = []
     const live = new FakeLiveWindow()
@@ -710,27 +705,6 @@ describe('Run view script', () => {
         assign: (href) => visits.push(href),
       },
       live,
-      EventSource: class {
-        listeners = new Map<string, (event: { data: string }) => void>()
-        closed = false
-        constructor(readonly url: string) {
-          streams.push(this as unknown as (typeof streams)[number])
-        }
-        addEventListener(
-          type: string,
-          listener: (event: { data: string }) => void,
-        ): void {
-          this.listeners.set(type, listener)
-        }
-        close(): void {
-          this.closed = true
-        }
-      },
-      DOMParser: class {
-        parseFromString(): Document {
-          return new El() as unknown as Document
-        }
-      },
     }
     start(doc as unknown as Document, win)
     action.fire('submit')
@@ -785,30 +759,76 @@ describe('Run view script', () => {
     live.socket.frame({ key: 'run', event: 'end' })
     assert(live.socket.closed)
 
-    // The dashboard: the queue panel reloads after the first snapshot.
-    const queue = new El()
-    queue.innerHTML = 'old'
-    const fresh = new El()
-    fresh.innerHTML = 'new'
-    const dashboard = new El().set('[data-queue]', queue)
-    start(dashboard as unknown as Document, {
-      ...win,
-      fetch: (async () =>
-        reply(200, '<html></html>')) as unknown as typeof fetch,
-      DOMParser: class {
-        parseFromString(): Document {
-          return new El().set('[data-queue]', fresh) as unknown as Document
-        }
-      },
+    // The dashboard: the queue panel and run chips, live from the socket.
+    const before = live.sockets.length
+    const list = new El()
+    const runningDot = new El({ class: 'dot running' })
+    const running = new El({ title: 'build running' })
+    running.dataset = { runId: 'r1', status: 'running' }
+    running.set('.dot', runningDot)
+    const row = new El()
+    row.dataset = { runId: 'r1', status: 'running' }
+    const rowText = new El()
+    row.set('[data-status-text]', rowText)
+    const done = new El()
+    done.dataset = { runId: 'r0', status: 'succeeded' }
+    const old = new El()
+    const cards = new El().set('[data-branch="feature"]', old)
+    const dashboard = new El()
+      .set('[data-run-id]', running, row, done)
+      .set('[data-run-id="r1"]', running, row)
+      .set('[data-queue] ul', list)
+      .set('[data-project-runs="app"]', cards)
+    start(dashboard as unknown as Document, win)
+    const board = live.sockets[before]!
+    board.accept()
+    assert.deepEqual(board.sent, [
+      { subscribe: 'status', run: 'r1', key: 'status:r1' },
+      { subscribe: 'queue', key: 'queue' },
+    ])
+    board.frame({ key: 'status:r1', event: 'run', data: { status: 'failed' } })
+    assert.deepEqual(
+      [running.dataset.status, runningDot.className, rowText.textContent],
+      ['failed', 'dot failed', 'failed'],
+    )
+    assert.equal(running.getAttribute('title'), 'build failed')
+    board.frame({ key: 'status:r1', event: 'end' })
+    // A queued run the card has no chip for gets one, in place of its branch's.
+    const entry = {
+      job: 'r2',
+      project: 'app',
+      workflow: 'build',
+      number: 9,
+      branch: 'feature',
+      stage: 'test',
+      status: 'queued',
+    }
+    board.frame({
+      key: 'queue',
+      event: 'queue',
+      data: [
+        entry,
+        { ...entry, job: 'r1' },
+        { ...entry, job: 'r3', project: 'gone' },
+      ],
     })
-    const queueStream = streams[0]!
-    assert.equal(queueStream.url, '/api/v2/queue/events')
-    queueStream.listeners.get('queue')!({ data: '[]' })
-    await settle()
-    assert.equal(queue.innerHTML, 'old')
-    queueStream.listeners.get('queue')!({ data: '[1]' })
-    await settle()
-    assert.equal(queue.innerHTML, 'new')
+    assert.match(list.innerHTML, /app · test/)
+    assert(old.removed)
+    assert.match(
+      cards.innerHTML,
+      /data-run-id="r2" data-branch="feature" data-status="queued"/,
+    )
+    assert.deepEqual(board.sent.at(-1), {
+      subscribe: 'status',
+      run: 'r2',
+      key: 'status:r2',
+    })
+    board.frame({ key: 'queue', event: 'other' })
+    board.frame({ key: 'queue', event: 'queue', data: [] })
+    assert.match(list.innerHTML, /Nothing is running/)
+    // A page with no queue and no unfinished run opens no socket.
+    start(new El().set('[data-run-id]', done) as unknown as Document, win)
+    assert.equal(live.sockets.length, before + 1)
     // A run page without a selected stage follows the running one.
     const plain = new El().set('.run-head', head)
     start(plain as unknown as Document, win)

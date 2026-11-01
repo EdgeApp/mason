@@ -394,14 +394,30 @@ function query(filter: DashboardFilter, change: DashboardFilter): string {
 /** A run's page. */
 export const runHref = (id: string): string => `/runs/${encodeURIComponent(id)}`
 
+/** A run's chip on its project's card, which the page's socket keeps at the run's status. */
+export function runChip(run: ProjectCard['runs'][number]): string {
+  return `<a class="run-chip" href="${runHref(run.id)}" title="${escape(run.workflow)} ${escape(run.status)}" data-run-id="${escape(run.id)}" data-branch="${escape(run.branch)}" data-status="${escape(run.status)}">${escape(run.branch)} <span>#${run.number}</span>${statusDot(run.status)}</a>`
+}
+
+/** The queue panel's list items: each running or queued stage, or that nothing is. */
+export function queueItems(entries: readonly QueueEntry[]): string {
+  return (
+    entries
+      .map(
+        (entry) =>
+          `<li><div><span class="mono">${escape(entry.project)} · ${escape(entry.stage)}</span><small>${escape(entry.workflow)} #${entry.number} · <span class="mono">${escape(entry.branch)}</span>${entry.elapsed == null ? '' : ` · ${escape(duration(entry.elapsed))}`}</small>${
+            entry.progress == null
+              ? ''
+              : `<div class="progress" role="progressbar" aria-valuenow="${Math.round(entry.progress * 100)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${Math.round(entry.progress * 100)}%"></span></div>`
+          }</div><span class="state-${escape(entry.status)}">${statusDot(entry.status)} ${escape(entry.status)}</span></li>`,
+      )
+      .join('') || '<li>Nothing is running.</li>'
+  )
+}
+
 /** A project's card; all of it opens the project's page, but for its run chips, which open their runs. */
 function projectCard(card: ProjectCard, now: number): string {
-  const runs = card.runs
-    .map(
-      (run) =>
-        `<a class="run-chip" href="${runHref(run.id)}" title="${escape(run.workflow)} ${escape(run.status)}">${escape(run.branch)} <span>#${run.number}</span>${statusDot(run.status)}</a>`,
-    )
-    .join('')
+  const runs = card.runs.map(runChip).join('')
   const apps = card.apps
     .map(
       (app) =>
@@ -427,7 +443,7 @@ function projectCard(card: ProjectCard, now: number): string {
     card.latest == null
       ? ''
       : `<span>${icon('commit')} <span class="mono">${escape(card.latest.commit.slice(0, 8))}</span> ${escape(card.latest.description)} · ${escape(ago(card.latest.at, now))}</span>`
-  }</div></div><div class="runs">${runs}</div></header><div class="apps"><h3>App IDs (${card.apps.length})</h3>${apps || '<p>No app IDs.</p>'}</div></article>`
+  }</div></div><div class="runs" data-project-runs="${escape(card.slug)}">${runs}</div></header><div class="apps"><h3>App IDs (${card.apps.length})</h3>${apps || '<p>No app IDs.</p>'}</div></article>`
 }
 
 /** The projects-and-apps dashboard for developers and up. */
@@ -453,16 +469,6 @@ export function dashboardView(
       return `<a class="chip" href="${escape(href)}"${current ? ' aria-current="true"' : ''}>${escape(key === 'all' ? 'All' : platformNames[key])} (${data.counts[key]})</a>`
     })
     .join('')
-  const queue = data.queue
-    .map(
-      (entry) =>
-        `<li><div><span class="mono">${escape(entry.project)} · ${escape(entry.stage)}</span><small>${escape(entry.workflow)} #${entry.number} · <span class="mono">${escape(entry.branch)}</span>${entry.elapsed == null ? '' : ` · ${escape(duration(entry.elapsed))}`}</small>${
-          entry.progress == null
-            ? ''
-            : `<div class="progress" role="progressbar" aria-valuenow="${Math.round(entry.progress * 100)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${Math.round(entry.progress * 100)}%"></span></div>`
-        }</div><span class="state-${escape(entry.status)}">${statusDot(entry.status)} ${escape(entry.status)}</span></li>`,
-    )
-    .join('')
   const nodes =
     data.nodes == null
       ? ''
@@ -483,5 +489,5 @@ export function dashboardView(
   return `<div class="page-head"><div><div class="breadcrumbs"><span>Mason</span><span>/</span><span>${viewer.node === 'master' ? 'Master' : 'Builds'}</span></div><h1>Projects &amp; apps</h1><p>Every project's app IDs, their latest builds and runs.</p></div>${viewer.node === 'master' && (viewer.role === 'admin' || viewer.role === 'manager') ? `<a class="button" href="/projects/new">${icon('add')} Add project</a>` : ''}</div><div class="tiles">${tile('folder', 'Projects', String(data.tiles.projects))}${tile('apps', 'App IDs', String(data.tiles.apps))}${tile('speed', 'Success rate', rate, data.tiles.finished === 0 ? 'No finished runs in 30 days' : `${data.tiles.finished} runs in 30 days`)}${tile('storage', 'Artifact storage', bytes(data.tiles.storage))}</div><nav class="chips" aria-label="Platforms">${chips}</nav><div class="columns"><div>${
     data.projects.map((card) => projectCard(card, now)).join('') ||
     '<p class="empty-state">No projects match.</p>'
-  }</div><aside><section class="panel" data-queue><h2>${icon('hourglass_top')}Queue</h2><ul>${queue || '<li>Nothing is running.</li>'}</ul></section>${nodes}<section class="panel"><h2>${icon('deployed_code')}Recent builds</h2><ul>${builds || '<li>No builds yet.</li>'}</ul></section></aside></div>`
+  }</div><aside><section class="panel" data-queue><h2>${icon('hourglass_top')}Queue</h2><ul>${queueItems(data.queue)}</ul></section>${nodes}<section class="panel"><h2>${icon('deployed_code')}Recent builds</h2><ul>${builds || '<li>No builds yet.</li>'}</ul></section></aside></div>`
 }

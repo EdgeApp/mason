@@ -552,15 +552,6 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       developer,
     )
     assert.match(plain.text, /^green line$/m)
-    const events = await request(
-      c.master,
-      'GET',
-      `/api/v2/runs/${run}/events?stage=test`,
-      developer,
-    )
-    assert.match(events.type, /text\/event-stream/)
-    assert.match(events.text, /event: stages/)
-    assert.match(events.text, /event: log/)
     // The live socket: a session from the master's own pages, or an API key.
     const pageOrigin = { origin: origin(c.master) }
     const watching = await live(c.master, {
@@ -686,7 +677,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     assert.equal(api.status, 400)
   })
 
-  it('serves the run view on the host, its logs and events forwarded to the master, and a developer’s cancel through it', async () => {
+  it('serves the run view on the host, its logs forwarded and its live updates relayed from the master, and a developer’s cancel through it', async () => {
     await c.until(
       () =>
         host.host!.cache.db.prepare('SELECT 1 FROM jobs WHERE id=?').get(run),
@@ -734,13 +725,15 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.equal(log.status, 200, log.text)
     assert.match(log.text, /second line/)
-    const events = await request(
-      host,
-      'GET',
-      `/api/v2/runs/${run}/events?stage=test`,
-      { cookie: developer.cookie },
+    // Live updates are not forwarded requests: they come over the host's live stream.
+    assert.equal(
+      (
+        await request(host, 'GET', `/api/v2/runs/${run}/events?stage=test`, {
+          cookie: developer.cookie,
+        })
+      ).status,
+      403,
     )
-    assert.match(events.text, /event: log/)
     // The host's live socket is the master's, relayed over the host's link.
     const watching = await live(host, {
       cookie: developer.cookie,

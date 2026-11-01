@@ -10,8 +10,8 @@ clients still use. The host forwards most of these routes to the master
 ## Conventions
 
 - Bodies are JSON (`Content-Type: application/json`), and so are answers,
-  except log downloads (`text/plain`) and event streams
-  (`text/event-stream`). A route that has nothing to return answers `null`.
+  except log downloads (`text/plain`). Live updates come over the `/live`
+  WebSocket (section 4). A route that has nothing to return answers `null`.
 - Times are milliseconds since the Unix epoch.
 - An error answers `{ "error": "<message>" }` with one of these statuses:
 
@@ -145,10 +145,12 @@ is not forwarded.
 
   | Kind | Requests | CSRF proof |
   | --- | --- | --- |
-  | Run reads (`isRunRead`) | `GET /api/v2/runs/:id/logs`, `GET /api/v2/runs/:id/events`, `GET /api/v2/queue/events` | none |
+  | Run reads (`isRunRead`) | `GET /api/v2/runs/:id/logs` | none |
   | Run actions (`isRunAction`) | `POST /api/jobs`, `POST /api/jobs/:id/cancel`, `POST /api/v2/runs`, `POST /api/v2/runs/:id/cancel`, `…/restart`, `…/approve` | the host session's token in `X-Mason-CSRF` or `csrf`, from the host's own origin |
 
   Any other request from a host session answers 403.
+- The host's `/live` is not a forwarded request: the host relays it over its
+  link (see [Live updates](#live-updates)).
 - The master's own session cookie is never accepted on a forwarded request,
   and sign-in and setup refuse forwarded requests (403 `Sign in on the
   master itself`).
@@ -524,41 +526,57 @@ A run's log as a download.
   (`.ansi` unless `plain=1`). A stage with no log yet answers an empty body.
   404 for an unknown run or step.
 
-### GET /api/v2/runs/:id/events
+### Live updates
 
-A run's live updates as server-sent events.
+`GET /live` upgrades to a WebSocket that sends a run's status, stages, steps
+and log, and the queue, as the master records them. The master and every
+host serve it on their web port; a host relays it over its link to the
+master, which checks every subscription.
 
-- Permission: `runs.read`. Host sessions may read it.
-- Query: `stage` selects the stage whose steps and log are followed. `after`
-  (or the `Last-Event-ID` header, which takes precedence) is a byte offset in
-  that stage's log to resume from.
-- The stream sends:
+- Authentication: a session cookie from a page of the same node (the
+  `Origin` must be that node's own), or `Authorization: Bearer <key>` from a
+  script, which may send no `Origin` but never a foreign one. Anything else
+  is refused before the upgrade: 401 without a credential, 403 for a
+  foreign origin or a key whose owner is disabled, 429 past 16 sockets for
+  one viewer, 503 on a host while the master is unreachable.
+- Messages are JSON, one per frame. A page sends:
 
-  | Event | When | Data |
-  | --- | --- | --- |
-  | `stages` | at the start and whenever the run's status, its stages or the selected stage's steps change | `{ "status", "finished", "stages": [{ "name", "status", "started", "finished" }], "steps": [{ "id", "kind", "title", "status", "ms", "parent" }] }` |
-  | `log` | the selected stage's log has new complete lines | `{ "stage", "text", "first" }`, `first` being the number of the first line; the event's `id` is the byte offset the text ends at |
-  | `end` | the run has finished and the log is drained | `{}` |
-  | `gone` | the run no longer exists | `{}` |
+  | Message | Meaning |
+  | --- | --- |
+  | `{ "subscribe": "run", "run": id, "stage"?: name, "after"?: offset, "tail"?: true, "log"?: false, "follow"?: true, "key"?: key }` | the run's `run`, `stages` and `steps` events, and the stage's log from byte `after`, or from its last megabyte with `tail`, or not at all with `log: false`. Without `stage` it follows the running stage, sending the last megabyte of its log from a line's start and switching when the next stage starts; `follow` keeps following after naming a stage. |
+  | `{ "subscribe": "status", "run": id }` | the run's `run` events only |
+  | `{ "subscribe": "queue" }` | `queue` events: the queue panel's running and queued stages, of the runs a key's scopes cover |
+  | `{ "unsubscribe": key }` | stop one subscription |
 
-  It checks every 500 ms and sends a `: keep-alive` comment every 15 s. It
-  closes after 15 minutes; a browser's `EventSource` reconnects with its last
-  event ID and continues without gaps or repeats. The setup stage
-  (`@setup`) is not in `stages`.
-- A client whose `Accept` header does not include `text/event-stream` gets
-  one `stages` event and the log so far, then the response ends.
+  `key` names the subscription in the frames that answer it; it defaults to
+  `run:<id>`, `status:<id>` or `queue`. Each subscription is checked as the
+  matching HTTP read (`runs.read` on the run's project and branch). A page
+  holds 200 subscriptions at most and may send 50 messages at once and 20 a
+  second after that.
+- The node sends `{ "key", "event", "data" }`:
 
-### GET /api/v2/queue/events
+  | Event | Data |
+  | --- | --- |
+  | `run` | `{ "id", "number", "workflow", "branch", "status", "created", "started"?, "finished"?, "description"?, "reason"? }` |
+  | `stages` | `[{ "name", "kind", "status", "attempt", "node"?, "started"?, "finished"?, "reason"?, "disconnected"? }]`, without `@setup` |
+  | `steps` | `{ "stage", "steps": [{ "id", "kind", "title", "status", "ms", "parent" }] }` |
+  | `log` | `{ "stage", "offset", "first", "text", "partial"? }`: `offset` is the byte the text ends at and `first` the number of its first line. A line longer than 256 KB comes in pieces marked `partial`, the last unmarked. A running stage's unfinished last line waits for its end. |
+  | `queue` | `[{ "job", "project", "workflow", "number", "branch", "stage", "status", "elapsed"?, "progress"? }]` |
+  | `end` | the run has finished and its log has been sent |
+  | `gone` | the run does not exist |
+  | `error` | `{ "error" }`, for a bad message or a refused subscription |
 
-The queue's live state as server-sent events.
-
-- Permission: `runs.read`. Host sessions may read it. A scoped key sees only
-  the stages of runs its scopes cover, as in `GET /api/v2/runs`.
-- Sends a `queue` event at the start and whenever the set changes, checked
-  every second: a list of `{ "job", "stage", "status" }` for every stage
-  that is `running`, `queued` or `awaiting_approval`. It closes after 15
-  minutes, or at once for a client that does not accept
-  `text/event-stream`.
+  An event is sent only when its data changed. To resume after a dropped
+  socket, subscribe again with `after` set to the last `offset` received:
+  every later line comes once, with none lost.
+- The node pings every 25 seconds and closes a client that misses two. Close
+  codes: 1008 when the session or key may no longer watch (final); 1012 when
+  the node restarts or a host loses its link to the master (reconnect and
+  resume); 4000 when a host's master is too old to serve live updates
+  (final). A host older than its master has no `/live`: its upgrade fails,
+  and its pages show no live updates until it is upgraded.
+- Log text goes a megabyte per turn and waits while a page has a megabyte
+  unread, so a page that stops reading for long (16 MB) is dropped.
 
 ## 5. Projects
 
@@ -1392,11 +1410,11 @@ curl -sS -H "Authorization: Bearer $KEY" -o build-ios.log \
   "$MASON/api/v2/runs/$RUN/logs?stage=build-ios&plain=1"
 ```
 
-Follow the same stage live:
+Follow the same stage live (`websocat` or any WebSocket client):
 
 ```sh
-curl -sS -N -H "Authorization: Bearer $KEY" -H 'Accept: text/event-stream' \
-  "$MASON/api/v2/runs/$RUN/events?stage=build-ios"
+echo '{"subscribe":"run","run":"'"$RUN"'","stage":"build-ios"}' |
+  websocat -n -H "Authorization: Bearer $KEY" "${MASON/https:/wss:}/live"
 ```
 
 Add a file secret for the `release` and `beta` build configs. The contents

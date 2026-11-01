@@ -100,11 +100,8 @@ export function asForwardRequest(value: unknown): ForwardRequest {
   }
 }
 
-/** Run reads a host session may make: a run's logs and events, and the queue's events. */
-const RUN_READS = [
-  /^\/api\/v2\/runs\/[^/]+\/(logs|events)$/,
-  /^\/api\/v2\/queue\/events$/,
-]
+/** Run reads a host session may make: a run's logs. Live updates come over the host's live stream. */
+const RUN_READS = [/^\/api\/v2\/runs\/[^/]+\/logs$/]
 
 /** Whether a host session may make this request: one of the four run actions. */
 export function isRunAction(method: string, target: string): boolean {

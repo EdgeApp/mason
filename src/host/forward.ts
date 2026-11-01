@@ -93,7 +93,7 @@ export function forwardRoutes(host: HostRuntime): Router {
           } else if (!isRunAction(req.method, req.originalUrl)) {
             res.status(403).json({
               error:
-                'A host session may only read run logs and events, or request, cancel, restart or approve runs',
+                'A host session may only read run logs, or request, cancel, restart or approve runs',
             })
             return
           }

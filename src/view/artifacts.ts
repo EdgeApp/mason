@@ -180,7 +180,7 @@ export function runsTable(
       const saved = counts.get(run.id) as { count: number; size: number }
       const builds = runBuilds(source, run)
       const numbers = [...new Set(builds.map((build) => build.build_number))]
-      return `<tr><td><a href="${runHref(run.id)}">${escape(run.slug)} ${escape(run.workflow)} #${run.number}</a></td><td class="mono">${escape(run.branch)}</td><td>${statusDot(run.status)} ${escape(run.status)}</td><td class="mono">${builds.length === 0 ? '—' : `${numbers.map(escape).join(', ')} · ${builds.length} ${builds.length === 1 ? 'file' : 'files'}`}</td><td class="mono">${saved.count === 0 ? '—' : `${saved.count} · ${escape(bytes(saved.size))}`}</td><td>${escape(ago(run.created, source.now))}</td></tr>`
+      return `<tr data-run-id="${escape(run.id)}" data-status="${escape(run.status)}"><td><a href="${runHref(run.id)}">${escape(run.slug)} ${escape(run.workflow)} #${run.number}</a></td><td class="mono">${escape(run.branch)}</td><td>${statusDot(run.status)} <span data-status-text>${escape(run.status)}</span></td><td class="mono">${builds.length === 0 ? '—' : `${numbers.map(escape).join(', ')} · ${builds.length} ${builds.length === 1 ? 'file' : 'files'}`}</td><td class="mono">${saved.count === 0 ? '—' : `${saved.count} · ${escape(bytes(saved.size))}`}</td><td>${escape(ago(run.created, source.now))}</td></tr>`
     })
     .join('')}</tbody></table>`
 }

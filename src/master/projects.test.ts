@@ -8,6 +8,7 @@ import type { AddressInfo } from 'node:net'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, describe, it } from 'mocha'
+import { WebSocket } from 'ws'
 import { clientPasswordHash } from '../auth/passwordKdf.js'
 import {
   clientParameters,
@@ -32,6 +33,7 @@ import { Projects } from './projects.js'
 import { localOperator, type Actor } from './roles.js'
 import { asRules, globExpression, matches, ruleFor } from './rules.js'
 import { seedLegacySecrets, seedSecret } from '../test/secrets.js'
+import type { QueueEntry } from '../view/dashboard.js'
 
 let root: string
 // API responses are read field by field in assertions.
@@ -1327,7 +1329,7 @@ describe('Projects, branch rules and build numbers', function () {
           .get()!.n,
         0,
       )
-      // The queue stream lists only the stages of runs the key covers.
+      // The live queue lists only the stages of runs the key covers.
       for (const [job, slug] of [
         ['job-mine', 'mine'],
         ['job-theirs', 'theirs'],
@@ -1340,14 +1342,23 @@ describe('Projects, branch rules and build numbers', function () {
           "INSERT INTO job_stages(job_id,name,position,kind,status) VALUES(?,'build',1,'stage','running')",
         ).run(job)
       const queue = async (key: string): Promise<unknown> => {
-        const response = await pinnedFetch(
-          node.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') +
-            '/api/v2/queue/events',
-          { headers: { Authorization: `Bearer ${key}` } },
-          node.identity.pin,
+        const ws = new WebSocket(
+          node.web!.url.replace(/^https:\/\/[^:]+:/, 'wss://127.0.0.1:') +
+            '/live',
+          {
+            headers: { Authorization: `Bearer ${key}` },
+            rejectUnauthorized: false,
+          },
         )
-        const text = await response.text()
-        return JSON.parse(/data: (.*)/.exec(text)![1]!)
+        await new Promise((resolve) => ws.once('open', resolve))
+        ws.send(JSON.stringify({ subscribe: 'queue' }))
+        const entries = await new Promise<QueueEntry[]>((resolve) =>
+          ws.once('message', (data) =>
+            resolve((JSON.parse(String(data)) as { data: QueueEntry[] }).data),
+          ),
+        )
+        ws.close()
+        return entries.map(({ job, stage, status }) => ({ job, stage, status }))
       }
       assert.deepEqual(await queue(scoped), [
         { job: 'job-mine', stage: 'build', status: 'running' },

@@ -2,8 +2,13 @@
 // run's status, stages, steps and log lines live from the page's socket, the
 // log's follow and Jump to latest, its wrap toggle, the stage list's
 // filters, the graph's zoom and its highlighted rails, and the dashboard's
-// queue, which reloads when the queue changes.
-import { statusDot } from '../view/dashboard.js'
+// queue and run statuses, live from the same socket.
+import {
+  queueItems,
+  runChip,
+  statusDot,
+  type QueueEntry,
+} from '../view/dashboard.js'
 import { escape } from '../view/html.js'
 import { ansiLine } from '../view/log.js'
 import { stepItems, type StepRow } from '../view/steps.js'
@@ -511,16 +516,6 @@ export interface RunWindow {
     assign: (href: string) => void
   }
   live: LiveWindow
-  EventSource: new (url: string) => {
-    addEventListener: (
-      type: string,
-      listener: (event: { data: string }) => void,
-    ) => void
-    close: () => void
-  }
-  DOMParser: new () => {
-    parseFromString: (html: string, type: 'text/html') => Document
-  }
 }
 
 /** Wires the run view, the action forms and the dashboard's queue on a page. */
@@ -625,55 +620,118 @@ export function start(doc: Document, win: RunWindow): void {
         if (code != null) code.innerHTML = logLines(text, 1).join('')
       })
   const head = doc.querySelector<HTMLElement>('.run-head')
-  if (head?.dataset.live === '1') {
-    const stage =
-      doc.querySelector<HTMLElement>('.stage-panel')?.dataset.stage ?? ''
-    const offset = Number(
-      doc.querySelector<HTMLElement>('[data-log]')?.dataset.offset ?? -1,
-    )
-    const page = domRunPage(doc, () => win.location.assign(win.location.href))
-    const state = doc.querySelector<HTMLElement>('[data-live-state]')
-    const client = new LiveClient(
+  // One socket for the page, opened when something subscribes.
+  const state = doc.querySelector<HTMLElement>('[data-live-state]')
+  let client: LiveClient | undefined
+  const live = (): LiveClient =>
+    (client ??= new LiveClient(
       liveUrl(win.location),
       win.live,
       (now: LiveState) => {
         if (state == null) return
-        state.hidden = now !== 'reconnecting'
-        state.textContent = now === 'reconnecting' ? 'Reconnecting…' : ''
+        state.hidden = now !== 'reconnecting' && now !== 'unavailable'
+        state.textContent =
+          now === 'reconnecting'
+            ? 'Reconnecting…'
+            : now === 'unavailable'
+              ? 'Live updates are unavailable here: reload for the latest'
+              : ''
       },
-    )
+    ))
+  if (head?.dataset.live === '1') {
+    const stage =
+      doc.querySelector<HTMLElement>('.stage-panel')?.dataset.stage ?? ''
+    const start = doc.querySelector<HTMLElement>('[data-log]')?.dataset.offset
+    const offset = start === 'tail' ? 'tail' : Number(start ?? -1)
+    const page = domRunPage(doc, () => win.location.assign(win.location.href))
     const run = new RunLive(
       page,
       head.dataset.run ?? '',
       stage === '' ? undefined : stage,
       offset,
     )
-    client.subscribe(
+    live().subscribe(
       'run',
       () => run.message(),
       (frame) => run.apply(frame),
     )
   }
-  const queue = doc.querySelector('[data-queue]')
-  if (queue != null && head == null) {
-    let first = true
-    const events = new win.EventSource('/api/v2/queue/events')
-    events.addEventListener('queue', () => {
-      if (first) {
-        first = false
-        return
-      }
-      void win
-        .fetch(win.location.href, { credentials: 'same-origin' })
-        .then(async (response) => await response.text())
-        .then((html) => {
-          const fresh = new win.DOMParser()
-            .parseFromString(html, 'text/html')
-            .querySelector('[data-queue]')
-          if (fresh != null) queue.innerHTML = fresh.innerHTML
-        })
-    })
+  if (head == null) liveRuns(doc, live)
+}
+
+/** Runs whose status may still change. */
+const ACTIVE = new Set(['queued', 'running'])
+
+/** Draws a run's status on each of its chips and rows. */
+export function markRun(doc: Document, id: string, status: string): void {
+  for (const node of doc.querySelectorAll<HTMLElement>(
+    `[data-run-id="${quoted(id)}"]`,
+  )) {
+    node.dataset.status = status
+    const dot = node.querySelector('.dot')
+    if (dot != null) dot.className = `dot ${status}`
+    const text = node.querySelector('[data-status-text]')
+    if (text != null) text.textContent = status
+    const title = node.getAttribute('title')
+    if (title != null) node.setAttribute('title', title.replace(/\S+$/, status))
   }
+}
+
+/**
+ * The dashboard's and a project's Runs and builds tab's live parts: the
+ * queue panel, redrawn from `queue` events, and each unfinished run's chip
+ * or row, kept at its status by its `run` events. A run the queue names
+ * that its project's card has no chip for gets one, in place of its
+ * branch's last.
+ */
+export function liveRuns(doc: Document, live: () => LiveClient): void {
+  const watched = new Set<string>()
+  const watch = (id: string, status: string): void => {
+    if (watched.has(id) || !ACTIVE.has(status)) return
+    watched.add(id)
+    live().subscribe(
+      `status:${id}`,
+      () => ({ subscribe: 'status', run: id }),
+      (frame) => {
+        if (frame.event === 'run')
+          markRun(doc, id, String((frame.data as { status: unknown }).status))
+      },
+    )
+  }
+  for (const node of doc.querySelectorAll<HTMLElement>('[data-run-id]'))
+    watch(node.dataset.runId ?? '', node.dataset.status ?? '')
+  const list = doc.querySelector('[data-queue] ul')
+  if (list == null) return
+  live().subscribe(
+    'queue',
+    () => ({ subscribe: 'queue' }),
+    (frame) => {
+      if (frame.event !== 'queue') return
+      const entries = frame.data as QueueEntry[]
+      list.innerHTML = queueItems(entries)
+      for (const entry of entries) {
+        if (doc.querySelector(`[data-run-id="${quoted(entry.job)}"]`) != null)
+          continue
+        const runs = doc.querySelector(
+          `[data-project-runs="${quoted(entry.project)}"]`,
+        )
+        if (runs == null) continue
+        runs.querySelector(`[data-branch="${quoted(entry.branch)}"]`)?.remove()
+        const status = entry.status === 'queued' ? 'queued' : 'running'
+        runs.insertAdjacentHTML(
+          'afterbegin',
+          runChip({
+            id: entry.job,
+            branch: entry.branch,
+            number: entry.number,
+            status,
+            workflow: entry.workflow,
+          }),
+        )
+        watch(entry.job, status)
+      }
+    },
+  )
 }
 
 if (typeof document !== 'undefined' && typeof window !== 'undefined')
@@ -685,6 +743,4 @@ if (typeof document !== 'undefined' && typeof window !== 'undefined')
       setTimeout: (run, ms) => window.setTimeout(run, ms),
       clearTimeout: (timer) => window.clearTimeout(timer as number),
     },
-    EventSource: window.EventSource,
-    DOMParser: window.DOMParser,
   })

@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 import express, { Router } from 'express'
 import { lineAt, plainLog } from '../view/log.js'
-import { streamRunEvents, streamSnapshots } from './runEvents.js'
 import { AUTOMATIC_POLL_MS } from '../builder/automatic.js'
 import { branchName } from '../builder/config.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
@@ -166,36 +165,6 @@ export function runLog(
     text: content.subarray(start, end).toString('utf8'),
     first: lineAt(content, start),
   }
-}
-
-/** What a run's event stream compares: status, stages and the selected stage's steps. */
-export function runSnapshot(
-  master: Master,
-  id: string,
-  stage?: string,
-): string | undefined {
-  const db = master.database.db
-  const job = db
-    .prepare('SELECT status,finished FROM jobs WHERE id=?')
-    .get(id) as { status: string; finished: number | null } | undefined
-  if (job == null) return undefined
-  return JSON.stringify({
-    status: job.status,
-    finished: job.finished != null,
-    stages: db
-      .prepare(
-        "SELECT name,status,started,finished FROM job_stages WHERE job_id=? AND name NOT LIKE '@%' ORDER BY position",
-      )
-      .all(id),
-    steps:
-      stage == null
-        ? []
-        : db
-            .prepare(
-              'SELECT id,kind,title,status,ms,parent FROM job_steps WHERE job_id=? AND stage=? AND attempt=(SELECT MAX(attempt) FROM job_steps WHERE job_id=? AND stage=?) ORDER BY id',
-            )
-            .all(id, stage, id, stage),
-  })
 }
 
 /** The v1 job API on the master (paths and fields unchanged) and `/api/v2/runs`. */
@@ -475,60 +444,6 @@ export function runsApi(master: Master): Router {
         `attachment; filename="run-${id}${typeof req.query.stage === 'string' ? '-' + req.query.stage.replace(/[^A-Za-z0-9._-]/g, '_') : ''}${plain ? '' : '.ansi'}.log"`,
       )
       res.type('text/plain').send(plain ? plainLog(text.text) : text.text)
-    } catch (error) {
-      next(error)
-    }
-  })
-  router.get('/api/v2/runs/:id/events', (req, res, next) => {
-    try {
-      const id = String(req.params.id)
-      allowRole(actorOf(res), 'runs.read')
-      allow(actorOf(res), 'runs.read', runTarget(master, id))
-      streamRunEvents(
-        req,
-        res,
-        {
-          snapshot: (stage) => runSnapshot(master, id, stage),
-          finished: () =>
-            (
-              master.database.db
-                .prepare('SELECT finished FROM jobs WHERE id=?')
-                .get(id) as { finished: number | null } | undefined
-            )?.finished != null,
-          logFile: (stage) => master.scheduler.logFile(id, stage),
-        },
-        { logs: true },
-      )
-    } catch (error) {
-      next(error)
-    }
-  })
-  router.get('/api/v2/queue/events', (req, res, next) => {
-    try {
-      const actor = actorOf(res)
-      allowRole(actor, 'runs.read')
-      // Only the runs a key's scopes cover, as the runs list.
-      streamSnapshots(req, res, 'queue', () =>
-        JSON.stringify(
-          (
-            master.database.db
-              .prepare(
-                "SELECT s.job_id AS job,s.name AS stage,s.status,p.slug,j.branch FROM job_stages s JOIN jobs j ON j.id=s.job_id JOIN projects p ON p.id=j.project_id WHERE s.status IN ('running','queued','awaiting_approval') AND s.name NOT LIKE '@%' ORDER BY s.job_id,s.position",
-              )
-              .all() as Array<{
-              job: string
-              stage: string
-              status: string
-              slug: string
-              branch: string
-            }>
-          )
-            .filter((row) =>
-              covers(actor, { project: row.slug, branch: row.branch }),
-            )
-            .map(({ job, stage, status }) => ({ job, stage, status })),
-        ),
-      )
     } catch (error) {
       next(error)
     }
