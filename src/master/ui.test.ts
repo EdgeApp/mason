@@ -1,7 +1,14 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, realpathSync } from 'node:fs'
+import {
+  appendFileSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs'
 import path from 'node:path'
 import { after, before, describe, it } from 'mocha'
+import { WebSocket } from 'ws'
 import { SESSION_COOKIE } from '../auth/routes.js'
 import { pinnedFetch } from '../node/pinnedFetch.js'
 import type { RunningNode } from '../node/serve.js'
@@ -104,6 +111,65 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
   const onHost = (role: string): { cookie: string; csrf: string } => {
     const { token, session } = host.host!.accounts.startSession(people[role]!)
     return { cookie: `${SESSION_COOKIE}=${token}`, csrf: session.csrf }
+  }
+  /** A `/live` socket on a node, with the frames it has received; or the status that refused it. */
+  const live = async (
+    node: RunningNode,
+    headers: Record<string, string>,
+  ): Promise<
+    | number
+    | {
+        ws: WebSocket
+        frames: Json[]
+        send: (message: unknown) => void
+        next: (test: (frame: Json) => boolean) => Promise<Json>
+      }
+  > => {
+    const ws = new WebSocket(origin(node).replace('https:', 'wss:') + '/live', {
+      headers,
+      rejectUnauthorized: false,
+    })
+    const frames: Json[] = []
+    const waiting: Array<{ test: (frame: Json) => boolean; done: () => void }> =
+      []
+    ws.on('message', (data) => {
+      frames.push(JSON.parse(String(data)))
+      for (const wait of [...waiting]) wait.done()
+    })
+    const opened = await new Promise<number>((resolve) => {
+      ws.once('open', () => resolve(0))
+      ws.once('unexpected-response', (_req, res) => {
+        resolve(res.statusCode ?? 1)
+        ws.terminate()
+      })
+      ws.on('error', () => resolve(1))
+    })
+    if (opened !== 0) return opened
+    return {
+      ws,
+      frames,
+      send: (message) => ws.send(JSON.stringify(message)),
+      next: async (test) =>
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(
+            () =>
+              reject(new Error(`No such frame in ${JSON.stringify(frames)}`)),
+            10_000,
+          )
+          const wait = {
+            test,
+            done: (): void => {
+              const found = frames.find(test)
+              if (found == null) return
+              clearTimeout(timer)
+              waiting.splice(waiting.indexOf(wait), 1)
+              resolve(found)
+            },
+          }
+          waiting.push(wait)
+          wait.done()
+        }),
+    }
   }
   let run: string
 
@@ -428,6 +494,16 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     const page = await request(c.master, 'GET', `/runs/${run}`, developer)
     assert.equal(page.status, 200)
+    // The header names who requested the run, and the API names them too.
+    assert.match(page.text, /Requested by developer person /)
+    const shown = await request(
+      c.master,
+      'GET',
+      `/api/v2/runs/${run}`,
+      developer,
+    )
+    assert.equal(shown.json.actor, `account:${people.developer}`)
+    assert.equal(shown.json.requestedBy, 'developer person')
     assert.match(page.text, /class="pipeline-graph"/)
     assert.match(page.text, /data-stage="android"/)
     assert.match(page.text, /data-path="\/api\/v2\/runs\/[^/]+\/cancel"/)
@@ -486,15 +562,153 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       developer,
     )
     assert.match(plain.text, /^green line$/m)
-    const events = await request(
+    // The live socket: a session from the master's own pages, or an API key.
+    const pageOrigin = { origin: origin(c.master) }
+    const watching = await live(c.master, {
+      cookie: developer.cookie,
+      ...pageOrigin,
+    })
+    assert(typeof watching !== 'number')
+    watching.send({ subscribe: 'run', run, stage: 'test' })
+    const logged = await watching.next((frame) => frame.event === 'log')
+    assert.match(logged.data.text, /green.* line\n/)
+    assert.equal(logged.data.first, 1)
+    assert.deepEqual(watching.frames.map((frame) => frame.event).slice(0, 3), [
+      'run',
+      'stages',
+      'steps',
+    ])
+    assert.equal(watching.frames[0].data.status, 'running')
+    assert.deepEqual(
+      watching.frames[1].data.map(
+        (stage: Json) => `${stage.name} ${stage.status}`,
+      ),
+      ['test succeeded', 'android queued'],
+    )
+    assert.equal(watching.frames[1].data[0].node, 'w')
+    assert(watching.frames[2].data.steps.length > 0)
+    watching.send({ subscribe: 'queue' })
+    const queued = await watching.next((frame) => frame.event === 'queue')
+    assert(
+      queued.data.some(
+        (entry: Json) => entry.job === run && entry.stage === 'android',
+      ),
+    )
+    watching.ws.close()
+    const testerSocket = await live(c.master, {
+      cookie: signIn('tester').cookie,
+      ...pageOrigin,
+    })
+    assert(typeof testerSocket !== 'number')
+    testerSocket.send({ subscribe: 'run', run })
+    assert.match(
+      (await testerSocket.next((frame) => frame.event === 'error')).data.error,
+      /tester role/,
+    )
+    testerSocket.ws.close()
+    // A page's socket needs its own origin; a missing session is refused.
+    assert.equal(await live(c.master, { cookie: developer.cookie }), 403)
+    assert.equal(
+      await live(c.master, {
+        cookie: developer.cookie,
+        origin: 'https://elsewhere.example',
+      }),
+      403,
+    )
+    assert.equal(await live(c.master, pageOrigin), 401)
+    const key = c.master.master!.keys.create(localOperator, {
+      role: 'developer',
+    })
+    assert.equal(
+      await live(c.master, { authorization: 'Bearer mason_v1_nothing' }),
+      401,
+    )
+    const scripted = await live(c.master, {
+      authorization: `Bearer ${key.token}`,
+    })
+    assert(typeof scripted !== 'number')
+    scripted.send({ subscribe: 'status', run })
+    assert.equal(
+      (await scripted.next((frame) => frame.event === 'run')).data.id,
+      run,
+    )
+    scripted.ws.close()
+    // A live page leaves a partial last line to the socket, which sends it once the stage settles.
+    const logFile = c.master.master!.scheduler.logFile(run, 'test')
+    const whole = readFileSync(logFile)
+    appendFileSync(logFile, 'partial')
+    const partial = await request(
       c.master,
       'GET',
-      `/api/v2/runs/${run}/events?stage=test`,
+      `/runs/${run}?stage=test`,
       developer,
     )
-    assert.match(events.type, /text\/event-stream/)
-    assert.match(events.text, /event: stages/)
-    assert.match(events.text, /event: log/)
+    assert.match(partial.text, new RegExp(`data-offset="${whole.length}"`))
+    assert.doesNotMatch(partial.text, /partial/)
+    const rest = await live(c.master, { authorization: `Bearer ${key.token}` })
+    assert(typeof rest !== 'number')
+    rest.send({ subscribe: 'run', run, stage: 'test', after: whole.length })
+    assert.equal(
+      (await rest.next((frame) => frame.event === 'log')).data.text,
+      'partial',
+    )
+    rest.ws.close()
+    writeFileSync(logFile, whole)
+    // A run a key requested names the key by six characters of its id, off the master too.
+    const keyed = await pinnedFetch(
+      origin(c.master) + '/api/v2/runs',
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${key.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ ...body, params: { seat: 'none' } }),
+      },
+      c.master.web!.certificate!.pin,
+    )
+    const keyedBody = (await keyed.json()) as Json
+    assert.equal(keyed.status, 202, JSON.stringify(keyedBody))
+    const keyedRun = keyedBody.id
+    const keyedShown = await request(
+      c.master,
+      'GET',
+      `/api/v2/runs/${keyedRun}`,
+      developer,
+    )
+    const short = key.id.slice(0, 6)
+    assert.equal(keyedShown.json.actor, `key ${short}`)
+    assert.equal(
+      keyedShown.json.requestedBy,
+      `local operator · key "developer key ${short}" (${short})`,
+    )
+    assert.doesNotMatch(keyedShown.text, new RegExp(key.id))
+    const cached = await c.until(
+      () =>
+        host
+          .host!.cache.db.prepare(
+            'SELECT actor,requested_by FROM jobs WHERE id=?',
+          )
+          .get(keyedRun) as Json,
+      10_000,
+      'the keyed run on the host',
+    )
+    assert.deepEqual(
+      { ...cached },
+      {
+        actor: `key ${short}`,
+        requested_by: `local operator · key "developer key ${short}" (${short})`,
+      },
+    )
+    assert.equal(
+      (
+        await request(c.master, 'POST', `/api/v2/runs/${keyedRun}/cancel`, {
+          ...developer,
+          body: {},
+        })
+      ).status,
+      200,
+    )
     assert.equal(
       (await request(c.master, 'GET', `/runs/${run}`, signIn('tester'))).status,
       403,
@@ -528,7 +742,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     assert.equal(api.status, 400)
   })
 
-  it('serves the run view on the host, its logs and events forwarded to the master, and a developer’s cancel through it', async () => {
+  it('serves the run view on the host, its logs forwarded and its live updates relayed from the master, and a developer’s cancel through it', async () => {
     await c.until(
       () =>
         host.host!.cache.db.prepare('SELECT 1 FROM jobs WHERE id=?').get(run),
@@ -544,7 +758,8 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.equal(page.status, 200)
     assert.match(page.text, /<meta name="mason-csrf"/)
-    assert.match(page.text, /data-offset="0"/)
+    assert.match(page.text, /Requested by developer person /)
+    assert.match(page.text, /data-offset="tail"/)
     const step = await request(
       host,
       'GET',
@@ -576,13 +791,39 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.equal(log.status, 200, log.text)
     assert.match(log.text, /second line/)
-    const events = await request(
-      host,
-      'GET',
-      `/api/v2/runs/${run}/events?stage=test`,
-      { cookie: developer.cookie },
+    // Live updates are not forwarded requests: they come over the host's live stream.
+    assert.equal(
+      (
+        await request(host, 'GET', `/api/v2/runs/${run}/events?stage=test`, {
+          cookie: developer.cookie,
+        })
+      ).status,
+      403,
     )
-    assert.match(events.text, /event: log/)
+    // The host's live socket is the master's, relayed over the host's link.
+    const watching = await live(host, {
+      cookie: developer.cookie,
+      origin: origin(host),
+    })
+    assert(typeof watching !== 'number')
+    watching.send({ subscribe: 'run', run, stage: 'test' })
+    assert.match(
+      (await watching.next((frame) => frame.event === 'log')).data.text,
+      /second line/,
+    )
+    watching.ws.close()
+    const testerSocket = await live(host, {
+      cookie: onHost('tester').cookie,
+      origin: origin(host),
+    })
+    assert(typeof testerSocket !== 'number')
+    testerSocket.send({ subscribe: 'run', run })
+    assert.match(
+      (await testerSocket.next((frame) => frame.event === 'error')).data.error,
+      /tester role/,
+    )
+    testerSocket.ws.close()
+    assert.equal(await live(host, { origin: origin(host) }), 401)
     assert.equal(
       (
         await request(host, 'GET', `/api/v2/runs/${run}/logs`, {

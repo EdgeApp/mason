@@ -6,9 +6,11 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { asObject, asOptional, asString } from 'cleaners'
 import { hostApp } from '../host/web.js'
+import { hostLive } from '../host/live.js'
 import { HostRuntime, type HostOptions } from '../host/runtime.js'
 import { recordIdentity } from '../master/identity.js'
 import { masterApp } from '../master/web.js'
+import { masterLive, serveLive } from '../master/live.js'
 import {
   applyPendingRestore,
   PENDING_RESTORE,
@@ -431,6 +433,17 @@ export async function startNode(
             server.close(() => resolve())
           }),
       )
+      // The live pages' socket, closed before the listener so pages reconnect.
+      const accept =
+        master != null
+          ? masterLive(master)
+          : hostRuntime == null
+            ? undefined
+            : hostLive(hostRuntime)
+      if (accept != null) {
+        const live = serveLive(server, accept)
+        cleanup.push(() => live.close())
+      }
       const scheme = certificate == null ? 'http' : 'https'
       const host = options.listen ?? hostname()
       web = {

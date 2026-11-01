@@ -396,6 +396,50 @@ describe('Master database, setup and import', function () {
     db.close()
   })
 
+  it('schema 25 credits each API key to whoever made it: by its audit entry, else its creating account', () => {
+    const db = new DatabaseSync(path.join(root, 'key-makers.sqlite'))
+    migrateMaster(db)
+    const hash = (n: number): string => String(n).repeat(64)
+    db.exec(`ALTER TABLE api_keys DROP COLUMN created_by;
+    INSERT INTO accounts(id,name,created_at) VALUES(3,'Paul Puey',0),(4,'Dana',0),(5,'Eli',0);
+    INSERT INTO api_keys(id,hash,name,apps,created_at,role,creator) VALUES
+      ('k1','${hash(1)}','TeamStation CI','"all"',0,'developer',3),
+      ('k2','${hash(2)}','old','"all"',0,'developer',4),
+      ('k3','${hash(3)}','unaudited','"all"',0,'developer',5),
+      ('k4','${hash(4)}','imported','"all"',0,'developer',NULL),
+      ('k5','${hash(5)}','by a key','"all"',0,'developer',NULL),
+      ('k6','${hash(6)}','by the operator','"all"',0,'admin',NULL);
+    INSERT INTO audit(actor,action,target,at,via) VALUES
+      (3,'key.create','k1',0,'account:3'),
+      (4,'key.create','k2',0,''),
+      (NULL,'key.create','k5',0,'key:k1'),
+      (NULL,'key.create','k6',0,'local operator'),
+      (NULL,'key.create','k6',1,'key:k5'),
+      (3,'key.revoke','k4',0,'account:3');
+    UPDATE meta SET value='24' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      Object.fromEntries(
+        db
+          .prepare('SELECT id,created_by FROM api_keys ORDER BY id')
+          .all()
+          .map((row) => [row.id, row.created_by]),
+      ),
+      {
+        k1: 'account:3',
+        k2: 'account:4',
+        k3: 'account:5',
+        k4: null,
+        k5: 'key:k1',
+        k6: 'local operator',
+      },
+    )
+    // Again: the column is there and every key is credited already.
+    db.exec("UPDATE meta SET value='24' WHERE key='master_schema'")
+    migrateMaster(db)
+    db.close()
+  })
+
   it('U7.2 schema 24 labels every node, permanent cloud worker and pool setup, as each ran setup before', () => {
     const db = new DatabaseSync(path.join(root, 'setup-label.sqlite'))
     migrateMaster(db)

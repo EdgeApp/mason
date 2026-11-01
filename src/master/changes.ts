@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
 import type { MasterDatabase } from './database.js'
+import { requesterName, shownLabel } from './requesters.js'
 
 /**
  * What the host's cache holds: each replicated entity, projected from the
@@ -208,7 +209,14 @@ export function entities(setting: SettingProjection): Record<string, Entity> {
         const rest = { ...row }
         delete rest.graph_key
         return {
-          row: { ...rest, graph: graph?.graph ?? null },
+          // The host has no keys: it shows who requested the run as the master names them.
+          row: {
+            ...rest,
+            // Never a key's whole id off the master.
+            actor: shownLabel(String(row.actor ?? '')),
+            graph: graph?.graph ?? null,
+            requested_by: requesterName(db, String(row.actor ?? '')),
+          },
           children: {
             job_stages: all(
               db,

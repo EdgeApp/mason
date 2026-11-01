@@ -1,9 +1,25 @@
 // The run view and the actions on it: forms that call the API as JSON, the
-// live stream of stages, steps and log lines, the log's wrap toggle, the
-// stage list's filters, the graph's zoom and its highlighted rails, and the
-// dashboard's queue, which reloads when the queue changes.
+// run's status, stages, steps and log lines live from the page's socket, the
+// log's follow and Jump to latest, its wrap toggle, the stage list's
+// filters, the graph's zoom and its highlighted rails, and the dashboard's
+// queue and run statuses, live from the same socket.
+import {
+  queueItems,
+  runChip,
+  statusDot,
+  type QueueEntry,
+} from '../view/dashboard.js'
+import { escape } from '../view/html.js'
 import { ansiLine } from '../view/log.js'
-import { stepItems } from '../view/steps.js'
+import { stepItems, type StepRow } from '../view/steps.js'
+import {
+  LiveClient,
+  liveUrl,
+  type LiveFrame,
+  type LiveSocket,
+  type LiveState,
+  type LiveWindow,
+} from './live.js'
 
 /** The body an action form sends: known fields at the top, the rest as parameters. */
 export function actionBody(
@@ -33,21 +49,6 @@ export function logLines(text: string, first: number): string[] {
   })
 }
 
-/** What the run view's live stream sends as `stages`. */
-export interface Snapshot {
-  status: string
-  finished: boolean
-  stages: Array<{ name: string; status: string }>
-  steps: Array<{
-    id: number
-    kind: string
-    title: string
-    status: string
-    ms: number | null
-    parent?: number | null
-  }>
-}
-
 /** The page parts the script changes, so a test can supply them. */
 export interface RunPage {
   /** Whether the page draws a stage; setup adds stages after a page may have loaded. */
@@ -55,27 +56,89 @@ export interface RunPage {
   reload(): void
   setStageStatus(name: string, status: string): void
   setRunStatus(status: string): void
-  setSteps(snapshot: Snapshot['steps']): void
+  /** Shows a stage the log panel follows under its name, its log emptied. */
+  follow(stage: string): void
+  setSteps(stage: string, steps: StepRow[]): void
   appendLog(html: string[]): void
   ended(): void
 }
 
-/** Applies one stream event to the page. */
-export function applyEvent(page: RunPage, type: string, data: string): void {
-  if (type === 'stages') {
-    const snapshot = JSON.parse(data) as Snapshot
-    if (snapshot.stages.some((stage) => !page.hasStage(stage.name))) {
-      page.reload()
-      return
+/**
+ * A run page's live subscription: the stage its log panel shows and the
+ * byte offset its log has reached, so a reconnect resumes after the last
+ * line it has. With no stage selected the panel follows the running stage,
+ * and switches when the next one starts.
+ */
+export class RunLive {
+  private readonly following: boolean
+  /** The start of a line longer than a frame, held until the rest of it arrives. */
+  private carry: { text: string; first: number } | undefined
+  constructor(
+    private readonly page: RunPage,
+    private readonly run: string,
+    /** The stage the panel shows; none while it waits for one to follow. */
+    private stage: string | undefined,
+    /**
+     * Where the shown log ends; `tail` when the page holds none of it (the
+     * host's) and starts at its end; -1 when the panel shows a step's lines,
+     * which take no more.
+     */
+    private offset: number | 'tail',
+  ) {
+    this.following = stage == null
+  }
+
+  /** The subscribe message, as of now. */
+  message(): Record<string, unknown> {
+    return {
+      subscribe: 'run',
+      run: this.run,
+      ...(this.stage == null
+        ? {}
+        : this.offset === 'tail'
+          ? { stage: this.stage, tail: true }
+          : this.offset < 0
+            ? { stage: this.stage, log: false }
+            : { stage: this.stage, after: this.offset }),
+      ...(this.following ? { follow: true } : {}),
     }
-    page.setRunStatus(snapshot.status)
-    for (const stage of snapshot.stages)
-      page.setStageStatus(stage.name, stage.status)
-    if (snapshot.steps.length > 0) page.setSteps(snapshot.steps)
-  } else if (type === 'log') {
-    const chunk = JSON.parse(data) as { text: string; first: number }
-    page.appendLog(logLines(chunk.text, chunk.first))
-  } else if (type === 'end' || type === 'gone') page.ended()
+  }
+
+  apply(frame: LiveFrame): void {
+    const data = frame.data as Record<string, unknown> | undefined
+    if (frame.event === 'run') this.page.setRunStatus(String(data!.status))
+    else if (frame.event === 'stages') {
+      const stages = frame.data as Array<{ name: string; status: string }>
+      if (stages.some((stage) => !this.page.hasStage(stage.name))) {
+        this.page.reload()
+        return
+      }
+      for (const stage of stages)
+        this.page.setStageStatus(stage.name, stage.status)
+    } else if (frame.event === 'steps') {
+      const stage = String(data!.stage)
+      if (this.following && stage !== this.stage) {
+        this.stage = stage
+        this.offset = 0
+        this.carry = undefined
+        this.page.follow(stage)
+      }
+      if (stage === this.stage)
+        this.page.setSteps(stage, data!.steps as StepRow[])
+    } else if (frame.event === 'log') {
+      if (data!.stage !== this.stage || this.offset === -1) return
+      this.offset = Number(data!.offset)
+      const text = (this.carry?.text ?? '') + String(data!.text)
+      const first = this.carry?.first ?? Number(data!.first)
+      if (data!.partial === true) {
+        this.carry = { text, first }
+        return
+      }
+      this.carry = undefined
+      this.page.appendLog(logLines(text, first))
+    } else if (frame.event === 'end' || frame.event === 'gone')
+      this.page.ended()
+  }
 }
 
 /** A form's named fields, by the names in its `data-fields`; checked boxes named `app` become `apps`. */
@@ -271,15 +334,59 @@ export async function submitAction(
   return undefined
 }
 
-/** The step list's items, as the server renders them. */
+/** How near the bottom a viewer must be for the log to keep following. */
+export const FOLLOW_PX = 80
 
-/** The real page's parts. */
+/**
+ * The real page's parts. A live log opens at its end and follows new lines
+ * while the viewer is within 80px of its bottom; scrolling up stops it and
+ * shows Jump to latest, which scrolls back down and follows again, as does
+ * scrolling back within 80px of the bottom.
+ */
 export function domRunPage(
   doc: Document,
   reload: () => void = (): void => undefined,
 ): RunPage {
-  const stage =
-    doc.querySelector<HTMLElement>('.stage-panel')?.dataset.stage ?? ''
+  const pre = (): HTMLElement | null =>
+    doc.querySelector<HTMLElement>('[data-log] pre')
+  const jump = doc.querySelector<HTMLElement>('[data-jump]')
+  let following = true
+  /** Where the log was scrolled to last, so a move up is told from new lines below. */
+  let lastTop = 0
+  const toEnd = (): void => {
+    const log = pre()
+    if (log == null) return
+    log.scrollTop = log.scrollHeight
+    lastTop = log.scrollTop
+  }
+  // Any move up stops following, even within 80px of the bottom, so lines
+  // arriving mid-scroll never pull the viewer back down; back within 80px
+  // of the bottom, it follows again.
+  const scrolled = (): void => {
+    const log = pre()
+    if (log == null) return
+    const distance = log.scrollHeight - log.scrollTop - log.clientHeight
+    // At the very bottom it follows, though a taller log panel (a resized
+    // window) moved it up; any other move up stops it.
+    if (distance > 1 && log.scrollTop < lastTop) following = false
+    else if (distance < FOLLOW_PX) following = true
+    lastTop = log.scrollTop
+    if (jump != null) jump.hidden = following
+  }
+  let watched: HTMLElement | null = null
+  const watch = (): void => {
+    const log = pre()
+    if (log == null || log === watched) return
+    watched = log
+    log.addEventListener('scroll', scrolled)
+  }
+  toEnd()
+  watch()
+  jump?.addEventListener('click', () => {
+    toEnd()
+    following = true
+    jump.hidden = true
+  })
   return {
     hasStage: (name): boolean =>
       doc.querySelector(`.stage-list li[data-name="${quoted(name)}"]`) != null,
@@ -314,15 +421,42 @@ export function domRunPage(
         panel.dataset.status = status
         reload()
       }
+      const title = doc.querySelector<HTMLElement>('[data-log-title]')
+      if (title != null && title.dataset.following === name)
+        title.innerHTML = followTitle(name, status)
     },
     setRunStatus: (status): void => {
       const node = doc.querySelector<HTMLElement>('[data-run-status]')
       if (node != null) {
         node.className = `state-${status}`
-        node.innerHTML = `<span class="dot ${status}" aria-hidden="true"></span> ${status.replace('_', ' ')}`
+        node.innerHTML = `${statusDot(status)} ${escape(status.replace('_', ' '))}`
       }
     },
-    setSteps: (steps): void => {
+    follow: (stage): void => {
+      const title = doc.querySelector<HTMLElement>('[data-log-title]')
+      if (title != null) {
+        title.dataset.following = stage
+        title.innerHTML = followTitle(stage, 'running')
+      }
+      const list = doc.querySelector<HTMLElement>('[data-steps]')
+      if (list != null) list.hidden = false
+      const code = doc.querySelector('[data-log] code')
+      if (code != null) code.innerHTML = ''
+      else
+        // A page without the run's log (the host's) gets a log to follow.
+        doc
+          .querySelector('[data-log]')
+          ?.insertAdjacentHTML(
+            'afterbegin',
+            '<pre class="log"><code></code></pre>',
+          )
+      doc.querySelector<HTMLElement>('[data-log] .empty-state')?.remove()
+      watch()
+      following = true
+      lastTop = pre()?.scrollTop ?? 0
+      if (jump != null) jump.hidden = true
+    },
+    setSteps: (stage, steps): void => {
       const list = doc.querySelector('[data-steps]')
       if (list != null) list.innerHTML = stepItems(stage, steps)
     },
@@ -330,12 +464,8 @@ export function domRunPage(
       const code = doc.querySelector('[data-log] code')
       if (code == null || html.length === 0) return
       code.insertAdjacentHTML('beforeend', html.join(''))
-      const panel = doc.querySelector<HTMLElement>('[data-log] pre')
-      if (
-        panel != null &&
-        panel.scrollHeight - panel.scrollTop - panel.clientHeight < 80
-      )
-        panel.scrollTop = panel.scrollHeight
+      if (following) toEnd()
+      else if (jump != null) jump.hidden = false
     },
     ended: (): void => {
       doc
@@ -344,6 +474,10 @@ export function domRunPage(
     },
   }
 }
+
+/** The log panel's title while it follows a stage. */
+const followTitle = (stage: string, status: string): string =>
+  `${statusDot(status)}${escape(stage)} <span class="follow-note">following the running stage</span>`
 
 /** A value inside a double-quoted attribute selector. */
 const quoted = (value: string): string => value.replace(/["\\]/g, '\\$&')
@@ -375,17 +509,13 @@ export function highlight(svg: Element, name: string | undefined): void {
 /** What the run view's script needs from the window, so a test can supply it. */
 export interface RunWindow {
   fetch: typeof fetch
-  location: { href: string; assign: (href: string) => void }
-  EventSource: new (url: string) => {
-    addEventListener: (
-      type: string,
-      listener: (event: { data: string }) => void,
-    ) => void
-    close: () => void
+  location: {
+    href: string
+    protocol: string
+    host: string
+    assign: (href: string) => void
   }
-  DOMParser: new () => {
-    parseFromString: (html: string, type: 'text/html') => Document
-  }
+  live: LiveWindow
 }
 
 /** Wires the run view, the action forms and the dashboard's queue on a page. */
@@ -490,53 +620,127 @@ export function start(doc: Document, win: RunWindow): void {
         if (code != null) code.innerHTML = logLines(text, 1).join('')
       })
   const head = doc.querySelector<HTMLElement>('.run-head')
+  // One socket for the page, opened when something subscribes.
+  const state = doc.querySelector<HTMLElement>('[data-live-state]')
+  let client: LiveClient | undefined
+  const live = (): LiveClient =>
+    (client ??= new LiveClient(
+      liveUrl(win.location),
+      win.live,
+      (now: LiveState) => {
+        if (state == null) return
+        state.hidden = now !== 'reconnecting' && now !== 'unavailable'
+        state.textContent =
+          now === 'reconnecting'
+            ? 'Reconnecting…'
+            : now === 'unavailable'
+              ? 'Live updates are unavailable here: reload for the latest'
+              : ''
+      },
+    ))
   if (head?.dataset.live === '1') {
     const stage =
       doc.querySelector<HTMLElement>('.stage-panel')?.dataset.stage ?? ''
-    const offset = Number(
-      doc.querySelector<HTMLElement>('[data-log]')?.dataset.offset ?? -1,
-    )
-    const params = new URLSearchParams()
-    if (stage !== '' && offset >= 0) {
-      params.set('stage', stage)
-      params.set('after', String(offset))
-    }
-    const events = new win.EventSource(
-      `/api/v2/runs/${encodeURIComponent(head.dataset.run ?? '')}/events?${params}`,
-    )
+    const start = doc.querySelector<HTMLElement>('[data-log]')?.dataset.offset
+    const offset = start === 'tail' ? 'tail' : Number(start ?? -1)
     const page = domRunPage(doc, () => win.location.assign(win.location.href))
-    for (const type of ['stages', 'log', 'end', 'gone'])
-      events.addEventListener(type, (event) => {
-        applyEvent(page, type, event.data)
-        if (type === 'end' || type === 'gone') events.close()
-      })
+    const run = new RunLive(
+      page,
+      head.dataset.run ?? '',
+      stage === '' ? undefined : stage,
+      offset,
+    )
+    live().subscribe(
+      'run',
+      () => run.message(),
+      (frame) => run.apply(frame),
+    )
   }
-  const queue = doc.querySelector('[data-queue]')
-  if (queue != null && head == null) {
-    let first = true
-    const events = new win.EventSource('/api/v2/queue/events')
-    events.addEventListener('queue', () => {
-      if (first) {
-        first = false
-        return
+  if (head == null) liveRuns(doc, live)
+}
+
+/** Runs whose status may still change. */
+const ACTIVE = new Set(['queued', 'running'])
+
+/** Draws a run's status on each of its chips and rows. */
+export function markRun(doc: Document, id: string, status: string): void {
+  for (const node of doc.querySelectorAll<HTMLElement>(
+    `[data-run-id="${quoted(id)}"]`,
+  )) {
+    node.dataset.status = status
+    const dot = node.querySelector('.dot')
+    if (dot != null) dot.className = `dot ${status}`
+    const text = node.querySelector('[data-status-text]')
+    if (text != null) text.textContent = status
+    const title = node.getAttribute('title')
+    if (title != null) node.setAttribute('title', title.replace(/\S+$/, status))
+  }
+}
+
+/**
+ * The dashboard's and a project's Runs and builds tab's live parts: the
+ * queue panel, redrawn from `queue` events, and each unfinished run's chip
+ * or row, kept at its status by its `run` events. A run the queue names
+ * that its project's card has no chip for gets one, in place of its
+ * branch's last.
+ */
+export function liveRuns(doc: Document, live: () => LiveClient): void {
+  const watched = new Set<string>()
+  const watch = (id: string, status: string): void => {
+    if (watched.has(id) || !ACTIVE.has(status)) return
+    watched.add(id)
+    live().subscribe(
+      `status:${id}`,
+      () => ({ subscribe: 'status', run: id }),
+      (frame) => {
+        if (frame.event === 'run')
+          markRun(doc, id, String((frame.data as { status: unknown }).status))
+      },
+    )
+  }
+  for (const node of doc.querySelectorAll<HTMLElement>('[data-run-id]'))
+    watch(node.dataset.runId ?? '', node.dataset.status ?? '')
+  const list = doc.querySelector('[data-queue] ul')
+  if (list == null) return
+  live().subscribe(
+    'queue',
+    () => ({ subscribe: 'queue' }),
+    (frame) => {
+      if (frame.event !== 'queue') return
+      const entries = frame.data as QueueEntry[]
+      list.innerHTML = queueItems(entries)
+      for (const entry of entries) {
+        if (doc.querySelector(`[data-run-id="${quoted(entry.job)}"]`) != null)
+          continue
+        const runs = doc.querySelector(
+          `[data-project-runs="${quoted(entry.project)}"]`,
+        )
+        if (runs == null) continue
+        runs.querySelector(`[data-branch="${quoted(entry.branch)}"]`)?.remove()
+        const status = entry.status === 'queued' ? 'queued' : 'running'
+        runs.insertAdjacentHTML(
+          'afterbegin',
+          runChip({
+            id: entry.job,
+            branch: entry.branch,
+            number: entry.number,
+            status,
+            workflow: entry.workflow,
+          }),
+        )
+        watch(entry.job, status)
       }
-      void win
-        .fetch(win.location.href, { credentials: 'same-origin' })
-        .then(async (response) => await response.text())
-        .then((html) => {
-          const fresh = new win.DOMParser()
-            .parseFromString(html, 'text/html')
-            .querySelector('[data-queue]')
-          if (fresh != null) queue.innerHTML = fresh.innerHTML
-        })
-    })
-  }
+    },
+  )
 }
 
 if (typeof document !== 'undefined' && typeof window !== 'undefined')
   start(document, {
     fetch: window.fetch.bind(window),
     location: window.location,
-    EventSource: window.EventSource,
-    DOMParser: window.DOMParser,
+    live: {
+      open: (url) => new WebSocket(url) as unknown as LiveSocket,
+      setTimeout: (run, ms) => window.setTimeout(run, ms),
+      clearTimeout: (timer) => window.clearTimeout(timer as number),
+    },
   })

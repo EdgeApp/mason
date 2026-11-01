@@ -71,6 +71,8 @@ export class HostLinks {
       onDevices?: () => void
       /** Runs a request the host forwards to the master's API. */
       forward?: (params: unknown, stream: Stream) => Promise<void>
+      /** Serves one of the host's pages' live connections. */
+      live?: (params: unknown, stream: Stream) => void
       /** Password sign-in on the host, checked by the master. */
       password?: {
         parameters: (username: unknown) => unknown
@@ -586,6 +588,20 @@ export class HostLinks {
             return
           }
           await this.options.forward(params, stream)
+        },
+        /** A page's live connection on the host, relayed both ways (`live`). */
+        live: (stream, params, link): void => {
+          try {
+            this.host(link)
+          } catch (error) {
+            stream.abort((error as Error).message)
+            return
+          }
+          if (this.options.live == null) {
+            stream.abort('The master does not serve live pages')
+            return
+          }
+          this.options.live(params, stream)
         },
       },
     }

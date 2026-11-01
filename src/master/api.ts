@@ -89,6 +89,34 @@ function nodeAssignment(
   return asAssignment(fields)
 }
 /**
+ * The actor a host session acts as, by the account and permission version
+ * the host asserts: none once the account is disabled or removed, or its
+ * permissions have changed since the session began.
+ */
+export function hostSessionActor(
+  database: MasterDatabase,
+  asserted: { accountId: number; permissionVersion: number },
+): Actor | undefined {
+  const row = database.db
+    .prepare(
+      'SELECT role,disabled,removed_at,permission_version FROM accounts WHERE id=?',
+    )
+    .get(asserted.accountId) as Record<string, unknown> | undefined
+  if (
+    row == null ||
+    Number(row.disabled) !== 0 ||
+    row.removed_at != null ||
+    Number(row.permission_version) !== asserted.permissionVersion
+  )
+    return undefined
+  return {
+    role: asRole(row.role),
+    accountId: asserted.accountId,
+    label: `host:${asserted.accountId}`,
+  }
+}
+
+/**
  * Bearer API keys, master sessions (with the CSRF proof on any request
  * that changes something), and, on the API socket only, a host session's
  * account for the four run actions: accepted while the account is enabled
@@ -119,27 +147,16 @@ export function authenticate(
     }
     const asserted = forwarder?.asserted(req)
     if (asserted != null && database != null) {
-      const row = database.db
-        .prepare(
-          'SELECT role,disabled,removed_at,permission_version FROM accounts WHERE id=?',
-        )
-        .get(asserted.accountId) as Record<string, unknown> | undefined
+      const actor = hostSessionActor(database, asserted)
       if (
-        row == null ||
-        Number(row.disabled) !== 0 ||
-        row.removed_at != null ||
-        Number(row.permission_version) !== asserted.permissionVersion ||
+        actor == null ||
         (!isRunAction(req.method, req.originalUrl) &&
           !isRunRead(req.method, req.originalUrl))
       ) {
         res.status(403).json({ error: 'The host session is not allowed this' })
         return
       }
-      res.locals.actor = {
-        role: asRole(row.role),
-        accountId: asserted.accountId,
-        label: `host:${asserted.accountId}`,
-      } satisfies Actor
+      res.locals.actor = actor
       next()
       return
     }

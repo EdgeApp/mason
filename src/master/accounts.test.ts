@@ -1130,8 +1130,6 @@ describe('Master sign-in, setup, people and permissions', function () {
       'POST /api/v2/runs/:id/restart': 'runs.request',
       'POST /api/v2/runs/:id/approve': 'runs.approve',
       'GET /api/v2/runs/:id/logs': 'runs.read',
-      'GET /api/v2/runs/:id/events': 'runs.read',
-      'GET /api/v2/queue/events': 'runs.read',
       'POST /api/v2/projects/check': 'projects.change',
       'POST /api/v2/projects/:slug/discover': 'projects.change',
       'GET /api/v2/projects/:slug/discover': 'projects.change',

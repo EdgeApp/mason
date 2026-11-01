@@ -13,6 +13,7 @@ import { ago, duration, escape, time } from './html.js'
 import { icon } from './icons.js'
 import { logHtml } from './log.js'
 import { stepItems } from './steps.js'
+import { shownLabel } from '../master/requesters.js'
 
 /** A run's graph as its stages and post stages, from the graph its setup recorded. */
 export interface RunGraph {
@@ -68,6 +69,8 @@ export interface RunData {
   commit: string | null
   trigger: string
   actor: string
+  /** Who requested the run, as a page shows them: never a key's whole id. */
+  requestedBy: string
   status: string
   created: number
   started: number | null
@@ -99,6 +102,8 @@ export function runData(
   options: {
     repository?: (projectId: number) => string | undefined
     nodeName?: (fingerprint: string) => string | undefined
+    /** Who an actor label names; the host's cache holds it resolved by the master. */
+    requester?: (label: string) => string
   } = {},
 ): RunData | undefined {
   const job = db
@@ -196,6 +201,11 @@ export function runData(
     commit: job.commit_sha == null ? null : String(job.commit_sha),
     trigger: String(job.trigger),
     actor: String(job.actor ?? ''),
+    requestedBy:
+      options.requester?.(String(job.actor ?? '')) ??
+      (job.requested_by == null
+        ? shownLabel(String(job.actor ?? ''))
+        : String(job.requested_by)),
     status: String(job.status),
     created: Number(job.created),
     started: job.started == null ? null : Number(job.started),
@@ -301,6 +311,8 @@ export interface RunViewOptions {
   logSource?: string
   /** Where the shown stage log ends, so the live stream continues from there. */
   logOffset?: number
+  /** The page holds none of the stage's log (the host): its live log starts at the end. */
+  logTail?: boolean
   /** The step whose lines are shown, when one is expanded. */
   step?: number
   can: {
@@ -363,8 +375,13 @@ function stagePanel(run: RunData, options: RunViewOptions): string {
       ? `<p class="empty-state">${escape(options.log.unavailable)}</p>`
       : logHtml(options.log.text, options.log.first ?? 1)
   const downloads = `<div class="actions log-actions"><label class="wrap"><input type="checkbox" data-wrap> Wrap lines</label><a href="${escape(`${options.base}/api/v2/runs/${encodeURIComponent(run.id)}/logs${selected == null ? '' : `?stage=${encodeURIComponent(selected.name)}`}`)}" download>${icon('download')} Raw</a><a href="${escape(`${options.base}/api/v2/runs/${encodeURIComponent(run.id)}/logs?plain=1${selected == null ? '' : `&stage=${encodeURIComponent(selected.name)}`}`)}" download>${icon('description')} Plain text</a></div>`
+  const live = run.finished == null
+  // A live log opens at its end; a viewer who scrolls up can jump back to it.
+  const jump = live
+    ? `<button type="button" class="secondary jump" data-jump hidden>${icon('expand_more')} Jump to latest</button>`
+    : ''
   if (selected == null)
-    return `<section class="panel stage-panel" data-stage=""><h2>${icon('receipt_long')}Whole run log</h2>${downloads}<div data-log>${log}</div></section>`
+    return `<section class="panel stage-panel" data-stage=""><h2 data-log-title>${icon('receipt_long')}Whole run log</h2>${downloads}${live ? '<ol class="steps" data-steps hidden></ol>' : ''}<div data-log>${log}${jump}</div></section>`
   const steps = run.steps.filter(
     (step) => step.stage === selected.name && step.attempt === selected.attempt,
   )
@@ -429,7 +446,7 @@ function stagePanel(run: RunData, options: RunViewOptions): string {
       ...(options.step == null ? {} : { open: options.step }),
       tab: options.tab,
     },
-  )}</ol><h3>${options.step == null ? 'Log' : 'Lines of this step'}</h3>${downloads}<div data-log data-offset="${options.step == null ? (options.logOffset ?? 0) : -1}"${options.logSource == null ? '' : ` data-src="${escape(options.logSource)}"`}>${log}</div></section>`
+  )}</ol><h3>${options.step == null ? 'Log' : 'Lines of this step'}</h3>${downloads}<div data-log data-offset="${options.step != null ? -1 : options.logTail === true ? 'tail' : (options.logOffset ?? 0)}"${options.logSource == null ? '' : ` data-src="${escape(options.logSource)}"`}>${log}${options.step == null ? jump : ''}</div></section>`
 }
 
 function stageList(
@@ -518,7 +535,7 @@ export function runView(run: RunData, options: RunViewOptions): string {
       )}</div></details>`
     : ''
   const params = Object.entries(run.params)
-  const header = `<div class="page-head run-head" data-run="${escape(run.id)}" data-live="${live ? '1' : '0'}"><div><div class="breadcrumbs"><a href="/projects/${encodeURIComponent(run.project.slug)}">${escape(run.project.name)}</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.project.slug)}&amp;branch=${encodeURIComponent(run.branch)}">${escape(run.branch)}</a></div><h1><a href="?" class="run-title">${escape(run.workflow)} #${run.number}</a> <span class="state-${escape(run.status)}" data-run-status>${statusDot(run.status)} ${escape(run.status.replace('_', ' '))}</span></h1><p class="run-meta">${icon('fork_right')} <span class="mono">${escape(run.branch)}</span>${run.commit == null ? '' : ` · ${icon('commit')} <span class="mono">${escape(run.commit.slice(0, 12))}</span>`}${run.project.repository == null ? '' : ` · <span class="mono">${escape(run.project.repository)}</span>`} · ${escape(triggerText[run.trigger] ?? run.trigger)}${run.actor === '' ? '' : ` by ${escape(run.actor)}`} ${time(run.created)} · queued ${escape(duration(queued))}${took == null ? '' : ` · took ${escape(duration(took))}`}${nodes.length === 0 ? '' : ` · on <span class="mono">${nodes.map(escape).join(', ')}</span>`}</p>${run.description == null ? '' : `<p class="run-description">${escape(run.description)}</p>`}${run.reason == null ? '' : `<p class="state-failed">${escape(run.reason)}</p>`}${
+  const header = `<div class="page-head run-head" data-run="${escape(run.id)}" data-live="${live ? '1' : '0'}"><div><div class="breadcrumbs"><a href="/projects/${encodeURIComponent(run.project.slug)}">${escape(run.project.name)}</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.project.slug)}&amp;branch=${encodeURIComponent(run.branch)}">${escape(run.branch)}</a></div><h1><a href="?" class="run-title">${escape(run.workflow)} #${run.number}</a> <span class="state-${escape(run.status)}" data-run-status>${statusDot(run.status)} ${escape(run.status.replace('_', ' '))}</span>${live ? '<span class="live-state" data-live-state role="status" hidden></span>' : ''}</h1><p class="run-meta">${icon('fork_right')} <span class="mono">${escape(run.branch)}</span>${run.commit == null ? '' : ` · ${icon('commit')} <span class="mono">${escape(run.commit.slice(0, 12))}</span>`}${run.project.repository == null ? '' : ` · <span class="mono">${escape(run.project.repository)}</span>`} · ${escape(triggerText[run.trigger] ?? run.trigger)}${run.requestedBy === '' ? '' : ` by ${escape(run.requestedBy)}`} ${time(run.created)} · queued ${escape(duration(queued))}${took == null ? '' : ` · took ${escape(duration(took))}`}${nodes.length === 0 ? '' : ` · on <span class="mono">${nodes.map(escape).join(', ')}</span>`}</p>${run.description == null ? '' : `<p class="run-description">${escape(run.description)}</p>`}${run.reason == null ? '' : `<p class="state-failed">${escape(run.reason)}</p>`}${
     params.length === 0
       ? ''
       : `<details><summary>Parameters</summary><ul class="plain">${params.map(([name, value]) => `<li><span class="mono">${escape(name)}</span> = <span class="mono">${escape(JSON.stringify(value))}</span></li>`).join('')}</ul></details>`

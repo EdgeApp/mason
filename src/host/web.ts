@@ -367,7 +367,8 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
               logSource: `${logs}?stage=${encodeURIComponent(stage)}&step=${step}`,
             }
           : {}),
-        logOffset: 0,
+        // It holds none of the stage's log: the socket starts at its end.
+        logTail: true,
         can: {
           cancel: true,
           restart: true,

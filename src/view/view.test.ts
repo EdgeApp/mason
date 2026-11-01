@@ -574,6 +574,11 @@ describe('Design system and views', () => {
     )
     assert.doesNotMatch(html, /meta-link|\/masonfile"|\?project=/)
     assert.match(html, /<a class="run-chip" href="\/runs\/run-\d+"/)
+    // Each chip names its run, branch and status, for the page's socket to keep current.
+    assert.match(
+      html,
+      /<div class="runs" data-project-runs="phones"><a class="run-chip" [^>]*data-run-id="run-\d+" data-branch="[^"]+" data-status="[a-z_]+">/,
+    )
     // A platform filter keeps the projects with an app on it.
     const mac = dashboardData(
       { db, viewer: viewer('developer'), now: NOW, appVisible: all },
@@ -797,6 +802,11 @@ describe('Design system and views', () => {
     assert.match(list, /phones · main/)
     assert.match(list, /2 · 1\.5 MB/)
     assert.match(list, /<td class="mono">26102011, 26102013 · 3 files<\/td>/)
+    // Each row names its run and status, for the page's socket to keep current.
+    assert.match(
+      list,
+      /<tr data-run-id="run-\d+" data-status="[a-z_]+">.*<span data-status-text>[a-z_]+<\/span><\/td>/,
+    )
     assert.doesNotMatch(list, /feature\/login/)
     assert.match(artifactsView(source, { project: 'nothing' }), /No runs yet/)
     const master = artifactsView(

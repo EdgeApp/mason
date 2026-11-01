@@ -75,7 +75,7 @@ const order = [
   'job',
 ]
 
-const HOST_SCHEMA = 5
+const HOST_SCHEMA = 6
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -105,10 +105,19 @@ function migrateHost(db: DatabaseSync): void {
     INSERT INTO host_meta(key,value) VALUES('host_schema','4') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
   // The section step each step ran in, replicated with the step.
-  const columns = db.prepare('PRAGMA table_info(job_steps)').all()
-  db.exec(`BEGIN IMMEDIATE;
+  if (current < 5) {
+    const columns = db.prepare('PRAGMA table_info(job_steps)').all()
+    db.exec(`BEGIN IMMEDIATE;
     ${columns.some((column) => column.name === 'parent') ? '' : 'ALTER TABLE job_steps ADD COLUMN parent INTEGER;'}
     INSERT INTO host_meta(key,value) VALUES('host_schema','5') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  }
+  // Who requested each run, as the master names them; the host has no keys.
+  // A run replicated before shows its label until the master next sends it.
+  const jobs = db.prepare('PRAGMA table_info(jobs)').all()
+  db.exec(`BEGIN IMMEDIATE;
+    ${jobs.some((column) => column.name === 'requested_by') ? '' : 'ALTER TABLE jobs ADD COLUMN requested_by TEXT;'}
+    INSERT INTO host_meta(key,value) VALUES('host_schema','6') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
 }
 

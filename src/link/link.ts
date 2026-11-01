@@ -87,11 +87,30 @@ export class Stream extends EventEmitter {
   /** The peer finished sending. */
   private receiveEnded = false
   private aborted: string | undefined
+  /** Whether credit waits for `grant`, so the reader paces the writer. */
+  private held = false
   constructor(
     readonly id: number,
     private readonly link: Link,
   ) {
     super()
+  }
+  /**
+   * Grants credit only when `grant` says, not as data arrives: a reader
+   * that passes the data on paces the writer by how fast it goes.
+   */
+  holdCredit(): void {
+    this.held = true
+  }
+  /** Grants the writer `bytes` more, once a held reader has passed them on. */
+  grant(bytes: number): void {
+    for (let left = bytes; left > 0; left -= STREAM_WINDOW)
+      this.link.sendMessage({
+        kind: 'stream',
+        op: 'credit',
+        stream: this.id,
+        bytes: Math.min(left, STREAM_WINDOW),
+      })
   }
   /** Writes one chunk, waiting for credit first. */
   async write(chunk: Buffer): Promise<void> {
@@ -153,13 +172,8 @@ export class Stream extends EventEmitter {
   /** @internal */
   receiveData(chunk: Buffer): void {
     this.emit('data', chunk)
-    // Consumed data is granted back to the writer.
-    this.link.sendMessage({
-      kind: 'stream',
-      op: 'credit',
-      stream: this.id,
-      bytes: chunk.length,
-    })
+    // Consumed data is granted back to the writer, unless the reader grants it.
+    if (!this.held) this.grant(chunk.length)
   }
   /** @internal */
   receiveCredit(bytes: number): void {
