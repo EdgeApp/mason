@@ -1399,8 +1399,16 @@ export async function signIos(ctx: Stage) {
 `plutil` and `security`. It takes an unsigned build, one signed ad hoc
 (`-`), or one signed for development or another team, and:
 
-1. copies the app out of the `.ipa`, `.xcarchive` or `.app` (with an
-   `.ipa`'s or archive's `SwiftSupport`); the input is left as it was;
+1. copies the app out of the `.ipa`, `.xcarchive` or `.app` (with every
+   folder beside an `.ipa`'s `Payload`, such as `SwiftSupport`,
+   `WatchKitSupport2` and `Symbols`, or an archive's `SwiftSupport`); the
+   input is left as it was. The input, `output` and `entitlements` must be in
+   the workspace, also through any symlink on the way, the app is taken only
+   from inside the input, and a symlink in the package that leads out of it
+   or nowhere (followed as the system follows it, an earlier link first), a
+   `Frameworks`, `PlugIns`, `Extensions`, `Watch` or `AppClips` folder that
+   is a symlink, or an app's or extension's `Info.plist` that is a symlink, is
+   refused;
 2. finds what is signed separately — frameworks, dylibs and test bundles in
    `Frameworks`, extensions in `PlugIns` and `Extensions`, `Watch` apps and
    `AppClips` — and needs a profile for the bundle ID of every app and
@@ -1409,10 +1417,13 @@ export async function signIos(ctx: Stage) {
 3. takes each bundle's entitlements from `options.entitlements`, else from
    its own signature, else from its profile (wildcards left out), and
    rewrites them for the profile: `application-identifier` and the team
-   identifier from the profile, team-prefixed keychain and app groups moved to
-   its team, `get-task-allow`, `aps-environment` and `beta-reports-active` as
-   the profile has them, and keys the profile does not grant left out. Those
-   keys go to the master first, as an archive's do: it adds the capabilities
+   identifier from the profile, values prefixed with an App ID prefix moved to
+   the profile's prefix, `get-task-allow`, `aps-environment` and
+   `beta-reports-active` as the profile has them, and keys the profile does
+   not grant left out. Of a key's values (app groups, iCloud containers and
+   services, keychain groups, associated domains, …) only those the profile
+   grants are kept, `*` in a grant matching anything; each value left out is
+   named in the log. Keys left out go to the master first, as an archive's do: it adds the capabilities
    to the bundle IDs, makes new profiles, and the stage signs with them;
 4. sets `CFBundleShortVersionString` and `CFBundleVersion` of the app and its
    extensions from `version` and `buildNumber`, when given;

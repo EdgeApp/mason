@@ -6,6 +6,8 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -68,11 +70,21 @@ const sorted = (dir: string): string[] =>
  * A bundle and everything inside it that is signed separately, deepest
  * first, so each outer signature seals the inner ones: frameworks, dylibs
  * and test bundles in `Frameworks`, extensions in `PlugIns` and
- * `Extensions`, watch apps and app clips. Symlinks are never followed.
+ * `Extensions`, watch apps and app clips. Symlinks are never followed,
+ * and a folder of bundles that is one is refused.
  */
 export function signables(bundle: string, kind: Kind = 'app'): Bundle[] {
   const out: Bundle[] = []
   const take = (sub: string, test: RegExp, inner: Kind): void => {
+    // A folder of bundles that is a symlink would be listed through it.
+    if (
+      lstatSync(path.join(bundle, sub), {
+        throwIfNoEntry: false,
+      })?.isSymbolicLink()
+    )
+      throw new Error(
+        `${path.basename(bundle)}/${sub} is a symlink; the folders of bundles to sign must be folders`,
+      )
     for (const name of sorted(path.join(bundle, sub))) {
       if (!test.test(name)) continue
       const file = path.join(bundle, sub, name)
@@ -135,7 +147,7 @@ export function profileEntitlements(granted: Plist): Plist {
   )
 }
 
-/** Values that start with a team ID, which moves to the profile's team. */
+/** Values that start with an App ID prefix, which moves to the profile's. */
 const teamPrefixed = new Set([
   'keychain-access-groups',
   'com.apple.security.application-groups',
@@ -151,42 +163,84 @@ const fromProfile = [
   'beta-reports-active',
 ]
 
+/** A grant as a pattern: `*` stands for anything, every other character for itself. */
+const pattern = (grant: string): RegExp =>
+  new RegExp(
+    `^${grant
+      .split('*')
+      .map((part) => part.replace(/[.+?^$|()[\]{}\\]/g, '\\$&'))
+      .join('.*')}$`,
+  )
+
+/** Whether a profile's grant (a value, or a list of them) allows a value. */
+const grants = (granted: unknown, value: string): boolean =>
+  (Array.isArray(granted) ? granted : [granted]).some(
+    (grant) => typeof grant === 'string' && pattern(grant).test(value),
+  )
+
 /**
  * A bundle's entitlements rewritten for its profile: the application and
- * team identifiers from the profile, team-prefixed groups moved to its
- * team, `get-task-allow`, `beta-reports-active` and `aps-environment` as
- * the profile grants them, and every key it does not grant dropped (and
- * named, so a missing capability can be added).
+ * team identifiers from the profile, values prefixed with an App ID prefix
+ * moved to the profile's, `get-task-allow`, `beta-reports-active` and
+ * `aps-environment` as the profile grants them, every key it does not grant
+ * dropped (and named, so a missing capability can be added), and of a key's
+ * values (app groups, iCloud containers, keychain groups, associated
+ * domains, …) only those the profile grants kept (the rest named).
  */
 export function rewriteEntitlements(
   values: Plist,
   profile: Pick<Profile, 'bundleId' | 'team' | 'entitlements'>,
-): { entitlements: Plist; dropped: string[] } {
+): { entitlements: Plist; dropped: string[]; ungranted: string[] } {
   const granted = profile.entitlements
   const team = profile.team
+  const identifier = granted['application-identifier']
+  // The App ID prefix is the team ID, except for apps made before Apple used it.
+  const prefix =
+    typeof identifier === 'string' && /^[A-Z0-9]{10}\./.test(identifier)
+      ? identifier.slice(0, 10)
+      : team
   const out: Plist = {}
   const dropped: string[] = []
+  const ungranted: string[] = []
   const retarget = (value: unknown): unknown =>
     typeof value === 'string'
-      ? value.replace(/^[A-Z0-9]{10}\./, `${team}.`)
+      ? value.replace(/^[A-Z0-9]{10}\./, `${prefix}.`)
       : Array.isArray(value)
         ? value.map(retarget)
         : value
-  for (const [key, value] of Object.entries(values)) {
+  const strings = (value: unknown): value is string | string[] =>
+    typeof value === 'string' ||
+    (Array.isArray(value) && value.every((entry) => typeof entry === 'string'))
+  for (const [key, raw] of Object.entries(values)) {
     if (fromProfile.includes(key)) continue
-    if (!(key in granted)) dropped.push(key)
-    else if (key === 'aps-environment') out[key] = granted[key]
-    else out[key] = teamPrefixed.has(key) ? retarget(value) : value
+    if (!(key in granted)) {
+      dropped.push(key)
+      continue
+    }
+    if (key === 'aps-environment') {
+      out[key] = granted[key]
+      continue
+    }
+    const value = teamPrefixed.has(key) ? retarget(raw) : raw
+    // Values beyond the grant sign and verify, then fail installation.
+    if (strings(value) && strings(granted[key])) {
+      const list = typeof value === 'string' ? [value] : value
+      const kept = list.filter((entry) => grants(granted[key], entry))
+      for (const entry of list)
+        if (!kept.includes(entry)) ungranted.push(`${key} ${entry}`)
+      if (typeof value === 'string') {
+        if (kept.length > 0) out[key] = value
+      } else out[key] = kept
+    } else out[key] = value
   }
-  const identifier = granted['application-identifier']
   out['application-identifier'] =
     typeof identifier === 'string' && !identifier.includes('*')
       ? identifier
-      : `${team}.${profile.bundleId}`
+      : `${prefix}.${profile.bundleId}`
   out['com.apple.developer.team-identifier'] = team
   for (const key of ['get-task-allow', 'beta-reports-active'])
     if (key in granted) out[key] = granted[key]
-  return { entitlements: out, dropped }
+  return { entitlements: out, dropped, ungranted }
 }
 
 /** Runs a tool and resolves with its output; a failure carries the output's end. */
@@ -290,9 +344,25 @@ async function signedEntitlements(
   return Object.keys(values).length === 0 ? undefined : values
 }
 
+/** Whether a path, through every symlink on the way, is inside a directory. */
+function within(dir: string, file: string): boolean {
+  // The deepest part that exists; a dangling symlink resolves nowhere.
+  let existing = file
+  while (lstatSync(existing, { throwIfNoEntry: false }) == null)
+    existing = path.dirname(existing)
+  try {
+    // As the system resolves it: each link in turn, then what follows it.
+    const base = realpathSync.native(dir)
+    const real = realpathSync.native(existing)
+    return real === base || real.startsWith(base + path.sep)
+  } catch {
+    return false
+  }
+}
+
 function inside(dir: string, file: string, what: string): string {
   const resolved = path.resolve(dir, file)
-  if (!resolved.startsWith(dir + path.sep))
+  if (!resolved.startsWith(dir + path.sep) || !within(dir, resolved))
     throw new Error(`The re-sign ${what} ${file} must stay in the workspace`)
   return resolved
 }
@@ -328,6 +398,34 @@ function checkOptions(options: ResignOptions): void {
 }
 
 /**
+ * Refuses a symlink in the package that leads out of it, or nowhere, as
+ * the system resolves it (an earlier link first), as `codesign --verify
+ * --strict` would.
+ */
+function escapes(root: string): void {
+  const base = realpathSync.native(root)
+  const walk = (dir: string): void => {
+    for (const name of readdirSync(dir)) {
+      const file = path.join(dir, name)
+      const info = lstatSync(file)
+      if (info.isSymbolicLink()) {
+        let real: string | undefined
+        try {
+          real = realpathSync.native(file)
+        } catch {
+          real = undefined
+        }
+        if (real == null || !real.startsWith(base + path.sep))
+          throw new Error(
+            `${path.relative(root, file)} is a symlink out of the package (to ${readlinkSync(file)}); a signed app's symlinks stay inside it`,
+          )
+      } else if (info.isDirectory()) walk(file)
+    }
+  }
+  walk(root)
+}
+
+/**
  * Puts the input's app at `<root>/Payload/<App>.app`, with an `.ipa`'s or
  * archive's `SwiftSupport` beside `Payload`, and resolves with the app.
  */
@@ -344,7 +442,9 @@ async function unpack(
       (name) =>
         name.endsWith('.app') && lstatSync(path.join(dir, name)).isDirectory(),
     )
-  const one = (dir: string, found: string[]): string => {
+  // The app comes from inside the input, never through a symlink out of it.
+  const one = (base: string, dir: string): string => {
+    const found = within(base, dir) ? apps(dir) : []
     if (found.length !== 1)
       throw new Error(
         `${path.basename(input)} must hold exactly one app; found ${found.length === 0 ? 'none' : found.join(', ')}`,
@@ -353,24 +453,26 @@ async function unpack(
   }
   const copy = (from: string, to: string): void =>
     cpSync(from, to, { recursive: true, verbatimSymlinks: true })
-  const swiftSupport = (dir: string): void => {
-    const from = path.join(dir, 'SwiftSupport')
-    if (existsSync(from)) copy(from, path.join(root, 'SwiftSupport'))
+  // A folder beside Payload; a symlink in its place is left out.
+  const beside = (dir: string, name: string): void => {
+    const from = path.join(dir, name)
+    if (lstatSync(from, { throwIfNoEntry: false })?.isDirectory() === true)
+      copy(from, path.join(root, name))
   }
   const info = statSync(input, { throwIfNoEntry: false })
   if (info == null) throw new Error(`${path.basename(input)} does not exist`)
   if (input.endsWith('.ipa') && info.isFile()) {
     const unzipped = path.join(work, 'unzipped')
     await tool(context, DITTO, ['-x', '-k', input, unzipped])
-    const from = path.join(unzipped, 'Payload')
-    const app = one(from, apps(from))
+    const app = one(unzipped, path.join(unzipped, 'Payload'))
     copy(app, path.join(payload, path.basename(app)))
-    swiftSupport(unzipped)
+    // SwiftSupport, WatchKitSupport2, MessagesApplicationSupport, Symbols, …
+    for (const name of sorted(unzipped))
+      if (name !== 'Payload' && name !== '__MACOSX') beside(unzipped, name)
   } else if (input.endsWith('.xcarchive') && info.isDirectory()) {
-    const from = path.join(input, 'Products', 'Applications')
-    const app = one(from, apps(from))
+    const app = one(input, path.join(input, 'Products', 'Applications'))
     copy(app, path.join(payload, path.basename(app)))
-    swiftSupport(input)
+    beside(input, 'SwiftSupport')
   } else if (input.endsWith('.app') && info.isDirectory())
     copy(input, path.join(payload, path.basename(input)))
   else
@@ -378,8 +480,11 @@ async function unpack(
       `ctx.apple.resign takes an .ipa, .xcarchive or .app, not ${path.basename(input)}`,
     )
   const app = path.join(payload, apps(payload)[0]!)
-  // Finder information and other extended attributes fail codesign.
-  await tool(context, XATTR, ['-cr', root])
+  // Signing writes into the bundles: never through a symlink out of them.
+  escapes(root)
+  // Finder information and other extended attributes fail codesign; a
+  // symlink's own are cleared, never its target's.
+  await tool(context, XATTR, ['-crs', root])
   return app
 }
 
@@ -435,11 +540,17 @@ export async function resign(
         'CFBundleIdentifier',
       )
     const signed = bundles.filter(takesProfile)
-    for (const bundle of signed)
+    for (const bundle of signed) {
       if (bundle.bundleId == null)
         throw new Error(
           `${path.relative(root, bundle.path)} has no CFBundleIdentifier`,
         )
+      // Its Info.plist is written to (version, build number) and sealed.
+      if (lstatSync(path.join(bundle.path, 'Info.plist')).isSymbolicLink())
+        throw new Error(
+          `${path.relative(root, bundle.path)}/Info.plist is a symlink; an app's or extension's Info.plist must be a file`,
+        )
+    }
     const needed = [...new Set(signed.map((bundle) => bundle.bundleId!))]
     const missing = needed.filter(
       (id) =>
@@ -482,7 +593,7 @@ export async function resign(
       return out
     }
     let profiles = await read(context.signing.profiles)
-    const plan = (): Map<Bundle, { entitlements: Plist; dropped: string[] }> =>
+    const plan = (): Map<Bundle, ReturnType<typeof rewriteEntitlements>> =>
       new Map(
         signed.map((bundle) => {
           const profile = profiles.find(
@@ -523,6 +634,13 @@ export async function resign(
           )
       }
     }
+    for (const bundle of signed) {
+      const { ungranted } = planned.get(bundle)!
+      if (ungranted.length > 0)
+        context.log(
+          `${bundle.bundleId}: its profile does not grant the values ${ungranted.join(', ')}; signed without them\n`,
+        )
+    }
     const result: ResignResult['bundles'] = []
     for (const [index, bundle] of bundles.entries()) {
       const relative = path.relative(root, bundle.path)
@@ -539,10 +657,10 @@ export async function resign(
         '--generate-entitlement-der',
       ]
       if (profile != null) {
-        writeFileSync(
-          path.join(bundle.path, 'embedded.mobileprovision'),
-          profile.content,
-        )
+        // A new file, never written through what was there.
+        const embedded = path.join(bundle.path, 'embedded.mobileprovision')
+        rmSync(embedded, { force: true })
+        writeFileSync(embedded, profile.content, { flag: 'wx' })
         const file = path.join(work, `entitlements-${index}.plist`)
         writeFileSync(
           file,
