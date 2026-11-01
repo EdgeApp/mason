@@ -34,7 +34,8 @@ clients still use. The host forwards most of these routes to the master
   | --- | --- |
   | `/api/v2/projects/:slug/secrets…` | 8 MB |
   | `/api/v2/apple/certificates`, `…/profiles`, `…/setup` | 2 MB |
-  | other `/api/v2/projects…` | 64 KB |
+  | the wizard's routes: `POST /api/v2/projects/check` (that path alone, so a project slugged `check` takes the next limit), `…/:slug/discover`, `…/:slug/wizard/…`, `…/:slug/webhook`, `…/:slug/masonfile` | 64 KB |
+  | other `/api/v2/projects…` | 1 MB |
   | `/api/v2/build-numbers/…` | 1 MB |
   | `/api/v2/runs…`, `/api/v2/queue…` | 16 KB |
   | `/api/v2/session…`, `/api/v2/people…`, `/api/v2/groups…`, `/api/v2/settings/backup…`, `/api/v2/backups`, `/api/v2/storage…`, `/api/v2/cloud…` | 64 KB |
@@ -99,9 +100,6 @@ means no limit. A scoped key:
   anything that is not about one project: settings, nodes, people, groups,
   storage, backups, cloud and Apple routes, and listing or revoking keys. It
   may still create keys within its own scopes.
-
-A few project routes check only the role, not the scopes; their entries say
-so.
 
 ### Browser sessions
 
@@ -554,8 +552,8 @@ A run's live updates as server-sent events.
 
 The queue's live state as server-sent events.
 
-- Permission: `runs.read` (role only). Host sessions may read it. The
-  stream is not filtered by a key's scopes.
+- Permission: `runs.read`. Host sessions may read it. A scoped key sees only
+  the stages of runs its scopes cover, as in `GET /api/v2/runs`.
 - Sends a `queue` event at the start and whenever the set changes, checked
   every second: a list of `{ "job", "stage", "status" }` for every stage
   that is `running`, `queued` or `awaiting_approval`. It closes after 15
@@ -683,8 +681,9 @@ first match decides. It answers the project.
 
 ### Add-project wizard and Masonfile
 
-The dashboard's add-project wizard uses these routes. They check the role
-only, not a key's scopes.
+The dashboard's add-project wizard uses these routes. Each checks its
+permission and that a key's scopes cover the project it names; `check` names
+no project yet, so a key scoped to projects cannot use it.
 
 | Method and path | What it does | Permission |
 | --- | --- | --- |
@@ -700,9 +699,10 @@ only, not a key's scopes.
   and answers `{ "repository", "slug", "defaultBranch" }`, the slug derived
   from the repository's name. 400 when it is not a GitHub repository or the
   master cannot reach it.
-- **`POST …/discover`** answers `{ "run": "<run id>" }`. **`GET
-  …/discover`** answers `null` before any discovery, else `{ "run",
-  "status", "reason" }` and, once the Masonfile is read, `apps` (each
+- **`POST …/discover`** answers `{ "run": "<run id>" }`. The run is on the
+  project's default branch, so a key scoped to branches must cover it
+  (403). **`GET …/discover`** answers `null` before any discovery, else
+  `{ "run", "status", "reason" }` and, once the Masonfile is read, `apps` (each
   `{ "bundleId", "platforms", "bundleIds" }`) and `triggers` by workflow.
 - **`wizard/apps`** takes `{ "apps": "app.example.one,app.example.two",
   "team": "ABCDE12345" }`: a comma-separated list of app IDs the discovery
@@ -844,6 +844,7 @@ Workers and the host paired with the master.
 | --- | --- | --- |
 | `GET /api/v2/nodes` | Every paired node with its inventory and software state. | `nodes.read` |
 | `POST /api/v2/nodes` | Pairs a node by its address and pairing key. 201. | `nodes.change` |
+| `PUT /api/v2/nodes/:fingerprint` | Sets a node's name, type, labels and slots. | `nodes.change` |
 | `DELETE /api/v2/nodes/:fingerprint` | Unpairs a node. | `nodes.change` |
 
 A node:
@@ -883,16 +884,34 @@ report.
 
 **`POST /api/v2/nodes`** takes `{ "address": "192.168.1.20:9310", "key":
 "mason1:mldsa65:…" }`: the node's address and the pairing key it printed on
-first start. It answers the node. 400 for a key that is not a pairing key;
-409 when the node is already paired; 502 when the node does not answer, or
-its certificate or handshake does not match the key.
+first start. It may also take the fields `PUT` sets (below), so a dedicated
+node is paired with its labels and never carries `setup`; they are checked
+before the node is paired. A host takes only a name: given any other field,
+a host is refused before it pairs and can be paired again. It answers the
+node. 400 for a key that is not a pairing key, a field that fails, or a host
+given a worker's fields; 409 when the node is already paired; 502
+when the node does not answer, or its certificate or handshake does not match
+the key.
+
+**`PUT /api/v2/nodes/:fingerprint`** takes any of:
+
+| Field | Value |
+| --- | --- |
+| `name` | 1–128 characters, not all spaces, without control characters |
+| `type` | up to 64 letters, digits, dots, dashes and underscores, or `""` for none |
+| `labels` | a list of up to 20 labels like a type, repeats dropped; it replaces the node's labels, so a node that runs setup keeps `setup` in it |
+| `slots` | 1–64 stages at a time |
+| `workspaceRoots` | absolute paths for custom workspace paths |
+
+A field left out is kept. Every field is checked before any is written, and
+any other field, `address` and `key` included, is refused (400). A host
+takes only a name; a type, labels, slots or workspace roots for a host are
+refused (400). It answers the node and sends the node its
+new type and labels. 404 for an unknown node. The Nodes page edits the same
+fields, and `mason nodes set` on the master's computer does too.
 
 **`DELETE /api/v2/nodes/:fingerprint`** answers `null`; 404 for an unknown
 node.
-
-No HTTP route changes a paired node's name, type, labels or slots. On the
-master's computer, `mason nodes set <node> --type … --label … --slots …`
-does, through the control socket (see [Examples](#15-examples)).
 
 ## 9. Cloud accounts, pools, hosts and nodes
 
@@ -1382,12 +1401,20 @@ List nodes:
 curl -sS -H "Authorization: Bearer $KEY" "$MASON/api/v2/nodes"
 ```
 
-No HTTP route sets a paired node's labels. On the master's computer, `mason
-nodes set` replaces them with the `--label`s it is given:
+Set a node's type and labels. The list replaces its labels, so a node that
+runs setup keeps `setup`; a dedicated node, such as a signer, leaves it out:
 
 ```sh
-mason nodes set mac-mini-2 --type mac-xcode --label setup --label apple-signing --slots 2
+NODE=$(curl -sS -H "Authorization: Bearer $KEY" "$MASON/api/v2/nodes" \
+  | jq -r '.[] | select(.name == "mac-mini-2") | .fingerprint')
+curl -sS -X PUT "$MASON/api/v2/nodes/$(jq -rn --arg f "$NODE" '$f|@uri')" \
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"type": "mac-xcode", "labels": ["setup", "apple-signing"], "slots": 2}'
 ```
+
+`mason nodes set mac-mini-2 --type mac-xcode --label setup --label
+apple-signing --slots 2` does the same on the master's computer.
 
 A permanent cloud node takes its labels when it is made:
 

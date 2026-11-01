@@ -867,6 +867,83 @@ describe('Nodes page', () => {
     assert(!nodesView({ ...base, canChange: false }).includes('id="add-node"'))
   })
 
+  it('edits a node’s name, type, labels and slots, and pairs a worker with its type and labels', () => {
+    const node = {
+      name: 'mac-1',
+      fingerprint: 'mldsa65:abc/def+ghi',
+      type: 'mac-xcode',
+      labels: ['setup', 'apple-signing'],
+      slots: 2,
+      status: 'idle' as const,
+      checklist: [],
+    }
+    const html = nodesView({
+      ...base,
+      nodes: [
+        { ...node, role: 'worker' },
+        { ...node, name: 'builds', fingerprint: 'mldsa65:host', role: 'host' },
+      ],
+    })
+    // A worker's form sets all four; the route names the node by fingerprint.
+    assert.match(
+      html,
+      /<form data-mason="api" data-path="\/api\/v2\/nodes\/mldsa65%3Aabc%2Fdef%2Bghi" data-method="PUT" data-fields="name,type,labels,slots" data-then="reload">/,
+    )
+    assert.match(
+      html,
+      /name="labels" data-kind="list" value="setup, apple-signing">/,
+    )
+    assert.match(
+      html,
+      /name="slots" type="number" data-kind="number" min="1" max="64" value="2">/,
+    )
+    // A host has only its name to set.
+    assert.match(
+      html,
+      /data-path="\/api\/v2\/nodes\/mldsa65%3Ahost" data-method="PUT" data-fields="name" /,
+    )
+    // A worker is paired with optional type and labels, setup by default.
+    assert.match(
+      html,
+      /data-path="\/api\/v2\/nodes" data-fields="address,key,type,labels"/,
+    )
+    assert.match(
+      html,
+      /id="node-labels" name="labels" data-kind="list" value="setup">/,
+    )
+    assert.match(
+      html,
+      /data-path="\/api\/v2\/nodes" data-fields="address,key" /,
+    )
+    const viewer = nodesView({
+      ...base,
+      canChange: false,
+      nodes: [{ ...node, role: 'worker' }],
+    })
+    assert(!viewer.includes('data-method="PUT"'))
+    // A browser ignores a pattern it cannot compile with the v flag.
+    const patterns = [...html.matchAll(/pattern="([^"]*)"/g)].map(
+      (match) => match[1]!,
+    )
+    assert(patterns.length >= 2)
+    for (const pattern of patterns)
+      assert.doesNotThrow(() => new RegExp(`^(?:${pattern})$`, 'v'), pattern)
+  })
+
+  it('writes every form pattern so a browser can compile it with the v flag', () => {
+    const files = ['../../src/view/admin.ts', '../../src/master/pages.ts']
+    const patterns = files.flatMap((file) =>
+      [
+        ...readFileSync(new URL(file, import.meta.url), 'utf8').matchAll(
+          /pattern="([^"$]*)"/g,
+        ),
+      ].map((match) => match[1]!.replaceAll('\\\\', '\\')),
+    )
+    assert(patterns.length > 10)
+    for (const pattern of patterns)
+      assert.doesNotThrow(() => new RegExp(`^(?:${pattern})$`, 'v'), pattern)
+  })
+
   it('U2.1 explains the host and the node steps: title above command, Copy right, pairing-key note, address and port', () => {
     const html = nodesView({
       ...base,

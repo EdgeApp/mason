@@ -17,7 +17,12 @@ import {
 } from './auth.js'
 import type { MasterDatabase } from './database.js'
 import { isRunAction, isRunRead, type Forwarder } from './forward.js'
-import type { NodeRegistry } from './nodes.js'
+import {
+  asAssignment,
+  setsWorkerFields,
+  type NodeAssignment,
+  type NodeRegistry,
+} from './nodes.js'
 import { allow } from './permissions.js'
 import { asRole, Forbidden, type Actor } from './roles.js'
 import { methodsOf } from './hostSettings.js'
@@ -64,6 +69,25 @@ export interface Credentials {
   database?: MasterDatabase
 }
 
+/**
+ * The fields of a node's assignment a request sets: its name, type, labels
+ * and slots, and a worker's workspace roots, each checked; anything else in
+ * the body is refused, except the address and key a pairing names.
+ */
+function nodeAssignment(
+  body: Record<string, unknown>,
+  pairing: boolean,
+): NodeAssignment {
+  const fields = Object.fromEntries(
+    Object.entries(body).filter(
+      ([field]) => !pairing || (field !== 'address' && field !== 'key'),
+    ),
+  )
+  for (const field of Object.keys(fields))
+    if (!['name', 'type', 'labels', 'slots', 'workspaceRoots'].includes(field))
+      throw new Error(`A node has no field ${field.slice(0, 40)}`)
+  return asAssignment(fields)
+}
 /**
  * Bearer API keys, master sessions (with the CSRF proof on any request
  * that changes something), and, on the API socket only, a host session's
@@ -348,14 +372,26 @@ export function masterApi(context: ApiContext): Router {
     '/api/v2/nodes',
     json(async (req, res) => {
       allow(actorOf(res), 'nodes.change')
-      const body = (req.body ?? {}) as { address?: unknown; key?: unknown }
+      const body = (req.body ?? {}) as Record<string, unknown>
       if (typeof body.address !== 'string' || typeof body.key !== 'string')
         throw new Error('Expected {address, key}')
+      const assignment = nodeAssignment(body, true)
+      // A host takes only a name, so a worker's fields pair only a worker.
+      const workerOnly = setsWorkerFields(assignment)
       try {
-        const node = await context.registry.add(body.address, body.key)
+        const node = await context.registry.add(
+          body.address,
+          body.key,
+          workerOnly ? 'worker' : undefined,
+        )
         res.status(201)
-        return node
+        // A dedicated node is paired with its labels, so it never carries `setup`.
+        return Object.keys(assignment).length === 0
+          ? node
+          : await context.registry.assign(node.fingerprint, assignment)
       } catch (error) {
+        if (error instanceof Error && error.message === 'Wrong role')
+          throw new Error('A host takes only a name')
         if (
           error instanceof Error &&
           error.message === 'This node is already paired'
@@ -363,6 +399,19 @@ export function masterApi(context: ApiContext): Router {
           throw new Conflict(error.message)
         throw error
       }
+    }),
+  )
+  router.put(
+    '/api/v2/nodes/:fingerprint',
+    json(async (req, res) => {
+      allow(actorOf(res), 'nodes.change')
+      const fingerprint = String(req.params.fingerprint)
+      if (context.registry.get(fingerprint) == null)
+        throw new NotFound('No such node')
+      return await context.registry.assign(
+        fingerprint,
+        nodeAssignment((req.body ?? {}) as Record<string, unknown>, false),
+      )
     }),
   )
   router.delete(

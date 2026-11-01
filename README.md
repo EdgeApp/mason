@@ -106,8 +106,11 @@ mason settings set host --file host.json     # {"origin": "https://builds.exampl
 ```
 
 A stage runs on a node that matches its `on` selector: the node's type, OS and
-architecture, and every label the selector names. `mason nodes set` replaces a
-node's labels with the `--label`s it is given.
+architecture, and every label the selector names. A node's name, type, labels
+and slots are set on the Nodes page (each node's **Edit**), with
+`PUT /api/v2/nodes/:fingerprint`, or with `mason nodes set`; each replaces the
+node's labels with the ones it is given. A worker may also be paired with its
+type and labels.
 
 A run's setup, which executes the branch's Masonfile, runs only on nodes
 labelled `setup`. Every new node, permanent cloud node and pool carries that

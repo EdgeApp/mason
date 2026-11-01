@@ -166,7 +166,7 @@ function poolFields(
           text(
             'name',
             pool.name ?? (mac ? 'macos-cloud' : ''),
-            ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-cloud"',
+            ' required pattern="[a-z0-9][a-z0-9\\-]{0,39}" placeholder="linux-cloud"',
           ),
           'The pool’s name on this master.',
         ),
@@ -176,7 +176,7 @@ function poolFields(
       text(
         'type',
         pool.type ?? (mac ? 'macos-arm64' : ''),
-        ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-x86"',
+        ' required pattern="[a-z0-9][a-z0-9\\-]{0,39}" placeholder="linux-x86"',
       ),
       'Type of node as specified in the Masonfile.',
     ),
@@ -318,8 +318,8 @@ function hostFields(
   return [
     `<input type="hidden" name="account" value="${escape(account.id)}">`,
     role === 'host'
-      ? `<label for="${prefix}-name">Name</label>${text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="builds"')}`
-      : `${field(`${prefix}-name`, 'Name', text('name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-node"'), 'The node’s name on this master and its droplet’s.')}${field(`${prefix}-type`, 'Node type', text('type', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="linux-x86"'), 'Type of node as specified in the Masonfile.')}${field(`${prefix}-labels`, 'Labels', text('labels', SETUP_LABEL), `Labels it carries, comma-separated, for stages that ask for them. A node labelled ${SETUP_LABEL} runs setup.`)}`,
+      ? `<label for="${prefix}-name">Name</label>${text('name', '', ' required pattern="[a-z0-9][a-z0-9\\-]{0,39}" placeholder="builds"')}`
+      : `${field(`${prefix}-name`, 'Name', text('name', '', ' required pattern="[a-z0-9][a-z0-9\\-]{0,39}" placeholder="linux-node"'), 'The node’s name on this master and its droplet’s.')}${field(`${prefix}-type`, 'Node type', text('type', '', ' required pattern="[a-z0-9][a-z0-9\\-]{0,39}" placeholder="linux-x86"'), 'Type of node as specified in the Masonfile.')}${field(`${prefix}-labels`, 'Labels', text('labels', SETUP_LABEL), `Labels it carries, comma-separated, for stages that ask for them. A node labelled ${SETUP_LABEL} runs setup.`)}`,
     `<label for="${prefix}-region">Region</label>${
       catalog == null
         ? text('region', 'sfo3', ' required')
@@ -361,10 +361,10 @@ function hostFields(
       : `<label for="${prefix}-domain">DNS domain</label>${select('dns.domain', '', [{ value: '', label: 'No DNS: serve the droplet’s address' }, ...(account.domains ?? []).map((domain) => ({ value: domain, label: domain }))])}`,
     role === 'worker'
       ? ''
-      : `<label for="${prefix}-record">Record name in the domain (or @)</label>${text('dns.name', '', ' placeholder="builds" pattern="@|[a-z0-9.-]{1,200}"')}`,
+      : `<label for="${prefix}-record">Record name in the domain (or @)</label>${text('dns.name', '', ' placeholder="builds" pattern="@|[a-z0-9.\\-]{1,200}"')}`,
     role === 'worker'
       ? ''
-      : `<label for="${prefix}-space">Store builds in a new DigitalOcean Space named (empty: the host’s disk)</label><input id="${prefix}-space" name="space.bucket" placeholder="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">`,
+      : `<label for="${prefix}-space">Store builds in a new DigitalOcean Space named (empty: the host’s disk)</label><input id="${prefix}-space" name="space.bucket" placeholder="mason-builds" pattern="[a-z0-9][a-z0-9\\-]{1,61}[a-z0-9]">`,
     role === 'worker'
       ? ''
       : `<label for="${prefix}-space-region">Space region</label>${spacesRegionSelect(`${prefix}-space-region`, 'sfo3')}`,
@@ -409,7 +409,7 @@ function storageCard(options: {
           `${icon('add')} Make a new Space`,
           apiForm(
             '/api/v2/storage/space/new',
-            `<p><small class="hint">A Space is DigitalOcean’s storage, billed by use from $5 a month for 250 GB, so there is no machine size to choose. Mason makes it and a key that can use only it; it becomes a row above, beside the others.</small></p>${field('new-space-account', 'DigitalOcean account', `<select id="new-space-account" name="account">${spaceAccounts.map((account) => `<option value="${escape(account.id)}">${escape(account.name)}</option>`).join('')}</select>`)}${field('new-space-bucket', 'Space name', '<input id="new-space-bucket" name="bucket" required value="mason-builds" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]">', '3 to 63 lowercase letters, digits and dashes; unique across DigitalOcean.')}${field('new-space-region', 'Region', spacesRegionSelect('new-space-region', 'sfo3').replace('name="space.region"', 'name="region"'))}${useField('new-space-use')}`,
+            `<p><small class="hint">A Space is DigitalOcean’s storage, billed by use from $5 a month for 250 GB, so there is no machine size to choose. Mason makes it and a key that can use only it; it becomes a row above, beside the others.</small></p>${field('new-space-account', 'DigitalOcean account', `<select id="new-space-account" name="account">${spaceAccounts.map((account) => `<option value="${escape(account.id)}">${escape(account.name)}</option>`).join('')}</select>`)}${field('new-space-bucket', 'Space name', '<input id="new-space-bucket" name="bucket" required value="mason-builds" pattern="[a-z0-9][a-z0-9\\-]{1,61}[a-z0-9]">', '3 to 63 lowercase letters, digits and dashes; unique across DigitalOcean.')}${field('new-space-region', 'Region', spacesRegionSelect('new-space-region', 'sfo3').replace('name="space.region"', 'name="region"'))}${useField('new-space-use')}`,
             `${icon('storage')} Make the Space`,
             {
               fields: ['account', 'bucket', 'region', 'use'],
@@ -584,6 +584,29 @@ export function nodesView(data: {
       const xcodes = (node.inventory?.xcodes ?? [])
         .map((entry) => entry.version)
         .join(', ')
+      // Its name, type, labels and slots; a host has only a name to set.
+      const id = `node-${node.fingerprint.replace(/[^A-Za-z0-9]/g, '').slice(-12)}`
+      const worker = node.role === 'worker'
+      const edit = data.canChange
+        ? action(
+            `${icon('edit')} Edit`,
+            apiForm(
+              `/api/v2/nodes/${encodeURIComponent(node.fingerprint)}`,
+              `${field(`${id}-name`, 'Name', `<input id="${id}-name" name="name" required maxlength="128" value="${escape(node.name)}">`)}${
+                worker
+                  ? `${field(`${id}-type`, 'Node type', `<input id="${id}-type" name="type" value="${escape(node.type)}" pattern="([A-Za-z0-9][A-Za-z0-9._\\-]{0,63})?">`, 'The type a Masonfile selects it by.')}${field(`${id}-labels`, 'Labels', `<input id="${id}-labels" name="labels" data-kind="list" value="${escape(node.labels.join(', '))}">`, `Comma-separated, for stages that ask for them. A node labelled ${SETUP_LABEL} runs setup; a dedicated node leaves it out.`)}${field(`${id}-slots`, 'Slots', `<input id="${id}-slots" name="slots" type="number" data-kind="number" min="1" max="64" value="${node.slots}">`, 'Stages it runs at a time.')}`
+                  : ''
+              }`,
+              `${icon('edit')} Save`,
+              {
+                method: 'PUT',
+                fields: worker ? ['name', 'type', 'labels', 'slots'] : ['name'],
+                then: 'reload',
+              },
+            ),
+            { kind: 'secondary' },
+          )
+        : ''
       return `<article class="panel node"><h2>${statusDot(node.status === 'busy' ? 'running' : node.status === 'idle' ? 'succeeded' : 'cancelled')}<span class="mono">${escape(node.name)}</span> <small>${[
         node.role,
         node.type,
@@ -600,7 +623,7 @@ export function nodesView(data: {
         node.checklist.length === 0
           ? ''
           : `<h3>Checklist</h3><ul class="plain checklist">${node.checklist.map((item) => `<li>${icon(item.done === true ? 'check_circle' : 'warning')} ${escape(item.title ?? item.text ?? '')}</li>`).join('')}</ul>`
-      }</article>`
+      }${edit}</article>`
     })
     .join('')
   /** One line that installs Mason and starts it as `role`, from the master's release on GitHub. */
@@ -630,19 +653,30 @@ export function nodesView(data: {
     prefix: string,
     placeholder: string,
     button: string,
+    worker = false,
   ): string =>
     apiForm(
       '/api/v2/nodes',
-      `${field(`${prefix}-address`, 'Mason node address and port', `<input id="${prefix}-address" name="address" placeholder="${placeholder}" required>`)}${field(`${prefix}-key`, 'Pairing key', `<input id="${prefix}-key" name="key" placeholder="mason1:…" required autocomplete="off">`)}`,
+      `${field(`${prefix}-address`, 'Mason node address and port', `<input id="${prefix}-address" name="address" placeholder="${placeholder}" required>`)}${field(`${prefix}-key`, 'Pairing key', `<input id="${prefix}-key" name="key" placeholder="mason1:…" required autocomplete="off">`)}${
+        // A worker may be paired with its type and labels, so a dedicated one never runs setup.
+        worker
+          ? `${field(`${prefix}-type`, 'Node type', `<input id="${prefix}-type" name="type" data-optional placeholder="linux-x86" pattern="([A-Za-z0-9][A-Za-z0-9._\\-]{0,63})?">`, 'Optional: the type a Masonfile selects it by.')}${field(`${prefix}-labels`, 'Labels', `<input id="${prefix}-labels" name="labels" data-kind="list" value="${SETUP_LABEL}">`, `Comma-separated. A node labelled ${SETUP_LABEL} runs setup; a dedicated node leaves it out.`)}`
+          : ''
+      }`,
       button,
-      { fields: ['address', 'key'], then: 'reload' },
+      {
+        fields: worker
+          ? ['address', 'key', 'type', 'labels']
+          : ['address', 'key'],
+        then: 'reload',
+      },
     )
   const cloudHosts = (data.cloudHosts ?? [])
     .map(
       (host) =>
         `<section class="panel cloud-host" id="host-${escape(host.name)}" data-state="${escape(host.state)}"><h3>${icon('cloud')}<span class="mono">${escape(host.name)}</span> <small>${escape(host.state)}</small></h3><p>${escape(host.region)} · ${escape(host.size)}${host.address == null ? '' : ` · <span class="mono">${escape(host.address)}</span>`}${host.dnsName == null ? '' : ` · <span class="mono">${escape(host.dnsName)}</span>`}${host.version == null || host.state === 'updating' ? '' : ` · Mason ${escape(host.version)}`}</p>${host.state === 'updating' && host.version != null ? `<p class="notice">Updating to Mason ${escape(host.version)}, as the master asked over its link; it reconnects on its own.</p>` : ''}${host.origin == null ? '' : `<p>Serves <a href="${escape(host.origin)}">${escape(host.origin)}</a></p>`}${host.certificate === 'waiting' ? '<p class="notice">Waiting for its certificate: Caddy asks Let’s Encrypt once the DNS name resolves.</p>' : ''}${host.space == null ? '' : `<p>Builds Space <span class="mono">${escape(host.space.bucket)}</span> (${escape(host.space.region)})</p>`}${host.error == null ? '' : `<p class="state-failed">${escape(host.error)}</p>`}${
           data.canChange
-            ? `${host.space == null ? action(`${icon('storage')} Store builds in a new DigitalOcean Space`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/space`, `<label for="space-${escape(host.name)}">Space name</label><input id="space-${escape(host.name)}" name="bucket" required value="mason-${escape(host.name)}" pattern="[a-z0-9][a-z0-9-]{1,61}[a-z0-9]"><label for="space-region-${escape(host.name)}">Space region</label>${spacesRegionSelect(`space-region-${escape(host.name)}`, host.region).replace('name="space.region"', 'name="region"')}<p><small>Mason makes the Space and a key that can use only it. New builds are stored there; earlier ones stay where they are.</small></p>`, `${icon('storage')} Make the Space`, { fields: ['bucket', 'region'] })) : ''}<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">${host.space == null ? '' : `<label for="remove-space-${escape(host.name)}">Its Space ${escape(host.space.bucket)}</label><select id="remove-space-${escape(host.name)}" name="deleteSpace"><option value="keep">Keep the Space and its builds as a storage location</option><option value="delete">Also delete the Space and every build in it</option></select>`}`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: host.space == null ? ['confirm'] : ['confirm', 'deleteSpace'], className: 'danger-fill' }), { kind: 'danger' })}</div>`
+            ? `${host.space == null ? action(`${icon('storage')} Store builds in a new DigitalOcean Space`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/space`, `<label for="space-${escape(host.name)}">Space name</label><input id="space-${escape(host.name)}" name="bucket" required value="mason-${escape(host.name)}" pattern="[a-z0-9][a-z0-9\\-]{1,61}[a-z0-9]"><label for="space-region-${escape(host.name)}">Space region</label>${spacesRegionSelect(`space-region-${escape(host.name)}`, host.region).replace('name="space.region"', 'name="region"')}<p><small>Mason makes the Space and a key that can use only it. New builds are stored there; earlier ones stay where they are.</small></p>`, `${icon('storage')} Make the Space`, { fields: ['bucket', 'region'] })) : ''}<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">${host.space == null ? '' : `<label for="remove-space-${escape(host.name)}">Its Space ${escape(host.space.bucket)}</label><select id="remove-space-${escape(host.name)}" name="deleteSpace"><option value="keep">Keep the Space and its builds as a storage location</option><option value="delete">Also delete the Space and every build in it</option></select>`}`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: host.space == null ? ['confirm'] : ['confirm', 'deleteSpace'], className: 'danger-fill' }), { kind: 'danger' })}</div>`
             : ''
         }</section>`,
     )
@@ -705,7 +739,7 @@ export function nodesView(data: {
     )
     .join('')
   const add = data.canChange
-    ? `<section class="panel" id="add-node"><h2>${icon('add')}Nodes</h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks. Run the following commands to start Mason on a Linux or macOS computer (Windows coming).</p>${cloudNodes}<ol class="howto">${installStep('Install and start Mason as a worker', 'On the new computer.', 'worker')}${step('Pair it here', pairForm('node', '192.168.1.20:9310', `${icon('lan')} Pair node`))}</ol>${nodeAccounts}</section>`
+    ? `<section class="panel" id="add-node"><h2>${icon('add')}Nodes</h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks. Run the following commands to start Mason on a Linux or macOS computer (Windows coming).</p>${cloudNodes}<ol class="howto">${installStep('Install and start Mason as a worker', 'On the new computer.', 'worker')}${step('Pair it here', pairForm('node', '192.168.1.20:9310', `${icon('lan')} Pair node`, true))}</ol>${nodeAccounts}</section>`
     : cloudNodes === ''
       ? ''
       : `<section class="panel" id="add-node"><h2>${icon('cloud')}Cloud nodes</h2>${cloudNodes}</section>`
@@ -943,7 +977,7 @@ function signInForm(
             `${p}-id`,
             'id',
             '',
-            ' required pattern="[a-z][a-z0-9-]*" maxlength="64" placeholder="google"',
+            ' required pattern="[a-z][a-z0-9\\-]*" maxlength="64" placeholder="google"',
           ),
           'A short name in the sign-in URL: lowercase letters, digits and dashes.',
         )
@@ -1310,7 +1344,7 @@ function nodeTypesCard(types: Record<string, NodeTypeView>): string {
           id(name),
           name,
           value ?? '',
-          ` data-optional pattern="[A-Za-z0-9][A-Za-z0-9._+-]{0,39}" placeholder="${placeholder}"`,
+          ` data-optional pattern="[A-Za-z0-9][A-Za-z0-9._+\\-]{0,39}" placeholder="${placeholder}"`,
         ),
         description,
       )
@@ -1350,7 +1384,7 @@ function nodeTypesCard(types: Record<string, NodeTypeView>): string {
     `${icon('add')} Add a node type`,
     apiForm(
       '/api/v2/settings/nodeTypes/{name}',
-      `<input type="hidden" name="create" value="yes">${field('type-new-name', 'Name', input('type-new-name', 'name', '', ' required pattern="[a-z0-9][a-z0-9-]{0,39}" placeholder="macos-arm64"'), 'As the Masonfile and pools name it.')}${fields('type-new', undefined)}`,
+      `<input type="hidden" name="create" value="yes">${field('type-new-name', 'Name', input('type-new-name', 'name', '', ' required pattern="[a-z0-9][a-z0-9\\-]{0,39}" placeholder="macos-arm64"'), 'As the Masonfile and pools name it.')}${fields('type-new', undefined)}`,
       `${icon('add')} Add`,
       { method: 'PUT', fields: ['name', 'create', ...names], then: 'reload' },
     ),

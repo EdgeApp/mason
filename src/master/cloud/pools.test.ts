@@ -669,9 +669,10 @@ export async function work(ctx: Stage) {
       new Date(now).getUTCMonth(),
       1,
     )
+    // Two minutes just before now, inside this month however little of it has passed.
     db.prepare(
-      "INSERT INTO cloud_machines(pool,state,size,created_at,destroyed_at) VALUES('linux-cloud','destroyed','s',?,?)",
-    ).run(start - 3_600_000, start + 10 * 3_600_000)
+      "INSERT INTO cloud_machines(pool,state,size,created_at,destroyed_at) VALUES('linux-cloud','destroyed','costly',?,?)",
+    ).run(Math.max(start, now - 2 * MINUTE), now)
     const spend = await pools.spend(now)
     assert(spend >= 0.1, String(spend))
     await c.master.master!.settings.set(admin, 'cloud', {

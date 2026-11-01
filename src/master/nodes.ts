@@ -73,6 +73,86 @@ export interface NodeRegistryOptions {
   now?: () => number
 }
 
+/** A node's name or type: letters, digits, dots, dashes and underscores; a type may be empty. */
+function asNodeWord(what: string, empty: boolean): (value: unknown) => string {
+  return (value) => {
+    const out = asString(value)
+    if (empty && out === '') return out
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(out))
+      throw new Error(
+        `A node's ${what} is up to 64 letters, digits, dots, dashes and underscores`,
+      )
+    return out
+  }
+}
+
+/** A node's name: what a person reads, up to 128 characters, no control characters. */
+function asNodeName(value: unknown): string {
+  const out = asString(value)
+  if (
+    out.trim() === '' ||
+    out.length > 128 ||
+    /[\u0000-\u001f\u007f]/.test(out)
+  )
+    throw new Error(
+      "A node's name is 1–128 characters, without control characters",
+    )
+  return out
+}
+
+/** A node's labels: at most 20 words, without repeats. */
+function asNodeLabels(value: unknown): string[] {
+  const list = asArray(asNodeWord('label', false))(value)
+  if (list.length > 20) throw new Error('A node has at most 20 labels')
+  return [...new Set(list)]
+}
+
+/** What an administrator may set on a paired node. */
+export interface NodeAssignment {
+  name?: string
+  type?: string
+  labels?: string[]
+  slots?: number
+  workspaceRoots?: string[]
+}
+
+/** Whether an assignment sets what only a worker has: a type, labels, slots or workspace roots. */
+export function setsWorkerFields(assignment: NodeAssignment): boolean {
+  return (
+    (assignment.type ?? '') !== '' ||
+    (assignment.labels ?? []).length > 0 ||
+    assignment.slots != null ||
+    assignment.workspaceRoots != null
+  )
+}
+
+/** A node assignment's fields, each checked; one that is absent is kept. */
+export function asAssignment(value: unknown): NodeAssignment {
+  const checked = asObject({
+    name: asOptional(asNodeName),
+    type: asOptional(asNodeWord('type', true)),
+    labels: asOptional(asNodeLabels),
+    slots: asOptional((slots: unknown): number => {
+      const out = asNumber(slots)
+      if (!Number.isSafeInteger(out) || out < 1 || out > 64)
+        throw new Error('slots is 1–64')
+      return out
+    }),
+    workspaceRoots: asOptional((roots: unknown): string[] => {
+      const out = asArray(asString)(roots)
+      if (
+        out.some(
+          (root) => !root.startsWith('/') || root.split('/').includes('..'),
+        )
+      )
+        throw new Error('Workspace roots are absolute paths')
+      return out
+    }),
+  })(value)
+  return Object.fromEntries(
+    Object.entries(checked).filter((entry) => entry[1] !== undefined),
+  ) as NodeAssignment
+}
 /**
  * The master's nodes: pairing, the links it dials to every paired node, and
  * redialing with jittered, capped backoff while a node is away.
@@ -156,7 +236,12 @@ export class NodeRegistry extends EventEmitter {
    * Add node: dials the address, checks its certificate against the pairing
    * key before sending anything, proves the secret, and records the node.
    */
-  async add(addressText: string, keyText: string): Promise<NodeRecord> {
+  /** Pairs a node by its pairing key; with a role, a node of another role is refused before it pairs. */
+  async add(
+    addressText: string,
+    keyText: string,
+    role?: 'worker' | 'host',
+  ): Promise<NodeRecord> {
     const key = parsePairingKey(keyText)
     const existing = this.row(key.fingerprint)
     if (existing != null && !existing.removed)
@@ -166,6 +251,7 @@ export class NodeRegistry extends EventEmitter {
       key.certificateHash,
       key.secret,
       key.fingerprint,
+      role,
     )
   }
 
@@ -276,47 +362,28 @@ export class NodeRegistry extends EventEmitter {
   /** Changes a node's name, type and labels and sends them to it; slots and workspace roots stay on the master. */
   async assign(
     fingerprint: string,
-    value: {
-      name?: string
-      type?: string
-      labels?: string[]
-      slots?: number
-      workspaceRoots?: string[]
-    },
+    value: NodeAssignment,
   ): Promise<NodeRecord> {
     const row = this.row(fingerprint)
     if (row == null || row.removed) throw new Error('No such node')
-    if (value.slots != null) {
-      if (
-        !Number.isSafeInteger(value.slots) ||
-        value.slots < 1 ||
-        value.slots > 64
-      )
-        throw new Error('slots is 1–64')
+    // Every field is checked before any is written.
+    const checked = asAssignment(value)
+    if (row.role === 'host' && setsWorkerFields(checked))
+      throw new Error('A host takes only a name')
+    if (checked.slots != null)
       this.db
         .prepare('UPDATE nodes SET slots=? WHERE fingerprint=?')
-        .run(value.slots, fingerprint)
-    }
-    if (value.workspaceRoots != null) {
-      const roots = asArray(asString)(value.workspaceRoots)
-      if (
-        roots.some(
-          (root) => !root.startsWith('/') || root.split('/').includes('..'),
-        )
-      )
-        throw new Error('Workspace roots are absolute paths')
+        .run(checked.slots, fingerprint)
+    if (checked.workspaceRoots != null)
       this.db
         .prepare('UPDATE nodes SET workspace_roots=? WHERE fingerprint=?')
-        .run(JSON.stringify(roots), fingerprint)
+        .run(JSON.stringify(checked.workspaceRoots), fingerprint)
+    const assigned = {
+      name: checked.name ?? String(row.name),
+      type: checked.type ?? String(row.type),
+      labels:
+        checked.labels ?? asArray(asString)(JSON.parse(String(row.labels))),
     }
-    const assigned = asObject({
-      name: asOptional(asString, row.name),
-      type: asOptional(asString, row.type),
-      labels: asOptional(
-        asArray(asString),
-        asArray(asString)(JSON.parse(row.labels)),
-      ),
-    })(value)
     this.db
       .prepare('UPDATE nodes SET name=?,type=?,labels=? WHERE fingerprint=?')
       .run(

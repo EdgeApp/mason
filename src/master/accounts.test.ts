@@ -1146,6 +1146,7 @@ describe('Master sign-in, setup, people and permissions', function () {
       'DELETE /api/v2/keys/:id': 'keys.revoke',
       'GET /api/v2/nodes': 'nodes.read',
       'POST /api/v2/nodes': 'nodes.change',
+      'PUT /api/v2/nodes/:fingerprint': 'nodes.change',
       'DELETE /api/v2/nodes/:fingerprint': 'nodes.change',
       'GET /api/v2/apple/certificates': 'apple.change',
       'POST /api/v2/apple/certificates': 'apple.change',
