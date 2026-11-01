@@ -209,8 +209,9 @@ export class FakeCloud implements CloudProvider {
     }
   }
 
-  async priceHourly(): Promise<number> {
-    return 0.01
+  /** A cent an hour; a `costly` machine costs 10 cents a minute. */
+  async priceHourly(size?: string): Promise<number> {
+    return size === 'costly' ? 6 : 0.01
   }
   async firewall(
     name: string,

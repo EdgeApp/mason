@@ -651,6 +651,9 @@ export class Backups {
       mkdirSync(repo, { recursive: true, mode: 0o700 })
       await git(['init', '-q'], { cwd: repo, env })
     }
+    // Commits carry the master's clock, which also decides each month's orphan.
+    const date = `@${Math.floor(this.now() / 1000)} +0000`
+    const dated = { ...env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date }
     const g = async (...args: string[]): Promise<string> =>
       await git(
         [
@@ -662,7 +665,7 @@ export class Backups {
           'commit.gpgsign=false',
           ...args,
         ],
-        { cwd: repo, env },
+        { cwd: repo, env: dated },
       )
     let remote: string | undefined
     try {
