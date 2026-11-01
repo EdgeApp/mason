@@ -6,6 +6,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { asObject, asOptional, asString } from 'cleaners'
 import { hostApp } from '../host/web.js'
+import { hostLive } from '../host/live.js'
 import { HostRuntime, type HostOptions } from '../host/runtime.js'
 import { recordIdentity } from '../master/identity.js'
 import { masterApp } from '../master/web.js'
@@ -433,8 +434,14 @@ export async function startNode(
           }),
       )
       // The live pages' socket, closed before the listener so pages reconnect.
-      if (master != null) {
-        const live = serveLive(server, masterLive(master))
+      const accept =
+        master != null
+          ? masterLive(master)
+          : hostRuntime == null
+            ? undefined
+            : hostLive(hostRuntime)
+      if (accept != null) {
+        const live = serveLive(server, accept)
         cleanup.push(() => live.close())
       }
       const scheme = certificate == null ? 'http' : 'https'

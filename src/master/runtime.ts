@@ -33,6 +33,7 @@ import { githubLfs, Mirrors, type RemoteResolver } from './mirrors.js'
 import { Retention } from './retention.js'
 import { Scheduler } from './scheduler.js'
 import { RunFeed } from './runFeed.js'
+import { masterLiveStream } from './live.js'
 import { Stashes } from './stash.js'
 import { Releases } from './releases.js'
 import { Updates } from './updates.js'
@@ -547,6 +548,9 @@ export class Master {
       },
       forward: async (params, stream): Promise<void> => {
         await this.forwarder.forward(params, stream)
+      },
+      live: (params, stream): void => {
+        masterLiveStream(this, params, stream)
       },
       password: {
         parameters: (username): unknown => this.auth.parameters(username),

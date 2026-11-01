@@ -136,7 +136,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
         resolve(res.statusCode ?? 1)
         ws.terminate()
       })
-      ws.once('error', () => resolve(1))
+      ws.on('error', () => resolve(1))
     })
     if (opened !== 0) return opened
     return {
@@ -714,6 +714,30 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       { cookie: developer.cookie },
     )
     assert.match(events.text, /event: log/)
+    // The host's live socket is the master's, relayed over the host's link.
+    const watching = await live(host, {
+      cookie: developer.cookie,
+      origin: origin(host),
+    })
+    assert(typeof watching !== 'number')
+    watching.send({ subscribe: 'run', run, stage: 'test' })
+    assert.match(
+      (await watching.next((frame) => frame.event === 'log')).data.text,
+      /second line/,
+    )
+    watching.ws.close()
+    const testerSocket = await live(host, {
+      cookie: onHost('tester').cookie,
+      origin: origin(host),
+    })
+    assert(typeof testerSocket !== 'number')
+    testerSocket.send({ subscribe: 'run', run })
+    assert.match(
+      (await testerSocket.next((frame) => frame.event === 'error')).data.error,
+      /tester role/,
+    )
+    testerSocket.ws.close()
+    assert.equal(await live(host, { origin: origin(host) }), 401)
     assert.equal(
       (
         await request(host, 'GET', `/api/v2/runs/${run}/logs`, {

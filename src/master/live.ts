@@ -4,7 +4,9 @@ import type { Duplex } from 'node:stream'
 import type { Request } from 'express'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { cookie } from '../auth/routes.js'
+import type { Stream } from '../link/link.js'
 import { queueEntries, type QueueEntry } from '../view/dashboard.js'
+import { hostSessionActor } from './api.js'
 import { MASTER_SESSION_COOKIE, sessionActor } from './auth.js'
 import { allow, allowRole, covers } from './permissions.js'
 import type { Actor } from './roles.js'
@@ -17,13 +19,22 @@ export const LIVE_PATH = '/live'
 const PING_MS = 25_000
 /** The largest message a page may send. */
 const MAX_MESSAGE = 4096
-/** Log text per frame; a longer stretch goes in several, split at line ends. */
-const MAX_LOG_TEXT = 256 * 1024
+/** Log text per frame; a longer stretch goes in several, split at line ends, or within a line longer than this. */
+export const MAX_LOG_TEXT = 256 * 1024
+/** Log bytes sent to one page in one turn of the event loop. */
+const TURN_BYTES = 1024 * 1024
+/** Unsent bytes past which a page's log waits until its output drains to a quarter of this. */
+const HIGH_WATER = 1024 * 1024
 /** How much of a followed stage's log a page gets when it switches to it: its end, from a line's start. */
 const FOLLOW_TAIL = 1024 * 1024
 /** What a page that stops reading may hold unsent before it is dropped. */
 const MAX_BUFFERED = 16 * 1024 * 1024
 const MAX_SUBSCRIPTIONS = 200
+/** Messages a page may send at once, and how many more it may send each second. */
+const MESSAGE_BURST = 50
+const MESSAGES_PER_SECOND = 20
+/** Sockets one viewer may hold open at once on a node. */
+export const MAX_SOCKETS_PER_VIEWER = 16
 /** A stage in these states writes no more lines. */
 const SETTLED = new Set([
   'succeeded',
@@ -99,6 +110,36 @@ export interface LiveFrame {
 export interface LiveOutput {
   send(text: string): void
   close(code: number): void
+  /** Bytes sent but not yet written; none when absent. */
+  pending?(): number
+  /** Resolves once the unsent bytes fall to a quarter of the high-water mark, or the output closes. */
+  drained?(): Promise<void>
+}
+
+/**
+ * Counts what an output has sent but not yet written, and wakes whoever
+ * waits for it to drain.
+ */
+class Backlog {
+  private bytes = 0
+  private waiting: Array<() => void> = []
+  get pending(): number {
+    return this.bytes
+  }
+  add(bytes: number): void {
+    this.bytes += bytes
+  }
+  written(bytes: number): void {
+    this.bytes -= bytes
+    if (this.bytes <= HIGH_WATER / 4) this.wake()
+  }
+  async drained(): Promise<void> {
+    if (this.bytes <= HIGH_WATER / 4) return
+    await new Promise<void>((resolve) => this.waiting.push(resolve))
+  }
+  wake(): void {
+    for (const resolve of this.waiting.splice(0)) resolve()
+  }
 }
 
 type Message =
@@ -110,6 +151,10 @@ type Message =
       stage?: string
       after?: number
       follow?: boolean
+      /** Start at the log's end, as a page with none of its own. */
+      tail?: boolean
+      /** False for a page that shows no more of the log (a step's lines). */
+      log?: boolean
     }
 
 /** Reads and checks one message a page sent. */
@@ -150,11 +195,17 @@ export function parseMessage(text: string): Message {
     ...(stage == null || kind === 'status' ? {} : { stage }),
     ...(after == null ? {} : { after: Number(after) }),
     ...(value.follow === true ? { follow: true } : {}),
+    ...(value.tail === true && after == null ? { tail: true } : {}),
+    ...(value.log === false ? { log: false } : {}),
   }
 }
 
+/** Log bytes read, so a test can tell a partial line is not read again on each append. */
+export const logReads = { bytes: 0 }
+
 /** Bytes of a file from `start` to `end`. */
 function read(file: string, start: number, end: number): Buffer {
+  logReads.bytes += end - start
   const out = Buffer.alloc(end - start)
   const fd = openSync(file, 'r')
   try {
@@ -177,12 +228,124 @@ const newlines = (bytes: Buffer): number => {
   return count
 }
 
-/** The number of the line that starts `offset` bytes into a file, read a megabyte at a time. */
-function lineAt(file: string, offset: number): number {
-  let line = 1
-  for (let at = 0; at < offset; at += FOLLOW_TAIL)
-    line += newlines(read(file, at, Math.min(offset, at + FOLLOW_TAIL)))
-  return line
+/** Bytes between a line index's marks, and the most read for it in one turn. */
+const MARK = 1024 * 1024
+/** Line indexes kept, the least recently used dropped first. */
+const MAX_INDEXES = 256
+
+/** A log's line number at every megabyte, and who waits for it to reach further. */
+interface LineIndex {
+  id: string
+  marks: number[]
+  /** The marks each waiting count needs, and how to answer it. */
+  waiting: Set<{ target: number; done: (error?: unknown) => void }>
+  /** Whether a count is extending the marks, a megabyte per turn. */
+  counting: boolean
+}
+
+/** Each log's line index, so a resume deep into a log reads only the last part. */
+const lineIndexes = new Map<string, LineIndex>()
+
+/** The index of a log, kept while it is the same file. */
+function lineIndex(file: string): LineIndex {
+  const stat = statSync(file, { throwIfNoEntry: false })
+  const id = stat == null ? '' : `${stat.dev}:${stat.ino}`
+  let index = lineIndexes.get(file)
+  if (index == null || index.id !== id)
+    index = { id, marks: [1], waiting: new Set(), counting: false }
+  lineIndexes.delete(file)
+  lineIndexes.set(file, index)
+  if (lineIndexes.size > MAX_INDEXES)
+    lineIndexes.delete(lineIndexes.keys().next().value!)
+  return index
+}
+
+/**
+ * Extends a log's marks a megabyte per turn while anyone still waits, as
+ * far as the furthest of them needs; one count per log serves them all.
+ */
+async function count(file: string, index: LineIndex): Promise<void> {
+  index.counting = true
+  try {
+    for (;;) {
+      const reached = index.marks.length - 1
+      for (const waiter of [...index.waiting])
+        if (waiter.target <= reached) {
+          index.waiting.delete(waiter)
+          waiter.done()
+        }
+      if (index.waiting.size === 0) return
+      const at = reached
+      index.marks.push(
+        index.marks[at]! + newlines(read(file, at * MARK, (at + 1) * MARK)),
+      )
+      await new Promise((resolve) => setImmediate(resolve))
+    }
+  } catch (error) {
+    for (const waiter of index.waiting) waiter.done(error)
+    index.waiting.clear()
+  } finally {
+    index.counting = false
+  }
+}
+
+/** A line count still under way, and how to stop waiting for it. */
+export interface Counting {
+  line: Promise<number>
+  cancel(): void
+}
+
+/**
+ * The number of the line that holds byte `offset` of a log: at once when
+ * its index reaches near there, or a megabyte of the index per turn,
+ * shared with every other count of the same log and stopped once no one
+ * waits.
+ */
+export function lineAt(file: string, offset: number): number | Counting {
+  const index = lineIndex(file)
+  const marks = index.marks
+  const target = Math.floor(offset / MARK)
+  const finish = (): number =>
+    marks[target]! + newlines(read(file, target * MARK, offset))
+  if (marks.length - 1 >= target - 1) {
+    while (marks.length - 1 < target) {
+      const at = marks.length - 1
+      marks.push(marks[at]! + newlines(read(file, at * MARK, (at + 1) * MARK)))
+    }
+    return finish()
+  }
+  let waiter: { target: number; done: (error?: unknown) => void }
+  const line = new Promise<number>((resolve, reject) => {
+    waiter = {
+      target,
+      done: (error): void => {
+        if (error != null) reject(error as Error)
+        else
+          try {
+            resolve(finish())
+          } catch (failed) {
+            reject(failed as Error)
+          }
+      },
+    }
+    index.waiting.add(waiter)
+  })
+  if (!index.counting) void count(file, index)
+  return {
+    line,
+    cancel: (): void => {
+      index.waiting.delete(waiter)
+    },
+  }
+}
+
+/** Where a piece of log may end at most `length` bytes in without splitting a UTF-8 character. */
+function characterEnd(bytes: Buffer, length: number): number {
+  let start = length - 1
+  while (start > 0 && (bytes[start]! & 0xc0) === 0x80) start--
+  const lead = bytes[start]!
+  const size = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1
+  return start + size > length ? start : length
 }
 
 /** Where a followed stage's log is sent from: its last megabyte, from the start of a line. */
@@ -222,6 +385,21 @@ interface Watch {
   shown: string | undefined
   /** Bytes of the shown stage's log already sent. */
   offset: number
+  /** Where the shown log has been read to with no line end after `offset`. */
+  scanned: number
+  /** Whether it sends the log at all. */
+  logs: boolean
+  /** False while the line `offset` falls on is still being counted. */
+  ready: boolean
+  /** Counts each move of `offset`, so a late count of an earlier one is ignored. */
+  seek: number
+  /** Whether its log is being sent, a turn at a time, and whether more arrived meanwhile. */
+  pumping: boolean
+  again: boolean
+  /** The run has finished: `end` goes once the log has. */
+  ending: boolean
+  /** Stops waiting for a line count under way. */
+  cancel?: () => void
   /** The number of the next line sent. */
   line: number
   /** Whether the shown stage has finished, so its last partial line goes too. */
@@ -247,18 +425,37 @@ export class LiveSession {
   private readonly watches = new Map<string, Watch>()
   private readonly stop: () => void
   private ended = false
+  /** Messages it may still send now, refilled each second. */
+  private allowance = MESSAGE_BURST
+  private counted: number
 
   constructor(
     private readonly source: LiveSource,
     private readonly viewer: () => Actor | undefined,
     private readonly out: LiveOutput,
+    private readonly now: () => number = Date.now,
   ) {
+    this.counted = now()
     // Registered before any snapshot is read: nothing written after it is missed.
     this.stop = source.subscribe((events) => this.hear(events))
   }
 
   receive(text: string): void {
     if (this.ended) return
+    const now = this.now()
+    this.allowance = Math.min(
+      MESSAGE_BURST,
+      this.allowance + ((now - this.counted) / 1000) * MESSAGES_PER_SECOND,
+    )
+    this.counted = now
+    if (this.allowance < 1) {
+      this.send({
+        event: 'error',
+        data: { error: 'Too many messages: send fewer' },
+      })
+      return
+    }
+    this.allowance--
     let message: Message
     try {
       message = parseMessage(text)
@@ -267,7 +464,7 @@ export class LiveSession {
       return
     }
     if ('unsubscribe' in message) {
-      this.watches.delete(message.unsubscribe)
+      this.forget(message.unsubscribe)
       return
     }
     const actor = this.viewer()
@@ -289,27 +486,30 @@ export class LiveSession {
       }
       const run = this.source.run(message.run!)
       if (run == null) {
-        this.watches.delete(key)
+        this.forget(key)
         this.send({ key, event: 'gone' })
         return
       }
       allow(actor, 'runs.read', { project: run.project, branch: run.branch })
       const watch = this.watch(message.subscribe, message.run!)
+      this.watches.set(key, watch)
       if (message.subscribe === 'run') {
         watch.follow = message.stage == null || message.follow === true
         watch.shown = message.stage
-        if (message.stage != null && message.after != null) {
+        watch.logs = message.log !== false
+        if (message.stage != null && watch.logs) {
           const file = this.source.logFile(watch.run, message.stage)
-          const size =
-            statSync(file, { throwIfNoEntry: false })?.size ?? message.after
-          watch.offset = Math.min(message.after, size)
-          watch.line = lineAt(file, watch.offset)
+          if (message.tail === true) this.seek(key, watch, tailStart(file))
+          else if (message.after != null) {
+            const size =
+              statSync(file, { throwIfNoEntry: false })?.size ?? message.after
+            this.seek(key, watch, Math.min(message.after, size))
+          }
         }
       }
-      this.watches.set(key, watch)
       this.refresh(key, watch, run)
     } catch (error) {
-      this.watches.delete(key)
+      this.forget(key)
       this.send({
         key,
         event: 'error',
@@ -323,7 +523,13 @@ export class LiveSession {
     if (this.ended) return
     this.ended = true
     this.stop()
-    this.watches.clear()
+    for (const key of [...this.watches.keys()]) this.forget(key)
+  }
+
+  /** Ends one subscription, and any line count it waits for. */
+  private forget(key: string): void {
+    this.watches.get(key)?.cancel?.()
+    this.watches.delete(key)
   }
 
   private watch(kind: Watch['kind'], run: string): Watch {
@@ -333,14 +539,58 @@ export class LiveSession {
       follow: false,
       shown: undefined,
       offset: 0,
+      scanned: 0,
+      logs: true,
+      ready: true,
+      seek: 0,
+      pumping: false,
+      again: false,
+      ending: false,
       line: 1,
       settled: false,
       sent: new Map(),
     }
   }
 
+  /** Moves a watch's log to `offset`, its line counted at once or over the next turns. */
+  private seek(key: string, watch: Watch, offset: number): void {
+    const seek = ++watch.seek
+    watch.offset = offset
+    watch.scanned = offset
+    const file = this.source.logFile(watch.run, watch.shown!)
+    watch.cancel?.()
+    watch.cancel = undefined
+    const line = offset === 0 ? 1 : lineAt(file, offset)
+    if (typeof line === 'number') {
+      watch.line = line
+      watch.ready = true
+      return
+    }
+    watch.ready = false
+    watch.cancel = line.cancel
+    void line.line.then(
+      (counted) => {
+        if (watch.seek !== seek || this.watches.get(key) !== watch) return
+        watch.line = counted
+        watch.ready = true
+        this.pump(key, watch)
+      },
+      (error: unknown) => this.fail(key, error),
+    )
+  }
+
   private send(frame: LiveFrame): void {
     if (!this.ended) this.out.send(JSON.stringify(frame))
+  }
+
+  /** Ends one subscription with the error that stopped it. */
+  private fail(key: string, error: unknown): void {
+    this.forget(key)
+    this.send({
+      key,
+      event: 'error',
+      data: { error: (error as Error).message },
+    })
   }
 
   /** Sends an event unless its data is what was sent last. */
@@ -381,12 +631,7 @@ export class LiveSession {
         )
           this.pump(key, watch)
       } catch (error) {
-        this.watches.delete(key)
-        this.send({
-          key,
-          event: 'error',
-          data: { error: (error as Error).message },
-        })
+        this.fail(key, error)
       }
     }
   }
@@ -411,7 +656,7 @@ export class LiveSession {
   private refresh(key: string, watch: Watch, found?: LiveRun): void {
     const run = found ?? this.source.run(watch.run)
     if (run == null) {
-      this.watches.delete(key)
+      this.forget(key)
       this.send({ key, event: 'gone' })
       return
     }
@@ -422,12 +667,14 @@ export class LiveSession {
         const next = followed(run.stages, watch.shown)
         if (next !== watch.shown) {
           watch.shown = next
-          // A page switching to a stage starts at its log's end, as it opens.
-          const file =
-            next == null ? undefined : this.source.logFile(watch.run, next)
-          watch.offset = file == null ? 0 : tailStart(file)
-          watch.line = file == null ? 1 : lineAt(file, watch.offset)
           watch.sent.delete('steps')
+          // A page switching to a stage starts at its log's end, as it opens.
+          if (next != null && watch.logs)
+            this.seek(
+              key,
+              watch,
+              tailStart(this.source.logFile(watch.run, next)),
+            )
         }
       }
       if (watch.shown != null) {
@@ -442,40 +689,110 @@ export class LiveSession {
       }
     }
     if (run.finished) {
-      this.watches.delete(key)
-      this.send({ key, event: 'end' })
+      // A log still being sent sends `end` once it is done.
+      if (watch.pumping || !watch.ready) watch.ending = true
+      else this.finish(key)
     }
   }
 
-  /** Sends the shown stage's log past what was sent: whole lines, and the rest once it has settled. */
+  private finish(key: string): void {
+    this.forget(key)
+    this.send({ key, event: 'end' })
+  }
+
+  /**
+   * Sends the shown stage's log past what was sent: whole lines, a line
+   * longer than a frame in pieces marked `partial`, and the rest once the
+   * stage has settled. A megabyte goes per turn of the event loop, and none
+   * while the page has a megabyte unread.
+   */
   private pump(key: string, watch: Watch): void {
+    if (!watch.logs || watch.shown == null || !watch.ready) return
+    if (watch.pumping) {
+      watch.again = true
+      return
+    }
+    watch.pumping = true
+    const turn = (): void => {
+      try {
+        for (let sent = 0; ; ) {
+          if (this.ended || this.watches.get(key) !== watch || !watch.ready) {
+            watch.pumping = false
+            return
+          }
+          // Every subscription waits while the page has a megabyte unread.
+          if ((this.out.pending?.() ?? 0) > HIGH_WATER) {
+            void (this.out.drained?.() ?? Promise.resolve()).then(turn)
+            return
+          }
+          const piece = this.piece(key, watch)
+          if (piece === 0 && watch.again) {
+            watch.again = false
+            continue
+          }
+          if (piece === 0) {
+            watch.pumping = false
+            if (watch.ending) this.finish(key)
+            return
+          }
+          sent += piece
+          if (sent >= TURN_BYTES) {
+            setImmediate(turn)
+            return
+          }
+        }
+      } catch (error) {
+        watch.pumping = false
+        this.fail(key, error)
+      }
+    }
+    turn()
+  }
+
+  /** Sends the next piece of the shown log, if there is one; returns its bytes. */
+  private piece(key: string, watch: Watch): number {
     const stage = watch.shown!
     const file = this.source.logFile(watch.run, stage)
     const size = statSync(file, { throwIfNoEntry: false })?.size ?? 0
-    if (size <= watch.offset) return
-    const chunk = read(file, watch.offset, size)
-    const end = watch.settled ? chunk.length : chunk.lastIndexOf(0x0a) + 1
-    for (let at = 0; at < end; ) {
-      let stop = Math.min(end, at + MAX_LOG_TEXT)
-      if (stop < end) {
-        const before = chunk.lastIndexOf(0x0a, stop - 1)
-        stop = before >= at ? before + 1 : chunk.indexOf(0x0a, stop) + 1 || end
+    const available = size - watch.offset
+    if (available <= 0) return 0
+    // A running stage's unfinished line waits for its end, read only where it grew.
+    if (!watch.settled && available < MAX_LOG_TEXT) {
+      const from = Math.max(watch.offset, watch.scanned)
+      if (from >= size || !read(file, from, size).includes(0x0a)) {
+        watch.scanned = size
+        return 0
       }
-      const piece = chunk.subarray(at, stop)
-      this.send({
-        key,
-        event: 'log',
-        data: {
-          stage,
-          offset: watch.offset + stop,
-          first: watch.line,
-          text: piece.toString('utf8'),
-        },
-      })
-      watch.line += newlines(piece)
-      at = stop
     }
+    const length = Math.min(available, MAX_LOG_TEXT)
+    const chunk = read(file, watch.offset, watch.offset + length)
+    let end: number
+    let partial = false
+    if (watch.settled && length === available) end = length
+    else {
+      end = chunk.lastIndexOf(0x0a) + 1
+      if (end === 0) {
+        // A line longer than a frame goes in pieces the page joins.
+        end = characterEnd(chunk, length)
+        partial = true
+      }
+    }
+    const piece = chunk.subarray(0, end)
     watch.offset += end
+    watch.scanned = watch.offset
+    this.send({
+      key,
+      event: 'log',
+      data: {
+        stage,
+        offset: watch.offset,
+        first: watch.line,
+        text: piece.toString('utf8'),
+        ...(partial ? { partial: true } : {}),
+      },
+    })
+    watch.line += newlines(piece)
+    return end
   }
 }
 
@@ -494,6 +811,8 @@ export function sameOrigin(req: IncomingMessage): boolean | undefined {
 export interface LiveViewer {
   open(out: LiveOutput): { receive(text: string): void; end(): void }
   valid(): boolean
+  /** Who it is, so one viewer holds at most 16 sockets; none counts no one. */
+  who?: string
 }
 
 /**
@@ -514,6 +833,8 @@ export function serveLive(
     perMessageDeflate: false,
   })
   const sockets = new Map<WebSocket, { missed: number; viewer: LiveViewer }>()
+  /** Open sockets by viewer. */
+  const open = new Map<string, number>()
   const refuse = (socket: Duplex, status: number): void => {
     socket.on('error', () => undefined)
     socket.end(
@@ -540,16 +861,33 @@ export function serveLive(
       return
     }
     const accepted = viewer
+    if (
+      accepted.who != null &&
+      (open.get(accepted.who) ?? 0) >= MAX_SOCKETS_PER_VIEWER
+    ) {
+      refuse(socket, 429)
+      return
+    }
     wss.handleUpgrade(req, socket, head, (ws) => {
       const entry = { missed: 0, viewer: accepted }
       sockets.set(ws, entry)
+      const who = accepted.who
+      if (who != null) open.set(who, (open.get(who) ?? 0) + 1)
+      const backlog = new Backlog()
       const connection = accepted.open({
         send: (text) => {
           if (ws.readyState !== ws.OPEN) return
-          if (ws.bufferedAmount > MAX_BUFFERED) ws.terminate()
-          else ws.send(text)
+          if (backlog.pending > MAX_BUFFERED) {
+            ws.terminate()
+            return
+          }
+          const bytes = Buffer.byteLength(text)
+          backlog.add(bytes)
+          ws.send(text, () => backlog.written(bytes))
         },
         close: (code) => ws.close(code),
+        pending: () => backlog.pending,
+        drained: async () => await backlog.drained(),
       })
       ws.on('pong', () => {
         entry.missed = 0
@@ -560,6 +898,12 @@ export function serveLive(
       })
       ws.on('close', () => {
         sockets.delete(ws)
+        if (who != null) {
+          const left = (open.get(who) ?? 1) - 1
+          if (left > 0) open.set(who, left)
+          else open.delete(who)
+        }
+        backlog.wake()
         connection.end()
       })
       ws.on('error', () => undefined)
@@ -684,6 +1028,10 @@ export function masterLiveSource(master: Master): LiveSource {
   }
 }
 
+/** The token of an `Authorization: Bearer` header. */
+const bearer = (header: string): string | undefined =>
+  /^Bearer (\S+)$/.exec(header)?.[1]
+
 /** A key's actor while its key is valid. */
 function keyViewer(master: Master, token: string): () => Actor | undefined {
   return () => {
@@ -712,7 +1060,7 @@ export function masterLive(
     let viewer: () => Actor | undefined
     const header = req.headers.authorization
     if (header != null) {
-      const token = /^Bearer (\S+)$/.exec(header)?.[1]
+      const token = bearer(header)
       if (token == null || master.keys.authenticate(token) == null) return 401
       viewer = keyViewer(master, token)
       if (viewer() == null) return 403
@@ -728,6 +1076,179 @@ export function masterLive(
     return {
       open: (out) => new LiveSession(source, viewer, out),
       valid: () => viewer() != null,
+      who: viewer()!.label,
     }
   }
+}
+
+/** Whom a host's live stream serves: one of its sessions, or a script's key. */
+export interface LiveStreamParams {
+  /** A host session's account and the permission version it was made under. */
+  account?: { id: number; permissionVersion: number }
+  /** A script's `Authorization` header, which the master authenticates. */
+  authorization?: string
+}
+
+export function asLiveStreamParams(value: unknown): LiveStreamParams {
+  const input = (value ?? {}) as Record<string, unknown>
+  const account = input.account as
+    | { id?: unknown; permissionVersion?: unknown }
+    | undefined
+  const authorization = input.authorization
+  if (
+    (account == null) === (authorization == null) ||
+    (account != null &&
+      (!Number.isSafeInteger(account.id) ||
+        !Number.isSafeInteger(account.permissionVersion))) ||
+    (authorization != null &&
+      (typeof authorization !== 'string' || authorization.length > 512))
+  )
+    throw new Error('Name one account or one key')
+  return account != null
+    ? {
+        account: {
+          id: Number(account.id),
+          permissionVersion: Number(account.permissionVersion),
+        },
+      }
+    : { authorization: String(authorization) }
+}
+
+/** Calls `line` with each line a stream carries; a line over `max` bytes aborts it. */
+export function streamLines(
+  stream: Stream,
+  line: (text: string) => void,
+  max: number,
+): void {
+  let partial = Buffer.alloc(0)
+  stream.on('data', (chunk: Buffer) => {
+    partial = Buffer.concat([partial, chunk])
+    for (
+      let end = partial.indexOf(0x0a);
+      end >= 0;
+      end = partial.indexOf(0x0a)
+    ) {
+      const text = partial.subarray(0, end).toString('utf8')
+      partial = partial.subarray(end + 1)
+      line(text)
+    }
+    if (partial.length > max) {
+      partial = Buffer.alloc(0)
+      stream.abort('A line is too long')
+    }
+  })
+}
+
+/** A frame that closes a relayed connection with a WebSocket close code. */
+export const closeFrame = (code: number): string =>
+  JSON.stringify({ close: code })
+
+/**
+ * A live connection's output over a link stream: one frame per line, in
+ * order, waiting on the stream's credit; a close is a close frame and the
+ * stream's end. A page that leaves more than 16 MB unread is dropped.
+ */
+export function streamOutput(stream: Stream): LiveOutput {
+  let chain = Promise.resolve()
+  const backlog = new Backlog()
+  let closed = false
+  stream.once('abort', () => backlog.wake())
+  const write = (text: string): void => {
+    const bytes = Buffer.from(text + '\n')
+    if (backlog.pending + bytes.length > MAX_BUFFERED) {
+      closed = true
+      backlog.wake()
+      stream.abort('The page stopped reading')
+      return
+    }
+    backlog.add(bytes.length)
+    chain = chain
+      .then(async () => await stream.write(bytes))
+      .then(
+        () => backlog.written(bytes.length),
+        () => backlog.wake(),
+      )
+  }
+  return {
+    send: (text): void => {
+      if (!closed) write(text)
+    },
+    close: (code): void => {
+      if (closed) return
+      write(closeFrame(code))
+      closed = true
+      chain = chain.then(() => stream.end())
+    },
+    pending: () => backlog.pending,
+    drained: async () => await backlog.drained(),
+  }
+}
+
+/**
+ * Serves one live connection over a link stream: the far end relays a
+ * page's messages as lines, and the frames go back the same way. A viewer
+ * who may no longer watch is closed with 1008.
+ */
+export function serveLiveStream(
+  source: LiveSource,
+  viewer: () => Actor | undefined,
+  stream: Stream,
+  options: { checkMs?: number } = {},
+): void {
+  const out = streamOutput(stream)
+  if (viewer() == null) {
+    out.close(1008)
+    return
+  }
+  const session = new LiveSession(source, viewer, out)
+  const timer = setInterval(() => {
+    if (viewer() == null) out.close(1008)
+  }, options.checkMs ?? PING_MS)
+  timer.unref()
+  const end = (): void => {
+    clearInterval(timer)
+    session.end()
+  }
+  streamLines(stream, (text) => session.receive(text), MAX_MESSAGE)
+  stream.once('end', () => {
+    end()
+    stream.end()
+  })
+  stream.once('abort', end)
+}
+
+/**
+ * One of a host's pages, over the host's link (`live`). The master trusts
+ * the account a host names only on that host's link, and checks every
+ * subscription against it as it would its own session's; a script's key
+ * is authenticated here.
+ */
+export function masterLiveStream(
+  master: Master,
+  value: unknown,
+  stream: Stream,
+): void {
+  let params: LiveStreamParams
+  try {
+    params = asLiveStreamParams(value)
+  } catch (error) {
+    stream.abort((error as Error).message)
+    return
+  }
+  const account = params.account
+  const token =
+    params.authorization == null ? undefined : bearer(params.authorization)
+  serveLiveStream(
+    masterLiveSource(master),
+    account != null
+      ? (): Actor | undefined =>
+          hostSessionActor(master.database, {
+            accountId: account.id,
+            permissionVersion: account.permissionVersion,
+          })
+      : token == null
+        ? (): undefined => undefined
+        : keyViewer(master, token),
+    stream,
+  )
 }

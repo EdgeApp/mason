@@ -765,6 +765,33 @@ describe('Master-dialed links', function () {
     await assert.rejects(capped.collect(), /closed/)
   })
 
+  it('lets a reader that holds credit pace the writer, granting it as it passes data on', async () => {
+    let writing: Promise<void> | undefined
+    const [m] = linkPair(
+      {},
+      {
+        streams: {
+          pour: (stream): void => {
+            writing = stream.write(Buffer.alloc(STREAM_WINDOW * 3, 1))
+          },
+        },
+      },
+    )
+    const stream = m.openStream('pour')
+    stream.holdCredit()
+    let received = 0
+    stream.on('data', (chunk: Buffer) => (received += chunk.length))
+    // The opening window arrives, then nothing more until credit is granted.
+    await until(() => received === STREAM_WINDOW)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(received, STREAM_WINDOW)
+    // A grant past one window goes in several credits.
+    stream.grant(STREAM_WINDOW * 2)
+    await writing
+    await until(() => received === STREAM_WINDOW * 3)
+    m.close()
+  })
+
   it('caps collected streams and closes a link whose heartbeat goes unanswered', async () => {
     const [m] = linkPair(
       {},
