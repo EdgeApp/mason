@@ -584,6 +584,29 @@ export function nodesView(data: {
       const xcodes = (node.inventory?.xcodes ?? [])
         .map((entry) => entry.version)
         .join(', ')
+      // Its name, type, labels and slots; a host has only a name to set.
+      const id = `node-${node.fingerprint.replace(/[^A-Za-z0-9]/g, '').slice(-12)}`
+      const worker = node.role === 'worker'
+      const edit = data.canChange
+        ? action(
+            `${icon('edit')} Edit`,
+            apiForm(
+              `/api/v2/nodes/${encodeURIComponent(node.fingerprint)}`,
+              `${field(`${id}-name`, 'Name', `<input id="${id}-name" name="name" required maxlength="128" value="${escape(node.name)}">`)}${
+                worker
+                  ? `${field(`${id}-type`, 'Node type', `<input id="${id}-type" name="type" value="${escape(node.type)}" pattern="([A-Za-z0-9][A-Za-z0-9._\\-]{0,63})?">`, 'The type a Masonfile selects it by.')}${field(`${id}-labels`, 'Labels', `<input id="${id}-labels" name="labels" data-kind="list" value="${escape(node.labels.join(', '))}">`, `Comma-separated, for stages that ask for them. A node labelled ${SETUP_LABEL} runs setup; a dedicated node leaves it out.`)}${field(`${id}-slots`, 'Slots', `<input id="${id}-slots" name="slots" type="number" data-kind="number" min="1" max="64" value="${node.slots}">`, 'Stages it runs at a time.')}`
+                  : ''
+              }`,
+              `${icon('edit')} Save`,
+              {
+                method: 'PUT',
+                fields: worker ? ['name', 'type', 'labels', 'slots'] : ['name'],
+                then: 'reload',
+              },
+            ),
+            { kind: 'secondary' },
+          )
+        : ''
       return `<article class="panel node"><h2>${statusDot(node.status === 'busy' ? 'running' : node.status === 'idle' ? 'succeeded' : 'cancelled')}<span class="mono">${escape(node.name)}</span> <small>${[
         node.role,
         node.type,
@@ -600,7 +623,7 @@ export function nodesView(data: {
         node.checklist.length === 0
           ? ''
           : `<h3>Checklist</h3><ul class="plain checklist">${node.checklist.map((item) => `<li>${icon(item.done === true ? 'check_circle' : 'warning')} ${escape(item.title ?? item.text ?? '')}</li>`).join('')}</ul>`
-      }</article>`
+      }${edit}</article>`
     })
     .join('')
   /** One line that installs Mason and starts it as `role`, from the master's release on GitHub. */
@@ -630,12 +653,23 @@ export function nodesView(data: {
     prefix: string,
     placeholder: string,
     button: string,
+    worker = false,
   ): string =>
     apiForm(
       '/api/v2/nodes',
-      `${field(`${prefix}-address`, 'Mason node address and port', `<input id="${prefix}-address" name="address" placeholder="${placeholder}" required>`)}${field(`${prefix}-key`, 'Pairing key', `<input id="${prefix}-key" name="key" placeholder="mason1:…" required autocomplete="off">`)}`,
+      `${field(`${prefix}-address`, 'Mason node address and port', `<input id="${prefix}-address" name="address" placeholder="${placeholder}" required>`)}${field(`${prefix}-key`, 'Pairing key', `<input id="${prefix}-key" name="key" placeholder="mason1:…" required autocomplete="off">`)}${
+        // A worker may be paired with its type and labels, so a dedicated one never runs setup.
+        worker
+          ? `${field(`${prefix}-type`, 'Node type', `<input id="${prefix}-type" name="type" data-optional placeholder="linux-x86" pattern="([A-Za-z0-9][A-Za-z0-9._\\-]{0,63})?">`, 'Optional: the type a Masonfile selects it by.')}${field(`${prefix}-labels`, 'Labels', `<input id="${prefix}-labels" name="labels" data-kind="list" value="${SETUP_LABEL}">`, `Comma-separated. A node labelled ${SETUP_LABEL} runs setup; a dedicated node leaves it out.`)}`
+          : ''
+      }`,
       button,
-      { fields: ['address', 'key'], then: 'reload' },
+      {
+        fields: worker
+          ? ['address', 'key', 'type', 'labels']
+          : ['address', 'key'],
+        then: 'reload',
+      },
     )
   const cloudHosts = (data.cloudHosts ?? [])
     .map(
@@ -705,7 +739,7 @@ export function nodesView(data: {
     )
     .join('')
   const add = data.canChange
-    ? `<section class="panel" id="add-node"><h2>${icon('add')}Nodes</h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks. Run the following commands to start Mason on a Linux or macOS computer (Windows coming).</p>${cloudNodes}<ol class="howto">${installStep('Install and start Mason as a worker', 'On the new computer.', 'worker')}${step('Pair it here', pairForm('node', '192.168.1.20:9310', `${icon('lan')} Pair node`))}</ol>${nodeAccounts}</section>`
+    ? `<section class="panel" id="add-node"><h2>${icon('add')}Nodes</h2><p>Add a node, which Mason can use for building, signing, and testing apps, or any other pipeline tasks. Run the following commands to start Mason on a Linux or macOS computer (Windows coming).</p>${cloudNodes}<ol class="howto">${installStep('Install and start Mason as a worker', 'On the new computer.', 'worker')}${step('Pair it here', pairForm('node', '192.168.1.20:9310', `${icon('lan')} Pair node`, true))}</ol>${nodeAccounts}</section>`
     : cloudNodes === ''
       ? ''
       : `<section class="panel" id="add-node"><h2>${icon('cloud')}Cloud nodes</h2>${cloudNodes}</section>`

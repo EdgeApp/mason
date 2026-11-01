@@ -1529,9 +1529,140 @@ describe('Master database, setup and import', function () {
           ).status,
           502,
         )
+        // Paired with its type and labels: a dedicated node never carries setup.
+        const otherAddress = `127.0.0.1:${other.link!.port}`
+        const refused = await api(node, 'POST', '/api/v2/nodes', admin, {
+          address: otherAddress,
+          key: other.pairing!.key(),
+          labels: ['not a label'],
+        })
+        assert.equal(refused.status, 400)
+        assert.match(String(refused.json.error), /letters, digits/)
+        assert.equal(
+          (await api(node, 'GET', '/api/v2/nodes', admin)).json.length,
+          1,
+          'a refused assignment pairs nothing',
+        )
+        const signer = await api(node, 'POST', '/api/v2/nodes', admin, {
+          address: otherAddress,
+          key: other.pairing!.key(),
+          name: 'signer',
+          type: 'android-signer',
+          labels: ['android-signing'],
+        })
+        assert.equal(signer.status, 201, JSON.stringify(signer.json))
+        assert.deepEqual(
+          [signer.json.name, signer.json.type, signer.json.labels],
+          ['signer', 'android-signer', ['android-signing']],
+        )
       } finally {
         await other.close()
       }
+      // Its name, type, labels and slots change over HTTP.
+      const route = `/api/v2/nodes/${encodeURIComponent(added.json.fingerprint)}`
+      assert.equal(
+        (await api(node, 'PUT', route, developer, { labels: [] })).status,
+        403,
+      )
+      const set = await api(node, 'PUT', route, admin, {
+        name: 'alpha',
+        type: 'linux',
+        labels: ['setup', 'fast', 'fast'],
+        slots: 3,
+      })
+      assert.equal(set.status, 200, JSON.stringify(set.json))
+      assert.deepEqual(
+        [set.json.name, set.json.type, set.json.labels, set.json.slots],
+        ['alpha', 'linux', ['setup', 'fast'], 3],
+      )
+      // A field left out is kept; one that fails is refused, with nothing written.
+      const atomic = await api(node, 'PUT', route, admin, {
+        slots: 5,
+        labels: ['bad label'],
+      })
+      assert.equal(atomic.status, 400)
+      const kept = (await api(node, 'GET', '/api/v2/nodes', admin)).json.find(
+        (entry: Json) => entry.fingerprint === added.json.fingerprint,
+      )
+      assert.deepEqual(
+        [kept.name, kept.labels, kept.slots],
+        ['alpha', ['setup', 'fast'], 3],
+      )
+      for (const body of [
+        { slots: 0 },
+        { name: '' },
+        { labels: 'setup' },
+        { labels: Array.from({ length: 21 }, (_, i) => `l${i}`) },
+        { workspaceRoots: ['relative'] },
+        { role: 'host' },
+        { key: 'mason1:x' },
+        { address: '127.0.0.1:1' },
+        { name: 'x'.repeat(129) },
+        { name: 'line\nbreak' },
+        { name: '   ' },
+      ])
+        assert.equal(
+          (await api(node, 'PUT', route, admin, body)).status,
+          400,
+          JSON.stringify(body),
+        )
+      // A name is what a person reads: spaces and other punctuation are fine.
+      const named = await api(node, 'PUT', route, admin, {
+        name: 'Jack3 signer (mason-node)',
+      })
+      assert.equal(named.status, 200, JSON.stringify(named.json))
+      assert.equal(named.json.name, 'Jack3 signer (mason-node)')
+      // A host takes only a name: pairing it with a worker's fields is
+      // refused before it pairs, so it can still pair with a name alone.
+      const host = await startNode(
+        {
+          role: 'host',
+          data: path.join(root, 'h'),
+          port: 0,
+          linkPort: 0,
+          listen: '127.0.0.1',
+          heartbeatMs: 0,
+        },
+        quiet,
+      )
+      try {
+        const hostAddress = `127.0.0.1:${host.link!.port}`
+        const labelled = await api(node, 'POST', '/api/v2/nodes', admin, {
+          address: hostAddress,
+          key: host.pairing!.key(),
+          labels: ['android-signing'],
+        })
+        assert.equal(labelled.status, 400, JSON.stringify(labelled.json))
+        assert.match(String(labelled.json.error), /A host takes only a name/)
+        const paired = await api(node, 'POST', '/api/v2/nodes', admin, {
+          address: hostAddress,
+          key: host.pairing!.key(),
+          name: 'builds',
+        })
+        assert.equal(paired.status, 201, JSON.stringify(paired.json))
+        assert.equal(paired.json.role, 'host')
+        const hostRoute = `/api/v2/nodes/${encodeURIComponent(paired.json.fingerprint)}`
+        for (const body of [
+          { labels: ['fast'] },
+          { type: 'linux' },
+          { slots: 2 },
+        ]) {
+          const refused = await api(node, 'PUT', hostRoute, admin, body)
+          assert.equal(refused.status, 400, JSON.stringify(body))
+          assert.match(String(refused.json.error), /A host takes only a name/)
+        }
+        const renamed = await api(node, 'PUT', hostRoute, admin, {
+          name: 'Public builds',
+        })
+        assert.equal(renamed.status, 200, JSON.stringify(renamed.json))
+        assert.equal(renamed.json.name, 'Public builds')
+      } finally {
+        await host.close()
+      }
+      assert.equal(
+        (await api(node, 'PUT', '/api/v2/nodes/nope', admin, {})).status,
+        404,
+      )
       assert.equal(
         (
           await api(

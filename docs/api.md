@@ -844,6 +844,7 @@ Workers and the host paired with the master.
 | --- | --- | --- |
 | `GET /api/v2/nodes` | Every paired node with its inventory and software state. | `nodes.read` |
 | `POST /api/v2/nodes` | Pairs a node by its address and pairing key. 201. | `nodes.change` |
+| `PUT /api/v2/nodes/:fingerprint` | Sets a node's name, type, labels and slots. | `nodes.change` |
 | `DELETE /api/v2/nodes/:fingerprint` | Unpairs a node. | `nodes.change` |
 
 A node:
@@ -883,16 +884,34 @@ report.
 
 **`POST /api/v2/nodes`** takes `{ "address": "192.168.1.20:9310", "key":
 "mason1:mldsa65:…" }`: the node's address and the pairing key it printed on
-first start. It answers the node. 400 for a key that is not a pairing key;
-409 when the node is already paired; 502 when the node does not answer, or
-its certificate or handshake does not match the key.
+first start. It may also take the fields `PUT` sets (below), so a dedicated
+node is paired with its labels and never carries `setup`; they are checked
+before the node is paired. A host takes only a name: given any other field,
+a host is refused before it pairs and can be paired again. It answers the
+node. 400 for a key that is not a pairing key, a field that fails, or a host
+given a worker's fields; 409 when the node is already paired; 502
+when the node does not answer, or its certificate or handshake does not match
+the key.
+
+**`PUT /api/v2/nodes/:fingerprint`** takes any of:
+
+| Field | Value |
+| --- | --- |
+| `name` | 1–128 characters, not all spaces, without control characters |
+| `type` | up to 64 letters, digits, dots, dashes and underscores, or `""` for none |
+| `labels` | a list of up to 20 labels like a type, repeats dropped; it replaces the node's labels, so a node that runs setup keeps `setup` in it |
+| `slots` | 1–64 stages at a time |
+| `workspaceRoots` | absolute paths for custom workspace paths |
+
+A field left out is kept. Every field is checked before any is written, and
+any other field, `address` and `key` included, is refused (400). A host
+takes only a name; a type, labels, slots or workspace roots for a host are
+refused (400). It answers the node and sends the node its
+new type and labels. 404 for an unknown node. The Nodes page edits the same
+fields, and `mason nodes set` on the master's computer does too.
 
 **`DELETE /api/v2/nodes/:fingerprint`** answers `null`; 404 for an unknown
 node.
-
-No HTTP route changes a paired node's name, type, labels or slots. On the
-master's computer, `mason nodes set <node> --type … --label … --slots …`
-does, through the control socket (see [Examples](#15-examples)).
 
 ## 9. Cloud accounts, pools, hosts and nodes
 
@@ -1382,12 +1401,20 @@ List nodes:
 curl -sS -H "Authorization: Bearer $KEY" "$MASON/api/v2/nodes"
 ```
 
-No HTTP route sets a paired node's labels. On the master's computer, `mason
-nodes set` replaces them with the `--label`s it is given:
+Set a node's type and labels. The list replaces its labels, so a node that
+runs setup keeps `setup`; a dedicated node, such as a signer, leaves it out:
 
 ```sh
-mason nodes set mac-mini-2 --type mac-xcode --label setup --label apple-signing --slots 2
+NODE=$(curl -sS -H "Authorization: Bearer $KEY" "$MASON/api/v2/nodes" \
+  | jq -r '.[] | select(.name == "mac-mini-2") | .fingerprint')
+curl -sS -X PUT "$MASON/api/v2/nodes/$(jq -rn --arg f "$NODE" '$f|@uri')" \
+  -H "Authorization: Bearer $KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"type": "mac-xcode", "labels": ["setup", "apple-signing"], "slots": 2}'
 ```
+
+`mason nodes set mac-mini-2 --type mac-xcode --label setup --label
+apple-signing --slots 2` does the same on the master's computer.
 
 A permanent cloud node takes its labels when it is made:
 
