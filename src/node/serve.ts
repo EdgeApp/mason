@@ -9,6 +9,7 @@ import { hostApp } from '../host/web.js'
 import { HostRuntime, type HostOptions } from '../host/runtime.js'
 import { recordIdentity } from '../master/identity.js'
 import { masterApp } from '../master/web.js'
+import { masterLive, serveLive } from '../master/live.js'
 import {
   applyPendingRestore,
   PENDING_RESTORE,
@@ -431,6 +432,11 @@ export async function startNode(
             server.close(() => resolve())
           }),
       )
+      // The live pages' socket, closed before the listener so pages reconnect.
+      if (master != null) {
+        const live = serveLive(server, masterLive(master))
+        cleanup.push(() => live.close())
+      }
       const scheme = certificate == null ? 'http' : 'https'
       const host = options.listen ?? hostname()
       web = {
