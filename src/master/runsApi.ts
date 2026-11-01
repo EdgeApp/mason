@@ -505,14 +505,28 @@ export function runsApi(master: Master): Router {
   })
   router.get('/api/v2/queue/events', (req, res, next) => {
     try {
-      allowRole(actorOf(res), 'runs.read')
+      const actor = actorOf(res)
+      allowRole(actor, 'runs.read')
+      // Only the runs a key's scopes cover, as the runs list.
       streamSnapshots(req, res, 'queue', () =>
         JSON.stringify(
-          master.database.db
-            .prepare(
-              "SELECT s.job_id AS job,s.name AS stage,s.status FROM job_stages s WHERE s.status IN ('running','queued','awaiting_approval') AND s.name NOT LIKE '@%' ORDER BY s.job_id,s.position",
+          (
+            master.database.db
+              .prepare(
+                "SELECT s.job_id AS job,s.name AS stage,s.status,p.slug,j.branch FROM job_stages s JOIN jobs j ON j.id=s.job_id JOIN projects p ON p.id=j.project_id WHERE s.status IN ('running','queued','awaiting_approval') AND s.name NOT LIKE '@%' ORDER BY s.job_id,s.position",
+              )
+              .all() as Array<{
+              job: string
+              stage: string
+              status: string
+              slug: string
+              branch: string
+            }>
+          )
+            .filter((row) =>
+              covers(actor, { project: row.slug, branch: row.branch }),
             )
-            .all(),
+            .map(({ job, stage, status }) => ({ job, stage, status })),
         ),
       )
     } catch (error) {

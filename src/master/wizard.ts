@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto'
 import express, { Router } from 'express'
 import { alternatives, type Graph } from '../pipeline/graph.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
-import { allowRole } from './permissions.js'
+import { allow } from './permissions.js'
 import { repositoryName } from './mirrors.js'
 import type { Master } from './runtime.js'
 import { DISCOVER } from './scheduler.js'
@@ -182,7 +182,8 @@ export function wizardApi(master: Master): Router {
     checkPath,
     ...body,
     json(async (req, res) => {
-      allowRole(actorOf(res), 'projects.change')
+      // About no project yet: a key scoped to projects cannot add one.
+      allow(actorOf(res), 'projects.change')
       const repository = String(
         (req.body as { repository?: unknown }).repository ?? '',
       ).trim()
@@ -199,8 +200,13 @@ export function wizardApi(master: Master): Router {
     '/api/v2/projects/:slug/discover',
     json((req, res) => {
       const actor = actorOf(res)
-      allowRole(actor, 'projects.change')
+      allow(actor, 'projects.change', { project: String(req.params.slug) })
       const found = project(String(req.params.slug))
+      // The run is on the default branch, so a key's branches must cover it.
+      allow(actor, 'projects.change', {
+        project: String(req.params.slug),
+        branch: found.defaultBranch,
+      })
       const job = master.jobs.create(
         master.projects.get(String(req.params.slug)),
         found.defaultBranch,
@@ -218,7 +224,9 @@ export function wizardApi(master: Master): Router {
   router.get(
     '/api/v2/projects/:slug/discover',
     json((req, res) => {
-      allowRole(actorOf(res), 'projects.change')
+      allow(actorOf(res), 'projects.change', {
+        project: String(req.params.slug),
+      })
       return discovery(master, project(String(req.params.slug)).id) ?? null
     }),
   )
@@ -226,7 +234,7 @@ export function wizardApi(master: Master): Router {
     '/api/v2/projects/:slug/wizard/apps',
     json((req, res) => {
       const actor = actorOf(res)
-      allowRole(actor, 'projects.change')
+      allow(actor, 'projects.change', { project: String(req.params.slug) })
       const slug = String(req.params.slug)
       const body = req.body as { apps?: unknown; team?: unknown }
       const chosen = String(body.apps ?? '')
@@ -269,7 +277,7 @@ export function wizardApi(master: Master): Router {
     '/api/v2/projects/:slug/wizard/rules',
     json((req, res) => {
       const actor = actorOf(res)
-      allowRole(actor, 'projects.change')
+      allow(actor, 'projects.change', { project: String(req.params.slug) })
       const rules = String((req.body as { rules?: unknown }).rules ?? '')
         .split('\n')
         .map((line) => line.trim())
@@ -286,7 +294,7 @@ export function wizardApi(master: Master): Router {
     '/api/v2/projects/:slug/webhook',
     json(async (req, res) => {
       const actor = actorOf(res)
-      allowRole(actor, 'projects.change')
+      allow(actor, 'projects.change', { project: String(req.params.slug) })
       const slug = String(req.params.slug)
       const found = project(slug)
       const origin = (
@@ -312,7 +320,9 @@ export function wizardApi(master: Master): Router {
   router.get(
     '/api/v2/projects/:slug/masonfile',
     json(async (req, res) => {
-      allowRole(actorOf(res), 'projects.read')
+      allow(actorOf(res), 'projects.read', {
+        project: String(req.params.slug),
+      })
       const slug = String(req.params.slug)
       const found = project(slug)
       const commit = String(req.query.commit ?? '')

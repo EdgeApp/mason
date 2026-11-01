@@ -101,9 +101,6 @@ means no limit. A scoped key:
   storage, backups, cloud and Apple routes, and listing or revoking keys. It
   may still create keys within its own scopes.
 
-A few project routes check only the role, not the scopes; their entries say
-so.
-
 ### Browser sessions
 
 People sign in on the master's own pages. Sign-in uses a client-hash
@@ -555,8 +552,8 @@ A run's live updates as server-sent events.
 
 The queue's live state as server-sent events.
 
-- Permission: `runs.read` (role only). Host sessions may read it. The
-  stream is not filtered by a key's scopes.
+- Permission: `runs.read`. Host sessions may read it. A scoped key sees only
+  the stages of runs its scopes cover, as in `GET /api/v2/runs`.
 - Sends a `queue` event at the start and whenever the set changes, checked
   every second: a list of `{ "job", "stage", "status" }` for every stage
   that is `running`, `queued` or `awaiting_approval`. It closes after 15
@@ -684,8 +681,9 @@ first match decides. It answers the project.
 
 ### Add-project wizard and Masonfile
 
-The dashboard's add-project wizard uses these routes. They check the role
-only, not a key's scopes.
+The dashboard's add-project wizard uses these routes. Each checks its
+permission and that a key's scopes cover the project it names; `check` names
+no project yet, so a key scoped to projects cannot use it.
 
 | Method and path | What it does | Permission |
 | --- | --- | --- |
@@ -701,9 +699,10 @@ only, not a key's scopes.
   and answers `{ "repository", "slug", "defaultBranch" }`, the slug derived
   from the repository's name. 400 when it is not a GitHub repository or the
   master cannot reach it.
-- **`POST …/discover`** answers `{ "run": "<run id>" }`. **`GET
-  …/discover`** answers `null` before any discovery, else `{ "run",
-  "status", "reason" }` and, once the Masonfile is read, `apps` (each
+- **`POST …/discover`** answers `{ "run": "<run id>" }`. The run is on the
+  project's default branch, so a key scoped to branches must cover it
+  (403). **`GET …/discover`** answers `null` before any discovery, else
+  `{ "run", "status", "reason" }` and, once the Masonfile is read, `apps` (each
   `{ "bundleId", "platforms", "bundleIds" }`) and `triggers` by workflow.
 - **`wizard/apps`** takes `{ "apps": "app.example.one,app.example.two",
   "team": "ABCDE12345" }`: a comma-separated list of app IDs the discovery

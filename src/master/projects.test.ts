@@ -1255,6 +1255,138 @@ describe('Projects, branch rules and build numbers', function () {
     }
   })
 
+  it('keeps a project-scoped key to its own projects on the wizard, Masonfile and queue routes', async () => {
+    const { node, admin } = await master()
+    try {
+      for (const slug of ['mine', 'theirs'])
+        assert.equal(
+          (
+            await api(node, 'PUT', `/api/v2/projects/${slug}`, admin, {
+              repository: `https://github.com/example/${slug}`,
+            })
+          ).status,
+          201,
+        )
+      const scoped = node.master!.keys.create(localOperator, {
+        role: 'manager',
+        projects: ['mine'],
+      }).token
+      const commit = 'a'.repeat(40)
+      const outside: Array<[string, string, unknown?]> = [
+        ['GET', `/api/v2/projects/theirs/masonfile?commit=${commit}`],
+        ['GET', '/api/v2/projects/theirs/discover'],
+        ['POST', '/api/v2/projects/theirs/discover', {}],
+        ['POST', '/api/v2/projects/theirs/wizard/apps', { apps: [] }],
+        ['POST', '/api/v2/projects/theirs/wizard/rules', { rules: 'master' }],
+        ['POST', '/api/v2/projects/theirs/webhook', {}],
+      ]
+      for (const [method, route, body] of outside) {
+        const answer = await api(node, method, route, scoped, body)
+        assert.equal(answer.status, 403, `${method} ${route}`)
+        assert.match(
+          String(answer.json.error),
+          /does not cover that project/,
+          `${method} ${route}`,
+        )
+      }
+      // A repository check is about no project yet: a scoped key cannot add one.
+      const check = await api(node, 'POST', '/api/v2/projects/check', scoped, {
+        repository: 'https://github.com/example/new',
+      })
+      assert.equal(check.status, 403)
+      assert.match(String(check.json.error), /scoped to projects/)
+      // Its own project's routes still answer.
+      const own = await api(
+        node,
+        'GET',
+        '/api/v2/projects/mine/discover',
+        scoped,
+      )
+      assert.equal(own.status, 200, JSON.stringify(own.json))
+      assert.equal(
+        (
+          await api(
+            node,
+            'POST',
+            '/api/v2/projects/mine/wizard/rules',
+            scoped,
+            {
+              rules: 'master request',
+            },
+          )
+        ).status,
+        200,
+      )
+      // No run started for the other project.
+      const db = node.master!.database.db
+      assert.equal(
+        db
+          .prepare(
+            "SELECT COUNT(*) n FROM jobs j JOIN projects p ON p.id=j.project_id WHERE p.slug='theirs'",
+          )
+          .get()!.n,
+        0,
+      )
+      // The queue stream lists only the stages of runs the key covers.
+      for (const [job, slug] of [
+        ['job-mine', 'mine'],
+        ['job-theirs', 'theirs'],
+      ] as const)
+        db.prepare(
+          "INSERT INTO jobs(id,project_id,number,workflow,branch,trigger,status,created,request) VALUES(?,(SELECT id FROM projects WHERE slug=?),1,'build','master','request','running',0,'{}')",
+        ).run(job, slug)
+      for (const job of ['job-mine', 'job-theirs'])
+        db.prepare(
+          "INSERT INTO job_stages(job_id,name,position,kind,status) VALUES(?,'build',1,'stage','running')",
+        ).run(job)
+      const queue = async (key: string): Promise<unknown> => {
+        const response = await pinnedFetch(
+          node.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') +
+            '/api/v2/queue/events',
+          { headers: { Authorization: `Bearer ${key}` } },
+          node.identity.pin,
+        )
+        const text = await response.text()
+        return JSON.parse(/data: (.*)/.exec(text)![1]!)
+      }
+      assert.deepEqual(await queue(scoped), [
+        { job: 'job-mine', stage: 'build', status: 'running' },
+      ])
+      assert.deepEqual(
+        ((await queue(admin)) as Array<{ job: string }>).map((row) => row.job),
+        ['job-mine', 'job-theirs'],
+      )
+      // A key scoped to branches is held to them: the queue lists runs on
+      // its branches alone, and discovery runs on the default branch.
+      const releases = node.master!.keys.create(localOperator, {
+        role: 'manager',
+        branches: ['release/*'],
+      }).token
+      assert.deepEqual(await queue(releases), [])
+      const discover = await api(
+        node,
+        'POST',
+        '/api/v2/projects/mine/discover',
+        releases,
+        {},
+      )
+      assert.equal(discover.status, 403, JSON.stringify(discover.json))
+      assert.match(String(discover.json.error), /project or branch/)
+      const masters = node.master!.keys.create(localOperator, {
+        role: 'manager',
+        branches: ['master'],
+      }).token
+      assert.deepEqual(
+        ((await queue(masters)) as Array<{ job: string }>).map(
+          (row) => row.job,
+        ),
+        ['job-mine', 'job-theirs'],
+      )
+    } finally {
+      await node.close()
+    }
+  })
+
   it('takes a project body up to 1 MB, while the wizard keeps its own 64 KB limit', async () => {
     const { node, admin } = await master()
     try {
