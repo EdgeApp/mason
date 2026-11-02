@@ -6,8 +6,11 @@ import {
   mkdirSync,
   renameSync,
   rmSync,
+  statSync,
   type ReadStream,
 } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { fileSha256 } from '../release/install.js'
 import path from 'node:path'
 import type { Stream } from '../link/link.js'
 import type { MasterDatabase } from './database.js'
@@ -32,6 +35,18 @@ export interface StashRecord {
 
 /** Stashes a job's stages hand each other: tarballs in `<data>/stashes/<job>/`. */
 export class Stashes {
+  /** Digests of stash files by path, with the size and time they were taken at. */
+  private readonly digests = new Map<
+    string,
+    { size: number; mtime: number; sha256: string }
+  >()
+  /** Digests being read, by path, so concurrent asks share one read. */
+  private readonly hashing = new Map<
+    string,
+    Promise<{ size: number; sha256: string }>
+  >()
+  /** Stash files read through to hash them, rather than hashed as they arrived. */
+  hashed = 0
   constructor(
     readonly master: MasterDatabase,
     readonly root: string,
@@ -87,6 +102,7 @@ export class Stashes {
     // Writes still queued when a refused stash is discarded fail harmlessly.
     out.on('error', () => undefined)
     let size = 0
+    const hash = createHash('sha256')
     try {
       await new Promise<void>((resolve, reject) => {
         let refused = false
@@ -100,6 +116,7 @@ export class Stashes {
             reject(new Error(message))
             return
           }
+          hash.update(chunk)
           out.write(chunk)
         })
         stream.once('end', () => {
@@ -112,6 +129,12 @@ export class Stashes {
         })
       })
       renameSync(temporary, file)
+      // Hashed as it arrived, so a worker's first stash.stat reads nothing.
+      this.digests.set(file, {
+        size,
+        mtime: statSync(file).mtimeMs,
+        sha256: hash.digest('hex'),
+      })
     } catch (error) {
       out.destroy()
       rmSync(temporary, { force: true })
@@ -125,14 +148,60 @@ export class Stashes {
     return size
   }
 
-  open(job: string, nameValue: unknown): ReadStream | undefined {
+  private file(job: string, nameValue: unknown): string | undefined {
     const name = stashName(nameValue)
     const row = this.master.db
       .prepare('SELECT file FROM stashes WHERE job_id=? AND name=?')
       .get(job, name)
     if (row == null || String(row.file) === '' || !existsSync(String(row.file)))
       return undefined
-    return createReadStream(String(row.file))
+    return String(row.file)
+  }
+
+  /** A stash from `offset` on, for a worker continuing after its link dropped. */
+  open(job: string, nameValue: unknown, offset = 0): ReadStream | undefined {
+    const file = this.file(job, nameValue)
+    if (file == null) return undefined
+    if (
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      offset > statSync(file).size
+    )
+      throw new Error('That offset is outside the stash')
+    return createReadStream(file, { start: offset })
+  }
+
+  /** A stash's size and SHA-256 digest, which a worker checks a resumed stash against. */
+  async stat(
+    job: string,
+    nameValue: unknown,
+  ): Promise<{ size: number; sha256: string } | undefined> {
+    const file = this.file(job, nameValue)
+    if (file == null) return undefined
+    const info = statSync(file)
+    const known = this.digests.get(file)
+    if (
+      known != null &&
+      known.size === info.size &&
+      known.mtime === info.mtimeMs
+    )
+      return { size: known.size, sha256: known.sha256 }
+    let reading = this.hashing.get(file)
+    if (reading == null) {
+      this.hashed++
+      reading = fileSha256(file)
+        .then((sha256) => {
+          this.digests.set(file, {
+            size: info.size,
+            mtime: info.mtimeMs,
+            sha256,
+          })
+          return { size: info.size, sha256 }
+        })
+        .finally(() => this.hashing.delete(file))
+      this.hashing.set(file, reading)
+    }
+    return await reading
   }
 
   /** Gives a restarted run the stashes of the stages it reuses, without copying their bytes. */
@@ -176,6 +245,9 @@ export class Stashes {
 
   /** Deletes a job's stash files; their records stay, so a restart can tell they expired. */
   remove(job: string): void {
+    const dir = this.dir(job) + path.sep
+    for (const file of this.digests.keys())
+      if (file.startsWith(dir)) this.digests.delete(file)
     this.master.db.prepare("UPDATE stashes SET file='' WHERE job_id=?").run(job)
     rmSync(this.dir(job), { recursive: true, force: true })
   }

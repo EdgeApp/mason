@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { createServer } from 'node:http'
@@ -76,6 +77,71 @@ async function finished(c: Cluster, id: string, ms = 60000): Promise<Json> {
 function stage(run: Json, name: string): Json {
   return run.stages.find((entry: Json) => entry.name === name)
 }
+
+/**
+ * Serves a cluster's stashes 64 KiB every `chunkMs` (2 ms), calling `during`
+ * once the first megabyte of a stash read from its start is out, and
+ * flipping a byte of the first `corrupt` reads; records each read's offset.
+ */
+function slowStashes(
+  c: Cluster,
+  during: () => void = () => undefined,
+  { chunkMs = 2, corrupt = 0 }: { chunkMs?: number; corrupt?: number } = {},
+): { offsets: number[]; restore: () => void } {
+  const stashes = c.master.master!.stashes
+  const open = stashes.open.bind(stashes)
+  const offsets: number[] = []
+  let fired = false
+  stashes.open = ((job: string, name: unknown, offset = 0) => {
+    const file = open(job, name, offset)
+    if (file == null) return file
+    offsets.push(offset)
+    const flip = offsets.length <= corrupt
+    return (async function* (): AsyncGenerator<Buffer> {
+      let sent = 0
+      for await (const chunk of file) {
+        const bytes = Buffer.from(chunk as Buffer)
+        if (flip && sent === 0) bytes[0] = bytes[0]! ^ 0xff
+        yield bytes
+        sent += (chunk as Buffer).length
+        if (!fired && offset === 0 && sent >= 1024 * 1024) {
+          fired = true
+          during()
+        }
+        await new Promise((resolve) => setTimeout(resolve, chunkMs))
+      }
+    })() as unknown as ReturnType<typeof open>
+  }) as typeof stashes.open
+  return {
+    offsets,
+    restore: (): void => {
+      stashes.open = open
+    },
+  }
+}
+
+/** A stage that stashes 4 MiB of random bytes, and one on another node that unstashes them. */
+const resumeMasonfile = `
+import type { Setup, Stage } from '@mason/types'
+import { createHash, randomBytes } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('make', { on: 'linux', run: make })
+  m.stage('use', { on: 'mac', run: use })
+}
+const digest = (ctx: Stage) => createHash('sha256').update(readFileSync(join(ctx.workspace, 'big.bin'))).digest('hex')
+export async function make(ctx: Stage) {
+  await ctx.fs.write('big.bin', randomBytes(4 * 1024 * 1024))
+  await ctx.stash('big', 'big.bin')
+  return digest(ctx)
+}
+export async function use(ctx: Stage) {
+  await ctx.unstash('big')
+  return digest(ctx)
+}
+`
 
 describe('Scheduler, workers and stashes', function () {
   this.timeout(120000)
@@ -2519,6 +2585,197 @@ export async function sign(ctx: Stage) {
     )
   })
 
+  it('U7.29 resumes an unstash where it got to after a link drop, starts again with an older master, and asks for the Masonfile again', async () => {
+    await project('resume', { 'Masonfile.ts': resumeMasonfile })
+    let dropped: Promise<void> | undefined
+    const slow = slowStashes(c, () => {
+      dropped = c.drop('beta', 300)
+    })
+    try {
+      const run = await finished(c, await request('resume'), 90000)
+      await dropped
+      const log = c.master.master!.scheduler.logs(run.id)!
+      assert.equal(run.status, 'succeeded', log)
+      assert.equal(stage(run, 'use').attempt, 1)
+      assert.equal(stage(run, 'use').output, stage(run, 'make').output)
+      assert.match(
+        log,
+        /The link to the master dropped while unstashing big at \d+ of \d+ bytes; resuming once it is back/,
+      )
+      // The second read starts where the first got to.
+      assert.equal(slow.offsets.length, 2)
+      assert.equal(slow.offsets[0], 0)
+      assert(slow.offsets[1]! > 0, String(slow.offsets[1]))
+    } finally {
+      slow.restore()
+    }
+
+    // A master that predates stash.stat sends the whole stash again.
+    const scheduler = c.master.master!.scheduler
+    const methods = scheduler.methods.bind(scheduler)
+    scheduler.methods = (): ReturnType<typeof methods> => {
+      const table = methods()
+      const get = table.streams!['stash.get']!
+      return {
+        ...table,
+        requests: Object.fromEntries(
+          Object.entries(table.requests!).filter(
+            ([name]) => name !== 'stash.stat',
+          ),
+        ),
+        streams: {
+          ...table.streams,
+          'stash.get': async (stream, params, link): Promise<void> => {
+            await get(stream, { ...(params as Json), offset: undefined }, link)
+          },
+        },
+      }
+    }
+    let again: Promise<void> | undefined
+    const older = slowStashes(c, () => {
+      again = c.drop('beta', 300)
+    })
+    try {
+      await c.drop('beta', 0)
+      const run = await finished(c, await request('resume'), 90000)
+      await again
+      const log = c.master.master!.scheduler.logs(run.id)!
+      assert.equal(run.status, 'succeeded', log)
+      assert.equal(stage(run, 'use').output, stage(run, 'make').output)
+      assert.match(
+        log,
+        /The link to the master dropped while unstashing big; starting it again once it is back/,
+      )
+      assert.deepEqual(older.offsets, [0, 0])
+    } finally {
+      older.restore()
+      scheduler.methods = methods
+      await c.drop('beta', 0)
+    }
+
+    // The Masonfile of a stage with no checkout is asked for again after a drop.
+    await project('bare-again', {
+      'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('sign', { on: 'linux', checkout: false, run: sign })
+}
+export async function sign(ctx: Stage) { return 'signed' }
+`,
+    })
+    const mirrors = c.master.master!.mirrors
+    const show = mirrors.show.bind(mirrors)
+    let asked = 0
+    let relinked: Promise<void> | undefined
+    mirrors.show = async (slug, ...rest): ReturnType<typeof show> => {
+      if (slug === 'bare-again' && asked++ === 0) {
+        relinked = c.drop('alpha', 300)
+        await c.until(
+          () => c.master.master!.registry.link(c.fingerprint('alpha')) == null,
+          5000,
+        )
+      }
+      return await show(slug, ...rest)
+    }
+    try {
+      const run = await finished(c, await request('bare-again'), 90000)
+      await relinked
+      const log = c.master.master!.scheduler.logs(run.id)!
+      assert.equal(run.status, 'succeeded', log)
+      assert.equal(stage(run, 'sign').output, 'signed')
+      assert.match(
+        log,
+        /The master is unreachable; waiting to fetch the Masonfile\n[^]*Running Masonfile\.ts from the master, with no checkout/,
+      )
+      assert.equal(asked, 2)
+    } finally {
+      mirrors.show = show
+    }
+  })
+
+  it('U7.29 fetches a stash once for two stages of a run on one node, reads it again once when it does not match, and hashes each stash once', async () => {
+    await project('twice', {
+      'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+import { createHash, randomBytes } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('make', { on: 'mac', run: make })
+  m.parallel('both', { one: { on: 'linux', run: use }, two: { on: 'linux', run: use } })
+}
+const digest = (ctx: Stage) => createHash('sha256').update(readFileSync(join(ctx.workspace, 'big.bin'))).digest('hex')
+export async function make(ctx: Stage) {
+  await ctx.fs.write('big.bin', randomBytes(4 * 1024 * 1024))
+  await ctx.stash('big', 'big.bin')
+  return digest(ctx)
+}
+export async function use(ctx: Stage) {
+  await ctx.unstash('big')
+  return digest(ctx)
+}
+`,
+    })
+    const stashes = c.master.master!.stashes
+    const hashed = stashes.hashed
+    // Slow enough that both stages ask while the first read is under way.
+    const slow = slowStashes(c, undefined, { chunkMs: 30 })
+    let id: string
+    try {
+      const run = await finished(c, await request('twice'), 90000)
+      id = run.id
+      const log = c.master.master!.scheduler.logs(run.id)!
+      assert.equal(run.status, 'succeeded', log)
+      assert.equal(stage(run, 'both/one').output, stage(run, 'make').output)
+      assert.equal(stage(run, 'both/two').output, stage(run, 'make').output)
+      assert.deepEqual(slow.offsets, [0])
+    } finally {
+      slow.restore()
+    }
+    // Hashed as it arrived; a changed file is read once for asks at once.
+    assert.equal(stashes.hashed, hashed)
+    const file = path.join(stashes.root, id, 'big.tar')
+    utimesSync(file, new Date(), new Date(Date.now() + 5000))
+    const [a, b] = await Promise.all([
+      stashes.stat(id, 'big'),
+      stashes.stat(id, 'big'),
+    ])
+    assert.deepEqual(a, b)
+    assert.equal(stashes.hashed, hashed + 1)
+
+    // A stash that does not match is read once more from the start.
+    await project('resume', { 'Masonfile.ts': resumeMasonfile })
+    const once = slowStashes(c, undefined, { corrupt: 1 })
+    try {
+      const run = await finished(c, await request('resume'), 90000)
+      const log = c.master.master!.scheduler.logs(run.id)!
+      assert.equal(run.status, 'succeeded', log)
+      assert.equal(stage(run, 'use').output, stage(run, 'make').output)
+      assert.match(
+        log,
+        /Stash big does not match the master's copy \(\d+ of \d+ bytes\); reading it again/,
+      )
+      assert.deepEqual(once.offsets, [0, 0])
+    } finally {
+      once.restore()
+    }
+    // Twice, and the stage fails.
+    const always = slowStashes(c, undefined, { corrupt: 2 })
+    try {
+      const run = await finished(c, await request('resume'), 90000)
+      assert.equal(run.status, 'failed')
+      assert.match(
+        stage(run, 'use').reason,
+        /Stash big does not match the master's copy/,
+      )
+      assert.deepEqual(always.offsets, [0, 0])
+    } finally {
+      always.restore()
+    }
+  })
+
   it('answers the runs, nodes and recover commands', async () => {
     const lines: string[] = []
     const errors: string[] = []
@@ -2811,6 +3068,49 @@ export async function read(ctx: Stage) {
       resolveSecrets(variants, ['A'], stageConfigs({} as GraphStage)).get('A'),
       variants[0],
     )
+  })
+})
+
+describe('A stage whose master does not come back', function () {
+  this.timeout(120000)
+  it('U7.29 fails the unstash with the link error once the grace period passes', async () => {
+    const c = await cluster(root(), {
+      workers: [
+        { name: 'maker', type: 'linux' },
+        {
+          name: 'user',
+          type: 'mac',
+          setup: false,
+          workerOptions: { reconnectGraceMs: 300 },
+        },
+      ],
+    })
+    let dropped: Promise<void> | undefined
+    const slow = slowStashes(c, () => {
+      dropped = c.drop('user', 2000)
+    })
+    try {
+      const repo = c.repo('fixtures/resume')
+      repo.commit({ 'Masonfile.ts': resumeMasonfile })
+      c.master.master!.saveProject({ role: 'admin', label: 'test' }, 'resume', {
+        repository: repo.url,
+        rules: [{ pattern: 'master', mode: 'request' }],
+      })
+      const created = await c.api('POST', '/api/v2/runs', {
+        project: 'resume',
+      })
+      const run = await finished(c, created.json.id, 90000)
+      await dropped
+      assert.equal(run.status, 'failed')
+      assert.match(
+        stage(run, 'use').reason,
+        /Link closed: the master did not reconnect within 300 ms/,
+      )
+      assert.deepEqual(slow.offsets, [0])
+    } finally {
+      slow.restore()
+      await c.close()
+    }
   })
 })
 

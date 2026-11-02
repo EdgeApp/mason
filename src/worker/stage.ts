@@ -183,7 +183,15 @@ export interface WorkerOptions {
   applePollMs?: number
   /** Calls the privileged helper; through its socket by default. */
   helper?: (op: string, args: Record<string, unknown>) => Promise<unknown>
+  /**
+   * How long a transfer from the master (an unstash, the Masonfile) waits for
+   * the link to come back after it dropped; then the stage fails. Two minutes.
+   */
+  reconnectGraceMs?: number
 }
+
+/** How long a stage's transfer from the master waits for a dropped link to come back. */
+export const RECONNECT_GRACE_MS = 2 * 60_000
 
 /** Tools a stage can ask for that the system installs rather than the tools directory. */
 const systemTools = ['xcode', 'simulators', 'brew', 'apt', 'dnf'] as const
@@ -265,6 +273,8 @@ export class WorkerRuntime {
   readonly journal: Journal
   readonly bridge: GitBridge
   private readonly controllers = new Map<string, AbortController>()
+  /** Stashes being fetched, by their file: one transfer however many stages ask. */
+  private readonly downloads = new Map<string, Promise<void>>()
   private readonly executions = new Set<Promise<void>>()
   private installing: Promise<void> = Promise.resolve()
   private readonly busy = new Set<number>()
@@ -1028,7 +1038,7 @@ export class WorkerRuntime {
         report = await this.setup(assignment, dir, log, signal)
       else {
         for (const name of assignment.stashes)
-          await this.download(assignment, name)
+          await this.download(assignment, name, say, preparing)
         for (const entry of assignment.cache)
           await this.restoreCache(assignment.project, entry.key, dir)
         report =
@@ -1294,17 +1304,26 @@ export class WorkerRuntime {
     signal: AbortSignal,
   ): Promise<void> {
     let given: { path: string; text: string } | undefined
-    try {
-      given = await this.request<{ path: string; text: string }>(
-        'stage.masonfile',
-        ticket,
-        60_000,
-      )
-    } catch (error) {
-      // A master too old to send it: the shallow copy below.
-      if (!(error instanceof LinkError) || error.code === 'closed') throw error
-      say(`The master sent no Masonfile (${error.message})\n`)
-    }
+    for (;;)
+      try {
+        given = await this.request<{ path: string; text: string }>(
+          'stage.masonfile',
+          ticket,
+          60_000,
+        )
+        break
+      } catch (error) {
+        if (!(error instanceof LinkError)) throw error
+        // A dropped link: asked again once the master is back.
+        if (error.code === 'closed') {
+          say('The master is unreachable; waiting to fetch the Masonfile\n')
+          await this.reconnected(signal)
+          continue
+        }
+        // A master too old to send it: the shallow copy below.
+        say(`The master sent no Masonfile (${error.message})\n`)
+        break
+      }
     const imports = given == null ? [] : localImports(given.text)
     if (given != null && imports.length === 0) {
       rmSync(source, { recursive: true, force: true })
@@ -1510,6 +1529,26 @@ export class WorkerRuntime {
     return (await link.request(method, params, timeoutMs)) as T
   }
 
+  /**
+   * Waits for the master's link after it dropped, up to the grace period;
+   * past it, the link's error.
+   */
+  private async reconnected(signal: AbortSignal): Promise<Link> {
+    const grace = this.options.reconnectGraceMs ?? RECONNECT_GRACE_MS
+    const deadline = Date.now() + grace
+    for (;;) {
+      const link = this.options.link()
+      if (link != null && !link.closed) return link
+      if (signal.aborted) throw signal.reason
+      if (Date.now() >= deadline)
+        throw new LinkError(
+          `Link closed: the master did not reconnect within ${grace >= 10_000 ? `${Math.round(grace / 1000)} s` : `${grace} ms`}`,
+          'closed',
+        )
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+  }
+
   /** Waits for the master's link. */
   private async connected(signal: AbortSignal): Promise<void> {
     while (this.options.link() == null) {
@@ -1584,7 +1623,14 @@ export class WorkerRuntime {
       case 'unstash': {
         const [name, options] = args as [string, { into?: string }]
         const file = this.path('stashes', assignment.job, `${name}.tar`)
-        if (!existsSync(file)) await this.download(assignment, name)
+        if (!existsSync(file))
+          await this.download(
+            assignment,
+            name,
+            say,
+            this.controllers.get(assignment.key)?.signal ??
+              new AbortController().signal,
+          )
         await unpack(file, inside(dir, options?.into ?? '.'))
         return null
       }
@@ -1944,40 +1990,132 @@ export class WorkerRuntime {
     this.journal.uploaded(key, name)
   }
 
-  /** Fetches a stash of the run from the master into the local stash directory. */
+  /**
+   * Fetches a stash of the run from the master into the local stash
+   * directory, once per stash however many stages of the run on this node
+   * ask for it at the same time: a second caller waits for the first.
+   */
   private async download(
     assignment: StageAssignment,
     name: string,
+    say: (text: string) => void,
+    signal: AbortSignal,
   ): Promise<void> {
     const target = this.path('stashes', assignment.job, `${name}.tar`)
     if (existsSync(target)) return
-    const link = this.options.link()
-    if (link == null)
-      throw new Error(
-        `Stash ${name} is not on this node and the master is not connected`,
-      )
+    const running = this.downloads.get(target)
+    if (running != null) {
+      try {
+        await running
+        return
+      } catch (error) {
+        // The other stage's transfer failed or was cancelled: this one tries for itself.
+        if (signal.aborted) throw error
+        return await this.download(assignment, name, say, signal)
+      }
+    }
+    const fetching = this.fetchStash(assignment, name, target, say, signal)
+    this.downloads.set(target, fetching)
+    try {
+      await fetching
+    } finally {
+      this.downloads.delete(target)
+    }
+  }
+
+  /**
+   * One stash's transfer. A link that drops part way is waited for, up to
+   * the grace period, and the stash continues from the bytes already here,
+   * hashed as they arrive; the whole file is then checked against the
+   * master's size and digest, and read once more from the start if it does
+   * not match. A master that predates `stash.stat` sends it again from the
+   * start after a drop instead.
+   */
+  private async fetchStash(
+    assignment: StageAssignment,
+    name: string,
+    target: string,
+    say: (text: string) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const ticket = { key: assignment.key, token: assignment.token, name }
+    let held: { size: number; sha256: string } | undefined
+    for (;;)
+      try {
+        held = await this.request<{ size: number; sha256: string }>(
+          'stash.stat',
+          ticket,
+        )
+        break
+      } catch (error) {
+        if (!(error instanceof LinkError)) throw error
+        // An older master: no offsets, so a dropped stash starts again.
+        if (error.code === 'not_allowed') break
+        if (error.code !== 'closed')
+          throw new Error(`Stash ${name}: ${error.message}`)
+        say(`The master is unreachable; waiting to unstash ${name}\n`)
+        await this.reconnected(signal)
+      }
     mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 })
     const partial = `${target}.part`
-    const out = createWriteStream(partial, { mode: 0o600 })
-    out.on('error', () => undefined)
-    const stream = link.openStream('stash.get', {
-      key: assignment.key,
-      token: assignment.token,
-      name,
-    })
-    await new Promise<void>((resolve, reject) => {
-      stream.on('data', (chunk: Buffer) => out.write(chunk))
-      stream.once('end', () => {
-        stream.end()
-        out.end(() => {
-          resolve()
+    let offset = 0
+    let hash = createHash('sha256')
+    let retried = false
+    rmSync(partial, { force: true })
+    for (;;) {
+      const link = await this.reconnected(signal)
+      const out = createWriteStream(partial, {
+        mode: 0o600,
+        flags: offset > 0 ? 'a' : 'w',
+      })
+      out.on('error', () => undefined)
+      const stream = link.openStream('stash.get', {
+        ...ticket,
+        ...(held == null || offset === 0 ? {} : { offset }),
+      })
+      const reason = await new Promise<string | undefined>((resolve) => {
+        stream.on('data', (chunk: Buffer) => {
+          hash.update(chunk)
+          offset += chunk.length
+          out.write(chunk)
         })
+        stream.once('end', () => {
+          stream.end()
+          resolve(undefined)
+        })
+        stream.once('abort', (why: string) => resolve(why))
       })
-      stream.once('abort', (reason: string) => {
-        out.destroy()
-        reject(new Error(`Stash ${name}: ${reason}`))
-      })
-    })
+      // What arrived is on disk before the next attempt continues from it.
+      await new Promise<void>((resolve) => out.end(resolve))
+      const kept = existsSync(partial) ? lstatSync(partial).size : -1
+      if (reason != null && !link.closed) {
+        rmSync(partial, { force: true })
+        throw new Error(`Stash ${name}: ${reason}`)
+      }
+      if (reason != null) {
+        // An older master sends it all again; the bytes here go.
+        if (held == null || kept !== offset) {
+          offset = 0
+          hash = createHash('sha256')
+        }
+        say(
+          `The link to the master dropped while unstashing ${name}${held == null ? '' : ` at ${offset} of ${held.size} bytes`}; ${offset === 0 ? 'starting it again' : 'resuming'} once it is back\n`,
+        )
+        continue
+      }
+      if (held == null) break
+      if (kept === held.size && hash.digest('hex') === held.sha256) break
+      const why = `Stash ${name} does not match the master's copy (${kept} of ${held.size} bytes)`
+      if (retried) {
+        rmSync(partial, { force: true })
+        throw new Error(why)
+      }
+      // Once more from the start before the stage fails.
+      retried = true
+      offset = 0
+      hash = createHash('sha256')
+      say(`${why}; reading it again\n`)
+    }
     const { renameSync } = await import('node:fs')
     renameSync(partial, target)
   }

@@ -95,6 +95,11 @@ export async function ship(ctx: Stage) {
   }
   if (mode === 'fetch') return await ctx.artifacts.fetch({ workflow: 'build', name: 'results' }, 'got')
   if (mode === 'missing') return await ctx.artifacts.fetch({ workflow: 'build', name: 'nothing' }, 'got')
+  if (mode === 'hold') {
+    console.log('holding')
+    await ctx.waitUntil(() => existsSync('done'), { timeout: '30s', interval: '1s' })
+    return null
+  }
   return null
 }
 `
@@ -1487,6 +1492,65 @@ describe('Artifacts and publication', function () {
     )
     const elsewhere = await run('fetch', 'other')
     assert.equal(elsewhere.status, 'failed')
+    // A download continuing after a dropped link names its offset; the
+    // master passes it on and the host answers the rest with 206.
+    const created = await c.api('POST', '/api/v2/runs', {
+      project: 'ship',
+      branch: 'master',
+      params: { mode: 'hold' },
+    })
+    const id = created.json.id as string
+    // Past its checkout, which would clean away the file that ends it.
+    await c.until(
+      () => (c.master.master!.scheduler.logs(id) ?? '').includes('holding'),
+      30_000,
+      'the stage holding',
+    )
+    const row = db()
+      .prepare('SELECT token,attempt FROM job_stages WHERE job_id=? AND name=?')
+      .get(id, 'ship') as Json
+    const project = db()
+      .prepare("SELECT id FROM projects WHERE slug='ship'")
+      .get() as Json
+    const found = c.master.master!.artifacts.query(Number(project.id), {
+      workflow: 'build',
+      name: 'results',
+    })
+    const link = c.workers.get('w')!.links!.current()!
+    const read = async (
+      offset?: number,
+    ): Promise<{ status: number; body: Buffer }> => {
+      const stream = link.openStream('artifacts.download', {
+        key: `${id}/ship/${Number(row.attempt)}`,
+        token: row.token,
+        grant: found.grant,
+        ...(offset == null ? {} : { offset }),
+      })
+      stream.end()
+      const all = await stream.collect()
+      const newline = all.indexOf(0x0a)
+      return {
+        status: Number(JSON.parse(all.subarray(0, newline).toString()).status),
+        body: all.subarray(newline + 1),
+      }
+    }
+    const whole = await read()
+    assert.equal(whole.status, 200)
+    assert.equal(whole.body.length, found.size)
+    const rest = await read(10)
+    assert.equal(rest.status, 206)
+    assert.deepEqual(rest.body, whole.body.subarray(10))
+    // An offset past the object is the whole object again.
+    assert.deepEqual(await read(found.size), whole)
+    writeFileSync(
+      path.join(c.workers.get('w')!.dir, 'checkouts', '0', 'ship', 'done'),
+      '',
+    )
+    const held = await c.until(() => {
+      const value = c.master.master!.run(id) as Json
+      return value.status === 'running' ? undefined : value
+    }, 60_000)
+    assert.equal(held.status, 'succeeded', c.master.master!.scheduler.logs(id))
     // A stored file that no longer matches fails the fetch.
     const stored = host
       .host!.cache.db.prepare(

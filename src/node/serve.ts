@@ -130,6 +130,7 @@ export interface NodeOptions {
     | 'applePollMs'
     | 'helperWatchMs'
     | 'home'
+    | 'reconnectGraceMs'
   >
 }
 

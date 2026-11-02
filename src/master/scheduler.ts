@@ -2851,11 +2851,19 @@ export class Scheduler {
       } else {
         const grant = text('grant')
         if (grant == null) throw new Error('A download needs its grant')
+        // A worker continuing after its link dropped asks for the rest; a host
+        // that predates offsets answers the whole object with 200.
+        const offset = fields.offset
         request = {
           method: 'GET',
           path: '/api/artifacts/download',
           headers: {},
-          query: { grant },
+          query: {
+            grant,
+            ...(Number.isSafeInteger(offset) && Number(offset) > 0
+              ? { offset: String(offset) }
+              : {}),
+          },
         }
       }
     } catch (error) {
@@ -3002,6 +3010,20 @@ export class Scheduler {
             if (Date.now() > deadline) return { pending: true }
             await new Promise((resolve) => setTimeout(resolve, 250))
           }
+        },
+        /** A stash's size and digest, so a worker can resume it after a dropped link and check it. */
+        'stash.stat': async (
+          params,
+          link,
+        ): Promise<{ size: number; sha256: string }> => {
+          const { job } = this.authorize(params, link)
+          const held = await this.options.stashes.stat(
+            String(job.id),
+            (params as { name?: unknown }).name,
+          )
+          if (held == null)
+            throw new LinkError('No such stash in this run', 'failed')
+          return held
         },
         /**
          * The Masonfile at the run's commit, for a stage with no checkout:
@@ -3315,9 +3337,15 @@ export class Scheduler {
         'stash.get': async (stream, params, link): Promise<void> => {
           try {
             const { job } = this.authorize(params, link)
+            const { name, offset } = params as {
+              name?: unknown
+              offset?: unknown
+            }
+            // A worker continuing after its link dropped names where it got to.
             const file = this.options.stashes.open(
               String(job.id),
-              (params as { name?: unknown }).name,
+              name,
+              offset == null ? 0 : Number(offset),
             )
             if (file == null) throw new Error('No such stash in this run')
             for await (const chunk of file) await stream.write(chunk as Buffer)

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import {
   createReadStream,
   createWriteStream,
+  existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -76,6 +77,9 @@ const ticket = (context: ArtifactContext): { key: string; token: string } => ({
  * when the request succeeded and `into` is given, else parsed as JSON. The
  * master answers every refusal with a status, so a stream that ends without
  * one, or is aborted, is the link: it is tried again once the master is back.
+ * A download into `into` continues from the bytes already there: a 206
+ * answer is the rest, and is reported as 200 once the file is whole; a 200
+ * (from a master or host that predates offsets) is the whole file again.
  * A 503, the master with no host to relay to, is tried again shortly.
  */
 async function exchange(
@@ -84,9 +88,15 @@ async function exchange(
   params: Record<string, unknown>,
   options: { file?: string; into?: string } = {},
 ): Promise<{ status: number; body: Record<string, unknown> }> {
+  let offset = 0
   for (;;) {
     try {
-      const answer = await exchangeOnce(context, method, params, options)
+      const answer = await exchangeOnce(
+        context,
+        method,
+        offset > 0 ? { ...params, offset } : params,
+        options,
+      )
       // 503: the master has no host to relay to right now.
       if (answer.status !== 503) return answer
       context.log(
@@ -95,7 +105,13 @@ async function exchange(
       await new Promise((resolve) => setTimeout(resolve, 2000))
     } catch (error) {
       if (!(error instanceof LinkError && error.code === 'closed')) throw error
-      context.log(`The master is unreachable; waiting to send ${method}\n`)
+      offset =
+        options.into != null && existsSync(options.into)
+          ? statSync(options.into).size
+          : 0
+      context.log(
+        `The master is unreachable; waiting to ${offset > 0 ? `resume ${method} at byte ${offset}` : `send ${method}`}\n`,
+      )
       await context.connected()
       await new Promise((resolve) => setTimeout(resolve, 1000))
     }
@@ -142,8 +158,13 @@ async function exchangeOnce(
           return
         }
         chunk = pending.subarray(newline + 1)
-        if (options.into != null && status === 200)
-          sink = createWriteStream(options.into, { mode: 0o600 })
+        // A 206 is the rest of the file asked for by offset.
+        if (options.into != null && (status === 200 || status === 206))
+          sink = createWriteStream(options.into, {
+            mode: 0o600,
+            flags: status === 206 ? 'a' : 'w',
+          })
+        if (status === 206) status = 200
       }
       if (sink != null) sink.write(chunk)
       else chunks.push(chunk)
@@ -172,8 +193,9 @@ async function exchangeOnce(
       }
     })
     stream.once('abort', (reason: string) => {
-      sink?.destroy()
-      reject(new LinkError(reason, 'closed'))
+      // What arrived stays, for a download that continues from it.
+      if (sink == null) reject(new LinkError(reason, 'closed'))
+      else sink.end(() => reject(new LinkError(reason, 'closed')))
     })
   })
   // A refusal can come before the file is sent; it is read below. The
