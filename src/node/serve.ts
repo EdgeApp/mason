@@ -350,6 +350,7 @@ export async function startNode(
               : { redialBaseMs: options.redialBaseMs }),
             onConfigured: (): void => clearSetupCode(dir),
             testEndpoints: options.testEndpoints === true,
+            linkLog: log,
             ...options.masterOptions,
             scratch: privateScratch(dir),
             dir,
@@ -558,6 +559,7 @@ export async function startNode(
           log(`Paired with master ${fingerprint}`)
           worker?.trustMaster()
         },
+        log,
         onRemoved: () =>
           log('Removed by its master; start with --new-key to pair it again.'),
         onUpdate: (version) => {

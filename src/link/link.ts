@@ -12,7 +12,7 @@ export const MAX_CHUNK = 256 * 1024
 
 export type Role = 'master' | 'worker' | 'host'
 
-/** Codes a link closes with; the reason is always empty. */
+/** Codes a link closes with; the WebSocket reason is always empty. */
 export const CLOSE = {
   normal: 1000,
   protocol: 4000,
@@ -20,6 +20,33 @@ export const CLOSE = {
   replaced: 4002,
   removed: 4003,
   heartbeat: 4004,
+}
+
+/** Beats with nothing at all heard from the peer before the heartbeat closes a link. */
+export const HEARTBEAT_MISSES = 3
+
+/** What a close code means, for the log. */
+export function closeCodeName(code: number | undefined): string {
+  switch (code) {
+    case CLOSE.normal:
+      return 'shutdown'
+    case CLOSE.protocol:
+      return 'protocol violation'
+    case CLOSE.refused:
+      return 'refused'
+    case CLOSE.replaced:
+      return 'replaced by a newer link'
+    case CLOSE.removed:
+      return 'node removed'
+    case CLOSE.heartbeat:
+      return 'heartbeat: nothing heard'
+    case undefined:
+    case 1005:
+    case 1006:
+      return 'connection lost'
+    default:
+      return `code ${code}`
+  }
 }
 
 export class LinkError extends Error {
@@ -203,8 +230,12 @@ export interface LinkOptions {
   /** Who opened the transport; the master always does. */
   dialer: boolean
   methods: MethodTable
-  /** Heartbeat interval; a missing reply by the next beat closes the link. */
+  /**
+   * Heartbeat interval. Any frame from the peer is life; the link closes
+   * only when nothing at all arrived for `heartbeatMisses` beats in a row.
+   */
   heartbeatMs?: number
+  heartbeatMisses?: number
   requestTimeoutMs?: number
   /** Facts learned in the handshake. */
   peer?: { fingerprint: string; version: string; hostname?: string }
@@ -229,8 +260,13 @@ export class Link extends EventEmitter {
   private seen = new Set<number>()
   private streams = new Map<number, Stream>()
   private heartbeat: NodeJS.Timeout | undefined
-  private awaitingPong = false
+  /** Whether anything arrived since the last beat. */
+  private heard = false
+  /** Beats in a row with nothing heard. */
+  private silentBeats = 0
   closed = false
+  /** Why the link closed: by this side with a code, or by the peer or the network. */
+  closeReason: string | undefined
   readonly localRole: Role
   readonly peerRole: Role
   readonly peer: LinkOptions['peer']
@@ -245,18 +281,29 @@ export class Link extends EventEmitter {
     // Each side numbers its requests and streams in its own parity.
     this.nextId = options.dialer ? 1 : 2
     this.nextStream = options.dialer ? 1 : 2
-    wire.onClose(() => this.shutdown())
+    wire.onClose(() => {
+      this.closeReason ??= `peer closed: ${closeCodeName(wire.closeCode)}`
+      this.shutdown()
+    })
     wire.onPong(() => {
-      this.awaitingPong = false
+      this.heard = true
     })
     const beat = options.heartbeatMs ?? 15000
+    const misses = options.heartbeatMisses ?? HEARTBEAT_MISSES
     if (wire.ping != null && beat > 0) {
+      // A pong waits behind data already on the socket, so on a slow path
+      // carrying a large transfer it may come late; the data is life too.
       this.heartbeat = setInterval(() => {
-        if (this.awaitingPong) {
+        this.silentBeats = this.heard ? 0 : this.silentBeats + 1
+        this.heard = false
+        if (this.silentBeats >= misses) {
+          // The last frame came between `misses` and `misses + 1` beats ago.
+          const time = (ms: number): string =>
+            ms >= 10_000 ? `${Math.round(ms / 1000)} s` : `${ms} ms`
+          this.closeReason = `heartbeat: nothing heard for ${misses} beats of ${time(beat)}`
           this.close(CLOSE.heartbeat)
           return
         }
-        this.awaitingPong = true
         wire.ping!()
       }, beat)
       this.heartbeat.unref()
@@ -328,6 +375,7 @@ export class Link extends EventEmitter {
 
   close(code = CLOSE.normal): void {
     if (this.closed) return
+    this.closeReason ??= closeCodeName(code)
     this.wire.close(code)
     this.shutdown()
   }
@@ -355,6 +403,7 @@ export class Link extends EventEmitter {
 
   private receive(data: Frame): void {
     if (this.closed) return
+    this.heard = true
     if (typeof data !== 'string') {
       if (data.length < 4 || data.length > MAX_CHUNK + 4)
         return this.violation()
