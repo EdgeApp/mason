@@ -481,6 +481,55 @@ describe('Devices across nodes', function () {
     )
   })
 
+  it('U15.9 a device of a class no app here runs on (an Apple TV for an iOS-only project) is not registered and queues nothing', async () => {
+    const master = c.master.master!
+    const jobs = (): number =>
+      Number(
+        (
+          db()
+            .prepare(
+              "SELECT COUNT(*) n FROM jobs WHERE trigger='deviceRegistered'",
+            )
+            .get() as Json
+        ).n,
+      )
+    db().prepare("DELETE FROM jobs WHERE trigger='deviceRegistered'").run()
+    const udidTv = 'A'.repeat(39) + '9'
+    master.hosts.deliver(
+      {
+        id: 'device-tv-1',
+        kind: 'device',
+        payload: {
+          udid: udidTv,
+          product: 'AppleTV11,1',
+          model: 'Apple TV 4K',
+          osVersion: '26.0',
+          accountId: tester.id,
+          name: 'Living Room',
+        },
+      },
+      c.fingerprint('host'),
+    )
+    await master.provisioning.poke()
+    const tv = db()
+      .prepare('SELECT status,message FROM devices WHERE udid=?')
+      .get(udidTv) as Json
+    assert.equal(tv.status, 'error')
+    assert.match(
+      tv.message,
+      /No Apple team with an App Store Connect key signs an app for this device \(AppleTV11,1\)/,
+    )
+    assert(
+      !apple.calls.some(
+        (call) =>
+          call.path === '/v1/devices' &&
+          call.method === 'POST' &&
+          call.body!.data.attributes.udid === udidTv,
+      ),
+    )
+    assert.equal(jobs(), 0)
+  })
+
   it('U15.4/U15.1 prepare-for-device on the host makes a job pinned to the build’s branch and commit; renames and removals go to the master', async () => {
     const master = c.master.master!
     const appId = Number(

@@ -383,7 +383,7 @@ describe('Apple on the master', function () {
     apple.devices.push({
       type: 'devices',
       id: 'DEVICE1',
-      attributes: { status: 'ENABLED', platform: 'IOS' },
+      attributes: { status: 'ENABLED', platform: 'IOS', deviceClass: 'IPHONE' },
     })
     const posts = (): number =>
       apple.calls.filter(
@@ -417,7 +417,7 @@ describe('Apple on the master', function () {
     apple.devices.push({
       type: 'devices',
       id: 'DEVICE2',
-      attributes: { status: 'ENABLED', platform: 'IOS' },
+      attributes: { status: 'ENABLED', platform: 'IOS', deviceClass: 'IPAD' },
     })
     const appStore = await ensure('appStore')
     clock += 61 * 60_000
@@ -499,6 +499,134 @@ describe('Apple on the master', function () {
       }),
       /no usable distribution certificate|no App Store Connect key/,
     )
+  })
+
+  it('U14.12 iOS profiles carry iPhones, iPads, iPods, watches and Vision Pros but no Apple TV; devices of no profiled class are logged once', async () => {
+    const lines: string[] = []
+    const logged = new AppleService(database, {
+      setting: (): SettingValue | undefined => settings.value('apple'),
+      testEndpoints: true,
+      sleep: instant,
+      scratch: root('apple-classes-'),
+      log: (line): void => {
+        lines.push(line)
+      },
+    })
+    await logged.certificates.sync(TEAM)
+    const before = apple.devices.splice(0)
+    const device = (
+      id: string,
+      deviceClass: string | undefined,
+      name: string,
+    ): void => {
+      apple.devices.push({
+        type: 'devices',
+        id,
+        attributes: {
+          status: 'ENABLED',
+          platform: 'IOS',
+          ...(deviceClass == null ? {} : { deviceClass }),
+          name,
+        },
+      })
+    }
+    device('PHONE1', 'IPHONE', 'Phone one')
+    device('PHONE2', 'IPHONE', 'Phone two')
+    device('PAD1', 'IPAD', 'Pad')
+    device('POD1', 'IPOD', 'Pod')
+    device('TV1', 'APPLE_TV', 'Living Room')
+    device('TV2', 'APPLE_TV', 'Den')
+    device('WATCH1', 'APPLE_WATCH', 'Wrist')
+    device('VISION1', 'APPLE_VISION_PRO', 'Goggles')
+    device('ODD1', undefined, 'Mystery')
+    try {
+      // A list cached before device classes were kept, with an Apple TV in it, is not used.
+      database.db
+        .prepare('DELETE FROM apple_cache WHERE key=?')
+        .run(`devices2:${TEAM}:ios`)
+      database.db
+        .prepare(
+          'INSERT INTO apple_cache(key,value,fetched_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,fetched_at=excluded.fetched_at',
+        )
+        .run(`devices:${TEAM}:ios`, JSON.stringify(['PHONE1', 'TV1']), clock)
+      const made = await logged.profiles.ensure({
+        team: TEAM,
+        bundleId: 'app.example.classes',
+        distribution: 'adHoc',
+        platform: 'ios',
+      })
+      const post = apple.calls
+        .filter(
+          (call) => call.path === '/v1/profiles' && call.method === 'POST',
+        )
+        .at(-1)!
+      assert.equal(post.body!.data.attributes.profileType, 'IOS_APP_ADHOC')
+      assert.deepEqual(
+        (
+          post.body!.data.relationships.devices.data as Array<{ id: string }>
+        ).map((entry) => entry.id),
+        ['PAD1', 'PHONE1', 'PHONE2', 'POD1', 'VISION1', 'WATCH1'],
+      )
+      assert.equal(
+        [...apple.profiles.values()].find(
+          (item) => item.attributes.uuid === made.uuid,
+        )?.attributes.profileType,
+        'IOS_APP_ADHOC',
+      )
+      assert.equal(
+        database.db
+          .prepare('SELECT 1 FROM apple_cache WHERE key=?')
+          .get(`devices:${TEAM}:ios`),
+        undefined,
+      )
+      assert.deepEqual(lines, [
+        `Left 1 device of no class and 2 Apple TVs off iOS profiles for team ${TEAM}: Den, Living Room, Mystery`,
+      ])
+      // The same devices left out again are not logged again; a change is.
+      await logged.profiles.devices(TEAM, 'ios', true)
+      assert.equal(lines.length, 1)
+      device('ODD2', 'APPLE_TOASTER', 'Toaster')
+      await logged.profiles.devices(TEAM, 'ios', true)
+      assert.equal(lines.length, 2)
+      assert.match(
+        lines[1]!,
+        /^Left 1 device of no class, 1 APPLE_TOASTER device and/,
+      )
+      apple.devices.splice(4)
+      await logged.profiles.devices(TEAM, 'ios', true)
+      assert.equal(lines.length, 2)
+      // Apple refuses an Apple TV on an iOS ad hoc profile, as Mason once sent it.
+      const certificate = logged.certificates.current(TEAM, 'distribution')!
+      device('TV4', 'APPLE_TV', 'Office')
+      await assert.rejects(
+        new AppStoreConnect(key, { bases: apple.endpoints }).request(
+          'POST',
+          '/v1/profiles',
+          {
+            data: {
+              type: 'profiles',
+              attributes: { name: 'by hand', profileType: 'IOS_APP_ADHOC' },
+              relationships: {
+                bundleId: { data: { type: 'bundleIds', id: 'x' } },
+                certificates: {
+                  data: [{ type: 'certificates', id: certificate.appleId }],
+                },
+                devices: {
+                  data: [
+                    { type: 'devices', id: 'PHONE1' },
+                    { type: 'devices', id: 'TV4' },
+                  ],
+                },
+              },
+            },
+          },
+        ),
+        (error: AppleApiError) =>
+          error.status === 409 && /TV4 are not valid/.test(error.message),
+      )
+    } finally {
+      apple.devices.splice(0, apple.devices.length, ...before)
+    }
   })
 
   /** The worker's side of TestFlight and notarization, calling the master's handlers directly. */

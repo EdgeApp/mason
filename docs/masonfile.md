@@ -1255,6 +1255,14 @@ distribution, and creates or regenerates one when:
   (devices registered on the host are added to Apple's device list
   automatically, as today).
 
+A development or ad hoc profile carries the enabled devices of its
+platform's device classes only: for iOS iPhones, iPads, iPods, Apple Watches
+(a watch app is signed with its iPhone app's profile) and Apple Vision Pros;
+for macOS Macs. Apple lists Apple TVs under its `IOS` platform too but
+refuses them on an iOS profile, so they are left out. A device of a class
+no platform's profiles carry is logged by the master, once each time that
+set changes.
+
 Bundle IDs missing from the Apple account are created (Fastlane `produce`);
 their capabilities (push, App Groups, iCloud, …) are taken from the
 entitlements of the previous successful archive and kept in sync, so a new
@@ -1272,13 +1280,15 @@ Every bundle ID — the app and each extension — has its own profile.
 
 **When a device is registered** on the host:
 
-1. The master registers the UDID with Apple unless Apple already has it, and
-   shows the device as processing until Apple enables it.
+1. The master registers the UDID with Apple, in each team that signs an app
+   for its device class, unless Apple already has it, and shows the device as
+   processing until Apple enables it.
 2. It immediately replaces the **development** and **ad hoc** profiles of
    every bundle ID of every iOS app ID, with the full list of enabled devices.
    App Store and Developer ID profiles contain no devices and are untouched.
-3. It queues iOS builds, because existing builds cannot install on the new
-   device: of each project's automatic branches whose `build` workflow has a
+3. It queues builds, because existing builds cannot install on the new
+   device: of the automatic branches of each project with an app for the
+   device's class whose `build` workflow has a
    `deviceRegistered` trigger, as the branch's last push setup recorded it,
    at its last seen commit and at most 20 per project (the default branch,
    then branches exact rules name, then the most recently set up), and of

@@ -156,6 +156,7 @@ export class AppleService {
       ) => Promise<void>
       scratch?: string
       sleep?: (ms: number) => Promise<void>
+      log?: (line: string) => void
     },
   ) {
     const connect = (team: string): AppStoreConnect | undefined =>
@@ -170,6 +171,7 @@ export class AppleService {
     this.profiles = new Profiles(master, {
       connect,
       certificates: this.certificates,
+      ...(options.log == null ? {} : { log: options.log }),
     })
     this.testflight = new TestFlight(master, connect)
     this.notary = new Notary(

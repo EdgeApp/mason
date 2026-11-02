@@ -419,10 +419,15 @@ export class FakeAppleConnect {
         this.failDevices--
         return { status: 500, json: { errors: [{ title: 'Apple is busy' }] } }
       }
+      // Apple tells the class from the UDID; registrations here are iPhones.
       const item = {
         type: 'devices',
         id: this.id('DEVICE'),
-        attributes: { ...data!.attributes, status: 'ENABLED' },
+        attributes: {
+          ...data!.attributes,
+          status: 'ENABLED',
+          deviceClass: 'IPHONE',
+        },
       }
       this.devices.push(item)
       return { status: 201, json: { data: item } }
@@ -446,6 +451,36 @@ export class FakeAppleConnect {
       }
     }
     if (p === '/v1/profiles' && method === 'POST') {
+      // Apple refuses a device of another class, though it lists it under the platform.
+      const type = String(data!.attributes.profileType)
+      const classes = type.startsWith('IOS_')
+        ? ['IPHONE', 'IPAD', 'IPOD', 'APPLE_WATCH', 'APPLE_VISION_PRO']
+        : type.startsWith('TVOS_')
+          ? ['APPLE_TV']
+          : ['MAC']
+      const refused = (
+        (data!.relationships.devices?.data ?? []) as Array<{ id: string }>
+      )
+        .map((entry) => this.devices.find((device) => device.id === entry.id))
+        .filter(
+          (device) =>
+            device != null &&
+            !classes.includes(String(device.attributes.deviceClass)),
+        )
+      if (refused.length !== 0)
+        return {
+          status: 409,
+          json: {
+            errors: [
+              {
+                status: '409',
+                code: 'ENTITY_ERROR.RELATIONSHIP.INVALID',
+                title: 'There is a problem with the request entity',
+                detail: `Devices ${refused.map((device) => device!.id).join(', ')} are not valid for profile type ${type}`,
+              },
+            ],
+          },
+        }
       const id = this.id('PROFILE')
       const uuid = randomUUID().toUpperCase()
       const item = {

@@ -373,6 +373,7 @@ export class Master {
       scratch: options.scratch ?? path.join(dir, 'scratch'),
       ...(options.appleFetch == null ? {} : { fetch: options.appleFetch }),
       ...(options.appleSleep == null ? {} : { sleep: options.appleSleep }),
+      log: (line): void => (this.options.log ?? console.log)(line),
       clone: async (repository, branch, into): Promise<void> => {
         const access = /github\.com/.test(repository)
           ? await this.github
