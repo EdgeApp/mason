@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import type { MasterDatabase } from './database.js'
 import { listHeads, type GitHub } from './github.js'
-import type { Jobs } from './jobs.js'
 import type { Project, Projects } from './projects.js'
+import type { Pushes } from './pushes.js'
 import { isGlob, ruleFor } from './rules.js'
 
 export const POLL_MS = 5 * 60 * 1000
@@ -30,8 +30,8 @@ export function gitHeadLister(github: GitHub, scratchRoot: string): HeadLister {
 }
 
 /**
- * Polls every enabled project and queues a job for each new commit on a
- * branch whose first matching rule is `automatic`. Exact rules come first,
+ * Polls every enabled project and passes each new commit on a branch whose
+ * first matching rule is `automatic` to the master's push decision. Exact rules come first,
  * then branches matching glob rules in name order, up to
  * `MAX_AUTOMATIC_BRANCHES` per project. Deleted branches simply stop
  * appearing; pull requests from forks are not branches of the repository.
@@ -44,7 +44,7 @@ export class Poller {
   constructor(
     private readonly master: MasterDatabase,
     private readonly projects: Projects,
-    private readonly jobs: Jobs,
+    private readonly pushes: Pick<Pushes, 'later'>,
     private readonly lister: HeadLister,
   ) {}
 
@@ -102,6 +102,16 @@ export class Poller {
   }
 
   private async run(): Promise<void> {
+    // Each push is decided on its own, so one slow repository holds up no other.
+    const decisions: Array<Promise<unknown>> = []
+    try {
+      await this.list(decisions)
+    } finally {
+      await Promise.allSettled(decisions)
+    }
+  }
+
+  private async list(decisions: Array<Promise<unknown>>): Promise<void> {
     for (const project of this.projects.list()) {
       if (this.closed) return
       if (
@@ -122,7 +132,7 @@ export class Poller {
       for (const branch of Poller.automaticBranches(project, heads)) {
         const commit = heads.get(branch)!
         this.record(project, branch, commit)
-        this.jobs.automatic(project, branch, commit)
+        decisions.push(this.pushes.later(project, branch, commit))
       }
     }
   }

@@ -118,16 +118,40 @@ export function catalogRoutes(
       const home = `<a href="/${query}">Apps</a>`,
         appPath = `/apps/${app.id}`
       if (req.params.branchKey == null) {
-        const rows = branches(store.builds(app.id))
+        const all = store.builds(app.id)
+        const rows = branches(all)
           .map(
             (branch) =>
               `<a class="list-row" href="${appPath}/branches/${branchKey(branch.name)}${query}"><div><strong>${escape(branch.name)}</strong><small>Last built ${time(branch.time)}</small></div><span aria-hidden="true">→</span></a>`,
           )
           .join('')
+        // With no build for the chosen platform on any branch, the platforms that have one.
+        const others = (Object.keys(labels) as Platform[])
+          .map((value) => ({
+            value,
+            latest: Math.max(
+              0,
+              ...all
+                .filter((build) => build.platform === value)
+                .map((build) => build.published_at),
+            ),
+          }))
+          .filter((entry) => entry.latest > 0)
+          .map(
+            (entry) =>
+              `<a class="list-row" data-platform="${entry.value}" href="${appPath}?platform=${entry.value}"><div><strong>${labels[entry.value]}</strong><small>Last built ${time(entry.latest)}</small></div><span aria-hidden="true">→</span></a>`,
+          )
+          .join('')
         res.send(
           page(
             app.name,
-            `<p class="breadcrumbs">${home}</p><p class="intro">Branches · ${labels[chosen]}</p><div class="build-list">${rows || '<section class="card"><p>No retained builds yet.</p></section>'}</div>`,
+            `<p class="breadcrumbs">${home}</p><p class="intro">Branches · ${labels[chosen]}</p><div class="build-list">${
+              rows === ''
+                ? '<section class="card"><p>No retained builds yet.</p></section>'
+                : all.some((build) => build.platform === chosen)
+                  ? rows
+                  : `<section class="card"><p>There are currently no builds for ${labels[chosen]}. Select one of these other platforms:</p></section>${others}`
+            }</div>`,
             nav,
             true,
           ),

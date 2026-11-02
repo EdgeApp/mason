@@ -321,15 +321,17 @@ describe('Host cache schema', () => {
             .prepare("SELECT value FROM host_meta WHERE key='host_schema'")
             .get() as { value: string }
         ).value,
-        '6',
+        '7',
       )
-      // Schema 6: who requested each run, as the master names them.
-      assert(
-        db
-          .prepare('PRAGMA table_info(jobs)')
-          .all()
-          .some((column) => column.name === 'requested_by'),
-      )
+      // Schema 6: who requested each run, as the master names them; 7: the build number it reserved.
+      for (const name of ['requested_by', 'build_number'])
+        assert(
+          db
+            .prepare('PRAGMA table_info(jobs)')
+            .all()
+            .some((column) => column.name === name),
+          name,
+        )
       assert.deepEqual(
         db
           .prepare('PRAGMA table_info(job_steps)')
@@ -720,6 +722,30 @@ describe('Host cache, sign-in and offline serving', function () {
       await (await developer.get('/projects/edge')).text(),
       /Recent runs/,
     )
+    // Each recent run opens its run's page on the host.
+    const master = c.master.master!.database
+    master.db
+      .prepare(
+        "INSERT INTO jobs(id,project_id,workflow,number,branch,trigger,status,created,request) VALUES('m4-run',?,'build',4242,'develop','request','succeeded',?,'{}')",
+      )
+      .run(c.master.master!.projects.get('edge').id, master.now())
+    master.change('job', 'm4-run')
+    await c.until(
+      () =>
+        runtime()
+          .cache.db.prepare("SELECT 1 FROM jobs WHERE id='m4-run'")
+          .get(),
+      10000,
+      'the run on the host',
+    )
+    const home = await (await developer.get('/projects/edge')).text()
+    assert.match(
+      home,
+      /<a class="list-row" href="\/runs\/m4-run"><div><strong>Run 4242<\/strong><small>develop · /,
+    )
+    assert.equal((await developer.get('/runs/m4-run')).status, 200)
+    master.db.prepare("DELETE FROM jobs WHERE id='m4-run'").run()
+    master.change('job', 'm4-run', 'delete')
   })
 
   it('U10.10 a permission-version change ends that account’s host sessions', async () => {
@@ -990,7 +1016,7 @@ describe('Host cache, sign-in and offline serving', function () {
     }
   })
 
-  it('U10.12 relays a signed push to the master, which verifies it and schedules it under the branch rules', async () => {
+  it('U10.12 relays a signed push to the master, which verifies it, answers, then decides it under the branch rules', async () => {
     const jobs = (): Json[] =>
       c.master
         .master!.database.db.prepare(
@@ -998,9 +1024,25 @@ describe('Host cache, sign-in and offline serving', function () {
         )
         .all() as Json[]
     assert.equal((await deliver('ping', { zen: 'hi' })).status, 202)
-    const scheduled = await deliver('push', push('develop', 'e'.repeat(40)))
+    // The master answers before it decides the push, which may wait on a fetch.
+    const pushes = c.master.master!.pushes
+    const schedule = pushes.schedule.bind(pushes)
+    let release: () => void = () => undefined
+    pushes.schedule = async (...args): ReturnType<typeof schedule> => {
+      await new Promise<void>((resolve) => (release = resolve))
+      return await schedule(...args)
+    }
+    let scheduled: Response
+    try {
+      scheduled = await deliver('push', push('develop', 'e'.repeat(40)))
+      assert.equal(jobs().length, 0)
+    } finally {
+      pushes.schedule = schedule
+      release()
+    }
     assert.equal(scheduled.status, 202)
-    assert.equal(((await scheduled.json()) as Json).status, 'scheduled')
+    assert.equal(((await scheduled.json()) as Json).status, 'accepted')
+    await c.until(() => jobs().length === 1, 10000, 'the push decided')
     assert.deepEqual(
       jobs().map((row) => row.requested_commit),
       ['e'.repeat(40)],
@@ -1090,6 +1132,16 @@ describe('Host cache, sign-in and offline serving', function () {
       () => runtime().webhooks.queued().length === 0,
       10000,
       'the deliveries forwarded',
+    )
+    await c.until(
+      () =>
+        db
+          .prepare(
+            "SELECT 1 FROM jobs WHERE trigger='push' AND status<>'cancelled'",
+          )
+          .get(),
+      10000,
+      'the forwarded push decided',
     )
     const develop = db
       .prepare(

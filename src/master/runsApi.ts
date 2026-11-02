@@ -102,6 +102,12 @@ function buildSettings(master: Master, slug: string): Record<string, unknown> {
         ? {}
         : { observedCommit: String(row.observed_commit) }),
       ...(row.poll_error == null ? {} : { pollError: String(row.poll_error) }),
+      ...(row.skipped_commit == null
+        ? {}
+        : {
+            skippedCommit: String(row.skipped_commit),
+            skippedReason: String(row.skipped_reason),
+          }),
       attempts: 0,
     }))
   return {

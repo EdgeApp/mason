@@ -1,5 +1,10 @@
 import { bytes, platformChip, statusDot } from './dashboard.js'
-import { ago, escape } from './html.js'
+import { ago, escape, localTime } from './html.js'
+import {
+  projectRunsTable,
+  type BranchItem,
+  type ProjectRunRow,
+} from './artifacts.js'
 import { icon } from './icons.js'
 import { spacesRegions } from '../master/cloud/regions.js'
 import { SETUP_LABEL } from '../pipeline/graph.js'
@@ -1768,16 +1773,46 @@ function buildNumbersPanel(data: {
   }${form}</section>`
 }
 
-/** A project's Runs and builds tab: its latest runs, each with its published builds and saved artifacts. */
+/**
+ * A project's Runs and builds tab in two columns: its branches, All
+ * branches first, then those its push trigger builds, then the rest by
+ * their latest run; and the selected branch's runs.
+ */
 export function projectRunsView(
-  data: { slug: string; name: string; branch?: string },
-  runs: string,
+  data: {
+    slug: string
+    name: string
+    branch?: string
+    branches: BranchItem[]
+    runs: ProjectRunRow[]
+  },
+  now: number,
 ): string {
-  return `${head(`${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch, with the builds each published.' : `The latest runs on ${data.branch}, with the builds each published.`, [data.name, 'Runs and builds'])}${projectTabs(data.slug, 'runs')}${
-    data.branch == null
-      ? ''
-      : `<p><a href="/projects/${encodeURIComponent(data.slug)}/runs">${icon('close')} Every branch</a></p>`
-  }<section class="panel">${runs}</section>`
+  const base = `/projects/${encodeURIComponent(data.slug)}/runs`
+  const item = (
+    label: string,
+    href: string,
+    current: boolean,
+    extra = '',
+  ): string =>
+    `<li><a href="${escape(href)}"${current ? ' aria-current="true"' : ''}>${label}${extra}</a></li>`
+  const pinned = data.branches.filter((entry) => entry.pinned)
+  const others = data.branches.filter((entry) => !entry.pinned)
+  const branch = (entry: BranchItem): string =>
+    item(
+      `<span class="mono">${escape(entry.branch)}</span>`,
+      `${base}?branch=${encodeURIComponent(entry.branch)}`,
+      entry.branch === data.branch,
+      entry.at == null
+        ? '<small>No runs yet</small>'
+        : `<small>${localTime(entry.at, now, 'since')}</small>`,
+    )
+  const list = `<nav class="panel branch-list" aria-label="Branches"><ul class="tree">${item(`<span>${icon('fork_right')} All branches</span>`, base, data.branch == null)}${pinned.map(branch).join('')}${
+    pinned.length > 0 && others.length > 0
+      ? '<li class="divider" role="separator"></li>'
+      : ''
+  }${others.map(branch).join('')}</ul></nav>`
+  return `${head(`${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch.' : `The latest runs on ${data.branch}.`, [data.name, 'Runs and builds'])}${projectTabs(data.slug, 'runs')}<div class="runs-columns">${list}<section class="panel"><h2>${data.branch == null ? 'All branches' : `<span class="mono">${escape(data.branch)}</span>`}</h2>${projectRunsTable(data.runs, now, data.branch == null)}</section></div>`
 }
 
 /** A project on the master: repository, app IDs, branch rules, build numbers, and its tabs. */

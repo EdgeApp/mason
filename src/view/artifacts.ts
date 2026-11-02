@@ -1,8 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { bytes, platformChip, runHref, statusDot } from './dashboard.js'
-import { ago, duration, escape, time } from './html.js'
+import { ago, duration, escape, localTime, runName, time } from './html.js'
 import { icon } from './icons.js'
 import type { Viewer } from './shell.js'
+import { isGlob, matches } from '../master/rules.js'
 
 export interface ArtifactsFilter {
   project?: string
@@ -116,7 +117,7 @@ function runDetail(source: ArtifactsSource, run: RunRow): string {
     run.started == null
       ? ''
       : ` · took ${duration((run.finished ?? source.now) - run.started)}`
-  return `<div class="page-head"><div><div class="breadcrumbs"><a href="/artifacts">Artifacts</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.slug)}">${escape(run.slug)}</a></div><h1>${escape(run.workflow)} #${run.number}</h1><p>${statusDot(run.status)} ${escape(run.status)} · <span class="mono">${escape(run.branch)}</span>${run.commit_sha == null ? '' : ` · <span class="mono">${escape(run.commit_sha.slice(0, 12))}</span>`} · ${time(run.created)}${escape(took)}${run.description == null ? '' : ` · ${escape(run.description)}`}</p></div></div><section class="panel"><h2>${icon('account_tree')}Stages</h2><ul>${stages
+  return `<div class="page-head"><div><div class="breadcrumbs"><a href="/artifacts">Artifacts</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.slug)}">${escape(run.slug)}</a></div><h1>${escape(runName(run.workflow, run.number))}</h1><p>${statusDot(run.status)} ${escape(run.status)} · <span class="mono">${escape(run.branch)}</span>${run.commit_sha == null ? '' : ` · <span class="mono">${escape(run.commit_sha.slice(0, 12))}</span>`} · ${time(run.created)}${escape(took)}${run.description == null ? '' : ` · ${escape(run.description)}`}</p></div></div><section class="panel"><h2>${icon('account_tree')}Stages</h2><ul>${stages
     .map(
       (stage) =>
         `<li><span class="mono">${escape(stage.name)}</span><span class="state-${escape(stage.status)}">${statusDot(stage.status)} ${escape(stage.status)}${stage.started == null ? '' : ` · ${escape(duration((stage.finished ?? source.now) - stage.started))}`}</span></li>`,
@@ -180,8 +181,107 @@ export function runsTable(
       const saved = counts.get(run.id) as { count: number; size: number }
       const builds = runBuilds(source, run)
       const numbers = [...new Set(builds.map((build) => build.build_number))]
-      return `<tr data-run-id="${escape(run.id)}" data-status="${escape(run.status)}"><td><a href="${runHref(run.id)}">${escape(run.slug)} ${escape(run.workflow)} #${run.number}</a></td><td class="mono">${escape(run.branch)}</td><td>${statusDot(run.status)} <span data-status-text>${escape(run.status)}</span></td><td class="mono">${builds.length === 0 ? '—' : `${numbers.map(escape).join(', ')} · ${builds.length} ${builds.length === 1 ? 'file' : 'files'}`}</td><td class="mono">${saved.count === 0 ? '—' : `${saved.count} · ${escape(bytes(saved.size))}`}</td><td>${escape(ago(run.created, source.now))}</td></tr>`
+      return `<tr data-run-id="${escape(run.id)}" data-status="${escape(run.status)}"><td><a href="${runHref(run.id)}">${escape(run.slug)} ${escape(runName(run.workflow, run.number))}</a></td><td class="mono">${escape(run.branch)}</td><td>${statusDot(run.status)} <span data-status-text>${escape(run.status)}</span></td><td class="mono">${builds.length === 0 ? '—' : `${numbers.map(escape).join(', ')} · ${builds.length} ${builds.length === 1 ? 'file' : 'files'}`}</td><td class="mono">${saved.count === 0 ? '—' : `${saved.count} · ${escape(bytes(saved.size))}`}</td><td>${escape(ago(run.created, source.now))}</td></tr>`
     })
+    .join('')}</tbody></table>`
+}
+
+/** A branch in the Runs and builds tab's list; `pinned` ones are those its push trigger builds. */
+export interface BranchItem {
+  branch: string
+  pinned: boolean
+  /** When its latest run was made. */
+  at?: number
+}
+
+/** One run in the Runs and builds tab: its status, the app's version and build number, and when it started. */
+export interface ProjectRunRow {
+  id: string
+  number: number
+  workflow: string
+  branch: string
+  status: string
+  at: number
+  version: string
+  buildNumber: string
+}
+
+/**
+ * A project's branches and runs for its Runs and builds tab. The branches
+ * its build's push trigger names come first, in its order, a glob standing
+ * for the branches with runs it matches; then every other branch with runs,
+ * most recently run first. The runs are the latest 50 of one branch or all,
+ * each with its published version and the app build number it reserved,
+ * else its published ones.
+ */
+export function projectRunsData(
+  source: ArtifactsSource & {
+    /** The app build number a run reserved. */
+    reserved?: (run: string) => string | undefined
+  },
+  project: string,
+  options: { branch?: string; pinned: string[] },
+): { branches: BranchItem[]; runs: ProjectRunRow[] } {
+  const { db } = source
+  const latest = (
+    db
+      .prepare(
+        "SELECT j.branch,MAX(j.created) AS at FROM jobs j JOIN projects p ON p.id=j.project_id WHERE p.slug=? AND j.workflow NOT LIKE '@%' GROUP BY j.branch ORDER BY at DESC,j.branch LIMIT 200",
+      )
+      .all(project) as Array<{ branch: string; at: number }>
+  ).map((row) => ({ branch: row.branch, at: Number(row.at) }))
+  const branches: BranchItem[] = []
+  const add = (branch: string, pinned: boolean, at?: number): void => {
+    if (branches.some((entry) => entry.branch === branch)) return
+    branches.push({ branch, pinned, ...(at == null ? {} : { at }) })
+  }
+  for (const pattern of options.pinned)
+    if (!isGlob(pattern))
+      add(pattern, true, latest.find((entry) => entry.branch === pattern)?.at)
+    else
+      for (const entry of latest)
+        if (matches(pattern, entry.branch)) add(entry.branch, true, entry.at)
+  for (const entry of latest) add(entry.branch, false, entry.at)
+  const runs = (
+    db
+      .prepare(
+        `${runSelect} WHERE p.slug=? AND j.workflow NOT LIKE '@%' AND (? IS NULL OR j.branch=?) ORDER BY j.created DESC LIMIT 50`,
+      )
+      .all(
+        project,
+        options.branch ?? null,
+        options.branch ?? null,
+      ) as unknown as RunRow[]
+  ).map((run) => {
+    const builds = runBuilds(source, run)
+    const versions = [...new Set(builds.map((build) => build.version))]
+    const numbers = [...new Set(builds.map((build) => build.build_number))]
+    return {
+      id: run.id,
+      number: run.number,
+      workflow: run.workflow,
+      branch: run.branch,
+      status: run.status,
+      at: run.started ?? run.created,
+      version: versions.join(', '),
+      buildNumber: source.reserved?.(run.id) ?? numbers.join(', '),
+    }
+  })
+  return { branches, runs }
+}
+
+/** The Runs and builds tab's runs table: status, version, build number and when each started. */
+export function projectRunsTable(
+  rows: ProjectRunRow[],
+  now: number,
+  every: boolean,
+): string {
+  if (rows.length === 0) return '<p class="empty-state">No runs yet.</p>'
+  return `<table class="list runs"><thead><tr><th>Status</th><th>Version</th><th>Build number</th><th>Started</th></tr></thead><tbody>${rows
+    .map(
+      (run) =>
+        `<tr data-run-id="${escape(run.id)}" data-status="${escape(run.status)}"><td><a href="${runHref(run.id)}">${statusDot(run.status)} <span data-status-text>${escape(run.status)}</span></a><small>Run ${run.number}${run.workflow === 'build' ? '' : ` · ${escape(run.workflow)}`}${every ? ` · <span class="mono">${escape(run.branch)}</span>` : ''}</small></td><td class="mono">${run.version === '' ? '—' : escape(run.version)}</td><td class="mono">${run.buildNumber === '' ? '—' : escape(run.buildNumber)}</td><td>${localTime(run.at, now, 'since')}</td></tr>`,
+    )
     .join('')}</tbody></table>`
 }
 

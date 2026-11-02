@@ -75,7 +75,7 @@ const order = [
   'job',
 ]
 
-const HOST_SCHEMA = 6
+const HOST_SCHEMA = 7
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -115,9 +115,15 @@ function migrateHost(db: DatabaseSync): void {
   // Who requested each run, as the master names them; the host has no keys.
   // A run replicated before shows its label until the master next sends it.
   const jobs = db.prepare('PRAGMA table_info(jobs)').all()
-  db.exec(`BEGIN IMMEDIATE;
+  if (current < 6)
+    db.exec(`BEGIN IMMEDIATE;
     ${jobs.some((column) => column.name === 'requested_by') ? '' : 'ALTER TABLE jobs ADD COLUMN requested_by TEXT;'}
     INSERT INTO host_meta(key,value) VALUES('host_schema','6') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  // The app build number each run reserved, which its page leads with.
+  db.exec(`BEGIN IMMEDIATE;
+    ${jobs.some((column) => column.name === 'build_number') ? '' : 'ALTER TABLE jobs ADD COLUMN build_number TEXT;'}
+    INSERT INTO host_meta(key,value) VALUES('host_schema','7') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
 }
 

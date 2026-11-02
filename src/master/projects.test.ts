@@ -29,6 +29,7 @@ import { MasterDatabase } from './database.js'
 import { GitHub, listHeads, storedConnection } from './github.js'
 import { Jobs } from './jobs.js'
 import { MAX_AUTOMATIC_BRANCHES, Poller } from './poller.js'
+import { Pushes } from './pushes.js'
 import { Projects } from './projects.js'
 import { localOperator, type Actor } from './roles.js'
 import { asRules, globExpression, matches, ruleFor } from './rules.js'
@@ -467,10 +468,15 @@ describe('Projects, branch rules and build numbers', function () {
     for (let i = 0; i < 30; i++)
       heads.set(`feature/f${String(i).padStart(2, '0')}`, commit(100 + i))
     let failing = false
-    const poller = new Poller(master, projects, jobs, async () => {
-      if (failing) throw new Error('offline')
-      return heads
-    })
+    const poller = new Poller(
+      master,
+      projects,
+      new Pushes({ master, jobs }),
+      async () => {
+        if (failing) throw new Error('offline')
+        return heads
+      },
+    )
     const branches = Poller.automaticBranches(projects.get('p'), heads)
     assert.equal(branches.length, MAX_AUTOMATIC_BRANCHES)
     assert.equal(branches[0], 'master')

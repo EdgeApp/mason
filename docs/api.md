@@ -1347,7 +1347,10 @@ set a file secret's path variable. A repeated `idempotencyKey` from the same
 caller answers the first job, or 400 when the request differs. A job has the
 run's v1 fields and `stages` (`name`, `status`, `worker`).
 `PUT …/build-settings` takes `{ "defaultBranch", "automaticBranches" }`, at
-most 20 automatic branches, which become `automatic` rules.
+most 20 automatic branches, which become `automatic` rules. In `GET`, a
+branch whose latest push was not built has `skippedCommit` and
+`skippedReason` (`<commit> has no Masonfile`, or `<branch> is not in the
+push trigger's branches`).
 
 ### First-run setup
 
@@ -1372,8 +1375,11 @@ are 404.
 master. GitHub sends pushes there; the host checks the size (1 MiB) and
 rate (60 deliveries a minute per project) and passes the raw body and
 `X-Hub-Signature-256` to the master, which verifies the signature with the
-project's webhook secret and schedules the push. It answers 202 with the
-master's result (`scheduled`, `unchanged`, `ignored` or `ok`); 401 for an
+project's webhook secret. It answers 202 with the master's result:
+`accepted` for a push on an automatic branch, which the master then
+decides (see "Deciding a push" in [docs/masonfile.md](masonfile.md#triggers);
+a push it does not build shows in the build settings below), `ignored`
+for any other branch, or `ok` for a ping; 401 for an
 unsigned delivery, a signature that does not verify, or a project with no
 webhook secret; 404 for an unknown project; 422 for a body that is not JSON
 or is for another repository; and 429 when the rate is exceeded. While the

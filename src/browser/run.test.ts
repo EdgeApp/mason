@@ -7,6 +7,7 @@ import {
   formFields,
   formPath,
   highlight,
+  localTimes,
   logLines,
   nestedBody,
   requestBody,
@@ -874,6 +875,55 @@ describe('Typed form fields', () => {
     }
     return element as unknown as HTMLFormElement
   }
+
+  it('M2 writes times in the viewer’s zone and keeps the relative ones current', async () => {
+    const now = Date.UTC(2026, 10, 2, 22, 35)
+    const time = (at: number, format: string): El => {
+      const node = new El()
+      node.dataset = { at: String(at), format }
+      return node
+    }
+    const recent = time(now - (2 * 3_600_000 + 31 * 60_000), 'since')
+    const old = time(Date.UTC(2026, 10, 1, 22, 35), 'since')
+    const date = time(Date.UTC(2026, 10, 1, 22, 35), 'date')
+    const broken = time(Number.NaN, 'date')
+    const doc = new El().set(
+      'time[data-at][data-format]',
+      recent,
+      old,
+      date,
+      broken,
+    )
+    assert.equal(
+      localTimes(doc as unknown as Document, now, 'America/Los_Angeles'),
+      true,
+    )
+    assert.deepEqual(
+      [recent, old, date, broken].map((node) => node.textContent),
+      ['2:31 ago', '2026-11-01 1435 PT', '2026-11-01 1435 PT', ''],
+    )
+    assert.equal(
+      localTimes(
+        new El().set('time[data-at][data-format]', date) as unknown as Document,
+        now,
+      ),
+      false,
+    )
+    // On a page, relative times are rewritten every 30 seconds.
+    const live = new FakeLiveWindow()
+    start(doc as unknown as Document, {
+      fetch: (async () => reply(200, {})) as typeof fetch,
+      location: {
+        href: '/projects/p/runs',
+        protocol: 'https:',
+        host: 'mason.example',
+        assign: () => undefined,
+      },
+      live,
+    })
+    assert.match(recent.textContent, /^\d+:\d{2} ago$/)
+    assert(live.timers.some((timer) => timer.ms === 30_000))
+  })
 
   it('U1.1 a number field sends a number, and an empty one is left out', () => {
     assert.deepEqual(

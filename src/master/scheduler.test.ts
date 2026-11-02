@@ -1482,6 +1482,259 @@ export async function one(ctx: Stage) { return ctx.run.params.n }
     assert.notEqual(stage(moved, '@setup'), undefined)
   })
 
+  it('M1 decides pushes from the Masonfile’s literal branches with no node, under the master’s rules; a request still builds', async () => {
+    const literal = `
+import type { Setup, Stage } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.workflow('build', { triggers: [{ push: true, branches: ['master', 'release/*'] }, { request: true }] }, (w) => {
+    w.stage('one', { on: 'linux', run: one })
+  })
+  m.workflow('docs', { triggers: [{ push: true, branches: ['docs/**'] }] }, (w) => {
+    w.stage('d', { on: 'linux', run: one })
+  })
+}
+export async function one(ctx: Stage) { return ctx.run.workflow }
+`
+    const first = await project(
+      'pushed',
+      { 'Masonfile.ts': literal },
+      {
+        rules: [
+          { pattern: 'master', mode: 'automatic' },
+          { pattern: 'feature/**', mode: 'automatic' },
+          { pattern: 'release/*', mode: 'automatic' },
+          { pattern: 'docs/**', mode: 'automatic' },
+          { pattern: 'manual/*', mode: 'request' },
+        ],
+      },
+    )
+    // Saving the project polled it: master's head builds.
+    const master = c.master.master!
+    const masterRun = await c.until(
+      () => (master.runs({ project: 'pushed' }) as Json[])[0],
+      10000,
+      'the master push',
+    )
+    assert.equal(masterRun.requested_commit, first)
+    assert.equal((await finished(c, masterRun.id)).status, 'succeeded')
+    const repo = c.repo('fixtures/pushed')
+    const schedule = async (branch: string, commit: string): Promise<Json> =>
+      await master.pushes.schedule(
+        master.projects.get('pushed'),
+        branch,
+        commit,
+      )
+    const setups = (): number =>
+      Number(
+        db()
+          .prepare(
+            "SELECT COUNT(*) n FROM job_stages s JOIN jobs j ON j.id=s.job_id JOIN projects p ON p.id=j.project_id WHERE p.slug='pushed' AND s.name='@setup'",
+          )
+          .get()!.n,
+      )
+    const before = setups()
+    const feature = repo.commit({ 'a.txt': 'a' }, 'feature/x')
+    assert.deepEqual(await schedule('feature/x', feature), {
+      status: 'ignored',
+      reason: "feature/x is not in the push trigger's branches",
+      by: 'source',
+    })
+    // The same head is not read again, and no run or setup was made for it.
+    assert.deepEqual(await schedule('feature/x', feature), {
+      status: 'ignored',
+      reason: "feature/x is not in the push trigger's branches",
+    })
+    assert.equal(
+      master.runs({ project: 'pushed', branch: 'feature/x' }).length,
+      0,
+    )
+    assert.equal(setups(), before)
+    assert.equal(
+      db()
+        .prepare(
+          "SELECT skipped_commit FROM automatic_branches WHERE branch='feature/x'",
+        )
+        .get()!.skipped_commit,
+      feature,
+    )
+    const settings = (await c.api('GET', '/api/apps/pushed/build-settings'))
+      .json
+    assert.deepEqual(
+      settings.branches
+        .filter((entry: Json) => entry.branch === 'feature/x')
+        .map((entry: Json) => [entry.skippedCommit, entry.skippedReason]),
+      [[feature, "feature/x is not in the push trigger's branches"]],
+    )
+    // A commit with no Masonfile builds nothing either.
+    const bare = repo.commit({ 'Masonfile.ts': null }, 'feature/none')
+    repo.git('checkout', '-q', 'master')
+    assert.deepEqual(await schedule('feature/none', bare), {
+      status: 'ignored',
+      reason: `${bare.slice(0, 12)} has no Masonfile`,
+      by: 'none',
+    })
+    // The master's rule is the ceiling: a branch the Masonfile names but no automatic rule allows.
+    assert.deepEqual(await schedule('manual/1', feature), { status: 'ignored' })
+    // A glob of the list, and another workflow's push trigger, build.
+    const release = repo.commit({ 'r.txt': 'r' }, 'release/1')
+    const releasePush = await schedule('release/1', release)
+    assert.equal(releasePush.status, 'scheduled')
+    assert.equal(releasePush.by, 'source')
+    assert.equal((await finished(c, releasePush.job)).status, 'succeeded')
+    const docs = repo.commit({ 'd.txt': 'd' }, 'docs/guide')
+    const docsPush = await schedule('docs/guide', docs)
+    assert.equal(docsPush.status, 'scheduled')
+    const carrier = await finished(c, docsPush.job)
+    assert.equal(carrier.status, 'cancelled')
+    assert.equal(
+      carrier.reason,
+      "Not built: docs/guide is not in the push trigger's branches",
+    )
+    const docsRun = await c.until(
+      () => (master.runs({ project: 'pushed', workflow: 'docs' }) as Json[])[0],
+      30000,
+      'the docs run',
+    )
+    assert.equal((await finished(c, docsRun.id)).status, 'succeeded')
+    // A requested run of a branch the push trigger leaves out builds.
+    const requested = await finished(
+      c,
+      await request('pushed', { branch: 'feature/x' }),
+    )
+    assert.equal(requested.status, 'succeeded')
+    assert.equal(stage(requested, 'one').output, 'build')
+    // A push that arrives while its branch is busy is decided when the run ends.
+    const busy = repo.commit({ 'b.txt': 'b' }, 'feature/x')
+    db()
+      .prepare(
+        "UPDATE automatic_branches SET observed_commit=? WHERE branch='feature/x'",
+      )
+      .run(busy)
+    assert.deepEqual(
+      await master.pushes.since(master.projects.get('pushed'), 'feature/x'),
+      {
+        status: 'ignored',
+        reason: "feature/x is not in the push trigger's branches",
+        by: 'source',
+      },
+    )
+    assert.deepEqual(
+      await master.pushes.since(master.projects.get('pushed'), 'master'),
+      { status: 'unchanged' },
+    )
+    // Without a branches list every automatic branch builds, as before.
+    repo.commit(
+      {
+        'Masonfile.ts': literal.replace(
+          ", branches: ['master', 'release/*']",
+          '',
+        ),
+      },
+      'feature/all',
+    )
+    const all = await schedule('feature/all', repo.git('rev-parse', 'HEAD'))
+    assert.equal(all.status, 'scheduled')
+    assert.equal((await finished(c, all.job)).status, 'succeeded')
+    for (const run of master.runs({ project: 'pushed' }) as Json[])
+      await finished(c, run.id)
+  })
+
+  it('M1 decides a computed push list from the triggers the branch’s last setup recorded, until its Masonfile or an import changes', async () => {
+    const masonfile = `
+import type { Setup, Stage } from '@mason/types'
+import { BRANCHES } from './ci/branches.ts'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.workflow('build', { triggers: [{ push: true, branches: BRANCHES }, { request: true }] }, (w) => {
+    w.stage('one', { on: 'linux', run: one })
+  })
+}
+export async function one(ctx: Stage) { return 'built' }
+`
+    await project('computed', {
+      'Masonfile.ts': masonfile,
+      'ci/branches.ts': `export const BRANCHES = ['master']\n`,
+    })
+    const master = c.master.master!
+    const repo = c.repo('fixtures/computed')
+    master.projects.setRules({ role: 'admin', label: 'test' }, 'computed', [
+      { pattern: '**', mode: 'automatic' },
+    ])
+    const push = async (
+      branch: string,
+      files: Record<string, string>,
+    ): Promise<Json> => {
+      const commit = repo.commit(files, branch)
+      const result = await master.pushes.schedule(
+        master.projects.get('computed'),
+        branch,
+        commit,
+      )
+      if (result.job != null) await finished(c, result.job)
+      await master.pushes.settled()
+      return result
+    }
+    // The poll the rule started builds master; setup fills the cache.
+    const polled = await c.until(
+      () => (master.runs({ project: 'computed' }) as Json[])[0],
+      10000,
+      'the master push',
+    )
+    await finished(c, polled.id)
+    await master.pushes.settled()
+    // A requested run's setup records nothing for pushes: it may declare build differently.
+    repo.commit({ 'a.txt': '0' }, 'feature/a')
+    await finished(c, await request('computed', { branch: 'feature/a' }))
+    await master.pushes.settled()
+    assert.equal(
+      db()
+        .prepare("SELECT 1 FROM push_triggers WHERE branch='feature/a'")
+        .get(),
+      undefined,
+    )
+    // A new branch has no cache: setup decides, once, and does not build it.
+    const firstFeature = await push('feature/a', { 'a.txt': '1' })
+    assert.equal(firstFeature.by, 'setup')
+    const carrier = master.run(firstFeature.job) as Json
+    assert.equal(carrier.status, 'cancelled')
+    assert.match(
+      carrier.reason,
+      /^Not built: feature\/a is not in the push trigger's branches$/,
+    )
+    assert.deepEqual(
+      carrier.stages.map((entry: Json) => entry.name),
+      ['@setup'],
+    )
+    const later = await push('feature/a', { 'a.txt': '2' })
+    assert.deepEqual(later, {
+      status: 'ignored',
+      reason: "feature/a is not in the push trigger's branches",
+      by: 'cache',
+    })
+    assert.equal(
+      master.runs({ project: 'computed', branch: 'feature/a' }).length,
+      2,
+    )
+    // master's later pushes build from the cache.
+    const cachedMaster = await push('master', { 'm.txt': '1' })
+    assert.equal(cachedMaster.by, 'cache')
+    assert.equal(cachedMaster.status, 'scheduled')
+    // A changed import makes setup decide again, and the new list builds.
+    const changed = await push('feature/a', {
+      'ci/branches.ts': `export const BRANCHES = ['master', 'feature/**']\n`,
+    })
+    assert.equal(changed.by, 'setup')
+    assert.equal(stage(master.run(changed.job) as Json, 'one').output, 'built')
+    assert.equal((await push('feature/a', { 'a.txt': '3' })).by, 'cache')
+    // So does a changed Masonfile.
+    const edited = await push('feature/a', {
+      'Masonfile.ts': masonfile.replace("'built'", "'edited'"),
+    })
+    assert.equal(edited.by, 'setup')
+    assert.equal(edited.status, 'scheduled')
+  })
+
   it('U7.18 starts schedule, after and deviceRegistered workflows only where rules and triggers allow; requests need a role', async () => {
     const body = (name: string): string =>
       `w.stage('${name}', { on: 'linux', run: quick })`

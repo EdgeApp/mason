@@ -40,4 +40,37 @@ import { a as again } from './a.ts'
       [],
     )
   })
+
+  it('M1 scans any text in time linear in its length', () => {
+    const megabyte = 1024 * 1024
+    for (const text of [
+      `const s = "${'import '.repeat(megabyte / 7)}"`,
+      `const s = "${'export '.repeat(megabyte / 7)}"`,
+      '/*'.repeat(megabyte / 2),
+      '//'.repeat(megabyte / 2),
+      'import' + ' '.repeat(megabyte),
+      'export' + ' '.repeat(megabyte),
+      'import(' + ' '.repeat(megabyte),
+    ]) {
+      const started = Date.now()
+      localImports(text)
+      assert(Date.now() - started < 2000, text.slice(0, 20))
+    }
+    // An unterminated block comment hides the rest; one ending keeps it.
+    assert.deepEqual(
+      localImports(`/* x */ import './a.ts'\n/* import './b.ts'`),
+      ['./a.ts'],
+    )
+    assert.deepEqual(
+      localImports(`import x from 'https://e.example/a' // './c.ts'`),
+      [],
+    )
+    // Spaces before a type-only import still make it one.
+    assert.deepEqual(
+      localImports(
+        `import   type { T } from './t.ts'\nimport  { a } from './a.ts'`,
+      ),
+      ['./a.ts'],
+    )
+  })
 })

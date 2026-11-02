@@ -176,6 +176,28 @@ describe('Mason protected catalog and installation', () => {
       /No retained builds/,
     )
   })
+  it('M4 names the platforms that have builds when the chosen one has none on any branch, each opening its branches', async () => {
+    assert.match(
+      await (await request(`/apps/${app}?platform=windows`)).text(),
+      /No retained builds yet/,
+    )
+    publish('ios')
+    now += 1000
+    publish('android', 'feature/new', '2')
+    const windows = await (
+      await request(`/apps/${app}?platform=windows`)
+    ).text()
+    assert.match(
+      windows,
+      /<p>There are currently no builds for Windows\. Select one of these other platforms:<\/p><\/section><a class="list-row" data-platform="ios" href="\/apps\/\d+\?platform=ios"><div><strong>iOS<\/strong><small>Last built <time[^]*<\/a><a class="list-row" data-platform="android" href="\/apps\/\d+\?platform=android"><div><strong>Android<\/strong>/,
+    )
+    assert.doesNotMatch(windows, /macOS<\/strong>|<strong>master/)
+    // A platform with builds lists the branches, as before.
+    const ios = await (await request(`/apps/${app}?platform=ios`)).text()
+    assert.doesNotMatch(ios, /There are currently no builds/)
+    assert(ios.indexOf('<strong>master') < ios.indexOf('<strong>feature/new'))
+  })
+
   it('U12.16 shows a run’s variants as one build, default first, each with its size and install control', async () => {
     const android = publish('android', 'master', '90')
     let key = 0

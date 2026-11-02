@@ -241,7 +241,7 @@ export class Jobs {
    * When a branch's run ends: the newest commit a push or poll saw while it
    * was busy, if the branch is still automatic and has not tried that commit.
    */
-  pushedSince(project: Project, branch: string): JobView | undefined {
+  observedSince(project: Project, branch: string): string | undefined {
     const row = this.db
       .prepare(
         'SELECT observed_commit,last_attempted_commit FROM automatic_branches WHERE project_id=? AND branch=?',
@@ -253,7 +253,12 @@ export class Jobs {
       ruleFor(project.rules, branch)?.mode !== 'automatic'
     )
       return undefined
-    return this.automatic(project, branch, String(row.observed_commit))
+    return String(row.observed_commit)
+  }
+  /** A job for {@link observedSince}'s commit. */
+  pushedSince(project: Project, branch: string): JobView | undefined {
+    const commit = this.observedSince(project, branch)
+    return commit == null ? undefined : this.automatic(project, branch, commit)
   }
 
   /** Records a successful automatic build so its commit is not built again. */

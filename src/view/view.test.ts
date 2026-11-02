@@ -14,14 +14,14 @@ import {
   secretsView,
   settingsView,
 } from './admin.js'
-import { artifactsView } from './artifacts.js'
+import { artifactsView, projectRunsData } from './artifacts.js'
 import {
   bytes,
   dashboardData,
   dashboardView,
   platformChip,
 } from './dashboard.js'
-import { ago, duration, escape, time } from './html.js'
+import { ago, duration, escape, localTime, since, stamp, time } from './html.js'
 import { icon, icons } from './icons.js'
 import {
   approvalNotifications,
@@ -643,9 +643,10 @@ describe('Design system and views', () => {
     const find = (query: string): string[] =>
       search(developer, query).map((result) => `${result.kind}:${result.label}`)
     assert.deepEqual(find('phone'), ['project:Phones', 'app:app.example.phone'])
-    assert.deepEqual(find('#2'), ['run:phones build #2'])
+    assert.deepEqual(find('#2'), ['run:phones Run 2'])
+    assert.deepEqual(find('run 2'), ['run:phones Run 2'])
     // Newest first.
-    assert.deepEqual(find('1'), ['run:desk build #1', 'run:phones build #1'])
+    assert.deepEqual(find('1'), ['run:desk Run 1', 'run:phones Run 1'])
     assert.deepEqual(find('cccc'), ['commit:cccccccccccc'])
     assert.deepEqual(find('login'), ['branch:feature/login'])
     assert.deepEqual(find('   '), [])
@@ -720,7 +721,7 @@ describe('Design system and views', () => {
     const approvals = (who: Viewer, roles?: ViewerRole[]): string[] =>
       approvalNotifications(db, who, () => roles).map((item) => item.text)
     assert.deepEqual(approvals(viewer('manager')), [
-      'desk build #1 (master) waits for your approval at approve',
+      'desk Run 1 (master) waits for your approval at approve',
     ])
     assert.deepEqual(approvals(viewer('developer')), [])
     assert.deepEqual(approvals(viewer('developer'), ['developer']).length, 1)
@@ -787,7 +788,7 @@ describe('Design system and views', () => {
     const run = artifactsView(source, { run: 'run-1' })
     assert.match(run, /Phone 1\.0 \(26102013\) arm64-v8a</)
     assert.doesNotMatch(run, /26102014/)
-    assert.match(run, /<h1>build #1<\/h1>/)
+    assert.match(run, /<h1>Run 1<\/h1>/)
     assert.match(run, /Version 1\.0 \(11\)/)
     assert.match(run, /12 passed/)
     assert.match(run, /href="\/runs\/run-1\/artifacts\/report\/view"/)
@@ -822,6 +823,115 @@ describe('Design system and views', () => {
       /href="https:\/\/builds\.example\.test\/runs\/run-1\/artifacts\/report\/view"/,
     )
     assert.doesNotMatch(master, /Install/)
+  })
+
+  it('M2 lists the Runs and builds tab’s branches, push trigger’s first, and the selected one’s runs with version, build number and start', () => {
+    const db = fixture()
+    db.prepare(
+      "INSERT INTO jobs(id,project_id,workflow,number,branch,commit_sha,trigger,status,created,request,token) VALUES('run-5',1,'nightly',1,'old/branch',NULL,'schedule','queued',?,'{}','t5')",
+    ).run(NOW - 40 * HOUR)
+    db.prepare(
+      "INSERT INTO jobs(id,project_id,workflow,number,branch,commit_sha,trigger,status,created,request,token) VALUES('run-6',1,'@discover',1,'wizard',NULL,'request','succeeded',?,'{}','t6')",
+    ).run(NOW)
+    const source = {
+      db,
+      viewer: viewer('developer'),
+      now: NOW,
+      appVisible: (): boolean => true,
+      artifactBase: '',
+      reserved: (run: string): string | undefined =>
+        run === 'run-2' ? '26110201' : undefined,
+    }
+    const pinned = ['develop', 'main', 'feature/*', 'release/*']
+    const all = projectRunsData(source, 'phones', { pinned })
+    assert.deepEqual(
+      all.branches.map((entry) => [entry.branch, entry.pinned, entry.at]),
+      [
+        ['develop', true, undefined],
+        ['main', true, NOW - 5 * HOUR],
+        ['feature/login', true, NOW - HOUR],
+        ['old/branch', false, NOW - 40 * HOUR],
+      ],
+    )
+    assert.deepEqual(
+      all.runs.map((run) => [run.id, run.version, run.buildNumber, run.at]),
+      [
+        ['run-3', '', '', NOW - HOUR],
+        ['run-2', '', '26110201', NOW - 5 * HOUR],
+        ['run-1', '1.0', '26102011', NOW - 30 * HOUR],
+        ['run-5', '', '', NOW - 40 * HOUR],
+      ],
+    )
+    const html = projectRunsView(
+      { slug: 'phones', name: 'Phones', ...all },
+      NOW,
+    )
+    // All branches first and current, then the pinned branches, a divider, the rest.
+    assert.match(
+      html,
+      /<ul class="tree"><li><a href="\/projects\/phones\/runs" aria-current="true"><span>[^]*All branches<\/span><\/a><\/li><li><a href="\/projects\/phones\/runs\?branch=develop"><span class="mono">develop<\/span><small>No runs yet<\/small><\/a><\/li><li><a href="\/projects\/phones\/runs\?branch=main"><span class="mono">main<\/span><small><time [^>]*data-format="since">5:00 ago<\/time><\/small><\/a><\/li><li><a href="\/projects\/phones\/runs\?branch=feature%2Flogin">[^]*<li class="divider" role="separator"><\/li><li><a href="\/projects\/phones\/runs\?branch=old%2Fbranch">/,
+    )
+    assert.match(
+      html,
+      /<thead><tr><th>Status<\/th><th>Version<\/th><th>Build number<\/th><th>Started<\/th><\/tr><\/thead>/,
+    )
+    assert.doesNotMatch(html, /Artifacts|Every branch/)
+    // A row links its run and keeps its status live; every branch's names its branch.
+    assert.match(
+      html,
+      /<tr data-run-id="run-2" data-status="failed"><td><a href="\/runs\/run-2"><span class="dot failed"[^>]*><\/span> <span data-status-text>failed<\/span><\/a><small>Run 2 · <span class="mono">main<\/span><\/small><\/td><td class="mono">—<\/td><td class="mono">26110201<\/td><td><time datetime="[^"]+" title="[^"]+" data-at="\d+" data-format="since">5:00 ago<\/time><\/td><\/tr>/,
+    )
+    assert.match(
+      html,
+      /<small>Run 1 · nightly · <span class="mono">old\/branch/,
+    )
+    assert.match(html, /data-format="since">2026-10-20 0600 UTC<\/time>/)
+    const main = projectRunsData(source, 'phones', {
+      branch: 'main',
+      pinned: [],
+    })
+    assert.deepEqual(
+      main.branches.map((entry) => entry.branch),
+      ['feature/login', 'main', 'old/branch'],
+    )
+    const selected = projectRunsView(
+      { slug: 'phones', name: 'Phones', branch: 'main', ...main },
+      NOW,
+    )
+    assert.match(selected, /The latest runs on main/)
+    assert.match(
+      selected,
+      /href="\/projects\/phones\/runs\?branch=main" aria-current="true"/,
+    )
+    assert.doesNotMatch(selected, /divider/)
+    assert.match(selected, /<small>Run 2<\/small>/)
+    assert.deepEqual(
+      main.runs.map((run) => run.id),
+      ['run-2', 'run-1'],
+    )
+  })
+
+  it('M2 writes times as hours and minutes ago within a day, else the date, 24-hour time and zone', () => {
+    const at = NOW - (2 * HOUR + 31 * 60_000)
+    assert.equal(since(at, NOW), '2:31 ago')
+    assert.equal(since(NOW + 60_000, NOW), '0:00 ago')
+    assert.equal(since(NOW - 23 * HOUR - 59 * 60_000, NOW), '23:59 ago')
+    assert.equal(
+      since(NOW - 24 * HOUR, NOW, 'America/Los_Angeles'),
+      '2026-10-20 0500 PT',
+    )
+    assert.equal(stamp(NOW, 'America/Los_Angeles'), '2026-10-21 0500 PT')
+    assert.equal(
+      stamp(Date.UTC(2026, 11, 1, 23, 7), 'America/New_York'),
+      '2026-12-01 1807 ET',
+    )
+    assert.equal(stamp(NOW, 'UTC'), '2026-10-21 1200 UTC')
+    assert.equal(stamp(NOW, 'Europe/Berlin'), '2026-10-21 1400 GMT+2')
+    assert.match(stamp(NOW), /^2026-10-2\d \d{4} \S+$/)
+    assert.equal(
+      localTime(NOW, NOW, 'date'),
+      `<time datetime="2026-10-21T12:00:00.000Z" title="2026-10-21T12:00:00.000Z" data-at="${NOW}" data-format="date">2026-10-21 1200 UTC</time>`,
+    )
   })
 
   it('formats times, durations and text', () => {
@@ -1750,22 +1860,14 @@ describe('Project tabs and the Secrets tab', () => {
       /href="\/projects\/app\/masonfile" aria-current="page">Masonfile/,
     )
     const runs = projectRunsView(
-      { slug: 'app', name: 'App' },
-      '<table class="list"></table>',
+      { slug: 'app', name: 'App', branches: [], runs: [] },
+      NOW,
     )
     assert.match(
       runs,
       /href="\/projects\/app\/runs" aria-current="page">Runs and builds/,
     )
-    assert.match(
-      runs,
-      /<section class="panel"><table class="list"><\/table><\/section>/,
-    )
-    assert.doesNotMatch(runs, /Every branch/)
-    assert.match(
-      projectRunsView({ slug: 'app', name: 'App', branch: 'beta' }, ''),
-      /The latest runs on beta[^]*href="\/projects\/app\/runs"><span[^>]*>[^<]*<\/span> Every branch/,
-    )
+    assert.match(runs, /No runs yet/)
   })
 
   it('U18.13 a manager sees the add buttons, Edit or Replace then Delete per row, the editor and the audit', () => {

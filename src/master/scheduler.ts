@@ -62,6 +62,8 @@ import type { Jobs, JobView } from './jobs.js'
 import type { Mirrors } from './mirrors.js'
 import { IN_PROCESS, type NodeRecord, type NodeRegistry } from './nodes.js'
 import type { Project, Projects } from './projects.js'
+import type { Pushes } from './pushes.js'
+import { pushAllows } from '../pipeline/pushTriggers.js'
 import { matches, ruleFor } from './rules.js'
 import type { Stashes } from './stash.js'
 import { cronMatches, masterTimeZone, parseCron } from './triggers.js'
@@ -121,6 +123,8 @@ export interface SchedulerOptions {
   master: MasterDatabase
   projects: Projects
   jobs: Jobs
+  /** Decides the pushes that arrive while a branch is busy, and keeps the triggers each setup records. */
+  pushes?: Pushes
   buildNumbers: BuildNumbers
   registry: NodeRegistry
   mirrors: Mirrors
@@ -937,11 +941,22 @@ export class Scheduler {
     const key = this.graphKey(job, String(job.commit_sha))
     this.storeGraph(key, job, String(job.commit_sha), graph)
     this.db.prepare('UPDATE jobs SET graph_key=? WHERE id=?').run(key, id)
+    // Only a push's setup of build records what pushes build: another
+    // workflow's, or a request's, may declare build differently.
+    if (job.trigger === 'push' && job.workflow === 'build')
+      this.options.pushes?.remember(
+        project,
+        String(job.branch),
+        String(job.commit_sha),
+        graph,
+      )
     if (job.trigger === 'push' && job.workflow === 'build')
       for (const workflow of graph.workflows)
         if (
           workflow.name !== 'build' &&
-          workflow.triggers.some((trigger) => 'push' in trigger)
+          workflow.triggers.some((trigger) =>
+            pushAllows(trigger, String(job.branch)),
+          )
         )
           this.options.jobs.create(project, String(job.branch), 'push', {
             workflow: workflow.name,
@@ -972,7 +987,7 @@ export class Scheduler {
       trigger === 'restart' ||
       workflow.triggers.some((entry) =>
         trigger === 'push'
-          ? 'push' in entry
+          ? pushAllows(entry, String(job.branch))
           : trigger === 'request'
             ? 'request' in entry
             : trigger === 'schedule'
@@ -985,7 +1000,9 @@ export class Scheduler {
       this.finishJob(
         id,
         'cancelled',
-        `Workflow ${workflow.name} has no ${trigger} trigger`,
+        trigger === 'push' && workflow.triggers.some((entry) => 'push' in entry)
+          ? `Not built: ${String(job.branch)} is not in the push trigger's branches`
+          : `Workflow ${workflow.name} has no ${trigger} trigger`,
       )
       return
     }
@@ -2175,7 +2192,10 @@ export class Scheduler {
     // A push that arrived while this run was busy builds now, not at the next poll.
     if (job.trigger === 'push')
       try {
-        this.options.jobs.pushedSince(this.project(job), String(job.branch))
+        const project = this.project(job)
+        if (this.options.pushes == null)
+          this.options.jobs.pushedSince(project, String(job.branch))
+        else void this.options.pushes.later(project, String(job.branch))
       } catch {
         // The project is gone.
       }

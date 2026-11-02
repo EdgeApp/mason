@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
+import { reservedBuildNumber } from './buildNumbers.js'
 import type { MasterDatabase } from './database.js'
 import { requesterName, shownLabel } from './requesters.js'
 
@@ -216,6 +217,7 @@ export function entities(setting: SettingProjection): Record<string, Entity> {
             actor: shownLabel(String(row.actor ?? '')),
             graph: graph?.graph ?? null,
             requested_by: requesterName(db, String(row.actor ?? '')),
+            build_number: reservedBuildNumber(db, id) ?? null,
           },
           children: {
             job_stages: all(

@@ -28,10 +28,10 @@ import {
   approvalRolesFromGraph,
   notificationsFor,
 } from '../view/notifications.js'
-import { graphFromJson, runData, runView } from '../view/run.js'
+import { graphFromJson, runData, runTitle, runView } from '../view/run.js'
 import { search } from '../view/search.js'
 import { page, shell, type Viewer } from '../view/shell.js'
-import { escape } from '../view/html.js'
+import { escape, runName } from '../view/html.js'
 import { stylesheet } from '../view/stylesheet.js'
 import type { HostRuntime } from './runtime.js'
 import { hostLogin } from './sessions.js'
@@ -56,7 +56,7 @@ function offlineBanner(host: HostRuntime): RequestHandler {
   }
 }
 
-/** A project's home: its apps the account may see and, for developers and up, its latest runs. */
+/** A project's home: its apps the account may see and, for developers and up, its latest runs, each opening its run's page. */
 function projectRoutes(host: HostRuntime): express.Router {
   const router = express.Router()
   router.get('/projects/:slug', (req, res) => {
@@ -121,9 +121,10 @@ function projectRoutes(host: HostRuntime): express.Router {
             (
               db
                 .prepare(
-                  'SELECT number,workflow,branch,status,created FROM jobs WHERE project_id=? ORDER BY created DESC LIMIT 10',
+                  'SELECT id,number,workflow,branch,status,created FROM jobs WHERE project_id=? ORDER BY created DESC LIMIT 10',
                 )
                 .all(project.id) as Array<{
+                id: string
                 number: number
                 workflow: string
                 branch: string
@@ -133,7 +134,7 @@ function projectRoutes(host: HostRuntime): express.Router {
             )
               .map(
                 (run) =>
-                  `<div class="list-row"><div><strong>${escape(run.workflow)} #${run.number}</strong><small>${escape(run.branch)} · ${new Date(run.created).toISOString().slice(0, 16).replace('T', ' ')} UTC</small></div><span>${escape(run.status)}</span></div>`,
+                  `<a class="list-row" href="/runs/${encodeURIComponent(run.id)}"><div><strong>${escape(runName(run.workflow, run.number))}</strong><small>${escape(run.branch)} · ${new Date(run.created).toISOString().slice(0, 16).replace('T', ' ')} UTC</small></div><span>${escape(run.status)} <span aria-hidden="true">→</span></span></a>`,
               )
               .join('') || '<section class="card"><p>No runs yet.</p></section>'
           }</div>`
@@ -348,7 +349,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
     render(
       res,
       found.viewer,
-      `${run.workflow} #${run.number}`,
+      runTitle(run),
       runView(run, {
         ...(stage == null ? {} : { selected: stage }),
         ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
