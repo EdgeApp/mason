@@ -45,10 +45,24 @@ export type StagedPayload = ReturnType<typeof asStagedPayload>
 
 /** The formats each platform publishes. */
 export const formatsFor: Record<string, Format[]> = {
-  ios: ['ipa'],
+  ios: ['ipa', 'zip'],
   android: ['apk'],
   macos: ['dmg'],
   windows: ['exe', 'msi'],
+}
+
+/** Whether Mason version `a` (`0.4.3`) is older than `b`, by number. */
+export function olderVersion(a: string, b: string): boolean {
+  const parts = (value: string): number[] =>
+    value
+      .replace(/^v/, '')
+      .split(/[.-]/)
+      .slice(0, 3)
+      .map((part) => Number.parseInt(part, 10) || 0)
+  const [x, y] = [parts(a), parts(b)]
+  for (let i = 0; i < 3; i++)
+    if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) < (y[i] ?? 0)
+  return false
 }
 
 /** Where workers reach the host: its worker origin, and its pin when it serves its own certificate. */
@@ -169,6 +183,9 @@ export class Artifacts {
       /** How workers reach the host; undefined until the host setting is made. */
       host: () => HostAccess | undefined
       retentionDays: () => number
+      /** The Mason versions the cluster's hosts last reported, and this master's. */
+      hostVersions?: () => string[]
+      version?: string
     },
   ) {}
 
@@ -311,6 +328,17 @@ export class Artifacts {
       request.size <= 0
     )
       throw new Error('A publication needs the file’s SHA-256 and size')
+    // A host older than this master may not know an iPhone Simulator zip,
+    // and would refuse it as a broken desktop package.
+    if (request.format === 'zip' && this.options.version != null) {
+      const older = (this.options.hostVersions?.() ?? []).find(
+        (entry) => entry !== '' && olderVersion(entry, this.options.version!),
+      )
+      if (older != null)
+        throw new Error(
+          `The host runs Mason ${older}, older than this master's ${this.options.version}, and may not take ${request.format} builds; update the host first`,
+        )
+    }
     const row = this.db
       .prepare(
         `SELECT r.id,r.app_id,r.build_number,r.block FROM build_reservations r JOIN apps a ON a.id=r.app_id

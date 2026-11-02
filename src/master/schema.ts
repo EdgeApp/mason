@@ -7,7 +7,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 27
+export const MASTER_SCHEMA = 28
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -712,6 +712,25 @@ const migrations: Array<(db: DatabaseSync) => void> = [
         db.prepare(
           'UPDATE automatic_branches SET device_registered=? WHERE project_id=? AND branch=?',
         ).run(Number(row.created), Number(row.project_id), String(row.branch))
+    }
+  },
+  // 28: an iOS channel also takes iPhone Simulator builds, zipped; each
+  // app changed is sent to the hosts again.
+  (db): void => {
+    const channels = db
+      .prepare("SELECT id,app_id,formats FROM channels WHERE platform='ios'")
+      .all()
+    for (const row of channels) {
+      const formats = JSON.parse(String(row.formats)) as string[]
+      if (formats.includes('ipa') && !formats.includes('zip')) {
+        db.prepare('UPDATE channels SET formats=? WHERE id=?').run(
+          JSON.stringify([...formats, 'zip']),
+          Number(row.id),
+        )
+        db.prepare(
+          "INSERT INTO change_log(entity,key,operation,at) VALUES('app',?,'put',?)",
+        ).run(String(row.app_id), Date.now())
+      }
     }
   },
 ]

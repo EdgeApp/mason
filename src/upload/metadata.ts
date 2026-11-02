@@ -1,10 +1,14 @@
-import { asBoolean, asObject, asOptional } from 'cleaners'
+import { asBoolean, asObject, asOptional, asString } from 'cleaners'
 import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs'
 import { Worker } from 'node:worker_threads'
 import { open as openZip, type Entry, type ZipFile } from 'yauzl'
 import { noSymlinks } from '../config.js'
-import { type Format, object, text } from '../validation.js'
-import { asPackageIdentity, type PackageIdentity } from './plist.js'
+import { type Format, object, packagedFormats, text } from '../validation.js'
+import {
+  asPackageIdentity,
+  NOT_SIMULATOR,
+  type PackageIdentity,
+} from './plist.js'
 
 export type Json =
   | null
@@ -56,9 +60,17 @@ const asPublisher = object({
     return new Date(stamp).toISOString()
   }),
 })
+/** The formats whose identity is read from a file inside the package, a ZIP. */
+type Zipped = 'ipa' | 'apk' | 'zip'
+
+/**
+ * The file a package's identity is read from: an APK's manifest, an IPA's
+ * app's Info.plist (or its embedded profile), or the Info.plist of the one
+ * `.app` at the root of an iPhone Simulator zip (Finder's `__MACOSX` aside).
+ */
 export async function zippedMetadata(
   file: string,
-  format: 'ipa' | 'apk',
+  format: Zipped,
   provisioning = false,
 ): Promise<Buffer> {
   const zip = await new Promise<ZipFile>((resolve, reject) =>
@@ -77,6 +89,8 @@ export async function zippedMetadata(
     if (zip.entryCount > 100000) throw new Error('Too many ZIP entries')
     let selected: Entry | undefined,
       count = 0
+    // A simulator zip's root entries: its one `.app` and nothing else.
+    const roots = new Set<string>()
     await new Promise<void>((resolve, reject) => {
       zip.on('error', reject)
       zip.on('end', resolve)
@@ -84,13 +98,27 @@ export async function zippedMetadata(
         try {
           if (++count > 100000 || entry.fileName.length > 4096)
             throw new Error('Invalid ZIP directory')
+          if (format === 'zip') {
+            const slash = entry.fileName.indexOf('/')
+            const root =
+              slash === -1 ? entry.fileName : entry.fileName.slice(0, slash + 1)
+            if (root !== '__MACOSX/') {
+              roots.add(root)
+              if (roots.size > 1 || !/^[^/]+\.app\/$/.test(root))
+                throw new Error(
+                  'An iPhone Simulator build is a zip of exactly one .app',
+                )
+            }
+          }
           const matches =
             format === 'apk'
               ? entry.fileName === 'AndroidManifest.xml'
-              : (provisioning
-                  ? /^Payload\/[^/]+\.app\/embedded\.mobileprovision$/
-                  : /^Payload\/[^/]+\.app\/Info\.plist$/
-                ).test(entry.fileName)
+              : format === 'zip'
+                ? /^[^/]+\.app\/Info\.plist$/.test(entry.fileName)
+                : (provisioning
+                    ? /^Payload\/[^/]+\.app\/embedded\.mobileprovision$/
+                    : /^Payload\/[^/]+\.app\/Info\.plist$/
+                  ).test(entry.fileName)
           if (matches) {
             if (
               selected != null ||
@@ -128,7 +156,7 @@ export async function zippedMetadata(
 }
 export async function parseInWorker(
   buffer: Buffer,
-  format: 'ipa' | 'apk',
+  format: Zipped,
 ): Promise<PackageIdentity> {
   return await new Promise<PackageIdentity>((resolve, reject) => {
     const worker = new Worker(
@@ -155,7 +183,12 @@ export async function parseInWorker(
         const result = asObject({
           ok: asBoolean,
           identity: asOptional(asPackageIdentity),
+          reason: asOptional(asString),
         })(message)
+        if (result.reason === NOT_SIMULATOR) {
+          reject(new Error(NOT_SIMULATOR))
+          return
+        }
         if (!result.ok || result.identity == null)
           throw new Error('Invalid package identity')
         resolve(result.identity)
@@ -183,10 +216,11 @@ export async function packageIdentity(
     Array.isArray(custom) || custom.mason == null
       ? undefined
       : asPublisher(custom.mason)
-  if (format === 'ipa' || format === 'apk') {
+  if (packagedFormats.includes(format)) {
+    const zipped = format as Zipped
     const actual = await parseInWorker(
-      await zippedMetadata(file, format),
-      format,
+      await zippedMetadata(file, zipped),
+      zipped,
     )
     if (
       publisher != null &&

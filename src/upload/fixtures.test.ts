@@ -47,6 +47,93 @@ export function plist(binary = false): Buffer {
     trailer,
   ])
 }
+/** A plist of string and string-array fields, XML or binary. */
+export function plistOf(
+  fields: Record<string, string | string[]>,
+  binary = false,
+): Buffer {
+  const xml = (value: string | string[]): string =>
+    Array.isArray(value)
+      ? `<array>${value.map((item) => `<string>${item}</string>`).join('')}</array>`
+      : `<string>${value}</string>`
+  if (!binary)
+    return Buffer.from(
+      '<?xml version="1.0"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict>' +
+        Object.entries(fields)
+          .map(([key, value]) => `<key>${key}</key>${xml(value)}`)
+          .join('') +
+        '</dict></plist>',
+    )
+  // Object 0 is the dictionary; one-byte references, two-byte offsets.
+  const objects: Buffer[] = [Buffer.alloc(0)]
+  const add = (object: Buffer): number => objects.push(object) - 1
+  const string = (value: string): number =>
+    add(
+      Buffer.concat([
+        value.length < 15
+          ? Buffer.from([0x50 + value.length])
+          : Buffer.from([0x5f, 0x10, value.length]),
+        Buffer.from(value),
+      ]),
+    )
+  const entries = Object.entries(fields)
+  const keys = entries.map(([key]) => string(key))
+  const values = entries.map(([, value]) =>
+    Array.isArray(value)
+      ? add(
+          Buffer.from([
+            0xa0 + value.length,
+            ...value.map((item) => string(item)),
+          ]),
+        )
+      : string(value),
+  )
+  objects[0] = Buffer.from([0xd0 + entries.length, ...keys, ...values])
+  const offsets = Buffer.alloc(objects.length * 2)
+  let length = 8
+  objects.forEach((object, index) => {
+    offsets.writeUInt16BE(length, index * 2)
+    length += object.length
+  })
+  const trailer = Buffer.alloc(32)
+  trailer[6] = 2
+  trailer[7] = 1
+  trailer.writeBigUInt64BE(BigInt(objects.length), 8)
+  trailer.writeBigUInt64BE(BigInt(length), 24)
+  return Buffer.concat([Buffer.from('bplist00'), ...objects, offsets, trailer])
+}
+/** An iPhone Simulator build of `packageFields`, zipped as Xcode's `.app` is: `Info.plist` saying `platform`. */
+export function simulatorZip(
+  options: {
+    name?: string
+    platform?: string
+    binary?: boolean
+    fields?: Record<string, string | string[]>
+  } = {},
+): Buffer {
+  const name = options.name ?? 'Example.app'
+  const platform = options.platform ?? 'iphonesimulator'
+  return zip([
+    [`${name}/`, Buffer.alloc(0)],
+    [
+      `${name}/Info.plist`,
+      plistOf(
+        {
+          CFBundleIdentifier: packageFields.bundleId,
+          CFBundleShortVersionString: packageFields.version,
+          CFBundleVersion: packageFields.buildNumber,
+          DTPlatformName: platform,
+          CFBundleSupportedPlatforms: [
+            platform === 'iphonesimulator' ? 'iPhoneSimulator' : 'iPhoneOS',
+          ],
+          ...options.fields,
+        },
+        options.binary,
+      ),
+    ],
+    [`${name}/Example`, Buffer.from('a Mach-O binary')],
+  ])
+}
 /** A binary AndroidManifest.xml for `packageFields`, with `versionCode` (42 by default). */
 export function manifest(
   utf16 = false,

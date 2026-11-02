@@ -434,6 +434,11 @@ export interface PublishOptions {
   /** An app ID of this project, listed in the stage's `publishes`. */
   app: string
   platform: Platform
+  /**
+   * The file, by extension: `.ipa`, `.apk`, `.dmg`, `.exe`, `.msi`, or for
+   * iOS a `.zip` of one `.app` built for the iPhone Simulator, which the
+   * host offers as a download only.
+   */
   path: string
   /**
    * One of several files of this build (`arm64-v8a`, `linux-x64`): 1 to 32
@@ -443,12 +448,13 @@ export interface PublishOptions {
    * refused, so a retried stage must reproduce its files exactly.
    */
   variant?: string
-  /** Required for DMG/EXE/MSI; read from IPA/APK and checked. */
+  /** Required for DMG/EXE/MSI; read from IPA/APK/zip and checked. */
   version?: string
   /**
-   * An IPA's or APK's own number is read from it (this must match it); a
-   * DMG/EXE/MSI's is this, defaulting to `getBuildNumber`'s. Either way it
-   * is one of the run's: N, or N to N+block−1 with a `block`.
+   * An IPA's, APK's or iPhone Simulator zip's own number is read from it
+   * (this must match it); a DMG/EXE/MSI's is this, defaulting to
+   * `getBuildNumber`'s. Either way it is one of the run's: N, or N to
+   * N+block−1 with a `block`.
    */
   buildNumber?: string
   changelog?: string

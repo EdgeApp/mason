@@ -147,6 +147,7 @@ const mime: Record<Format, string> = {
   dmg: 'application/x-apple-diskimage',
   exe: 'application/vnd.microsoft.portable-executable',
   msi: 'application/octet-stream',
+  zip: 'application/zip',
 }
 export function installationRoutes(
   store: Store,

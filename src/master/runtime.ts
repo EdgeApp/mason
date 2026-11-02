@@ -407,6 +407,8 @@ export class Master {
       privateKey: identity.privateKey,
       host: (): ReturnType<HostLinks['access']> => this.hosts.access(),
       retentionDays: (): number => 14,
+      hostVersions: (): string[] => this.hosts.versions(),
+      version,
     })
     this.scheduler = new Scheduler({
       artifacts: this.artifacts,

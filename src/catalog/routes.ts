@@ -3,7 +3,7 @@ import { Router, type Request } from 'express'
 import { Accounts } from '../auth/accounts.js'
 import { navigation, sessionContext } from '../auth/routes.js'
 import { Store } from '../store.js'
-import { asId, type Build, type Platform } from '../validation.js'
+import { asId, downloadOnly, type Build, type Platform } from '../validation.js'
 import { escape } from '../view/html.js'
 import { page } from '../view/shell.js'
 import { branchKey, branchName, labels, platform } from './platform.js'
@@ -170,15 +170,29 @@ export function catalogRoutes(
       const heading = (build: Build, size?: string): string =>
         `<strong>${escape(build.version)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${time(build.published_at)}${size == null ? '' : ` · ${size}`}</small><code title="${escape(build.commit_hash)}">${escape(build.commit_hash.slice(0, 12))}</code>`
       // One install control: a direct link for an IPA the device may install, else a form.
+      // A build that is only downloaded (an iPhone Simulator app) is a download, for any device.
       const install = (build: Build, variant?: string): string => {
+        const download = downloadOnly(build)
         const eligible = deviceStore.eligible(build, selectedDevice)
-        const label = `${eligible ? 'Install' : selectedDevice == null ? 'Register Device for' : 'Prepare for this device'} ${build.version} build ${build.build_number}${variant == null ? '' : ` (${variant})`}`
-        const action = `<span class="download-label">${eligible ? 'Install' : selectedDevice == null ? 'Register Device' : 'Prepare for device'} <span aria-hidden="true">↓</span></span>`
+        const verb =
+          download != null
+            ? 'Download'
+            : eligible
+              ? 'Install'
+              : selectedDevice == null
+                ? 'Register Device for'
+                : 'Prepare for this device'
+        const label = `${verb} ${build.version} build ${build.build_number}${variant == null ? '' : ` (${variant})`}${download == null ? '' : ` for the ${download}`}`
+        const action = `<span class="download-label">${download != null ? 'Download' : eligible ? 'Install' : selectedDevice == null ? 'Register Device' : 'Prepare for device'} <span aria-hidden="true">↓</span></span>`
+        const size =
+          download == null
+            ? megabytes(build.size)
+            : `${download} · ${megabytes(build.size)}`
         const content =
           variant == null
-            ? `<div>${heading(build, megabytes(build.size))}</div>${action}`
-            : `<div><strong>${escape(variant)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${megabytes(build.size)}</small></div>${action}`
-        if (eligible && build.format === 'ipa') {
+            ? `<div>${heading(build, size)}</div>${action}`
+            : `<div><strong>${escape(variant)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${size}</small></div>${action}`
+        if (eligible && download == null && build.format === 'ipa') {
           // The tap itself must open the native installer. A page-load
           // redirect loses Safari's user gesture and adds an app-open prompt.
           const grant = installations.create(build.id, session, selectedDevice)

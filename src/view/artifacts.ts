@@ -4,6 +4,7 @@ import { ago, duration, escape, localTime, runName, time } from './html.js'
 import { icon } from './icons.js'
 import type { Viewer } from './shell.js'
 import { isGlob, matches } from '../master/rules.js'
+import { downloadOnly } from '../validation.js'
 
 export interface ArtifactsFilter {
   project?: string
@@ -76,11 +77,12 @@ function runBuilds(
   build_number: string
   size: number
   variant: string
+  format: string
 }> {
   return (
     source.db
       .prepare(
-        "SELECT b.id,b.app_id,a.name,b.platform,b.version,b.build_number,b.size,b.variant FROM builds b JOIN apps a ON a.id=b.app_id WHERE (b.run=? OR (b.run IS NULL AND b.commit_hash=? AND b.branch=?)) AND b.state='ready' AND b.deleted_at IS NULL ORDER BY b.app_id,b.platform,b.variant<>'',b.variant",
+        "SELECT b.id,b.app_id,a.name,b.platform,b.version,b.build_number,b.size,b.variant,b.format FROM builds b JOIN apps a ON a.id=b.app_id WHERE (b.run=? OR (b.run IS NULL AND b.commit_hash=? AND b.branch=?)) AND b.state='ready' AND b.deleted_at IS NULL ORDER BY b.app_id,b.platform,b.variant<>'',b.variant",
       )
       .all(run.id, run.commit_sha ?? '', run.branch) as Array<{
       id: number
@@ -91,6 +93,7 @@ function runBuilds(
       build_number: string
       size: number
       variant: string
+      format: string
     }>
   ).filter((build) => source.appVisible(build.app_id))
 }
@@ -139,9 +142,9 @@ function runDetail(source: ArtifactsSource, run: RunRow): string {
     builds
       .map(
         (build) =>
-          `<li><div><span class="mono">${escape(build.name)} ${escape(build.version)} (${escape(build.build_number)})${build.variant === '' ? '' : ` ${escape(build.variant)}`}</span><small>${platformChip(build.platform)} · ${escape(bytes(build.size))}</small></div>${
+          `<li><div><span class="mono">${escape(build.name)} ${escape(build.version)} (${escape(build.build_number)})${build.variant === '' ? '' : ` ${escape(build.variant)}`}</span><small>${platformChip(build.platform)}${downloadOnly(build) == null ? '' : ` · ${escape(downloadOnly(build)!)}`} · ${escape(bytes(build.size))}</small></div>${
             source.viewer.node === 'host'
-              ? `<a href="/apps/${build.app_id}">Install</a>`
+              ? `<a href="/apps/${build.app_id}">${downloadOnly(build) == null ? 'Install' : 'Download'}</a>`
               : ''
           }</li>`,
       )

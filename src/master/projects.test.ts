@@ -259,7 +259,7 @@ describe('Projects, branch rules and build numbers', function () {
       channels.map((row) => [row.platform, row.formats]),
       [
         ['android', '["apk"]'],
-        ['ios', '["ipa"]'],
+        ['ios', '["ipa","zip"]'],
       ],
     )
     assert(channels.every((row) => Number(row.n) >= 32))

@@ -1,6 +1,6 @@
 import { isMainThread, parentPort, workerData } from 'node:worker_threads'
 import { androidManifest } from './androidManifest.js'
-import { plistIdentity } from './plist.js'
+import { NOT_SIMULATOR, plistIdentity, simulatorIdentity } from './plist.js'
 if (!isMainThread) {
   try {
     const data: unknown = workerData
@@ -19,10 +19,18 @@ if (!isMainThread) {
         ? plistIdentity(buffer)
         : data.format === 'apk'
           ? androidManifest(buffer)
-          : undefined
+          : data.format === 'zip'
+            ? simulatorIdentity(buffer)
+            : undefined
     if (result == null) throw new Error('Unknown metadata format')
     parentPort!.postMessage({ ok: true, identity: result })
-  } catch {
-    parentPort!.postMessage({ ok: false })
+  } catch (error) {
+    // Only a device app in a simulator zip is told apart; any other failure is just invalid.
+    parentPort!.postMessage({
+      ok: false,
+      ...((error as Error).message === NOT_SIMULATOR
+        ? { reason: NOT_SIMULATOR }
+        : {}),
+    })
   }
 }

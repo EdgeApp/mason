@@ -6,7 +6,14 @@ import {
   type Session,
 } from '../auth/accounts.js'
 import { Store, digest } from '../store.js'
-import { asId, integer, oneOf, text, type Build } from '../validation.js'
+import {
+  asId,
+  downloadOnly,
+  integer,
+  oneOf,
+  text,
+  type Build,
+} from '../validation.js'
 import { randomUUID } from 'node:crypto'
 import { models } from './models.js'
 import { escape } from '../view/html.js'
@@ -225,8 +232,13 @@ export class Devices {
     if (!/^[A-Za-z0-9_-]{43}$/.test(token)) throw new Error('Invalid request')
     return `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>PayloadType</key><string>Profile Service</string><key>PayloadVersion</key><integer>1</integer><key>PayloadIdentifier</key><string>app.mason.device-registration</string><key>PayloadUUID</key><string>${randomUUID()}</string><key>PayloadDisplayName</key><string>Mason Device Registration</string><key>PayloadOrganization</key><string>Mason</string><key>PayloadDescription</key><string>Share your device identifier, model and OS version with Mason so you can install test apps. This does not enroll your device in management.</string><key>PayloadContent</key><dict><key>URL</key><string>${escape(this.store.config.origin + '/devices/callback/' + token)}</string><key>Challenge</key><string>${escape(token)}</string><key>DeviceAttributes</key><array><string>UDID</string><string>PRODUCT</string><string>VERSION</string></array></dict></dict></plist>`
   }
+  /** Whether a device may have the build: always for one that is only downloaded, as an iPhone Simulator build. */
   eligible(build: Build, device: Device | undefined): boolean {
-    if (this.store.config.devices == null || build.platform !== 'ios')
+    if (
+      this.store.config.devices == null ||
+      build.platform !== 'ios' ||
+      downloadOnly(build) != null
+    )
       return true
     if (!device || device.status !== 'registered') return false
     const profile = this.store.db

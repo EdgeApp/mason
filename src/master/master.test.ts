@@ -397,6 +397,36 @@ describe('Master database, setup and import', function () {
     db.close()
   })
 
+  it('U12.19 schema 28 lets every iOS channel take iPhone Simulator zips', () => {
+    const db = new DatabaseSync(path.join(root, 'simulator.sqlite'))
+    migrateMaster(db)
+    db.exec(`INSERT INTO apps(id,slug,name,position,enabled) VALUES(1,'a.b','A',0,1);
+    INSERT INTO channels(app_id,platform,channel_key,formats,enabled) VALUES
+      (1,'ios','k1','["ipa"]',1),
+      (1,'android','k2','["apk"]',1);
+    UPDATE meta SET value='27' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      db
+        .prepare('SELECT platform,formats FROM channels ORDER BY platform')
+        .all()
+        .map((row) => [row.platform, row.formats]),
+      [
+        ['android', '["apk"]'],
+        ['ios', '["ipa","zip"]'],
+      ],
+    )
+    // The app goes to the hosts again, with its channels.
+    assert.deepEqual(
+      db
+        .prepare('SELECT entity,key,operation FROM change_log')
+        .all()
+        .map((row) => [row.entity, row.key, row.operation]),
+      [['app', '1', 'put']],
+    )
+    db.close()
+  })
+
   it('U12.16 schema 22 records each published or staged reservation as its default variant', () => {
     const db = new DatabaseSync(path.join(root, 'publications.sqlite'))
     migrateMaster(db)

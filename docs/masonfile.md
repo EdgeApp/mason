@@ -24,8 +24,8 @@ the types-only package `@mason/types`.
 - Stages pass **files** to each other with stash/unstash, and pass small
   **values** by returning them. Runs pass files to later runs, including runs
   of other workflows, through saved **artifacts**.
-- **Published builds** are the installable packages (IPA, APK, DMG, EXE, MSI)
-  that appear on the host under the project's home, for testers whose groups
+- **Published builds** are the installable packages (IPA, APK, DMG, EXE, MSI,
+  and iPhone Simulator apps, zipped) that appear on the host under the project's home, for testers whose groups
   include the app. **Artifacts**
   are everything else a run saves: reports, test results, logs, binaries.
 - Every byte a stage prints — its own `console.log` and everything it runs —
@@ -781,8 +781,8 @@ await ctx.publish({
   platform: 'macos',
   path: 'build/Eddy-412.dmg',
   variant?: string,                // one of several files of this build (see Variants)
-  version: '0.3.3',                // required for DMG/EXE/MSI; read from IPA/APK and checked
-  buildNumber: '412',              // DMG/EXE/MSI: defaults to getBuildNumber's; IPA/APK: read from it
+  version: '0.3.3',                // required for DMG/EXE/MSI; read from IPA/APK/zip and checked
+  buildNumber: '412',              // DMG/EXE/MSI: defaults to getBuildNumber's; IPA/APK/zip: read from it
   changelog?: string,
   metadata?: Record<string, unknown>,
 })
@@ -796,8 +796,8 @@ the master confirms it. `publish` resolves when the host has the file with
 lists what it published. `ctx.artifacts.save` and `ctx.artifacts.fetch` go
 through the master the same way.
 
-**Which number.** An IPA's or APK's number is its own (`CFBundleVersion`,
-`versionCode`); `buildNumber`, if given, must match it. A desktop file's is
+**Which number.** An IPA's, APK's or simulator zip's number is its own
+(`CFBundleVersion`, `versionCode`); `buildNumber`, if given, must match it. A desktop file's is
 `buildNumber`, defaulting to `getBuildNumber`'s. Either way it is one of the
 run's: N itself, or with a sequence `block` (section 8) any of N to
 N+block−1. Anything else is refused before the upload.
@@ -827,6 +827,29 @@ await ctx.publish({ app: 'co.edgesecure.app', platform: 'android', path: `${apks
 The host shows a run's variants as one build: the default first, then each
 variant with its size and its own install button. A variant never replaces
 its build as a branch's latest, and a build's variants expire together.
+
+**iPhone Simulator builds.** An iOS app can also be published as an iPhone
+Simulator build, for tests that run in the simulator (Maestro, for
+example): a `.zip` holding exactly one `.app` at its root, built with
+`-sdk iphonesimulator`. Its app ID, version and number come from the
+`.app`'s `Info.plist` (binary or XML), which must say it was built for the
+simulator and nothing else (`DTPlatformName` `iphonesimulator`, or without
+one `iPhoneSimulator` among `CFBundleSupportedPlatforms`, and no `iPhoneOS`
+there); an app built for devices, a zip of anything
+else, another app ID or another number is refused. Publish it as a variant
+of the run's iOS build, under the same number:
+
+```ts fragment
+await ctx.publish({ app: 'co.edgesecure.app', platform: 'ios', path: ipa })
+await ctx.exec('ditto', ['-c', '-k', '--keepParent', 'build/Build/Products/Release-iphonesimulator/Edge.app', 'Edge.app.zip'])
+await ctx.publish({ app: 'co.edgesecure.app', platform: 'ios', variant: 'maestro', path: 'Edge.app.zip' })
+```
+
+The host lists it with its variants as an *iPhone Simulator* download, with
+its size, for anyone who may see the app: no install link, no install
+manifest and no device check, since it cannot run on a phone. The format is
+`zip`, the file's extension, as every format is. A zip is refused while the
+host runs an older Mason than the master, which might not take it.
 
 | Zealot upload API (gone from the cluster) | `ctx.publish` |
 | --- | --- |
