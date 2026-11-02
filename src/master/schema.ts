@@ -1,11 +1,13 @@
 import type { DatabaseSync } from 'node:sqlite'
+import type { Graph } from '../pipeline/graph.js'
+import { buildsForDevice } from '../pipeline/pushTriggers.js'
 import { migrate } from '../schema.js'
 
 /**
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 26
+export const MASTER_SCHEMA = 27
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -678,6 +680,39 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       ALTER TABLE automatic_branches ADD COLUMN skipped_commit TEXT;
       ALTER TABLE automatic_branches ADD COLUMN skipped_key TEXT;
       ALTER TABLE automatic_branches ADD COLUMN skipped_reason TEXT;`)
+  },
+  // 27: a branch head the poll found changed but left for a later poll,
+  // and since when it has waited, so the longest-waiting goes next; and
+  // when a branch's push setup last recorded a build that runs when a
+  // device is registered (null when it did not), filled from each
+  // branch's latest graph of build.
+  (db): void => {
+    const columns = db.prepare('PRAGMA table_info(automatic_branches)').all()
+    if (!columns.some((column) => column.name === 'waiting_commit'))
+      db.exec(`
+      ALTER TABLE automatic_branches ADD COLUMN waiting_commit TEXT;
+      ALTER TABLE automatic_branches ADD COLUMN waiting_since INTEGER;
+      ALTER TABLE automatic_branches ADD COLUMN device_registered INTEGER;`)
+    const latest = db
+      .prepare(
+        "SELECT g.project_id,g.branch,g.graph,g.created FROM graphs g JOIN automatic_branches b ON b.project_id=g.project_id AND b.branch=g.branch WHERE g.workflow='build' AND g.created=(SELECT MAX(created) FROM graphs WHERE project_id=g.project_id AND branch=g.branch AND workflow='build')",
+      )
+      .all()
+    for (const row of latest) {
+      let graph: { workflows?: unknown }
+      try {
+        graph = JSON.parse(String(row.graph)) as { workflows?: unknown }
+      } catch {
+        continue
+      }
+      if (
+        Array.isArray(graph.workflows) &&
+        buildsForDevice(graph as Pick<Graph, 'workflows'>)
+      )
+        db.prepare(
+          'UPDATE automatic_branches SET device_registered=? WHERE project_id=? AND branch=?',
+        ).run(Number(row.created), Number(row.project_id), String(row.branch))
+    }
   },
 ]
 

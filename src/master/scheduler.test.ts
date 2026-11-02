@@ -1566,6 +1566,23 @@ export async function one(ctx: Stage) { return ctx.run.workflow }
         .map((entry: Json) => [entry.skippedCommit, entry.skippedReason]),
       [[feature, "feature/x is not in the push trigger's branches"]],
     )
+    // A changed head the poll left for a later poll is listed, waiting its turn.
+    db()
+      .prepare(
+        "UPDATE automatic_branches SET waiting_commit=?,waiting_since=5 WHERE branch='feature/x'",
+      )
+      .run(feature)
+    assert.deepEqual(
+      (await c.api('GET', '/api/apps/pushed/build-settings')).json.branches
+        .filter((entry: Json) => entry.branch === 'feature/x')
+        .map((entry: Json) => [entry.waitingCommit, entry.waitingSince]),
+      [[feature, 5]],
+    )
+    db()
+      .prepare(
+        "UPDATE automatic_branches SET waiting_commit=NULL,waiting_since=NULL WHERE branch='feature/x'",
+      )
+      .run()
     // A commit with no Masonfile builds nothing either.
     const bare = repo.commit({ 'Masonfile.ts': null }, 'feature/none')
     repo.git('checkout', '-q', 'master')
@@ -1705,6 +1722,24 @@ export async function one(ctx: Stage) { return 'built' }
     assert.deepEqual(
       carrier.stages.map((entry: Json) => entry.name),
       ['@setup'],
+    )
+    // The commit setup did not build is decided: it is not tried again.
+    const head = String(
+      db()
+        .prepare('SELECT requested_commit FROM jobs WHERE id=?')
+        .get(firstFeature.job)!.requested_commit,
+    )
+    const computedProject = master.projects.get('computed')
+    assert.equal(
+      master.pushes.decided(computedProject, 'feature/a', head),
+      true,
+    )
+    assert.deepEqual(
+      await master.pushes.schedule(computedProject, 'feature/a', head),
+      {
+        status: 'ignored',
+        reason: "feature/a is not in the push trigger's branches",
+      },
     )
     const later = await push('feature/a', { 'a.txt': '2' })
     assert.deepEqual(later, {

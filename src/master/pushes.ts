@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import path from 'node:path'
 import type { Graph } from '../pipeline/graph.js'
 import {
+  buildsForDevice,
   graphPushBranches,
   MAX_SOURCE_BYTES,
   pushBuilds,
@@ -37,6 +38,10 @@ const masonfiles = (project: Project): string[] =>
   project.entrypoint == null
     ? ['Masonfile.ts', 'Masonfile.js']
     : [project.entrypoint]
+
+/** Where a commit's Masonfile is looked for: a skipped commit is decided again only when this changes. */
+const skipKey = (project: Project, commit: string): string =>
+  `${commit} ${project.format} ${project.entrypoint ?? ''}`
 
 /** At most this many files of a Masonfile and its local imports are hashed. */
 export const MAX_SOURCES = 200
@@ -102,7 +107,7 @@ export class Pushes {
           : { status: 'scheduled' as const, job: job.id }
       }
       // A skipped commit is decided again only if where the Masonfile is looked for changes.
-      const key = `${commit} ${project.format} ${project.entrypoint ?? ''}`
+      const key = skipKey(project, commit)
       const skipped = this.db
         .prepare(
           'SELECT skipped_key,skipped_reason FROM automatic_branches WHERE project_id=? AND branch=?',
@@ -115,11 +120,7 @@ export class Pushes {
         }
       const decision = await this.decide(project, branch, commit)
       if (decision.build === false) {
-        this.db
-          .prepare(
-            'INSERT INTO automatic_branches(project_id,branch,observed_commit,skipped_commit,skipped_key,skipped_reason) VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,branch) DO UPDATE SET observed_commit=excluded.observed_commit,skipped_commit=excluded.skipped_commit,skipped_key=excluded.skipped_key,skipped_reason=excluded.skipped_reason',
-          )
-          .run(project.id, branch, commit, commit, key, decision.reason ?? null)
+        this.notBuilt(project, branch, commit, decision.reason)
         return {
           status: 'ignored' as const,
           ...(decision.reason == null ? {} : { reason: decision.reason }),
@@ -131,6 +132,32 @@ export class Pushes {
         ? { status: 'unchanged' as const, by: decision.by }
         : { status: 'scheduled' as const, job: job.id, by: decision.by }
     })
+  }
+
+  /**
+   * Records that a push of `commit` to `branch` is not built, and why: the
+   * master's decision, or setup's when the push trigger leaves the branch
+   * out. The commit is decided again only if where the Masonfile is looked
+   * for changes.
+   */
+  notBuilt(
+    project: Project,
+    branch: string,
+    commit: string,
+    reason: string | undefined,
+  ): void {
+    this.db
+      .prepare(
+        'INSERT INTO automatic_branches(project_id,branch,observed_commit,skipped_commit,skipped_key,skipped_reason) VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,branch) DO UPDATE SET observed_commit=excluded.observed_commit,skipped_commit=excluded.skipped_commit,skipped_key=excluded.skipped_key,skipped_reason=excluded.skipped_reason',
+      )
+      .run(
+        project.id,
+        branch,
+        commit,
+        commit,
+        skipKey(project, commit),
+        reason ?? null,
+      )
   }
 
   /**
@@ -159,6 +186,28 @@ export class Pushes {
     return commit == null
       ? { status: 'unchanged' }
       : await this.schedule(project, branch, commit)
+  }
+
+  /**
+   * Whether deciding a push of `commit` to `branch` again would change
+   * nothing: the commit built, failed three times, or was not built from
+   * where the Masonfile is looked for now, or the branch's run is of it or
+   * holds it for when it ends. The poll passes on only the other heads.
+   */
+  decided(project: Project, branch: string, commit: string): boolean {
+    if (this.tried(project, branch, commit)) return true
+    const row = this.db
+      .prepare(
+        'SELECT observed_commit,last_attempted_commit,skipped_key FROM automatic_branches WHERE project_id=? AND branch=?',
+      )
+      .get(project.id, branch)
+    if (row == null) return false
+    if (row.skipped_key === skipKey(project, commit)) return true
+    return (
+      (row.observed_commit === commit ||
+        row.last_attempted_commit === commit) &&
+      this.busy(project, branch)
+    )
   }
 
   private busy(project: Project, branch: string): boolean {
@@ -368,9 +417,10 @@ export class Pushes {
   }
 
   /**
-   * Keeps the push triggers a push's setup of `build` recorded for its
-   * branch, with the sources they came from, for the pushes that follow.
-   * Nothing is kept when the sources cannot all be known.
+   * Keeps what a push's setup of `build` recorded for its branch: whether
+   * its build runs when a device is registered, and when, always; and the
+   * push triggers, with the sources they came from, for the pushes that
+   * follow, unless the sources cannot all be known.
    */
   remember(
     project: Project,
@@ -378,6 +428,15 @@ export class Pushes {
     commit: string,
     graph: Graph,
   ): void {
+    this.db
+      .prepare(
+        'INSERT INTO automatic_branches(project_id,branch,device_registered) VALUES(?,?,?) ON CONFLICT(project_id,branch) DO UPDATE SET device_registered=excluded.device_registered',
+      )
+      .run(
+        project.id,
+        branch,
+        buildsForDevice(graph) ? this.options.master.now() : null,
+      )
     if (this.options.mirrors == null || project.format === 'script') return
     const write = (async (): Promise<void> => {
       const masonfile = await this.masonfile(project, commit)

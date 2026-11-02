@@ -700,7 +700,10 @@ and its builds stay. 404 when the project does not own it.
 **`PUT /api/v2/projects/:slug/rules`** takes a list of up to 100
 `{ "pattern", "mode" }`: `pattern` is a branch glob up to 200 characters
 with no spaces or `~^:?[\`, and `mode` is `automatic` or `request`. The
-first match decides. It answers the project.
+first match decides. `*` matches within one path segment and `**` across,
+so a rule for every branch, leaving the Masonfile's push triggers to narrow
+it, is `**` → automatic; `*` misses branches like `paul/x`. It answers the
+project.
 
 ### Add-project wizard and Masonfile
 
@@ -1347,10 +1350,15 @@ set a file secret's path variable. A repeated `idempotencyKey` from the same
 caller answers the first job, or 400 when the request differs. A job has the
 run's v1 fields and `stages` (`name`, `status`, `worker`).
 `PUT …/build-settings` takes `{ "defaultBranch", "automaticBranches" }`, at
-most 20 automatic branches, which become `automatic` rules. In `GET`, a
-branch whose latest push was not built has `skippedCommit` and
-`skippedReason` (`<commit> has no Masonfile`, or `<branch> is not in the
-push trigger's branches`).
+most 20 automatic branches, which become `automatic` rules. `GET` lists in
+`branches` every branch the master has seen: `lastChecked` is the last poll
+that saw it and `observedCommit` the head it last decided. A branch whose
+latest push was not built has `skippedCommit` and `skippedReason`
+(`<commit> has no Masonfile`, `<branch> is not in the push trigger's
+branches`, or `Workflow build has no push trigger`), whether the master
+decided it or setup did. A changed head the poll left for a later poll, because more than
+20 of the project's branches changed at once, has `waitingCommit` and
+`waitingSince` (milliseconds since the epoch) until it is decided.
 
 ### First-run setup
 

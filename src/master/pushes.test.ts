@@ -108,6 +108,35 @@ function setup(): {
 }
 
 describe('Push decisions', () => {
+  it('M1 records whether a branch’s build runs when a device is registered, even when its sources cannot be hashed', async () => {
+    const { master, mirrors, pushes, project } = setup()
+    mirrors.commits.set(commit(1), {
+      'Masonfile.ts': 'export function setup(m) {}\n',
+    })
+    mirrors.commits.set(commit(2), {
+      'Masonfile.ts': `import { readFile } from 'node:fs/promises'\nexport function setup(m) {}\n`,
+    })
+    const recorded = async (at: string, built: Graph): Promise<unknown> => {
+      pushes.remember(project(), 'main', at, built)
+      await pushes.settled()
+      return master.db
+        .prepare(
+          "SELECT device_registered FROM automatic_branches WHERE branch='main'",
+        )
+        .get()?.device_registered
+    }
+    const device = graph(['main'])
+    device.workflows[0]!.triggers.push({ deviceRegistered: true })
+    assert.equal(typeof (await recorded(commit(1), device)), 'number')
+    assert.equal(await recorded(commit(1), graph(['main'])), null)
+    // A Masonfile that imports node: keeps no push triggers, but the flag.
+    assert.equal(typeof (await recorded(commit(2), device)), 'number')
+    assert.equal(
+      master.db.prepare('SELECT 1 FROM push_triggers').get(),
+      undefined,
+    )
+  })
+
   it('M1 leaves a push to setup when the mirror fails or does not answer in time, never taking it for no Masonfile', async () => {
     const { mirrors, pushes, project } = setup()
     mirrors.throws = true
@@ -417,6 +446,9 @@ describe('Push decisions', () => {
           if (project.slug === 'slow')
             await new Promise<void>((resolve) => (release = resolve))
         },
+        decided: (): boolean => false,
+        cached: (): undefined => undefined,
+        latest: (): undefined => undefined,
       },
       async () => new Map([['main', commit(1)]]),
     )

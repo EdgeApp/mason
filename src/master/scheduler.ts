@@ -997,12 +997,28 @@ export class Scheduler {
                 : 'deviceRegistered' in entry,
       )
     if (!allowed) {
+      const reason =
+        trigger === 'push' && workflow.triggers.some((entry) => 'push' in entry)
+          ? `${String(job.branch)} is not in the push trigger's branches`
+          : undefined
+      // A push setup did not build is decided, as one the master skipped is.
+      if (
+        trigger === 'push' &&
+        workflow.name === 'build' &&
+        job.requested_commit != null
+      )
+        this.options.pushes?.notBuilt(
+          this.project(job),
+          String(job.branch),
+          String(job.requested_commit),
+          reason ?? `Workflow ${workflow.name} has no push trigger`,
+        )
       this.finishJob(
         id,
         'cancelled',
-        trigger === 'push' && workflow.triggers.some((entry) => 'push' in entry)
-          ? `Not built: ${String(job.branch)} is not in the push trigger's branches`
-          : `Workflow ${workflow.name} has no ${trigger} trigger`,
+        reason == null
+          ? `Workflow ${workflow.name} has no ${trigger} trigger`
+          : `Not built: ${reason}`,
       )
       return
     }

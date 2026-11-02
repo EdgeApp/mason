@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { after, before, describe, it } from 'mocha'
 import { SESSION_COOKIE } from '../auth/routes.js'
 import { verifyCms } from '../devices/cms.js'
@@ -26,6 +27,11 @@ import {
   fakeSigningCertificate,
 } from '../test/fakeAppleConnect.js'
 import { plist, zip } from '../upload/fixtures.test.js'
+import type { AppleService } from '../apple/service.js'
+import { MasterDatabase } from './database.js'
+import { Jobs, type JobView } from './jobs.js'
+import { Projects } from './projects.js'
+import { MAX_DEVICE_BRANCHES, Provisioning } from './provisioning.js'
 import { localOperator } from './roles.js'
 
 // Rows are read field by field.
@@ -244,6 +250,12 @@ describe('Devices across nodes', function () {
         'INSERT INTO automatic_branches(project_id,branch,observed_commit,last_checked) VALUES(?,?,?,?)',
       )
       .run(project.id, 'main', commitA, Date.now())
+    // Its last push setup recorded a build that runs for a new device.
+    db()
+      .prepare(
+        "UPDATE automatic_branches SET device_registered=1 WHERE branch='main'",
+      )
+      .run()
     await master.appleSigning.profiles.ensure({
       team: TEAM,
       bundleId: APP,
@@ -795,5 +807,75 @@ describe('Devices across nodes', function () {
       /['"`](bundle|fastlane)['"`]|bundle exec|Spaceship/,
     )
     assert.equal(createHash('sha256').update('').digest('hex').length, 64)
+  })
+})
+
+describe('Builds for a new device', () => {
+  it('U15.8 queues only branches whose build runs for a new device: the default branch, exact rules, then the most recently set up, at most 20', () => {
+    const master = new MasterDatabase(new DatabaseSync(':memory:'))
+    const projects = new Projects(master)
+    const jobs = new Jobs(master, projects)
+    const provisioning = new Provisioning({
+      master,
+      apple: {} as AppleService,
+      projects,
+      jobs,
+      scheduler: {
+        deviceRegistered: (): JobView[] => [],
+        poke: (): void => undefined,
+      },
+    })
+    const sha = (n: number): string => n.toString(16).padStart(40, 'd')
+    const branch = (n: number): string => `b${String(n).padStart(2, '0')}`
+    /** Branches b00…, observed; `device` maps those whose build runs for a device to when that was recorded. */
+    const seed = (
+      slug: string,
+      count: number,
+      device: (n: number) => number | null,
+    ): void => {
+      projects.save(localOperator, slug, {
+        repository: `https://github.com/a/${slug}`,
+        defaultBranch: 'b29',
+      })
+      projects.setRules(localOperator, slug, [
+        { pattern: 'b00', mode: 'request' },
+        { pattern: 'b25', mode: 'automatic' },
+        { pattern: '**', mode: 'automatic' },
+      ])
+      const id = projects.get(slug).id
+      for (let n = 0; n < count; n++)
+        master.db
+          .prepare(
+            'INSERT INTO automatic_branches(project_id,branch,observed_commit,device_registered) VALUES(?,?,?,?)',
+          )
+          .run(id, branch(n), sha(n), device(n))
+    }
+    // Thirty observed branches; only b07's build runs for a new device.
+    seed('one', 30, (n) => (n === 7 ? 1 : null))
+    // All but b28 would build, set up in branch order: b00 is no longer
+    // automatic and b27 is busy.
+    seed('many', 30, (n) => (n === 28 ? null : n + 1))
+    jobs.create(projects.get('many'), 'b27', 'request')
+    provisioning.queueBuilds([projects.get('one'), projects.get('many')])
+    const queued = (slug: string): unknown[][] =>
+      master.db
+        .prepare(
+          "SELECT j.branch,j.requested_commit FROM jobs j JOIN projects p ON p.id=j.project_id WHERE p.slug=? AND j.trigger='deviceRegistered' ORDER BY j.number",
+        )
+        .all(slug)
+        .map((row) => [row.branch, row.requested_commit])
+    assert.deepEqual(queued('one'), [['b07', sha(7)]])
+    const many = queued('many')
+    assert.equal(many.length, MAX_DEVICE_BRANCHES)
+    assert.deepEqual(
+      many.map(([name]) => name),
+      [
+        'b29',
+        'b25',
+        'b26',
+        ...Array.from({ length: 17 }, (_, i) => branch(24 - i)),
+      ],
+    )
+    assert.deepEqual(many[0], ['b29', sha(29)])
   })
 })

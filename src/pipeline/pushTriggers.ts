@@ -47,6 +47,15 @@ export function graphPushBranches(graph: Graph): PushBranches {
   return out
 }
 
+/** Whether a recorded graph's `build` workflow runs when a device is registered. */
+export function buildsForDevice(graph: Pick<Graph, 'workflows'>): boolean {
+  return (
+    graph.workflows
+      .find((workflow) => workflow.name === 'build')
+      ?.triggers.some((trigger) => 'deviceRegistered' in trigger) ?? false
+  )
+}
+
 /** Several push triggers of one workflow as one entry: any of them builds. */
 function merge(entries: Array<true | string[]>): true | string[] | undefined {
   if (entries.length === 0) return undefined

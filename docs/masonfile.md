@@ -306,13 +306,14 @@ m.workflow('release', {
 | `{ request: true }` | A developer, manager or admin, or a `build` API key, requests it. |
 | `{ schedule: '<cron>', branches: [...] }` | The cron time passes (master's time zone). |
 | `{ after: { workflow, status?: 'success' \| 'completed' } }` | Another workflow of the same project finishes a run of the same commit. Runs of other projects cannot be started or awaited. |
-| `{ deviceRegistered: true }` | A new iOS device is provisioned (rebuild ad hoc builds). |
+| `{ deviceRegistered: true }` | A new iOS device is provisioned (rebuild ad hoc builds): on the default branch, and on `build` of each automatic branch whose last push setup recorded it. |
 
 The master's **branch rules decide which branches may build at all**. A
 Masonfile trigger can narrow that, never widen it: a schedule on a branch with
 no rule does nothing, and a push trigger fires only on `automatic` branches.
 So, as in Jenkins, the Masonfile says which branches build on push and the
-master's rule is the ceiling: with the rule `*` → automatic,
+master's rule is the ceiling: with the rule `**` → automatic (not `*`, which
+matches within one path segment and so misses branches like `paul/x`),
 
 ```ts fragment
 m.workflow('build', {
@@ -357,7 +358,8 @@ for one it will not build, cheapest first:
    that does not answer within 20 seconds — does the push run setup, which
    records the triggers for the next push. A run its push trigger does not
    cover ends cancelled: "Not built: `<branch>` is not in the push trigger's
-   branches".
+   branches", and its commit is recorded as not built, like one the master
+   skipped.
 
 A push that is not built is recorded on its branch (`skippedReason` in the
 build settings API) and decided once per commit, again only if the
@@ -372,6 +374,23 @@ the master) and schedules the push. While the master is unreachable the host
 keeps the latest delivery per project and branch and passes it on when the
 link returns. The master still polls every 5 minutes, so a missed webhook
 only delays a build.
+
+**Polling.** Each poll lists every branch head of the repository at once
+and compares each automatic branch's head with what the master already
+decided for it: a head whose commit built, failed three times, was not
+built (by the master's decision, or by a setup whose push trigger left the
+branch out), or is the one the branch's run holds needs nothing; a commit
+that failed fewer than three times is tried again. The changed ones,
+and ones never seen, are decided, at most 20 per project and poll, in this
+order: branches an exact `automatic` rule names, in rule order; then
+branches the Masonfile's push triggers name literally (no `*`), as the
+default branch's last push setup recorded them (else the latest setup of
+any branch); then the rest, the one that has
+waited longest first. The others wait for the next poll (`waitingCommit` and
+`waitingSince` in the build settings API), so a repository with hundreds of
+branches still builds a push to any of them within a few polls. Deleted
+branches stop appearing, and pull requests from forks are not branches of
+the repository.
 
 ### Parameters
 
@@ -1258,9 +1277,14 @@ Every bundle ID — the app and each extension — has its own profile.
 2. It immediately replaces the **development** and **ad hoc** profiles of
    every bundle ID of every iOS app ID, with the full list of enabled devices.
    App Store and Developer ID profiles contain no devices and are untouched.
-3. It queues iOS builds of each project's automatic branches, because existing
-   builds cannot install on the new device; *Prepare for this device* rebuilds
-   one specific build.
+3. It queues iOS builds, because existing builds cannot install on the new
+   device: of each project's automatic branches whose `build` workflow has a
+   `deviceRegistered` trigger, as the branch's last push setup recorded it,
+   at its last seen commit and at most 20 per project (the default branch,
+   then branches exact rules name, then the most recently set up), and of
+   the default branch's workflows that declare it. A branch whose triggers the master
+   does not know is not queued; its next run makes its profiles with the
+   device anyway. *Prepare for this device* rebuilds one specific build.
 4. The next stage signs with the new profiles, and the host checks each
    uploaded IPA's embedded profile before offering it to that device.
 

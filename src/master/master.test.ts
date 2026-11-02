@@ -351,6 +351,52 @@ describe('Master database, setup and import', function () {
     db.close()
   })
 
+  it('schema 27 adds the poll’s waiting columns and fills each branch’s device flag from its latest graph of build', () => {
+    const db = new DatabaseSync(path.join(root, 'waiting.sqlite'))
+    migrateMaster(db)
+    const device = JSON.stringify({
+      workflows: [{ name: 'build', triggers: [{ deviceRegistered: true }] }],
+    })
+    const plain = JSON.stringify({
+      workflows: [{ name: 'build', triggers: [{ push: true }] }],
+    })
+    db.exec(`ALTER TABLE automatic_branches DROP COLUMN waiting_commit;
+    ALTER TABLE automatic_branches DROP COLUMN waiting_since;
+    ALTER TABLE automatic_branches DROP COLUMN device_registered;
+    INSERT INTO projects(id,slug,name,repository,format,timeout_seconds,created_at)
+      VALUES(1,'p','P','https://github.com/a/p','pipeline',60,0);
+    INSERT INTO automatic_branches(project_id,branch) VALUES(1,'main'),(1,'dev'),(1,'bad'),(1,'docs');
+    INSERT INTO graphs(key,project_id,branch,commit_sha,workflow,graph,created) VALUES
+      ('m1',1,'main','c','build','${plain}',1),
+      ('m2',1,'main','c','build','${device}',5),
+      ('d1',1,'dev','c','build','${device}',1),
+      ('d2',1,'dev','c','build','${plain}',9),
+      ('b1',1,'bad','c','build','{',3),
+      ('o1',1,'docs','c','docs','${device}',4),
+      ('n1',1,'gone','c','build','${device}',4);
+    UPDATE meta SET value='26' WHERE key='master_schema';`)
+    migrateMaster(db)
+    const flags = (): unknown[][] =>
+      db
+        .prepare(
+          'SELECT branch,device_registered,waiting_commit,waiting_since FROM automatic_branches ORDER BY branch',
+        )
+        .all()
+        .map((row) => Object.values(row))
+    const expected = [
+      ['bad', null, null, null],
+      ['dev', null, null, null],
+      ['docs', null, null, null],
+      ['main', 5, null, null],
+    ]
+    assert.deepEqual(flags(), expected)
+    // Again: the columns are there; the flags are filled the same.
+    db.exec("UPDATE meta SET value='26' WHERE key='master_schema'")
+    migrateMaster(db)
+    assert.deepEqual(flags(), expected)
+    db.close()
+  })
+
   it('U12.16 schema 22 records each published or staged reservation as its default variant', () => {
     const db = new DatabaseSync(path.join(root, 'publications.sqlite'))
     migrateMaster(db)
