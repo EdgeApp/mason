@@ -4,6 +4,7 @@ export const labels: Record<Platform, string> = {
   android: 'Android',
   macos: 'macOS',
   windows: 'Windows',
+  tvos: 'tvOS',
 }
 export function platform(
   query: unknown,

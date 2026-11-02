@@ -90,7 +90,7 @@ export interface StageSigning {
     | 'appStore'
     | 'developerId'
     | 'macAppStore'
-  platform: 'ios' | 'macos'
+  platform: 'ios' | 'macos' | 'tvos'
   /** The app ID the stage signs, and every bundle ID it signs (the app and its extensions). */
   app: string
   bundleIds: string[]

@@ -474,9 +474,11 @@ website.
 In a Mason cluster the host serves registration and sends each device to the
 master through its outbox. The master registers the device with Apple through
 its App Store Connect key, replaces the development and ad hoc profiles of
-every iOS app ID with the full list of enabled devices (the new profile is
-made before the old one is deleted), and queues iOS builds of each project's
-automatic branches; no worker and no Apple credential outside the master is
+every iOS app ID with the full list of enabled iPhones, iPads, iPods, Apple
+Watches and Vision Pros (the new profile is made before the old one is
+deleted; Apple TVs, which Apple refuses on iOS profiles, are left out), and
+queues
+builds of the automatic branches of each project with an app for the device; no worker and no Apple credential outside the master is
 involved. **Prepare for this device** queues a new build of that package's
 exact branch and commit.
 

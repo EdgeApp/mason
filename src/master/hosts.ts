@@ -403,6 +403,14 @@ export class HostLinks {
     return { origin, ...(pin == null ? {} : { pin }) }
   }
 
+  /** The Mason version each host last reported. */
+  versions(): string[] {
+    return this.options.master.db
+      .prepare("SELECT version FROM nodes WHERE role='host' AND removed=0")
+      .all()
+      .map((row) => String(row.version))
+  }
+
   mirrored(version: string): boolean {
     return (
       this.options.master.db

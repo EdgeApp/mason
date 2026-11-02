@@ -481,6 +481,114 @@ describe('Devices across nodes', function () {
     )
   })
 
+  it('U15.9 a device goes only to apps of its class: an Apple TV for an iOS-only project is refused and queues nothing; with a tvOS app it lands on the tvOS profiles only', async () => {
+    const master = c.master.master!
+    const jobs = (): number =>
+      Number(
+        (
+          db()
+            .prepare(
+              "SELECT COUNT(*) n FROM jobs WHERE trigger='deviceRegistered'",
+            )
+            .get() as Json
+        ).n,
+      )
+    db().prepare("DELETE FROM jobs WHERE trigger='deviceRegistered'").run()
+    const udidTv = 'A'.repeat(39) + '9'
+    master.hosts.deliver(
+      {
+        id: 'device-tv-1',
+        kind: 'device',
+        payload: {
+          udid: udidTv,
+          product: 'AppleTV11,1',
+          model: 'Apple TV 4K',
+          osVersion: '26.0',
+          accountId: tester.id,
+          name: 'Living Room',
+        },
+      },
+      c.fingerprint('host'),
+    )
+    await master.provisioning.poke()
+    const tv = db()
+      .prepare('SELECT status,message FROM devices WHERE udid=?')
+      .get(udidTv) as Json
+    assert.equal(tv.status, 'error')
+    assert.match(
+      tv.message,
+      /No Apple team with an App Store Connect key signs an app for this device \(AppleTV11,1\)/,
+    )
+    assert(
+      !apple.calls.some(
+        (call) =>
+          call.path === '/v1/devices' &&
+          call.method === 'POST' &&
+          call.body!.data.attributes.udid === udidTv,
+      ),
+    )
+    assert.equal(jobs(), 0)
+    // With a tvOS app of the team, the Apple TV goes to Apple and onto the tvOS ad hoc profile only.
+    master.saveProject(admin, 'tvs', {
+      repository: c.repo('fixtures/tvs').url,
+      rules: [{ pattern: 'main', mode: 'automatic' }],
+      apps: [
+        {
+          bundleId: 'app.example.tv',
+          name: 'TV',
+          platforms: ['tvos'],
+          apple: { team: TEAM },
+        },
+      ],
+    })
+    await master.appleSigning.profiles.ensure({
+      team: TEAM,
+      bundleId: 'app.example.tv',
+      distribution: 'adHoc',
+      platform: 'tvos',
+    })
+    apple.deviceClasses.set(udidTv, 'APPLE_TV')
+    const profilePosts = (type: string): Json[] =>
+      apple.calls.filter(
+        (call) =>
+          call.path === '/v1/profiles' &&
+          call.method === 'POST' &&
+          call.body!.data.attributes.profileType === type,
+      )
+    const iosBefore = profilePosts('IOS_APP_ADHOC').length
+    master.hosts.deliver(
+      {
+        id: 'device-tv-2',
+        kind: 'device',
+        payload: { action: 'retry', udid: udidTv, accountId: tester.id },
+      },
+      c.fingerprint('host'),
+    )
+    await master.provisioning.poke()
+    assert.equal(
+      (
+        db()
+          .prepare('SELECT status FROM devices WHERE udid=?')
+          .get(udidTv) as Json
+      ).status,
+      'registered',
+    )
+    const registered = apple.devices.find(
+      (device) => device.attributes.udid === udidTv,
+    )!
+    assert.equal(registered.attributes.platform, 'IOS')
+    assert.deepEqual(
+      profilePosts('TVOS_APP_ADHOC')
+        .at(-1)!
+        .body!.data.relationships.devices.data.map(
+          (entry: { id: string }) => entry.id,
+        ),
+      [registered.id],
+    )
+    assert.equal(profilePosts('IOS_APP_ADHOC').length, iosBefore)
+    master.projects.remove(admin, 'tvs')
+  })
+
   it('U15.4/U15.1 prepare-for-device on the host makes a job pinned to the build’s branch and commit; renames and removals go to the master', async () => {
     const master = c.master.master!
     const appId = Number(

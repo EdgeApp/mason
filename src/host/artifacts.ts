@@ -42,6 +42,7 @@ import {
   asDigest,
   asFileKey,
   asVariant,
+  packagedFormats,
   outsideBlock,
   type Build,
   type Format,
@@ -671,8 +672,8 @@ export class HostArtifacts {
         throw new Refused(400, 'The file does not match its grant')
       if (used != null && used.digest !== received.sha256)
         throw new Refused(409, alreadyPublished(expected.variant))
-      // IPA and APK identity comes from the package; a desktop package's from the publication and its app.
-      const desktop = !['ipa', 'apk'].includes(expected.format)
+      // IPA, APK and simulator zip identity comes from the package; a desktop package's from the publication and its app.
+      const desktop = !packagedFormats.includes(expected.format)
       let identity
       try {
         identity = await packageIdentity(

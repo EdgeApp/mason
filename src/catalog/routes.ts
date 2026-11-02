@@ -3,7 +3,7 @@ import { Router, type Request } from 'express'
 import { Accounts } from '../auth/accounts.js'
 import { navigation, sessionContext } from '../auth/routes.js'
 import { Store } from '../store.js'
-import { asId, type Build, type Platform } from '../validation.js'
+import { asId, downloadOnly, type Build, type Platform } from '../validation.js'
 import { escape } from '../view/html.js'
 import { page } from '../view/shell.js'
 import { branchKey, branchName, labels, platform } from './platform.js'
@@ -20,10 +20,12 @@ function selected(req: Request): Platform {
     req.get('user-agent') ?? '',
   )
 }
-function pill(path: string, chosen: Platform): string {
+/** The platform switch: only the platforms the apps shown have a channel for. */
+function pill(path: string, chosen: Platform, platforms: Platform[]): string {
   return `<div class="platforms" role="group" aria-label="Build platform">${Object.entries(
     labels,
   )
+    .filter(([value]) => platforms.includes(value as Platform))
     .map(
       ([value, label]) =>
         `<a data-platform="${value}" href="${escape(path)}?platform=${value}" aria-current="${chosen === value ? 'true' : 'false'}">${label}</a>`,
@@ -87,7 +89,22 @@ export function catalogRoutes(
       }
       const chosen = selected(req),
         apps = store.apps().filter((app) => store.visible(account.id, app.id))
-      const nav = pill(req.path, chosen) + navigation(session, account)
+      // The platforms of the app shown, or of every app the list shows.
+      const shown =
+        req.params.appId == null
+          ? apps
+          : apps.filter((item) => String(item.id) === req.params.appId)
+      const platforms = (
+        shown.length === 0
+          ? []
+          : store.db
+              .prepare(
+                `SELECT DISTINCT platform FROM channels WHERE enabled=1 AND app_id IN (${shown.map(() => '?').join(',')})`,
+              )
+              .all(...shown.map((item) => item.id))
+      ).map((row) => String(row.platform) as Platform)
+      const nav =
+        pill(req.path, chosen, platforms) + navigation(session, account)
       const query = `?platform=${chosen}`
       if (req.params.appId == null) {
         const cards = apps
@@ -170,15 +187,29 @@ export function catalogRoutes(
       const heading = (build: Build, size?: string): string =>
         `<strong>${escape(build.version)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${time(build.published_at)}${size == null ? '' : ` · ${size}`}</small><code title="${escape(build.commit_hash)}">${escape(build.commit_hash.slice(0, 12))}</code>`
       // One install control: a direct link for an IPA the device may install, else a form.
+      // A build that is only downloaded (an iPhone Simulator app) is a download, for any device.
       const install = (build: Build, variant?: string): string => {
+        const download = downloadOnly(build)
         const eligible = deviceStore.eligible(build, selectedDevice)
-        const label = `${eligible ? 'Install' : selectedDevice == null ? 'Register Device for' : 'Prepare for this device'} ${build.version} build ${build.build_number}${variant == null ? '' : ` (${variant})`}`
-        const action = `<span class="download-label">${eligible ? 'Install' : selectedDevice == null ? 'Register Device' : 'Prepare for device'} <span aria-hidden="true">↓</span></span>`
+        const verb =
+          download != null
+            ? 'Download'
+            : eligible
+              ? 'Install'
+              : selectedDevice == null
+                ? 'Register Device for'
+                : 'Prepare for this device'
+        const label = `${verb} ${build.version} build ${build.build_number}${variant == null ? '' : ` (${variant})`}${download == null ? '' : ` for the ${download}`}`
+        const action = `<span class="download-label">${download != null ? 'Download' : eligible ? 'Install' : selectedDevice == null ? 'Register Device' : 'Prepare for device'} <span aria-hidden="true">↓</span></span>`
+        const size =
+          download == null
+            ? megabytes(build.size)
+            : `${download} · ${megabytes(build.size)}`
         const content =
           variant == null
-            ? `<div>${heading(build, megabytes(build.size))}</div>${action}`
-            : `<div><strong>${escape(variant)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${megabytes(build.size)}</small></div>${action}`
-        if (eligible && build.format === 'ipa') {
+            ? `<div>${heading(build, size)}</div>${action}`
+            : `<div><strong>${escape(variant)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${size}</small></div>${action}`
+        if (eligible && download == null && build.format === 'ipa') {
           // The tap itself must open the native installer. A page-load
           // redirect loses Safari's user gesture and adds an app-open prompt.
           const grant = installations.create(build.id, session, selectedDevice)

@@ -385,6 +385,154 @@ describe('Mason protected catalog and installation', () => {
     accounts.logout(user.token)
     assert.equal((await request(manifest, {}, false)).status, 404)
   })
+  it('U12.19 offers an iPhone Simulator build as a download only: no install link, no manifest, no device check', async () => {
+    // Devices are checked on this server, and none is selected.
+    ;(store.config as { devices?: unknown }).devices = {
+      trustStoreFile: path.join(root, 'roots.pem'),
+      openssl: 'openssl',
+    }
+    const phone = publish('ios', 'master', '200')
+    store.db
+      .prepare('UPDATE channels SET formats=? WHERE id=?')
+      .run(JSON.stringify(['ipa', 'zip']), phone.channel_id)
+    const bytes = 'a zipped simulator app'
+    const key = `${'a'.repeat(32)}-maestro.zip`
+    writeFileSync(store.filePath(key), bytes, { mode: 0o600 })
+    const insert = (variant: string, file: string, format: Format): Build =>
+      insertBuild(
+        store.db,
+        {
+          channelId: phone.channel_id,
+          branch: 'master',
+          commit: 'c'.repeat(40),
+          version: '4.60.0',
+          buildNumber: '201',
+          bundleId: 'test.example.app',
+          format,
+          size: format === 'zip' ? bytes.length : content.length,
+          digest: digest(`${variant}201`),
+          changelog: '',
+          source: 'pipeline',
+          customFields: '{}',
+          variant,
+          run: 'run-20',
+        },
+        file,
+        { now: now + 1000, retentionDays: 14 },
+      )
+    now += 1000
+    insert('', `${'b'.repeat(32)}.ipa`, 'ipa')
+    const simulator = insert('maestro', key, 'zip')
+    const html = await (
+      await request(`/apps/${app}/branches/${branchKey('master')}?platform=ios`)
+    ).text()
+    const group = html.slice(
+      html.indexOf('id="run-run-20"'),
+      html.indexOf('</section>', html.indexOf('id="run-run-20"')),
+    )
+    // The device build waits for a registered device; the simulator build is a download.
+    assert.match(
+      group,
+      /aria-label="Register Device for 4\.60\.0 build 201 \(Default\)"/,
+    )
+    assert.match(
+      group,
+      /aria-label="Download 4\.60\.0 build 201 \(maestro\) for the iPhone Simulator"/,
+    )
+    assert.match(
+      group,
+      /<strong>maestro <span class="build-number">\(201\)<\/span><\/strong><small>iPhone Simulator · 0\.0 MB<\/small><\/div><span class="download-label">Download /,
+    )
+    assert.doesNotMatch(group, /itms-services/)
+    const response = await request(`/builds/${simulator.id}/install`, {
+      method: 'POST',
+      headers: {
+        origin: store.config.origin,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ csrf: user.session.csrf }),
+    })
+    assert.equal(response.status, 303)
+    const url = response.headers.get('location')!
+    const download = await request(url, {}, false)
+    assert.equal(download.status, 200)
+    assert.equal(download.headers.get('content-type'), 'application/zip')
+    assert.equal(await download.text(), bytes)
+    assert.equal(
+      (await request(url.replace('/artifact', '/manifest.plist'), {}, false))
+        .status,
+      404,
+    )
+    assert.throws(() => installs.manifest(simulator, 'fixture'))
+  })
+  it('U14.13 offers a tvOS app as an Apple TV download: no install link, no manifest', async () => {
+    ;(store.config as { devices?: unknown }).devices = {
+      trustStoreFile: path.join(root, 'roots.pem'),
+      openssl: 'openssl',
+    }
+    const tv = publish('tvos', 'master', '300', 'ipa')
+    const html = await (
+      await request(
+        `/apps/${app}/branches/${branchKey('master')}?platform=tvos`,
+      )
+    ).text()
+    assert.match(html, /<p class="intro">tvOS builds · newest first<\/p>/)
+    // The platform switch shows only the platforms the app has.
+    const switchOf = (page: string): string[] =>
+      [
+        ...(
+          /<div class="platforms"[^>]*>(.*?)<\/div>/.exec(page)?.[1] ?? ''
+        ).matchAll(/data-platform="([a-z]+)"/g),
+      ].map((match) => match[1]!)
+    assert.deepEqual(switchOf(html), ['tvos'])
+    publish('android', 'master', '301')
+    assert.deepEqual(
+      switchOf(await (await request(`/apps/${app}?platform=tvos`)).text()),
+      ['android', 'tvos'],
+    )
+    const other = store.addApp({
+      slug: 'test.example.other',
+      name: 'Other',
+      position: 1,
+    })
+    store.addChannel({
+      appId: other,
+      platform: 'windows',
+      key: 'other-windows',
+      allowedFormats: ['exe'],
+    })
+    assert.deepEqual(switchOf(await (await request('/')).text()), [
+      'android',
+      'windows',
+      'tvos',
+    ])
+    assert.deepEqual(switchOf(await (await request(`/apps/${other}`)).text()), [
+      'windows',
+    ])
+    assert.match(
+      html,
+      /aria-label="Download 1\.2\.3 build 300 for the Apple TV"/,
+    )
+    assert.match(html, /<\/time> · Apple TV · 0\.0 MB<\/small>/)
+    assert.doesNotMatch(html, /itms-services/)
+    const response = await request(`/builds/${tv.id}/install`, {
+      method: 'POST',
+      headers: {
+        origin: store.config.origin,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ csrf: user.session.csrf }),
+    })
+    assert.equal(response.status, 303)
+    const url = response.headers.get('location')!
+    assert.equal((await request(url, {}, false)).status, 200)
+    assert.equal(
+      (await request(url.replace('/artifact', '/manifest.plist'), {}, false))
+        .status,
+      404,
+    )
+    assert.throws(() => installs.manifest(tv, 'fixture'))
+  })
   it('selects platforms safely and round-trips arbitrary branch names without paths', () => {
     for (const [agent, expected] of [
       ['iPhone', 'ios'],

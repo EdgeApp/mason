@@ -10,10 +10,12 @@ import {
   manifest,
   packageFields,
   plist,
+  plistOf,
+  simulatorZip,
   zip,
 } from './fixtures.test.js'
 import { customFields, packageIdentity, parseInWorker } from './metadata.js'
-import { plistIdentity } from './plist.js'
+import { NOT_SIMULATOR, plistIdentity, simulatorIdentity } from './plist.js'
 let root: string
 function file(bytes: Buffer): string {
   const name = path.join(root, 'fixture')
@@ -163,6 +165,123 @@ describe('Bounded package identity parsing', () => {
       link = path.join(root, 'link')
     symlinkSync(name, link)
     await assert.rejects(packageIdentity(link, 'ipa', {}))
+  })
+  it('U12.19 reads an iPhone Simulator zip’s identity from its one .app and refuses a device app or any other layout', async () => {
+    for (const binary of [false, true]) {
+      assert.deepEqual(
+        await packageIdentity(file(simulatorZip({ binary })), 'zip', {}),
+        packageFields,
+      )
+      // Either key says simulator.
+      assert.deepEqual(
+        simulatorIdentity(
+          plistOf(
+            {
+              CFBundleIdentifier: packageFields.bundleId,
+              CFBundleShortVersionString: packageFields.version,
+              CFBundleVersion: packageFields.buildNumber,
+              CFBundleSupportedPlatforms: ['iPhoneSimulator'],
+            },
+            binary,
+          ),
+        ),
+        packageFields,
+      )
+      // A device app is refused, with the reason.
+      await assert.rejects(
+        packageIdentity(
+          file(simulatorZip({ binary, platform: 'iphoneos' })),
+          'zip',
+          {},
+        ),
+        { message: NOT_SIMULATOR },
+      )
+    }
+    // A device app that also names the simulator is still a device app.
+    for (const fields of [
+      {
+        DTPlatformName: 'iphoneos',
+        CFBundleSupportedPlatforms: ['iPhoneSimulator'],
+      },
+      {
+        DTPlatformName: 'iphonesimulator',
+        CFBundleSupportedPlatforms: ['iPhoneSimulator', 'iPhoneOS'],
+      },
+      { CFBundleSupportedPlatforms: ['iPhoneOS'] },
+      { CFBundleSupportedPlatforms: [] as string[] },
+    ] as Array<Record<string, string | string[]>>)
+      assert.throws(
+        () =>
+          simulatorIdentity(
+            plistOf({
+              CFBundleIdentifier: packageFields.bundleId,
+              CFBundleShortVersionString: packageFields.version,
+              CFBundleVersion: packageFields.buildNumber,
+              ...fields,
+            }),
+          ),
+        { message: NOT_SIMULATOR },
+      )
+    // Finder's resource forks are allowed beside the app.
+    assert.deepEqual(
+      await packageIdentity(
+        file(
+          zip([
+            ['__MACOSX/Example.app/._Info.plist', Buffer.from('fork')],
+            [
+              'Example.app/Info.plist',
+              plistOf({
+                CFBundleIdentifier: packageFields.bundleId,
+                CFBundleShortVersionString: packageFields.version,
+                CFBundleVersion: packageFields.buildNumber,
+                DTPlatformName: 'iphonesimulator',
+              }),
+            ],
+          ]),
+        ),
+        'zip',
+        {},
+      ),
+      packageFields,
+    )
+    const info = (): Buffer =>
+      plistOf({
+        CFBundleIdentifier: packageFields.bundleId,
+        CFBundleShortVersionString: packageFields.version,
+        CFBundleVersion: packageFields.buildNumber,
+        DTPlatformName: 'iphonesimulator',
+      })
+    for (const [bytes, message] of [
+      [zip([]), /Package metadata missing/],
+      [
+        zip([
+          ['A.app/Info.plist', info()],
+          ['B.app/Info.plist', info()],
+        ]),
+        /exactly one \.app/,
+      ],
+      [
+        zip([
+          ['A.app/Info.plist', info()],
+          ['README.txt', Buffer.from('notes')],
+        ]),
+        /exactly one \.app/,
+      ],
+      [zip([['Info.plist', info()]]), /exactly one \.app/],
+      // An IPA is not a simulator zip.
+      [zip([['Payload/A.app/Info.plist', info()]]), /exactly one \.app/],
+      [
+        zip([['A.app/Contents/Info.plist', info()]]),
+        /Package metadata missing/,
+      ],
+      [
+        zip([
+          ['A.app/Info.plist', plistOf({ DTPlatformName: 'iphonesimulator' })],
+        ]),
+        /Invalid package identity/,
+      ],
+    ] as const)
+      await assert.rejects(packageIdentity(file(bytes), 'zip', {}), message)
   })
   it('checks desktop file signatures and requires explicit publisher identity', async () => {
     for (const format of ['dmg', 'msi', 'exe'] as const) {

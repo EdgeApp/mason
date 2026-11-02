@@ -24,8 +24,8 @@ the types-only package `@mason/types`.
 - Stages pass **files** to each other with stash/unstash, and pass small
   **values** by returning them. Runs pass files to later runs, including runs
   of other workflows, through saved **artifacts**.
-- **Published builds** are the installable packages (IPA, APK, DMG, EXE, MSI)
-  that appear on the host under the project's home, for testers whose groups
+- **Published builds** are the installable packages (IPA, APK, DMG, EXE, MSI,
+  and iPhone Simulator apps, zipped) that appear on the host under the project's home, for testers whose groups
   include the app. **Artifacts**
   are everything else a run saves: reports, test results, logs, binaries.
 - Every byte a stage prints — its own `console.log` and everything it runs —
@@ -501,7 +501,7 @@ other nodes; this keeps every stage able to finish without the master.
 | `activityTimeout` | Fail the stage as `timed_out` when it prints nothing for this long (`'20m'`), catching hung simulators and prompts waiting for input. Default none. |
 | `retry` | `number` or `{ attempts, on?: ('failed' \| 'interrupted' \| 'timed_out')[] }`. Each attempt is a fresh run of the function, possibly on another node. |
 | `lock` | Named resource(s) held while running, across all runs of the project (`'ios-signing'`, `'device-farm'`). |
-| `apple` | Apple signing for this stage (section 12): `{ distribution, app?, bundleIds? }`. |
+| `apple` | Apple signing for this stage (section 12): `{ distribution, app?, bundleIds?, platform? }`. |
 | `publishes` | App IDs this stage may publish. Build numbers are reserved for them before the stage starts (section 8). |
 | `buildNumbers` | Other build-number sequences this stage needs (section 8). |
 | `checkout` | `true` (default), `false`, or `{ submodules?: boolean, depth?: number, lfs?: boolean }`. The source comes from the master (below); with `false`, only the Masonfile does. |
@@ -781,8 +781,8 @@ await ctx.publish({
   platform: 'macos',
   path: 'build/Eddy-412.dmg',
   variant?: string,                // one of several files of this build (see Variants)
-  version: '0.3.3',                // required for DMG/EXE/MSI; read from IPA/APK and checked
-  buildNumber: '412',              // DMG/EXE/MSI: defaults to getBuildNumber's; IPA/APK: read from it
+  version: '0.3.3',                // required for DMG/EXE/MSI; read from IPA/APK/zip and checked
+  buildNumber: '412',              // DMG/EXE/MSI: defaults to getBuildNumber's; IPA/APK/zip: read from it
   changelog?: string,
   metadata?: Record<string, unknown>,
 })
@@ -796,8 +796,8 @@ the master confirms it. `publish` resolves when the host has the file with
 lists what it published. `ctx.artifacts.save` and `ctx.artifacts.fetch` go
 through the master the same way.
 
-**Which number.** An IPA's or APK's number is its own (`CFBundleVersion`,
-`versionCode`); `buildNumber`, if given, must match it. A desktop file's is
+**Which number.** An IPA's, APK's or simulator zip's number is its own
+(`CFBundleVersion`, `versionCode`); `buildNumber`, if given, must match it. A desktop file's is
 `buildNumber`, defaulting to `getBuildNumber`'s. Either way it is one of the
 run's: N itself, or with a sequence `block` (section 8) any of N to
 N+block−1. Anything else is refused before the upload.
@@ -827,6 +827,29 @@ await ctx.publish({ app: 'co.edgesecure.app', platform: 'android', path: `${apks
 The host shows a run's variants as one build: the default first, then each
 variant with its size and its own install button. A variant never replaces
 its build as a branch's latest, and a build's variants expire together.
+
+**iPhone Simulator builds.** An iOS app can also be published as an iPhone
+Simulator build, for tests that run in the simulator (Maestro, for
+example): a `.zip` holding exactly one `.app` at its root, built with
+`-sdk iphonesimulator`. Its app ID, version and number come from the
+`.app`'s `Info.plist` (binary or XML), which must say it was built for the
+simulator and nothing else (`DTPlatformName` `iphonesimulator`, or without
+one `iPhoneSimulator` among `CFBundleSupportedPlatforms`, and no `iPhoneOS`
+there); an app built for devices, a zip of anything
+else, another app ID or another number is refused. Publish it as a variant
+of the run's iOS build, under the same number:
+
+```ts fragment
+await ctx.publish({ app: 'co.edgesecure.app', platform: 'ios', path: ipa })
+await ctx.exec('ditto', ['-c', '-k', '--keepParent', 'build/Build/Products/Release-iphonesimulator/Edge.app', 'Edge.app.zip'])
+await ctx.publish({ app: 'co.edgesecure.app', platform: 'ios', variant: 'maestro', path: 'Edge.app.zip' })
+```
+
+The host lists it with its variants as an *iPhone Simulator* download, with
+its size, for anyone who may see the app: no install link, no install
+manifest and no device check, since it cannot run on a phone. The format is
+`zip`, the file's extension, as every format is. A zip is refused while the
+host runs an older Mason than the master, which might not take it.
 
 | Zealot upload API (gone from the cluster) | `ctx.publish` |
 | --- | --- |
@@ -1241,7 +1264,11 @@ Otherwise an administrator gives the master, per Apple team:
   Private keys live only in the master database (and its encrypted backups).
 - per project app ID: its Apple team, the **bundle IDs** it signs (the app and
   each extension, for example `com.example.app` and
-  `com.example.app.widgets`), and its platform (iOS, macOS, both).
+  `com.example.app.widgets`), and its platforms (iOS, macOS, tvOS, or several).
+  App Store Connect has no tvOS bundle ID platform: a tvOS app's bundle ID is
+  an `IOS` one (`UNIVERSAL` with macOS), so one bundle ID can carry an app's
+  iOS and tvOS apps, as universal purchase needs, each with its own
+  profiles.
 
 ### Profiles are automatic
 
@@ -1254,6 +1281,14 @@ distribution, and creates or regenerates one when:
 - for development and ad hoc profiles, the set of enabled devices changed
   (devices registered on the host are added to Apple's device list
   automatically, as today).
+
+A development or ad hoc profile carries the enabled devices of its
+platform's device classes only: for iOS iPhones, iPads, iPods, Apple Watches
+(a watch app is signed with its iPhone app's profile) and Apple Vision Pros;
+for macOS Macs. Apple lists Apple TVs under its `IOS` platform too but
+refuses them on an iOS profile, so they are left out. A device of a class
+no platform's profiles carry is logged by the master, once each time that
+set changes.
 
 Bundle IDs missing from the Apple account are created (Fastlane `produce`);
 their capabilities (push, App Groups, iCloud, …) are taken from the
@@ -1272,13 +1307,15 @@ Every bundle ID — the app and each extension — has its own profile.
 
 **When a device is registered** on the host:
 
-1. The master registers the UDID with Apple unless Apple already has it, and
-   shows the device as processing until Apple enables it.
+1. The master registers the UDID with Apple, in each team that signs an app
+   for its device class, unless Apple already has it, and shows the device as
+   processing until Apple enables it.
 2. It immediately replaces the **development** and **ad hoc** profiles of
    every bundle ID of every iOS app ID, with the full list of enabled devices.
    App Store and Developer ID profiles contain no devices and are untouched.
-3. It queues iOS builds, because existing builds cannot install on the new
-   device: of each project's automatic branches whose `build` workflow has a
+3. It queues builds, because existing builds cannot install on the new
+   device: of the automatic branches of each project with an app for the
+   device's class whose `build` workflow has a
    `deviceRegistered` trigger, as the branch's last push setup recorded it,
    at its last seen commit and at most 20 per project (the default branch,
    then branches exact rules name, then the most recently set up), and of
@@ -1348,7 +1385,51 @@ m.stage('ios', {
 
 `distribution` is one of `development`, `adHoc`, `appStore` (App Store and
 TestFlight), `developerId` (macOS outside the App Store), `macAppStore`.
-`bundleIds` defaults to every bundle ID configured for `app`.
+`bundleIds` defaults to every bundle ID configured for `app`. `platform`
+(`ios`, `macos` or `tvos`, one of the app's platforms) is the platform the
+stage signs for; it is needed only for the tvOS app of an app ID that is
+also iOS, since iOS is the default then. Developer ID and Mac App Store are
+macOS; an app ID that is only tvOS signs for tvOS, and one that is only
+macOS for macOS.
+
+**tvOS.** A tvOS stage's profiles are `TVOS_APP_DEVELOPMENT`,
+`TVOS_APP_ADHOC` and `TVOS_APP_STORE`, its development and ad hoc profiles
+carrying the team's enabled Apple TVs only. `ctx.apple.archive` builds for
+`generic/platform=tvOS` with `-sdk appletvos` (a stage that gives its own
+`destination` gives its own `sdk`, if it needs one),
+`ctx.apple.resign` signs a tvOS `.ipa`, `.xcarchive` or `.app` as it does
+an iOS one, and `ctx.apple.testflight` uploads it as a `TV_OS` build. A
+tvOS `.ipa` is published with `platform: 'tvos'`; its identity is read from
+it, and since tvOS has no install from a web page the host offers it as an
+Apple TV download only. A tvOS publication is refused while the host runs
+an older Mason than the master, which might not show it. Apple TVs cannot
+register through the host's device page (tvOS has no Safari); register them
+in the Apple Developer account, and the next profile Mason makes for tvOS
+carries them.
+
+A stage signs every bundle ID of its app ID unless `bundleIds` names some,
+and the bundle IDs are the app ID's, not a platform's. When an app ID's iOS
+and tvOS apps have different extensions, each stage names the bundle IDs
+its own app signs, so a tvOS stage makes no tvOS profile for an iOS-only
+widget, and the other way around (setting the app ID up still makes each
+platform's profiles for all of them):
+
+```ts fragment
+m.stage('tv', {
+  on: { type: 'mac-xcode', labels: ['apple-signing'] },
+  apple: {
+    distribution: 'adHoc',
+    app: 'com.example.app',
+    platform: 'tvos',
+    bundleIds: ['com.example.app', 'com.example.app.topshelf'],
+  },
+  publishes: ['com.example.app'],
+  run: async (ctx) => {
+    const { ipa } = await ctx.apple.archive({ workspace: 'App.xcworkspace', scheme: 'App TV' })
+    await ctx.publish({ app: 'com.example.app', platform: 'tvos', path: ipa! })
+  },
+})
+```
 
 Before the stage function runs, the worker:
 
@@ -1404,8 +1485,8 @@ export async function buildIos(ctx: Stage) {
   artifact), and resolves with `{ archive, ipa? , app?, pkg?, dsyms }`.
   Options: `project` or `workspace`, `scheme`, `configuration`, `destination`,
   `version`, `buildNumber`, `sdk`, `xcargs`, `output`.
-- **`ctx.apple.resign(options)`** (Fastlane `resign`) signs an iOS build an
-  earlier stage produced with this stage's identity and profiles, and
+- **`ctx.apple.resign(options)`** (Fastlane `resign`) signs an iOS or tvOS
+  build an earlier stage produced with this stage's identity and profiles, and
   resolves with `{ ipa, bundles }`: the signed `.ipa` and every bundle
   signed, deepest first, with its bundle ID and profile. Options: `path` (an
   `.ipa`, `.xcarchive` or `.app` in the workspace), `output` (the `.ipa`;

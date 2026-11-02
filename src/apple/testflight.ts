@@ -63,7 +63,7 @@ export class TestFlight {
     stage: string
     team: string
     bundleId: string
-    platform: 'ios' | 'macos'
+    platform: 'ios' | 'macos' | 'tvos'
     fileName: string
     fileSize: number
     version: string
@@ -88,7 +88,12 @@ export class TestFlight {
           attributes: {
             cfBundleShortVersionString: input.version,
             cfBundleVersion: input.buildNumber,
-            platform: input.platform === 'macos' ? 'MAC_OS' : 'IOS',
+            platform:
+              input.platform === 'macos'
+                ? 'MAC_OS'
+                : input.platform === 'tvos'
+                  ? 'TV_OS'
+                  : 'IOS',
           },
           relationships: { app: { data: { type: 'apps', id: app.id } } },
         },

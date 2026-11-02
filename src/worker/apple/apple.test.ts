@@ -615,6 +615,49 @@ describe('Apple signing on a worker', function () {
       () => archiveArgs({ scheme: 'App' }, signing, '/k', '/a', '/d'),
       /project or a workspace/,
     )
+    // A tvOS stage archives for tvOS devices with the Apple TV SDK, unless told otherwise.
+    const tv = archiveArgs(
+      { scheme: 'TV', project: 'TV.xcodeproj' },
+      { ...signing, platform: 'tvos' },
+      '/k',
+      '/a',
+      '/d',
+    )
+    assert.equal(tv[tv.indexOf('-destination') + 1], 'generic/platform=tvOS')
+    assert.equal(tv[tv.indexOf('-sdk') + 1], 'appletvos')
+    const chosen = archiveArgs(
+      { scheme: 'TV', project: 'TV.xcodeproj', sdk: 'appletvos26.0' },
+      { ...signing, platform: 'tvos' },
+      '/k',
+      '/a',
+      '/d',
+    )
+    assert.equal(chosen[chosen.indexOf('-sdk') + 1], 'appletvos26.0')
+    const simulator = archiveArgs(
+      {
+        scheme: 'TV',
+        project: 'TV.xcodeproj',
+        destination: 'generic/platform=tvOS Simulator',
+      },
+      { ...signing, platform: 'tvos' },
+      '/k',
+      '/a',
+      '/d',
+    )
+    assert.equal(
+      simulator[simulator.indexOf('-destination') + 1],
+      'generic/platform=tvOS Simulator',
+    )
+    assert(!simulator.includes('-sdk'))
+    assert(
+      !archiveArgs(
+        { scheme: 'App', project: 'App.xcodeproj' },
+        signing,
+        '/k',
+        '/a',
+        '/d',
+      ).includes('-sdk'),
+    )
     assert.deepEqual(archiveEnvironment(undefined), {})
     for (const bad of [[], { 'A-B': 'x' }, { A: 1 }, 'x'])
       assert.throws(() => archiveEnvironment(bad), /ctx\.apple\.archive env/)

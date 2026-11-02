@@ -209,9 +209,10 @@ describe('Mason durable store', () => {
       `${reservation}-arm64-v8a.apk`,
       `${reservation}-0123456789abcdef.apk`,
       `${reservation}-arm64-v8a-0123456789abcdef.apk`,
+      `${reservation}-maestro-0123456789abcdef.zip`,
     ])
       assert.equal(asFileKey(key), key)
-    for (const key of [`${reservation}-.apk`, `${reservation}-x.zip`])
+    for (const key of [`${reservation}-.apk`, `${reservation}-x.tar`])
       assert.throws(() => asFileKey(key), /Invalid file key/)
     assert.equal(
       alreadyPublished(''),

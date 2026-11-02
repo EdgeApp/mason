@@ -1,4 +1,10 @@
 import { AppleApiError } from '../apple/connect.js'
+import {
+  applePlatforms,
+  deviceClasses,
+  deviceClassOf,
+  type ApplePlatform,
+} from '../apple/profiles.js'
 import type { AppleService } from '../apple/service.js'
 import type { MasterDatabase } from './database.js'
 import type { Jobs, JobView } from './jobs.js'
@@ -13,12 +19,13 @@ export const MAX_DEVICE_BRANCHES = 20
 /**
  * Devices and "Prepare for this device" requests the host sent through its
  * outbox, handled on the master with its App Store Connect client: each new
- * device is registered with Apple in every team that signs an iOS app, the
- * development and ad hoc profiles Mason holds for those teams are made
- * again with the full list of enabled devices (the replacement before the
- * old profile is deleted), and iOS builds of each project's automatic
- * branches whose build runs when a device is registered are queued so
- * they can install on it. A prepare request becomes
+ * device is registered with Apple in every team that signs an app for its
+ * device class (an iPhone: an iOS app), the development and ad hoc profiles
+ * Mason holds for those teams are made again with the full list of enabled
+ * devices (the replacement before the old profile is deleted), and builds
+ * of the automatic branches of each project with an app for the device's
+ * class, whose build runs when a device is registered, are queued so they
+ * can install on it. A prepare request becomes
  * a job pinned to the build's branch and commit. No Apple credential leaves
  * the master.
  */
@@ -77,19 +84,25 @@ export class Provisioning {
     return this.running
   }
 
-  /** Projects with an iOS app ID, and the Apple teams that sign them. */
-  private iosProjects(): Array<{ project: Project; teams: string[] }> {
+  /** Projects with an app for a device class, and the Apple teams that sign those apps. */
+  private projectsFor(
+    deviceClass: string | undefined,
+  ): Array<{ project: Project; teams: string[] }> {
+    const fits = (app: Project['apps'][number]): boolean =>
+      app.platforms.some(
+        (platform) =>
+          platform in deviceClasses &&
+          deviceClasses[platform as ApplePlatform].includes(deviceClass ?? ''),
+      )
     return this.options.projects
       .list()
-      .filter((project) => project.enabled)
+      .filter((project) => project.enabled && project.apps.some(fits))
       .map((project) => ({
         project,
         teams: project.apps
-          .filter((app) => app.platforms.includes('ios') && app.apple != null)
+          .filter((app) => fits(app) && app.apple != null)
           .map((app) => app.apple!.team),
-        ios: project.apps.some((app) => app.platforms.includes('ios')),
       }))
-      .filter((entry) => entry.ios)
   }
 
   private setStatus(id: number, status: string, message = ''): void {
@@ -111,25 +124,39 @@ export class Provisioning {
       name: string | null
     }>
     if (pending.length === 0) return
-    const projects = this.iosProjects()
-    const teams = [...new Set(projects.flatMap((entry) => entry.teams))].filter(
-      (team) => this.options.apple.connect(team) != null,
-    )
-    if (teams.length === 0) {
-      for (const device of pending)
+    const signing = (entries: Array<{ teams: string[] }>): string[] =>
+      [...new Set(entries.flatMap((entry) => entry.teams))].filter(
+        (team) => this.options.apple.connect(team) != null,
+      )
+    const registered: Array<{ id: number; projects: Project[] }> = []
+    // Each team a device went to, with the platforms whose profiles carry it.
+    const changed = new Map<string, Set<ApplePlatform>>()
+    for (const device of pending) {
+      const deviceClass = deviceClassOf(device.product)
+      const projects = this.projectsFor(deviceClass)
+      const teams = signing(projects)
+      if (teams.length === 0) {
         this.setStatus(
           device.id,
           'error',
-          'No Apple team with an App Store Connect key signs an iOS app on this master',
+          `No Apple team with an App Store Connect key signs an app for this device (${device.product}) on this master`,
         )
-      return
-    }
-    const registered: number[] = []
-    for (const device of pending) {
+        continue
+      }
       this.setStatus(device.id, 'processing')
       try {
         for (const team of teams) await this.register(team, device)
-        registered.push(device.id)
+        registered.push({
+          id: device.id,
+          projects: projects.map((entry) => entry.project),
+        })
+        for (const team of teams) {
+          const platforms = changed.get(team) ?? new Set<ApplePlatform>()
+          for (const platform of applePlatforms)
+            if (deviceClasses[platform].includes(deviceClass ?? ''))
+              platforms.add(platform)
+          changed.set(team, platforms)
+        }
         this.db
           .prepare('DELETE FROM apple_cache WHERE key=?')
           .run(`attempts:${device.id}`)
@@ -152,32 +179,37 @@ export class Provisioning {
     }
     if (registered.length === 0) return
     // The profiles that list devices are made again, each with every enabled device.
-    for (const team of teams) {
-      await this.options.apple.profiles.devices(team, 'ios', true)
-      const profiles = this.db
-        .prepare(
-          "SELECT DISTINCT bundle_id,distribution FROM apple_profiles WHERE team_id=? AND distribution IN ('development','adHoc') AND deleted_at IS NULL ORDER BY bundle_id,distribution",
-        )
-        .all(team) as Array<{
-        bundle_id: string
-        distribution: 'development' | 'adHoc'
-      }>
-      for (const profile of profiles)
-        await this.options.apple.profiles
-          .ensure({
-            team,
-            bundleId: profile.bundle_id,
-            distribution: profile.distribution,
-            platform: 'ios',
-          })
-          .catch((error: unknown) => {
-            this.options.log?.(
-              `Could not make the ${profile.distribution} profile of ${profile.bundle_id} again: ${(error as Error).message}`,
-            )
-          })
-    }
-    for (const id of registered) this.setStatus(id, 'registered')
-    this.queueBuilds(projects.map((entry) => entry.project))
+    for (const [team, platforms] of [...changed].sort(([a], [b]) =>
+      a.localeCompare(b),
+    ))
+      for (const platform of [...platforms].sort()) {
+        await this.options.apple.profiles.devices(team, platform, true)
+        const profiles = this.db
+          .prepare(
+            "SELECT DISTINCT bundle_id,distribution FROM apple_profiles WHERE team_id=? AND platform=? AND distribution IN ('development','adHoc') AND deleted_at IS NULL ORDER BY bundle_id,distribution",
+          )
+          .all(team, platform) as Array<{
+          bundle_id: string
+          distribution: 'development' | 'adHoc'
+        }>
+        for (const profile of profiles)
+          await this.options.apple.profiles
+            .ensure({
+              team,
+              bundleId: profile.bundle_id,
+              distribution: profile.distribution,
+              platform,
+            })
+            .catch((error: unknown) => {
+              this.options.log?.(
+                `Could not make the ${profile.distribution} profile of ${profile.bundle_id} again: ${(error as Error).message}`,
+              )
+            })
+      }
+    for (const { id } of registered) this.setStatus(id, 'registered')
+    this.queueBuilds([
+      ...new Set(registered.flatMap((entry) => entry.projects)),
+    ])
   }
 
   private attempt(device: number): number {

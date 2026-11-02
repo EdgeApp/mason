@@ -27,6 +27,7 @@ import { packageIdentity } from '../upload/metadata.js'
 import {
   asFormat,
   asVariant,
+  packagedFormats,
   outsideBlock,
   text,
   type Format,
@@ -216,9 +217,9 @@ export async function publish(
   const size = statSync(file).size
   const digest = await sha256(file)
   let version = options.version
-  // An IPA's or APK's own number is its publication's; a desktop file's is given.
+  // An IPA's, APK's or simulator zip's own number is its publication's; a desktop file's is given.
   let packageNumber: string | undefined
-  if (format === 'ipa' || format === 'apk') {
+  if (packagedFormats.includes(format)) {
     const identity = await packageIdentity(file, format, {})
     version = identity.version
     packageNumber = identity.buildNumber

@@ -25,7 +25,7 @@ export type Duration = `${number}s` | `${number}m` | `${number}h` | `${number}d`
 export type Os = 'macos' | 'linux' | 'windows'
 export type Arch = 'arm64' | 'x64'
 export type Role = 'admin' | 'manager' | 'developer' | 'tester'
-export type Platform = 'ios' | 'android' | 'macos' | 'windows'
+export type Platform = 'ios' | 'android' | 'macos' | 'windows' | 'tvos'
 export type TriggerKind =
   | 'push'
   | 'request'
@@ -155,6 +155,12 @@ export interface AppleOptions {
   app?: string
   /** Defaults to every bundle ID configured for `app`. */
   bundleIds?: string[]
+  /**
+   * The Apple platform the stage signs for, one of the app's: needed only
+   * to sign the tvOS app of an app ID that is also iOS (iOS is the
+   * default then); a tvOS-only app ID signs for tvOS.
+   */
+  platform?: 'ios' | 'macos' | 'tvos'
 }
 
 /** A stage function: an exported function receiving the stage context. */
@@ -434,6 +440,11 @@ export interface PublishOptions {
   /** An app ID of this project, listed in the stage's `publishes`. */
   app: string
   platform: Platform
+  /**
+   * The file, by extension: `.ipa`, `.apk`, `.dmg`, `.exe`, `.msi`, or for
+   * iOS a `.zip` of one `.app` built for the iPhone Simulator, which the
+   * host offers as a download only.
+   */
   path: string
   /**
    * One of several files of this build (`arm64-v8a`, `linux-x64`): 1 to 32
@@ -443,12 +454,13 @@ export interface PublishOptions {
    * refused, so a retried stage must reproduce its files exactly.
    */
   variant?: string
-  /** Required for DMG/EXE/MSI; read from IPA/APK and checked. */
+  /** Required for DMG/EXE/MSI; read from IPA/APK/zip and checked. */
   version?: string
   /**
-   * An IPA's or APK's own number is read from it (this must match it); a
-   * DMG/EXE/MSI's is this, defaulting to `getBuildNumber`'s. Either way it
-   * is one of the run's: N, or N to N+block−1 with a `block`.
+   * An IPA's, APK's or iPhone Simulator zip's own number is read from it
+   * (this must match it); a DMG/EXE/MSI's is this, defaulting to
+   * `getBuildNumber`'s. Either way it is one of the run's: N, or N to
+   * N+block−1 with a `block`.
    */
   buildNumber?: string
   changelog?: string

@@ -67,15 +67,52 @@ export const asFlag = (value: unknown): number => {
   const out = integer(0, 1)(value)
   return out
 }
-export const asPlatform = oneOf(['ios', 'android', 'macos', 'windows'] as const)
+export const asPlatform = oneOf([
+  'ios',
+  'android',
+  'macos',
+  'windows',
+  'tvos',
+] as const)
 export type Platform = ReturnType<typeof asPlatform>
-export const asFormat = oneOf(['ipa', 'apk', 'dmg', 'exe', 'msi'] as const)
+/**
+ * A published file's format, its file extension. An iOS `zip` is an iPhone
+ * Simulator build: one `.app` built for the simulator, zipped.
+ */
+export const asFormat = oneOf([
+  'ipa',
+  'apk',
+  'dmg',
+  'exe',
+  'msi',
+  'zip',
+] as const)
 export type Format = ReturnType<typeof asFormat>
 export const formats: Record<Platform, readonly Format[]> = {
-  ios: ['ipa'],
+  ios: ['ipa', 'zip'],
   android: ['apk'],
   macos: ['dmg'],
   windows: ['exe', 'msi'],
+  tvos: ['ipa'],
+}
+
+/** Formats whose app ID, version and build number come from the package itself. */
+export const packagedFormats: readonly Format[] = ['ipa', 'apk', 'zip']
+
+/**
+ * What a build that is only downloaded, never installed on a device from
+ * the host, is for (`iPhone Simulator`, `Apple TV`: tvOS has no web
+ * install); undefined for one people install.
+ */
+export function downloadOnly(build: {
+  platform: string
+  format: string
+}): string | undefined {
+  return build.platform === 'ios' && build.format === 'zip'
+    ? 'iPhone Simulator'
+    : build.platform === 'tvos'
+      ? 'Apple TV'
+      : undefined
 }
 
 /** A variant name: 1 to 32 letters, digits, `.`, `_` or `-`, starting with a letter or digit. */
@@ -128,7 +165,7 @@ export function outsideBlock(
  * so two files for one variant never share a name.
  */
 export const fileKeyPattern = new RegExp(
-  `^[a-f0-9]{32}(-${variantPattern})?(-[a-f0-9]{16})?\\.(ipa|apk|dmg|exe|msi)$`,
+  `^[a-f0-9]{32}(-${variantPattern})?(-[a-f0-9]{16})?\\.(ipa|apk|dmg|exe|msi|zip)$`,
 )
 
 /** Why a CocoaPods version is not one Mason installs: it must be exact, `1.16.2`. */

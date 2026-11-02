@@ -28,6 +28,7 @@ import type {
   StageSigning,
   RunReport,
 } from '../pipeline/assignment.js'
+import { signingPlatform } from '../apple/profiles.js'
 import type { AppleService } from '../apple/service.js'
 import {
   decide,
@@ -2703,12 +2704,11 @@ export class Scheduler {
         team: app.apple.team,
         app: app.bundleId,
         bundleIds: stage.apple!.bundleIds ?? app.apple.bundleIds,
-        platform:
-          distribution === 'developerId' ||
-          distribution === 'macAppStore' ||
-          !app.platforms.includes('ios')
-            ? 'macos'
-            : 'ios',
+        platform: signingPlatform(
+          app.platforms,
+          distribution,
+          stage.apple!.platform,
+        ),
       },
     }
   }

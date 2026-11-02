@@ -373,6 +373,7 @@ export class Master {
       scratch: options.scratch ?? path.join(dir, 'scratch'),
       ...(options.appleFetch == null ? {} : { fetch: options.appleFetch }),
       ...(options.appleSleep == null ? {} : { sleep: options.appleSleep }),
+      log: (line): void => (this.options.log ?? console.log)(line),
       clone: async (repository, branch, into): Promise<void> => {
         const access = /github\.com/.test(repository)
           ? await this.github
@@ -406,6 +407,8 @@ export class Master {
       privateKey: identity.privateKey,
       host: (): ReturnType<HostLinks['access']> => this.hosts.access(),
       retentionDays: (): number => 14,
+      hostVersions: (): string[] => this.hosts.versions(),
+      version,
     })
     this.scheduler = new Scheduler({
       artifacts: this.artifacts,

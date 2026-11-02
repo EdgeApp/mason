@@ -489,7 +489,7 @@ async function unpack(
 }
 
 /**
- * `ctx.apple.resign` (Fastlane `resign`): signs an iOS build an earlier
+ * `ctx.apple.resign` (Fastlane `resign`): signs an iOS or tvOS build an earlier
  * stage produced — an `.ipa`, `.xcarchive` or `.app`, unsigned or signed
  * for anything — with this stage's identity and profiles, deepest bundle
  * first, verifies it, and packages an `.ipa` for the stage's distribution.
@@ -505,9 +505,10 @@ export async function resign(
     throw new Error(
       'ctx.apple.resign runs only on macOS: it signs with Apple’s codesign',
     )
-  if (context.signing.platform !== 'ios')
+  // A tvOS app is laid out as an iOS app is: one Payload, flat bundles.
+  if (context.signing.platform === 'macos')
     throw new Error(
-      'ctx.apple.resign signs iOS builds; this stage signs for macOS',
+      'ctx.apple.resign signs iOS and tvOS builds; this stage signs for macOS',
     )
   checkOptions(options)
   const input = inside(context.dir, options.path, 'input')

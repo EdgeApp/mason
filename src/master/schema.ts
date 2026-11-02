@@ -7,7 +7,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 27
+export const MASTER_SCHEMA = 29
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -713,6 +713,37 @@ const migrations: Array<(db: DatabaseSync) => void> = [
           'UPDATE automatic_branches SET device_registered=? WHERE project_id=? AND branch=?',
         ).run(Number(row.created), Number(row.project_id), String(row.branch))
     }
+  },
+  // 28: an iOS channel also takes iPhone Simulator builds, zipped; each
+  // app changed is sent to the hosts again.
+  (db): void => {
+    const channels = db
+      .prepare("SELECT id,app_id,formats FROM channels WHERE platform='ios'")
+      .all()
+    for (const row of channels) {
+      const formats = JSON.parse(String(row.formats)) as string[]
+      if (formats.includes('ipa') && !formats.includes('zip')) {
+        db.prepare('UPDATE channels SET formats=? WHERE id=?').run(
+          JSON.stringify([...formats, 'zip']),
+          Number(row.id),
+        )
+        db.prepare(
+          "INSERT INTO change_log(entity,key,operation,at) VALUES('app',?,'put',?)",
+        ).run(String(row.app_id), Date.now())
+      }
+    }
+  },
+  // 29: each Apple profile's platform, so a bundle ID's iOS and tvOS
+  // profiles are two. One made before is macOS when its distribution is
+  // macOS-only, or its bundle ID is macOS-only; iOS otherwise.
+  (db): void => {
+    const columns = db.prepare('PRAGMA table_info(apple_profiles)').all()
+    if (!columns.some((column) => column.name === 'platform'))
+      db.exec(
+        "ALTER TABLE apple_profiles ADD COLUMN platform TEXT NOT NULL DEFAULT 'ios'",
+      )
+    db.exec(`UPDATE apple_profiles SET platform='macos' WHERE distribution IN ('developerId','macAppStore')
+      OR EXISTS (SELECT 1 FROM apple_bundle_ids b WHERE b.team_id=apple_profiles.team_id AND b.identifier=apple_profiles.bundle_id AND b.platform='MAC_OS')`)
   },
 ]
 

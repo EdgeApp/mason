@@ -1,5 +1,5 @@
 // Progressive enhancement: links and forms work without JavaScript.
-const platforms = new Set(['ios', 'android', 'macos', 'windows'])
+const platforms = new Set(['ios', 'android', 'macos', 'windows', 'tvos'])
 function localTimes(): void {
   for (const node of document.querySelectorAll<HTMLTimeElement>(
     'time[datetime]',
