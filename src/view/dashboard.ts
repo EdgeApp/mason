@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { ago, duration, escape } from './html.js'
+import { ago, duration, escape, runName } from './html.js'
 import { icon, type IconName } from './icons.js'
 import type { Viewer } from './shell.js'
 
@@ -396,7 +396,7 @@ export const runHref = (id: string): string => `/runs/${encodeURIComponent(id)}`
 
 /** A run's chip on its project's card, which the page's socket keeps at the run's status. */
 export function runChip(run: ProjectCard['runs'][number]): string {
-  return `<a class="run-chip" href="${runHref(run.id)}" title="${escape(run.workflow)} ${escape(run.status)}" data-run-id="${escape(run.id)}" data-branch="${escape(run.branch)}" data-status="${escape(run.status)}">${escape(run.branch)} <span>#${run.number}</span>${statusDot(run.status)}</a>`
+  return `<a class="run-chip" href="${runHref(run.id)}" title="${escape(run.workflow)} ${escape(run.status)}" data-run-id="${escape(run.id)}" data-branch="${escape(run.branch)}" data-status="${escape(run.status)}">${escape(run.branch)} <span>Run ${run.number}</span>${statusDot(run.status)}</a>`
 }
 
 /** The queue panel's list items: each running or queued stage, or that nothing is. */
@@ -405,7 +405,7 @@ export function queueItems(entries: readonly QueueEntry[]): string {
     entries
       .map(
         (entry) =>
-          `<li><div><span class="mono">${escape(entry.project)} · ${escape(entry.stage)}</span><small>${escape(entry.workflow)} #${entry.number} · <span class="mono">${escape(entry.branch)}</span>${entry.elapsed == null ? '' : ` · ${escape(duration(entry.elapsed))}`}</small>${
+          `<li><div><span class="mono">${escape(entry.project)} · ${escape(entry.stage)}</span><small>${escape(runName(entry.workflow, entry.number))} · <span class="mono">${escape(entry.branch)}</span>${entry.elapsed == null ? '' : ` · ${escape(duration(entry.elapsed))}`}</small>${
             entry.progress == null
               ? ''
               : `<div class="progress" role="progressbar" aria-valuenow="${Math.round(entry.progress * 100)}" aria-valuemin="0" aria-valuemax="100"><span style="width:${Math.round(entry.progress * 100)}%"></span></div>`

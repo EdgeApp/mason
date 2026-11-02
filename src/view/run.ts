@@ -9,7 +9,7 @@ import {
   type LayoutStage,
   type StageState,
 } from './graph.js'
-import { ago, duration, escape, time } from './html.js'
+import { ago, duration, escape, localTime, runName, time } from './html.js'
 import { icon } from './icons.js'
 import { logHtml } from './log.js'
 import { stepItems } from './steps.js'
@@ -71,6 +71,8 @@ export interface RunData {
   actor: string
   /** Who requested the run, as a page shows them: never a key's whole id. */
   requestedBy: string
+  /** The app build number the run reserved, which its page leads with. */
+  buildNumber: string | null
   status: string
   created: number
   started: number | null
@@ -104,6 +106,8 @@ export function runData(
     nodeName?: (fingerprint: string) => string | undefined
     /** Who an actor label names; the host's cache holds it resolved by the master. */
     requester?: (label: string) => string
+    /** The app build number a run reserved; the host's cache holds it with the run. */
+    buildNumber?: (id: string) => string | undefined
   } = {},
 ): RunData | undefined {
   const job = db
@@ -127,10 +131,13 @@ export function runData(
       finished: number | null
     }>
   ).map((row) => {
+    // A node is shown by its name, never its fingerprint: one with none is left out.
     const node =
       row.worker == null
         ? undefined
-        : (options.nodeName?.(row.worker) ?? row.worker.slice(0, 12))
+        : options.nodeName != null
+          ? options.nodeName(row.worker)
+          : row.worker
     return {
       name: row.name,
       kind: row.kind,
@@ -206,6 +213,10 @@ export function runData(
       (job.requested_by == null
         ? shownLabel(String(job.actor ?? ''))
         : String(job.requested_by)),
+    buildNumber:
+      (options.buildNumber == null
+        ? (job.build_number as string | null | undefined)
+        : options.buildNumber(id)) ?? null,
     status: String(job.status),
     created: Number(job.created),
     started: job.started == null ? null : Number(job.started),
@@ -478,6 +489,14 @@ function stageList(
   ].join('')}</ul></aside>`
 }
 
+/** A run page's title: the app build number the run reserved, then its run number. */
+export function runTitle(
+  run: Pick<RunData, 'buildNumber' | 'number' | 'workflow'>,
+): string {
+  const name = runName(run.workflow, run.number)
+  return run.buildNumber == null ? name : `Build ${run.buildNumber} · ${name}`
+}
+
 /** The run view: header, graph or timeline, the selected stage's panel, the stage list and the branch's history. */
 export function runView(run: RunData, options: RunViewOptions): string {
   const states = new Map(run.stages.map((stage) => [stage.name, stage]))
@@ -535,7 +554,12 @@ export function runView(run: RunData, options: RunViewOptions): string {
       )}</div></details>`
     : ''
   const params = Object.entries(run.params)
-  const header = `<div class="page-head run-head" data-run="${escape(run.id)}" data-live="${live ? '1' : '0'}"><div><div class="breadcrumbs"><a href="/projects/${encodeURIComponent(run.project.slug)}">${escape(run.project.name)}</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.project.slug)}&amp;branch=${encodeURIComponent(run.branch)}">${escape(run.branch)}</a></div><h1><a href="?" class="run-title">${escape(run.workflow)} #${run.number}</a> <span class="state-${escape(run.status)}" data-run-status>${statusDot(run.status)} ${escape(run.status.replace('_', ' '))}</span>${live ? '<span class="live-state" data-live-state role="status" hidden></span>' : ''}</h1><p class="run-meta">${icon('fork_right')} <span class="mono">${escape(run.branch)}</span>${run.commit == null ? '' : ` · ${icon('commit')} <span class="mono">${escape(run.commit.slice(0, 12))}</span>`}${run.project.repository == null ? '' : ` · <span class="mono">${escape(run.project.repository)}</span>`} · ${escape(triggerText[run.trigger] ?? run.trigger)}${run.requestedBy === '' ? '' : ` by ${escape(run.requestedBy)}`} ${time(run.created)} · queued ${escape(duration(queued))}${took == null ? '' : ` · took ${escape(duration(took))}`}${nodes.length === 0 ? '' : ` · on <span class="mono">${nodes.map(escape).join(', ')}</span>`}</p>${run.description == null ? '' : `<p class="run-description">${escape(run.description)}</p>`}${run.reason == null ? '' : `<p class="state-failed">${escape(run.reason)}</p>`}${
+  const name = runName(run.workflow, run.number)
+  const title =
+    run.buildNumber == null
+      ? `<a href="?" class="run-title">${escape(name)}</a>`
+      : `<a href="?" class="run-title">Build ${escape(run.buildNumber)}</a> <small class="run-number">${escape(name)}</small>`
+  const header = `<div class="page-head run-head" data-run="${escape(run.id)}" data-live="${live ? '1' : '0'}"><div><div class="breadcrumbs"><a href="/projects/${encodeURIComponent(run.project.slug)}">${escape(run.project.name)}</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.project.slug)}&amp;branch=${encodeURIComponent(run.branch)}">${escape(run.branch)}</a></div><h1>${title} <span class="state-${escape(run.status)}" data-run-status>${statusDot(run.status)} ${escape(run.status.replace('_', ' '))}</span>${live ? '<span class="live-state" data-live-state role="status" hidden></span>' : ''}</h1><p class="run-meta">${icon('schedule')} ${localTime(run.started ?? run.created, options.now, 'date')} · queued ${escape(duration(queued))}${took == null ? '' : ` · took ${escape(duration(took))}`}${nodes.length === 0 ? '' : ` · on <span class="mono">${nodes.map(escape).join(', ')}</span>`}</p><p class="run-meta">${run.commit == null ? '' : `${icon('commit')} <span class="mono">${escape(run.commit.slice(0, 12))}</span> · `}${escape(triggerText[run.trigger] ?? run.trigger)}${run.requestedBy === '' ? '' : ` by ${escape(run.requestedBy)}`}</p>${run.description == null ? '' : `<p class="run-description">${escape(run.description)}</p>`}${run.reason == null ? '' : `<p class="state-${run.status === 'cancelled' ? 'cancelled' : 'failed'}">${escape(run.reason)}</p>`}${
     params.length === 0
       ? ''
       : `<details><summary>Parameters</summary><ul class="plain">${params.map(([name, value]) => `<li><span class="mono">${escape(name)}</span> = <span class="mono">${escape(JSON.stringify(value))}</span></li>`).join('')}</ul></details>`
@@ -548,7 +572,7 @@ export function runView(run: RunData, options: RunViewOptions): string {
   const history = `<section class="panel history"><h2>${icon('history')}History of ${escape(run.branch)}</h2><table class="list"><tbody>${run.history
     .map(
       (entry) =>
-        `<tr${entry.id === run.id ? ' class="current"' : ''}><td><a href="/runs/${encodeURIComponent(entry.id)}">#${entry.number}</a></td><td>${statusDot(entry.status)} ${escape(entry.status.replace('_', ' '))}</td><td class="chips-cell">${entry.stages.map((stage) => `<span title="${escape(`${stage.name}: ${stage.status}`)}">${statusDot(stage.status)}</span>`).join('')}</td><td>${escape(ago(entry.created, options.now))}</td></tr>`,
+        `<tr${entry.id === run.id ? ' class="current"' : ''}><td><a href="/runs/${encodeURIComponent(entry.id)}">Run ${entry.number}</a></td><td>${statusDot(entry.status)} ${escape(entry.status.replace('_', ' '))}</td><td class="chips-cell">${entry.stages.map((stage) => `<span title="${escape(`${stage.name}: ${stage.status}`)}">${statusDot(stage.status)}</span>`).join('')}</td><td>${escape(ago(entry.created, options.now))}</td></tr>`,
     )
     .join('')}</tbody></table></section>`
   return `${header}${tabs}${graph}<div class="run-body">${stagePanel(run, options)}${stageList(run, options.selected, options.tab)}</div>${history}`

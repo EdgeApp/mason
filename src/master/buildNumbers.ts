@@ -1,5 +1,19 @@
 import type { Actor } from './roles.js'
+import type { DatabaseSync } from 'node:sqlite'
 import type { MasterDatabase } from './database.js'
+
+/** The app build number a run reserved: its first sequence's, when it has any. */
+export function reservedBuildNumber(
+  db: DatabaseSync,
+  job: string,
+): string | undefined {
+  const row = db
+    .prepare(
+      'SELECT value FROM build_number_reservations WHERE reservation=? ORDER BY created_at,key LIMIT 1',
+    )
+    .get(job)
+  return row == null ? undefined : String(row.value)
+}
 
 /** A build-number scheme as `setup` declares it. */
 export interface BuildNumberScheme {

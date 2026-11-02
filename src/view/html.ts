@@ -78,6 +78,11 @@ export function localTime(
   return `<time datetime="${iso}" title="${iso}" data-at="${at}" data-format="${format}">${escape(format === 'since' ? since(at, now, 'UTC') : stamp(at, 'UTC'))}</time>`
 }
 
+/** A run as pages and lists name it: `Run 12`, with its workflow when that is not `build`. */
+export function runName(workflow: string, number: number): string {
+  return `Run ${number}${workflow === 'build' ? '' : ` · ${workflow}`}`
+}
+
 /** A duration such as `4m 12s`. */
 export function duration(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000))

@@ -321,15 +321,17 @@ describe('Host cache schema', () => {
             .prepare("SELECT value FROM host_meta WHERE key='host_schema'")
             .get() as { value: string }
         ).value,
-        '6',
+        '7',
       )
-      // Schema 6: who requested each run, as the master names them.
-      assert(
-        db
-          .prepare('PRAGMA table_info(jobs)')
-          .all()
-          .some((column) => column.name === 'requested_by'),
-      )
+      // Schema 6: who requested each run, as the master names them; 7: the build number it reserved.
+      for (const name of ['requested_by', 'build_number'])
+        assert(
+          db
+            .prepare('PRAGMA table_info(jobs)')
+            .all()
+            .some((column) => column.name === name),
+          name,
+        )
       assert.deepEqual(
         db
           .prepare('PRAGMA table_info(job_steps)')

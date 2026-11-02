@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { runHref } from './dashboard.js'
+import { runName } from './html.js'
 import {
   atLeast,
   type Notification,
@@ -38,7 +39,7 @@ export function approvalNotifications(
     )
     .map((row) => ({
       icon: 'pan_tool' as const,
-      text: `${row.slug} ${row.workflow} #${row.number} (${row.branch}) waits for your approval at ${row.name}`,
+      text: `${row.slug} ${runName(row.workflow, row.number)} (${row.branch}) waits for your approval at ${row.name}`,
       href: runHref(row.id),
     }))
 }

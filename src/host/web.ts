@@ -28,7 +28,7 @@ import {
   approvalRolesFromGraph,
   notificationsFor,
 } from '../view/notifications.js'
-import { graphFromJson, runData, runView } from '../view/run.js'
+import { graphFromJson, runData, runTitle, runView } from '../view/run.js'
 import { search } from '../view/search.js'
 import { page, shell, type Viewer } from '../view/shell.js'
 import { escape } from '../view/html.js'
@@ -348,7 +348,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
     render(
       res,
       found.viewer,
-      `${run.workflow} #${run.number}`,
+      runTitle(run),
       runView(run, {
         ...(stage == null ? {} : { selected: stage }),
         ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),

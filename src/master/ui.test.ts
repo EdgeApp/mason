@@ -495,7 +495,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     const page = await request(c.master, 'GET', `/runs/${run}`, developer)
     assert.equal(page.status, 200)
     // The header names who requested the run, and the API names them too.
-    assert.match(page.text, /Requested by developer person /)
+    assert.match(page.text, /Requested by developer person<\/p>/)
     const shown = await request(
       c.master,
       'GET',
@@ -758,8 +758,43 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.equal(page.status, 200)
     assert.match(page.text, /<meta name="mason-csrf"/)
-    assert.match(page.text, /Requested by developer person /)
+    assert.match(page.text, /Requested by developer person<\/p>/)
     assert.match(page.text, /data-offset="tail"/)
+    assert.match(page.text, /<title>Run \d+ /)
+    // The build number the run reserved reaches the host with the run, and leads its page.
+    const master = c.master.master!
+    master.database.db
+      .prepare(
+        "INSERT INTO build_number_reservations(project_id,key,reservation,value,created_at) VALUES(?,'app.example.wizard',?,'26110299',1)",
+      )
+      .run(master.projects.get('wizard').id, run)
+    master.database.change('job', run)
+    await c.until(
+      () =>
+        (
+          host
+            .host!.cache.db.prepare('SELECT build_number FROM jobs WHERE id=?')
+            .get(run) as Json
+        )?.build_number === '26110299',
+      10_000,
+      'the build number on the host',
+    )
+    const numbered = (await request(host, 'GET', `/runs/${run}`, developer))
+      .text
+    assert.match(
+      numbered,
+      /class="run-title">Build 26110299<\/a> <small class="run-number">Run \d+<\/small>/,
+    )
+    assert.match(numbered, /<title>Build 26110299 · Run \d+ /)
+    assert.match(
+      (await request(c.master, 'GET', `/runs/${run}`, signIn('developer')))
+        .text,
+      /class="run-title">Build 26110299<\/a>/,
+    )
+    master.database.db
+      .prepare('DELETE FROM build_number_reservations WHERE reservation=?')
+      .run(run)
+    master.database.change('job', run)
     const step = await request(
       host,
       'GET',

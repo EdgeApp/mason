@@ -1,4 +1,5 @@
 import { locationsWithUsage } from './storageApi.js'
+import { reservedBuildNumber } from './buildNumbers.js'
 import type express from 'express'
 import { cookie } from '../auth/routes.js'
 import {
@@ -34,7 +35,7 @@ import {
   approvalNotifications,
   notificationsFor,
 } from '../view/notifications.js'
-import { graphFromJson, runData, runView } from '../view/run.js'
+import { graphFromJson, runData, runTitle, runView } from '../view/run.js'
 import { requesterName } from './requesters.js'
 import { search } from '../view/search.js'
 import { runLog } from './runsApi.js'
@@ -411,6 +412,7 @@ export function masterPages(
           )?.repository,
         nodeName: (fingerprint) => master.registry.get(fingerprint)?.name,
         requester: (label) => requesterName(db, label),
+        buildNumber: (job) => reservedBuildNumber(db, job),
       },
     )
     if (run == null) {
@@ -447,7 +449,7 @@ export function masterPages(
     const requester = can(actor, 'runs.request')
     send(
       res,
-      `${run.workflow} #${run.number}`,
+      runTitle(run),
       runView(run, {
         ...(stage == null ? {} : { selected: stage }),
         ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
@@ -987,9 +989,6 @@ export function masterPages(
               .filter((rule) => rule.mode === 'automatic')
               .map((rule) => rule.pattern)
           : push.build
-    const reserved = master.database.db.prepare(
-      'SELECT value FROM build_number_reservations WHERE reservation=? ORDER BY created_at,key LIMIT 1',
-    )
     const { branches, runs } = projectRunsData(
       {
         db: master.database.db,
@@ -997,10 +996,8 @@ export function masterPages(
         now,
         appVisible: appVisible(master, current),
         artifactBase: '',
-        reserved: (run): string | undefined => {
-          const row = reserved.get(run)
-          return row == null ? undefined : String(row.value)
-        },
+        reserved: (run): string | undefined =>
+          reservedBuildNumber(master.database.db, run),
       },
       project.slug,
       { ...(branch == null ? {} : { branch }), pinned },

@@ -14,7 +14,9 @@ the types-only package `@mason/types`.
 - A project's `Masonfile.ts` defines one or more **workflows** (`build`,
   `nightly`, `release`, …). A workflow is a graph of **stages**.
 - A **run** is one execution of one workflow at one pinned commit. Runs are
-  numbered per project and workflow (`build #412`).
+  numbered per project and workflow (Run 412). Pages call this the run
+  number, so it is never taken for the app's build number, which a run
+  page leads with when the run reserved one (Build 26110201).
 - A **stage** is one exported TypeScript function executed on one **worker
   node** chosen by the stage's node selector. Stages run in declaration order
   unless grouped as **parallel**, expanded as a **matrix**, or wired

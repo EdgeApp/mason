@@ -1,6 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import type { SearchResult } from '../browser/shell.js'
 import { runHref } from './dashboard.js'
+import { runName } from './html.js'
 import { atLeast, type Viewer } from './shell.js'
 
 export interface SearchScope {
@@ -71,7 +72,7 @@ export function search(scope: SearchScope, text: string): SearchResult[] {
           : `/projects/${encodeURIComponent(app.project)}`,
     })
   if (!developer) return out.slice(0, LIMIT)
-  const number = /^#?(\d{1,9})$/.exec(query)?.[1]
+  const number = /^(?:#|run\s*)?(\d{1,9})$/i.exec(query)?.[1]
   if (number != null)
     for (const run of db
       .prepare(
@@ -87,7 +88,7 @@ export function search(scope: SearchScope, text: string): SearchResult[] {
     }>)
       out.push({
         kind: 'run',
-        label: `${run.slug} ${run.workflow} #${run.number}`,
+        label: `${run.slug} ${runName(run.workflow, run.number)}`,
         detail: `${run.branch} · ${run.status}`,
         href: runHref(run.id),
       })

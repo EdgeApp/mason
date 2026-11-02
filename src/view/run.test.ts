@@ -18,6 +18,7 @@ import {
   graphFromJson,
   runBuilds,
   runData,
+  runTitle,
   runView,
   type RunViewOptions,
 } from './run.js'
@@ -393,15 +394,76 @@ describe('Run view', () => {
       whole,
       /<button type="button" class="secondary jump" data-jump hidden>.*Jump to latest<\/button><\/div>/,
     )
-    assert.match(whole, /build #7/)
-    assert.match(whole, /Push by dana/)
+    // The header: the run number when it reserved no build number, the
+    // start in the viewer's zone, how long it queued and took and where,
+    // then the commit and who asked; the branch only in the breadcrumbs.
+    assert.match(whole, /<h1><a href="\?" class="run-title">Run 7<\/a> <span/)
+    assert.match(
+      whole,
+      /<p class="run-meta"><span class="icon"[^>]*>[^<]*<\/span> <time datetime="1970-01-01T00:00:02.000Z" [^>]*data-format="date">1970-01-01 0000 UTC<\/time> · queued 1s · took 2m 0s · on <span class="mono">buildbox<\/span><\/p><p class="run-meta"><span class="icon"[^>]*>[^<]*<\/span> <span class="mono">aaaaaaaaaaaa<\/span> · Push by dana<\/p>/,
+    )
+    assert.doesNotMatch(whole, /github\.com|run-meta">[^]*fork_right|build #/)
+    assert.equal(
+      (whole.match(/>main</g) ?? []).length,
+      1,
+      'the branch is in the breadcrumbs only',
+    )
+    assert.equal(runTitle(run), 'Run 7')
+    // With the build number it reserved, that leads, and the run number follows.
+    const numbered = runData(db, 'r1', () => graph, {
+      nodeName: () => 'buildbox',
+      buildNumber: (id) => (id === 'r1' ? '26110201' : undefined),
+    })!
+    assert.equal(numbered.buildNumber, '26110201')
+    assert.match(
+      runView(numbered, options({})),
+      /<h1><a href="\?" class="run-title">Build 26110201<\/a> <small class="run-number">Run 7<\/small> <span/,
+    )
+    assert.equal(runTitle(numbered), 'Build 26110201 · Run 7')
+    assert.equal(
+      runTitle({ ...numbered, workflow: 'nightly' }),
+      'Build 26110201 · Run 7 · nightly',
+    )
+    // A node with no name is left out, never shown by its fingerprint.
+    db.prepare(
+      "UPDATE job_stages SET worker='mldsa65:0123456789abcdef' WHERE job_id='r1' AND name='test'",
+    ).run()
+    const unnamed = runData(db, 'r1', () => graph, {
+      nodeName: (fingerprint) =>
+        fingerprint === 'abc123' ? 'buildbox' : undefined,
+    })!
+    assert.deepEqual(
+      unnamed.stages.map((entry) => entry.node ?? null),
+      [null, 'buildbox', null],
+    )
+    assert.doesNotMatch(runView(unnamed, options({})), /mldsa65/)
+    db.prepare(
+      "UPDATE job_stages SET worker='abc123' WHERE job_id='r1' AND name='test'",
+    ).run()
+    // A run its push trigger did not cover says why, not as a failure.
+    assert.match(
+      runView(
+        {
+          ...run,
+          status: 'cancelled',
+          finished: 3000,
+          reason: "Not built: main is not in the push trigger's branches",
+        },
+        options({}),
+      ),
+      /<p class="state-cancelled">Not built: main is not in the push trigger&#39;s branches<\/p>/,
+    )
+    assert.match(
+      runView({ ...run, reason: 'Setup failed' }, options({})),
+      /<p class="state-failed">Setup failed<\/p>/,
+    )
     // A key's requester is shown by the start of its id at most, or as the master names it.
     db.prepare("UPDATE jobs SET actor=? WHERE id='r1'").run(
       'key:830f19b00cf214361f85ac579fa12497',
     )
     const keyed = runData(db, 'r1', () => graph)!
     assert.equal(keyed.actor, 'key:830f19b00cf214361f85ac579fa12497')
-    assert.match(runView(keyed, options({})), /Push by key 830f19 /)
+    assert.match(runView(keyed, options({})), /Push by key 830f19<\/p>/)
     assert.doesNotMatch(runView(keyed, options({})), /830f19b/)
     assert.match(
       runView(
@@ -417,6 +479,12 @@ describe('Run view', () => {
       "ALTER TABLE jobs ADD COLUMN requested_by TEXT; UPDATE jobs SET requested_by='Dana Doe' WHERE id='r1'",
     )
     assert.equal(runData(db, 'r1', () => graph)!.requestedBy, 'Dana Doe')
+    // So is the build number the run reserved.
+    db.exec(
+      "ALTER TABLE jobs ADD COLUMN build_number TEXT; UPDATE jobs SET build_number='26110202' WHERE id='r1'",
+    )
+    assert.equal(runData(db, 'r1', () => graph)!.buildNumber, '26110202')
+    assert.equal(runData(db, 'r0', () => graph)!.buildNumber, null)
     db.exec("UPDATE jobs SET actor='dana',requested_by=NULL WHERE id='r1'")
     assert.match(whole, /1\.0 \(7\)/)
     assert.match(whole, /on <span class="mono">buildbox<\/span>/)
@@ -426,7 +494,7 @@ describe('Run view', () => {
     )
     assert.match(whole, /data-path="\/api\/v2\/runs\/r1\/cancel"/)
     assert.match(whole, /name="seat"/)
-    assert.match(whole, /href="\/runs\/r0">#6/)
+    assert.match(whole, /href="\/runs\/r0">Run 6/)
     const selected = runView(run, options({ selected: 'test', logOffset: 8 }))
     assert.match(selected, /data-stage="test" data-status="[a-z_]+"><h2>/)
     assert.match(selected, /npm ci/)

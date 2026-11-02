@@ -643,9 +643,10 @@ describe('Design system and views', () => {
     const find = (query: string): string[] =>
       search(developer, query).map((result) => `${result.kind}:${result.label}`)
     assert.deepEqual(find('phone'), ['project:Phones', 'app:app.example.phone'])
-    assert.deepEqual(find('#2'), ['run:phones build #2'])
+    assert.deepEqual(find('#2'), ['run:phones Run 2'])
+    assert.deepEqual(find('run 2'), ['run:phones Run 2'])
     // Newest first.
-    assert.deepEqual(find('1'), ['run:desk build #1', 'run:phones build #1'])
+    assert.deepEqual(find('1'), ['run:desk Run 1', 'run:phones Run 1'])
     assert.deepEqual(find('cccc'), ['commit:cccccccccccc'])
     assert.deepEqual(find('login'), ['branch:feature/login'])
     assert.deepEqual(find('   '), [])
@@ -720,7 +721,7 @@ describe('Design system and views', () => {
     const approvals = (who: Viewer, roles?: ViewerRole[]): string[] =>
       approvalNotifications(db, who, () => roles).map((item) => item.text)
     assert.deepEqual(approvals(viewer('manager')), [
-      'desk build #1 (master) waits for your approval at approve',
+      'desk Run 1 (master) waits for your approval at approve',
     ])
     assert.deepEqual(approvals(viewer('developer')), [])
     assert.deepEqual(approvals(viewer('developer'), ['developer']).length, 1)
@@ -787,7 +788,7 @@ describe('Design system and views', () => {
     const run = artifactsView(source, { run: 'run-1' })
     assert.match(run, /Phone 1\.0 \(26102013\) arm64-v8a</)
     assert.doesNotMatch(run, /26102014/)
-    assert.match(run, /<h1>build #1<\/h1>/)
+    assert.match(run, /<h1>Run 1<\/h1>/)
     assert.match(run, /Version 1\.0 \(11\)/)
     assert.match(run, /12 passed/)
     assert.match(run, /href="\/runs\/run-1\/artifacts\/report\/view"/)
