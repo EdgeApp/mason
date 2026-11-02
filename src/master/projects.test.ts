@@ -448,7 +448,7 @@ describe('Projects, branch rules and build numbers', function () {
     assert.equal(jobs.pushedSince(project, 'unknown'), undefined)
   })
 
-  it('polls automatic branches by rule, capped, with three attempts per commit and one pending job', async () => {
+  it('polls automatic branches by rule, capped per poll, with three attempts per commit and one pending job', async () => {
     const master = database()
     const projects = new Projects(master)
     const jobs = new Jobs(master, projects)
@@ -487,9 +487,12 @@ describe('Projects, branch rules and build numbers', function () {
     const queued = jobs.pending()
     assert.equal(queued.length, MAX_AUTOMATIC_BRANCHES)
     assert(queued.every((job) => job.trigger === 'push' && job.automatic === 1))
-    // While a job is pending no second job is queued for the branch.
+    // The next poll decides the rest; while a job is pending no second job
+    // is queued for the branch.
     await poller.poll()
-    assert.equal(jobs.pending().length, MAX_AUTOMATIC_BRANCHES)
+    assert.equal(jobs.pending().length, 31)
+    await poller.poll()
+    assert.equal(jobs.pending().length, 31)
     const masterJob = queued.find((job) => job.branch === 'master')!
     // A failed attempt is retried; after three the commit is not built again.
     for (let attempt = 0; attempt < 3; attempt++) {

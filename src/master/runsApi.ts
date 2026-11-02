@@ -102,6 +102,12 @@ function buildSettings(master: Master, slug: string): Record<string, unknown> {
         ? {}
         : { observedCommit: String(row.observed_commit) }),
       ...(row.poll_error == null ? {} : { pollError: String(row.poll_error) }),
+      ...(row.waiting_commit == null
+        ? {}
+        : {
+            waitingCommit: String(row.waiting_commit),
+            waitingSince: Number(row.waiting_since),
+          }),
       ...(row.skipped_commit == null
         ? {}
         : {

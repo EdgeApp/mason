@@ -169,8 +169,14 @@ mason projects get phones
 ```
 
 Branch rules are globs, first match wins: `automatic` builds every new
-commit (at most 20 automatic branches per project), `request` builds only
-when someone asks. Deleted branches stop polling; forks never build.
+commit, `request` builds only when someone asks. Each poll looks at every
+automatic branch and decides at most 20 changed ones per project: exact
+rules first, then the Masonfile's literal push branches, then the
+longest-waiting (see [Triggers](docs/masonfile.md#triggers)). Deleted
+branches stop polling; forks never build. `*` matches within one path
+segment and `**` across: to let the Masonfile's push triggers choose among
+every branch, the rule is `**` → automatic, since `*` misses branches like
+`paul/x`.
 
 A project's secrets are named values and files, each limited to build
 configs, on the project's **Secrets** tab: administrators and managers add,

@@ -3,9 +3,12 @@ import type { AppleService } from '../apple/service.js'
 import type { MasterDatabase } from './database.js'
 import type { Jobs, JobView } from './jobs.js'
 import type { Project, Projects } from './projects.js'
+import { isGlob, ruleFor } from './rules.js'
 
 /** Attempts at Apple for a device before it shows an error the tester can retry. */
 const ATTEMPTS = 3
+/** At most this many branches of a project are built for a new device. */
+export const MAX_DEVICE_BRANCHES = 20
 
 /**
  * Devices and "Prepare for this device" requests the host sent through its
@@ -14,7 +17,8 @@ const ATTEMPTS = 3
  * development and ad hoc profiles Mason holds for those teams are made
  * again with the full list of enabled devices (the replacement before the
  * old profile is deleted), and iOS builds of each project's automatic
- * branches are queued so they can install on it. A prepare request becomes
+ * branches whose build runs when a device is registered are queued so
+ * they can install on it. A prepare request becomes
  * a job pinned to the build's branch and commit. No Apple credential leaves
  * the master.
  */
@@ -216,21 +220,40 @@ export class Provisioning {
 
   /**
    * Builds that can install on the new device: each iOS project's automatic
-   * branches at their last seen commit, one waiting job per branch, and the
-   * workflows that run when a device is registered.
+   * branches whose build, as the branch's last push setup recorded it, runs
+   * when a device is registered, at their last seen commit, one waiting job
+   * per branch and at most `MAX_DEVICE_BRANCHES` per project (the default
+   * branch, then exact rules', then the most recently set up); and the
+   * workflows that run when a device is registered. A branch whose triggers
+   * the master does not know gets none: its next run makes its profiles
+   * with the device anyway.
    */
-  private queueBuilds(projects: Project[]): void {
+  queueBuilds(projects: Project[]): void {
     for (const project of projects) {
-      const branches = this.db
-        .prepare(
-          'SELECT branch,observed_commit FROM automatic_branches WHERE project_id=? AND observed_commit IS NOT NULL ORDER BY branch',
-        )
-        .all(project.id) as Array<{ branch: string; observed_commit: string }>
-      const automatic = project.rules.filter(
-        (rule) => rule.mode === 'automatic',
+      const exact = project.rules
+        .filter((rule) => rule.mode === 'automatic' && !isGlob(rule.pattern))
+        .map((rule) => rule.pattern)
+      const rank = (branch: string): number =>
+        branch === project.defaultBranch
+          ? -1
+          : exact.includes(branch)
+            ? exact.indexOf(branch)
+            : exact.length
+      const branches = (
+        this.db
+          .prepare(
+            'SELECT branch,observed_commit,device_registered FROM automatic_branches WHERE project_id=? AND observed_commit IS NOT NULL AND device_registered IS NOT NULL ORDER BY device_registered DESC,branch',
+          )
+          .all(project.id) as Array<{ branch: string; observed_commit: string }>
       )
+        .filter(
+          (entry) => ruleFor(project.rules, entry.branch)?.mode === 'automatic',
+        )
+        .map((entry, order) => ({ ...entry, order }))
+        .sort((a, b) => rank(a.branch) - rank(b.branch) || a.order - b.order)
+      let queued = 0
       for (const entry of branches) {
-        if (!automatic.length) break
+        if (queued >= MAX_DEVICE_BRANCHES) break
         const waiting = this.db
           .prepare(
             "SELECT 1 FROM jobs WHERE project_id=? AND branch=? AND status IN ('queued','running') LIMIT 1",
@@ -240,6 +263,7 @@ export class Provisioning {
         this.options.jobs.create(project, entry.branch, 'deviceRegistered', {
           commit: entry.observed_commit,
         })
+        queued++
       }
     }
     this.options.scheduler.deviceRegistered()
