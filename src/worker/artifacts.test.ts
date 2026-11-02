@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import {
   mkdirSync,
   mkdtempSync,
@@ -448,6 +448,76 @@ describe('Worker artifact calls', function () {
       offline.logs.join(''),
       /The host is unreachable \(No host is connected\); waiting to send artifacts\.save/,
     )
+  })
+
+  it('U12.14 continues a download after a dropped link from the bytes it has, or takes the whole file again from an older master', async () => {
+    const packed = root()
+    mkdirSync(path.join(packed, 'report'))
+    writeFileSync(path.join(packed, 'report', 'data.bin'), randomBytes(200_000))
+    const archive = path.join(packed, 'report.tar.gz')
+    execFileSync('tar', ['-czf', archive, '-C', packed, 'report'])
+    const bytes = readFileSync(archive)
+    const digest = createHash('sha256').update(bytes).digest('hex')
+    const half = Math.floor(bytes.length / 2)
+    const header = (status: number): Buffer =>
+      Buffer.from(`${JSON.stringify({ status })}\n`)
+    for (const older of [false, true]) {
+      const offsets: unknown[] = []
+      const [a, b] = memoryPair()
+      new Link(a, {
+        localRole: 'master',
+        peerRole: 'worker',
+        dialer: true,
+        methods: {
+          streams: {
+            'artifacts.download': async (stream, params): Promise<void> => {
+              await stream.collect()
+              const offset = (params as { offset?: number }).offset
+              offsets.push(offset)
+              // The first answer stops half way, as when the link drops.
+              if (offset == null) {
+                await stream.write(
+                  Buffer.concat([header(200), bytes.subarray(0, half)]),
+                )
+                stream.abort('Link closed')
+              } else {
+                await stream.write(
+                  older
+                    ? Buffer.concat([header(200), bytes])
+                    : Buffer.concat([header(206), bytes.subarray(offset)]),
+                )
+                stream.end()
+              }
+            },
+          },
+        },
+      })
+      const worker = new Link(b, {
+        localRole: 'worker',
+        peerRole: 'master',
+        dialer: false,
+        methods: {},
+      })
+      const ctx = context({
+        request: async <T>(): Promise<T> =>
+          ({ grant: 'g', digest, size: bytes.length, name: 'results' }) as T,
+        stream: (method, params) => worker.openStream(method, params),
+      })
+      const files = await fetchArtifacts(
+        ctx,
+        { workflow: 'build', name: 'results' },
+        'got',
+      )
+      assert.deepEqual(files, [path.join(ctx.dir, 'got', 'report', 'data.bin')])
+      assert.deepEqual(offsets, [undefined, half])
+      assert(
+        ctx.logs.some((line) =>
+          line.includes(`waiting to resume artifacts.download at byte ${half}`),
+        ),
+        ctx.logs.join(''),
+      )
+      worker.close()
+    }
   })
 
   it('U12.14/U12.9 waits for the master before fetching, unpacks what it relays, reports a refusal, and journals test results while it is away', async () => {

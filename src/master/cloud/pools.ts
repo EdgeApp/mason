@@ -15,6 +15,7 @@ import {
   type ProviderMachine,
 } from './digitalocean.js'
 import { SETUP_LABEL } from '../../pipeline/graph.js'
+import { compareSemver } from '../../release/install.js'
 
 /** One pool: machines of one node type, made on demand and reused like in-house computers. */
 export interface PoolSetting {
@@ -381,15 +382,66 @@ export class Pools {
           .all(pool)) as unknown as MachineRow[]
   }
 
-  /** A machine that is retiring takes no new stage. */
-  draining(fingerprint: string): boolean {
+  /** Whether a node is one of this master's pool machines. */
+  owns(fingerprint: string): boolean {
     return (
       this.db
         .prepare(
-          "SELECT 1 FROM cloud_machines WHERE fingerprint=? AND state IN ('retiring','snapshotting')",
+          "SELECT 1 FROM cloud_machines WHERE fingerprint=? AND state<>'destroyed'",
         )
         .get(fingerprint) != null
     )
+  }
+
+  /**
+   * A machine that is retiring takes no new stage, nor one older than the
+   * master: it is retired once idle, and its replacement runs the master's
+   * release.
+   */
+  draining(fingerprint: string): boolean {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM cloud_machines WHERE fingerprint=? AND state<>'destroyed'",
+      )
+      .get(fingerprint) as MachineRow | undefined
+    return (
+      row != null &&
+      (row.state === 'retiring' ||
+        row.state === 'snapshotting' ||
+        this.outdated(row) != null)
+    )
+  }
+
+  /**
+   * Whether a ready machine is too old for the master: it runs an older
+   * Mason than the master's own release, which a new machine of its pool
+   * installs. The version decides at once, without the network, so an old
+   * machine takes no stage right after the master restarts on a new
+   * release. It is `replaceable` once GitHub lists the release's tarball for
+   * the pool's platform; a lookup that failed, or a release without that
+   * tarball, keeps the old machine at work, since no new one can be made.
+   */
+  private outdated(
+    row: MachineRow,
+  ): { reason: string; replaceable: boolean } | undefined {
+    if (row.state !== 'ready' || row.fingerprint == null) return undefined
+    const pool = this.pool(row.pool)
+    const node = this.options.registry.get(row.fingerprint)
+    const github = this.options.github?.()
+    if (
+      pool == null ||
+      node == null ||
+      github == null ||
+      compareSemver(node.version, github.version) >= 0
+    )
+      return undefined
+    const reason = `It runs Mason ${node.version}; the master runs ${github.version}`
+    if (typeof this.installer(pool) !== 'string')
+      return { reason, replaceable: true }
+    // No answer from GitHub yet: hold the machine until there is one.
+    return this.assets.has(`${github.repository}@${github.version}`)
+      ? undefined
+      : { reason, replaceable: false }
   }
 
   start(): void {
@@ -977,8 +1029,12 @@ nomac-service start mason-worker -- ~/.local/bin/mason worker --pairing-file ~/m
       const idle =
         this.now() - (row.last_used ?? row.ready_at ?? row.created_at)
       const age = this.now() - (row.ready_at ?? row.created_at)
+      const outdated = this.outdated(row)
       if (pool == null) await this.retire(row, 'Its pool is gone')
       else if (overBudget) await this.retire(row, 'The monthly budget is spent')
+      // A stage that needs the master's release gets a machine that has it.
+      else if (outdated?.replaceable === true)
+        await this.retire(row, outdated.reason)
       else if (idle >= pool.ttlMinutes * 60_000)
         await this.retire(row, `Idle for ${pool.ttlMinutes} minutes`)
       else if (age >= pool.maxHoursPerNode * 3_600_000)

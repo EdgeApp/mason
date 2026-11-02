@@ -117,6 +117,8 @@ export interface MasterOptions {
   backupAttempts?: number
   /** Where the master's own messages go; the console by default. */
   log?: (line: string) => void
+  /** Where the master logs its links' closes; `log` by default. */
+  linkLog?: (line: string) => void
   /** How mirrors reach a repository; the GitHub connection otherwise. */
   remote?: RemoteResolver
   /** The scheduler's pass interval. */
@@ -304,6 +306,8 @@ export class Master {
       ...(options.redialBaseMs == null
         ? {}
         : { redialBaseMs: options.redialBaseMs }),
+      log: (line): void =>
+        (this.options.linkLog ?? this.options.log ?? console.log)(line),
     })
     this.projects = new Projects(this.database)
     this.jobs = new Jobs(this.database, this.projects)
@@ -727,6 +731,8 @@ export class Master {
       this.releases,
       (fingerprint) => this.scheduler.inventoryOf(fingerprint),
       (fingerprint) => this.scheduler.busy(fingerprint),
+      Date.now,
+      (fingerprint) => this.pools.owns(fingerprint),
     )
     this.registry.on('retyped', (fingerprint: string) => {
       this.nodeStates.reconcile(fingerprint)

@@ -102,6 +102,8 @@ export interface NodeLinkOptions {
   onRemoved?(): void
   /** The master asks this node to update to a version; absent, it refuses. */
   onUpdate?(version: unknown): unknown
+  /** Where link closes and refused handshakes are logged. */
+  log?: (line: string) => void
 }
 
 export interface NodeLinks {
@@ -213,11 +215,19 @@ export function serveNodeLinks(
         current = link
         previous?.close(CLOSE.replaced)
         link.on('close', () => {
+          options.log?.(
+            `Link to the master closed: ${link.closeReason ?? 'unknown'}`,
+          )
           if (current === link) current = undefined
         })
         options.onLink?.(link)
       },
-      () => wire.close(CLOSE.refused),
+      (error: unknown) => {
+        options.log?.(
+          `Refused a link in the handshake: ${(error as Error).message}`,
+        )
+        wire.close(CLOSE.refused)
+      },
     )
   })
   return {

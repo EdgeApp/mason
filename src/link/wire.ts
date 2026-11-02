@@ -14,6 +14,8 @@ export abstract class Wire {
   private closeListeners: Array<() => void> = []
   private pongListeners: Array<() => void> = []
   closed = false
+  /** The close code the peer sent, when it sent one; set once the wire closes. */
+  closeCode: number | undefined
 
   abstract send(data: Frame): void
   abstract close(code: number): void
@@ -47,9 +49,10 @@ export abstract class Wire {
     if (this.receiver == null) this.queue.push(data)
     else this.receiver(data)
   }
-  protected closedByPeer(): void {
+  protected closedByPeer(code?: number): void {
     if (this.closed) return
     this.closed = true
+    this.closeCode = code
     for (const listener of this.closeListeners.splice(0)) listener()
   }
   protected ponged(): void {
@@ -69,7 +72,7 @@ export class WebSocketWire extends Wire {
           : Buffer.from(data)
       this.deliver(binary ? buffer : buffer.toString('utf8'))
     })
-    socket.on('close', () => this.closedByPeer())
+    socket.on('close', (code: number) => this.closedByPeer(code))
     socket.on('error', () => socket.terminate())
     socket.on('pong', () => this.ponged())
   }
@@ -99,10 +102,10 @@ class MemoryWire extends Wire {
       if (!this.peer.closed) this.peer.deliver(copy)
     })
   }
-  close(): void {
+  close(code: number): void {
     if (this.closed) return
     this.closedByPeer()
-    setImmediate(() => this.peer.closedByPeer())
+    setImmediate(() => this.peer.closedByPeer(code))
   }
 }
 

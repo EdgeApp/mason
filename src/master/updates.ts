@@ -19,7 +19,8 @@ export const inventoryPlatform = (
 
 /**
  * Pushes the current release to each idle worker that runs an older version
- * of the same major version, signed with the master's key.
+ * of the same major version, signed with the master's key. Pool machines
+ * are left to their pools, which replace one older than the master.
  */
 export class Updates {
   private readonly states = new Map<string, UpdateState>()
@@ -34,6 +35,8 @@ export class Updates {
     /** Whether a worker has a stage or setup run in progress. */
     private readonly busy: (fingerprint: string) => boolean,
     private readonly now: () => number = Date.now,
+    /** Whether a worker is a pool machine. */
+    private readonly pooled: (fingerprint: string) => boolean = () => false,
   ) {}
 
   state(fingerprint: string): UpdateState | undefined {
@@ -56,7 +59,9 @@ export class Updates {
     await Promise.all(
       this.registry
         .list()
-        .filter((node) => node.role === 'worker')
+        .filter(
+          (node) => node.role === 'worker' && !this.pooled(node.fingerprint),
+        )
         .map(async (node) => {
           const inventory = this.inventory(node.fingerprint)
           if (inventory == null || this.registry.link(node.fingerprint) == null)

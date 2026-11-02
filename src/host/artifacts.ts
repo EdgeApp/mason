@@ -888,16 +888,28 @@ export class HostArtifacts {
     res.status(201).json({ name, size: received.size, digest: received.sha256 })
   }
 
-  /** `GET /api/artifacts/download?grant=`: one stored object the master granted. */
+  /**
+   * `GET /api/artifacts/download?grant=`: one stored object the master
+   * granted. With `offset`, a download continuing after a dropped link, the
+   * rest from that byte is answered with 206.
+   */
   async download(req: Request, res: Response): Promise<void> {
     const claims = this.claims<DownloadClaims>(req.query.grant, 'download')
-    const found = await this.options.objects.get(claims.key)
+    const offset = Number(req.query.offset ?? 0)
+    const ranged =
+      Number.isSafeInteger(offset) && offset > 0 && offset < claims.size
+    const found = await this.options.objects.get(
+      claims.key,
+      ranged ? { start: offset, end: claims.size - 1 } : undefined,
+    )
     if (found == null)
       throw new Refused(404, 'The artifact is no longer stored')
+    if (ranged) res.status(206)
     res.set({
       'Content-Type': 'application/octet-stream',
-      'Content-Length': String(found.size),
+      'Content-Length': String(ranged ? found.size - offset : found.size),
       'X-Mason-Digest': claims.digest,
+      ...(ranged ? { 'X-Mason-Offset': String(offset) } : {}),
     })
     await pipeline(found.stream, res)
   }

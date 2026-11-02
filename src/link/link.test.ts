@@ -110,6 +110,31 @@ function linkPair(
   ]
 }
 
+/** In-process wires whose pings are answered only after `pongMs`, as behind a full socket. */
+class SlowPongWire extends Wire {
+  peer!: SlowPongWire
+  constructor(private readonly pongMs: number) {
+    super()
+  }
+  send(data: Frame): void {
+    if (this.closed) return
+    const copy = typeof data === 'string' ? data : Buffer.from(data)
+    setImmediate(() => {
+      if (!this.peer.closed) this.peer.deliver(copy)
+    })
+  }
+  close(code: number): void {
+    if (this.closed) return
+    this.closedByPeer()
+    setImmediate(() => this.peer.closedByPeer(code))
+  }
+  ping(): void {
+    setTimeout(() => {
+      if (!this.closed) this.ponged()
+    }, this.pongMs).unref()
+  }
+}
+
 /** A wire that records what is sent and lets a test inject frames. */
 class TestWire extends Wire {
   sent: Frame[] = []
@@ -833,6 +858,131 @@ describe('Master-dialed links', function () {
     await until(() => pings >= 5)
     assert.equal(alive.closed, false)
     alive.close()
+  })
+
+  it('keeps a link whose pongs come late while data flows, and closes one silent for three beats', async () => {
+    // Pongs take five beats; only the stream's frames say the peer is there.
+    const a = new SlowPongWire(100)
+    const b = new SlowPongWire(100)
+    a.peer = b
+    b.peer = a
+    const options = { heartbeatMs: 20, methods: {} }
+    const m = new Link(a, {
+      ...options,
+      localRole: 'master',
+      peerRole: 'worker',
+      dialer: true,
+    })
+    const w = new Link(b, {
+      ...options,
+      localRole: 'worker',
+      peerRole: 'master',
+      dialer: false,
+      methods: {
+        streams: {
+          trickle: async (stream): Promise<void> => {
+            const stop = Date.now() + 300
+            while (Date.now() < stop) {
+              await stream.write(Buffer.alloc(1024, 7))
+              await new Promise((resolve) => setTimeout(resolve, 5))
+            }
+            stream.end()
+          },
+        },
+      },
+    })
+    const received = await m.openStream('trickle').collect()
+    assert(received.length > 10 * 1024)
+    assert.equal(m.closed, false)
+    assert.equal(w.closed, false)
+    m.close()
+    // A peer that sends nothing at all is closed after three beats, not one.
+    const wire = new TestWire()
+    wire.ping = (): void => undefined
+    const silent = new Link(wire, {
+      localRole: 'master',
+      peerRole: 'worker',
+      dialer: true,
+      methods: {},
+      heartbeatMs: 50,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    assert.equal(silent.closed, false)
+    await once(silent, 'close')
+    assert.deepEqual(wire.closes, [CLOSE.heartbeat])
+    assert.equal(
+      silent.closeReason,
+      'heartbeat: nothing heard for 3 beats of 50 ms',
+    )
+  })
+
+  it('logs every link close on both sides with its reason and the node’s name', async () => {
+    const workerLog: string[] = []
+    const masterLog: string[] = []
+    const node = await startNode(
+      {
+        role: 'worker',
+        data: path.join(root, 'w'),
+        linkPort: 0,
+        listen: '127.0.0.1',
+        heartbeatMs: 0,
+      },
+      (line) => workerLog.push(line),
+    )
+    const m = await startNode(
+      {
+        role: 'master',
+        data: path.join(root, 'm'),
+        port: 0,
+        listen: '127.0.0.1',
+        heartbeatMs: 0,
+        redialBaseMs: 20,
+      },
+      (line) => masterLog.push(line),
+    )
+    try {
+      const key = keyOf(node)
+      const record = await m.registry!.add(addressOf(node), key)
+      await m.registry!.assign(record.fingerprint, { name: 'mac-1' })
+      // Another master's link is refused in the handshake, and said so.
+      const other = await master('m2')
+      try {
+        await assert.rejects(
+          other.registry!.add(addressOf(node), key),
+          HandshakeRefused,
+        )
+      } finally {
+        await other.close()
+      }
+      await until(() =>
+        workerLog.some((line) =>
+          line.startsWith('Refused a link in the handshake: '),
+        ),
+      )
+      m.registry!.link(record.fingerprint)!.close(CLOSE.heartbeat)
+      await until(() =>
+        workerLog.includes(
+          'Link to the master closed: peer closed: heartbeat: nothing heard',
+        ),
+      )
+      assert(
+        masterLog.includes(
+          'Link to worker mac-1 closed: heartbeat: nothing heard',
+        ),
+      )
+      // The master redials; a node that stops closes its link as a shutdown.
+      await until(() => m.registry!.link(record.fingerprint) != null)
+      await node.close()
+      await until(() =>
+        masterLog.includes(
+          'Link to worker mac-1 closed: peer closed: shutdown',
+        ),
+      )
+      assert(workerLog.includes('Link to the master closed: shutdown'))
+    } finally {
+      await m.close()
+      await node.close().catch(() => undefined)
+    }
   })
 
   it('backs off redials with jitter up to a cap, and the master has no link listener', async () => {

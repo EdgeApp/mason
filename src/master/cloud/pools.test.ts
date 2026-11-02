@@ -20,6 +20,8 @@ import { pinnedFetch } from '../../node/pinnedFetch.js'
 import { MASTER_SESSION_COOKIE } from '../auth.js'
 import { poolInput } from '../cloudApi.js'
 import { version } from '../../version.js'
+import { IN_PROCESS } from '../nodes.js'
+import { inventoryPlatform } from '../updates.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1009,5 +1011,214 @@ export async function work(ctx: Stage) {
       }),
       /Add a DigitalOcean or NoMac account on the <a href="\/cloud">Cloud<\/a> page/,
     )
+  })
+})
+
+describe('Pool machines older than the master', function () {
+  this.timeout(120_000)
+
+  it('U11.9 a pool machine older than the master takes no stage until GitHub answers; once its release is there it retires after its stage, and gets no update push', async () => {
+    const dir = root()
+    const cloud = new FakeCloud(dir)
+    // The machines run this checkout's version; the master's release can move past it.
+    const [major, minor, patch] = version.split(/[.-]/).map(Number)
+    const newer = `${major}.${minor}.${patch! + 1}`
+    const newer2 = `${major}.${minor}.${patch! + 2}`
+    const newer3 = `${major}.${minor}.${patch! + 3}`
+    let gitHub = { repository: 'EdgeApp/mason', version }
+    const listed = async (wanted: string): Promise<string[]> => [
+      `mason-${wanted}-linux-x64.tar.gz`,
+      'install.sh',
+    ]
+    let assets = listed
+    const logs: string[] = []
+    const c = await cluster(path.join(dir, 'cluster'), {
+      workers: [],
+      coWorker: true,
+      masterOptions: {
+        cloud: {
+          provider: () => cloud,
+          publicAddress: async () => '203.0.113.7',
+          releaseAssets: async (_repository, wanted) => await assets(wanted),
+          github: () => gitHub,
+          tickMs: 200,
+          pairTimeoutMs: 20_000,
+          log: (line: string) => {
+            logs.push(line)
+          },
+        },
+      },
+    })
+    try {
+      const master = c.master.master!
+      await master.settings.set(admin, 'host', {
+        origin: 'https://builds.example.test',
+      })
+      await master.settings.set(admin, 'cloudAccounts', {
+        accounts: [
+          {
+            id: 'do',
+            name: 'DigitalOcean',
+            provider: 'digitalocean',
+            key: TOKEN,
+          },
+        ],
+      })
+      await master.settings.set(admin, 'cloud', {
+        monthlyBudget: 200,
+        pools: [
+          {
+            name: 'linux-cloud',
+            type: 'linux-cloud',
+            account: 'do',
+            region: 'nyc3',
+            size: 's-1vcpu-1gb',
+            image: 'ubuntu-24-04-x64',
+            maxNodes: 1,
+            slots: 1,
+            ttlMinutes: 60,
+          },
+        ],
+      })
+      const repo = c.repo('fixtures/old-machines')
+      repo.commit({
+        'Masonfile.ts': `
+import type { Setup, Stage } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.stage('linux', { on: 'linux-cloud', run: work })
+}
+export async function work(ctx: Stage) {
+  console.log('working')
+  await ctx.sleep('2s')
+  return ctx.node.name
+}
+`,
+      })
+      master.saveProject(admin, 'old-machines', {
+        repository: repo.url,
+        rules: [{ pattern: '*', mode: 'request' }],
+      })
+      const start = async (): Promise<string> => {
+        const created = await c.api('POST', '/api/v2/runs', {
+          project: 'old-machines',
+        })
+        assert.equal(created.status, 202, created.text)
+        return created.json.id as string
+      }
+      const finish = async (id: string): Promise<Json> =>
+        await c.until(
+          () => {
+            const value = master.run(id) as Json
+            return ['succeeded', 'failed', 'cancelled'].includes(value.status)
+              ? value
+              : undefined
+          },
+          90_000,
+          `run ${id}`,
+        )
+      const machines = (): Json[] => master.pools.machines()
+      const first = await start()
+      await c.until(
+        () => (master.scheduler.logs(first) ?? '').includes('working'),
+        60_000,
+        'the first stage working',
+      )
+      const old = machines()[0]
+      const oldName = master.registry.get(old.fingerprint)!.name
+      const sleep = async (ms: number): Promise<void> => {
+        await new Promise((resolve) => setTimeout(resolve, ms))
+      }
+      const linux = (id: string): Json => (master.run(id) as Json).stages.at(-1)
+      // The master moves to a newer release; GitHub has not answered yet.
+      let fail: (error: Error) => void = () => undefined
+      assets = async (wanted): Promise<string[]> =>
+        wanted === newer
+          ? await new Promise<string[]>((_resolve, reject) => {
+              fail = reject
+            })
+          : await listed(wanted)
+      gitHub = { repository: 'EdgeApp/mason', version: newer }
+      assert.equal(master.pools.draining(old.fingerprint), true)
+      const second = await start()
+      const done = await finish(first)
+      assert.equal(done.status, 'succeeded', master.scheduler.logs(first))
+      assert.equal(done.stages.at(-1).output, oldName)
+      // Idle, it is neither given the waiting stage nor retired.
+      await sleep(1500)
+      assert.equal(machines()[0].state, 'ready')
+      assert.notEqual(linux(second).status, 'running')
+      assert.equal(linux(second).worker ?? null, null)
+      // A lookup that fails keeps it at work: no new machine could be made.
+      fail(new Error('GitHub is down'))
+      await c.until(
+        () => (master.scheduler.logs(second) ?? '').includes('working'),
+        30_000,
+        'the second stage on the old machine',
+      )
+      // Busy, it keeps its stage when the master's release can replace it.
+      gitHub = { repository: 'EdgeApp/mason', version: newer2 }
+      await c.until(
+        () => master.pools.draining(old.fingerprint),
+        5_000,
+        'the machine drained',
+      )
+      const third = await start()
+      await sleep(600)
+      assert.equal(machines()[0].state, 'ready')
+      const kept = await finish(second)
+      assert.equal(kept.status, 'succeeded', master.scheduler.logs(second))
+      assert.equal(kept.stages.at(-1).output, oldName)
+      // Once idle it is retired, not given the waiting stage.
+      await c.until(
+        () => machines().every((row) => row.id !== old.id),
+        30_000,
+        'the old machine retired',
+      )
+      assert(
+        logs.includes(
+          `Retiring linux-cloud machine ${old.id}: It runs Mason ${version}; the master runs ${newer2}`,
+        ),
+        logs.join('\n'),
+      )
+      // Its replacement installs the master's release (here the same checkout).
+      gitHub = { repository: 'EdgeApp/mason', version }
+      const later = await finish(third)
+      assert.equal(later.status, 'succeeded', master.scheduler.logs(third))
+      assert.notEqual(later.stages.at(-1).output, oldName)
+      assert.equal(cloud.created.length, 2)
+      // Pool machines are the pools' to refresh: a newer current release in
+      // the master's store goes to its own worker, not to a pool machine.
+      const fresh = machines()[0].fingerprint as string
+      const platform = inventoryPlatform(master.scheduler.inventoryOf(fresh)!)
+      const release = path.join(dir, 'release')
+      mkdirSync(release)
+      const files: Record<string, string> = {
+        'install.sh': '#!/bin/bash\n',
+        [`mason-${newer3}-${platform}.tar.gz`]: 'tarball',
+      }
+      for (const [name, text] of Object.entries(files))
+        writeFileSync(path.join(release, name), text)
+      writeFileSync(
+        path.join(release, 'SHA256SUMS'),
+        Object.entries(files)
+          .map(
+            ([name, text]) =>
+              `${createHash('sha256').update(text).digest('hex')}  ${name}`,
+          )
+          .join('\n') + '\n',
+      )
+      await master.releases.add(release)
+      master.releases.setCurrent(newer3)
+      await master.updates.tick()
+      const own = master.registry
+        .list()
+        .find((node) => node.host === IN_PROCESS)!
+      assert.equal(master.updates.state(own.fingerprint)?.version, newer3)
+      assert.equal(master.updates.state(fresh), undefined)
+    } finally {
+      await c.close()
+      await cloud.close()
+    }
   })
 })

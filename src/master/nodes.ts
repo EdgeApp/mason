@@ -71,6 +71,8 @@ export interface NodeRegistryOptions {
     port: number,
   ) => (() => Promise<Duplex>) | undefined
   now?: () => number
+  /** Where link closes and refused handshakes are logged. */
+  log?: (line: string) => void
 }
 
 /** A node's name or type: letters, digits, dots, dashes and underscores; a type may be empty. */
@@ -442,7 +444,18 @@ export class NodeRegistry extends EventEmitter {
     this.db
       .prepare('UPDATE nodes SET last_seen=?,version=? WHERE fingerprint=?')
       .run(this.now(), peerVersion, fingerprint)
+    const named = this.row(fingerprint)?.name ?? fingerprint
     link.on('close', () => {
+      // The name as it is now; the database is closed once the master stopped.
+      let name = named
+      try {
+        name = this.row(fingerprint)?.name ?? named
+      } catch {
+        // The name it had when it linked.
+      }
+      this.options.log?.(
+        `Link to ${role} ${name} closed: ${link.closeReason ?? 'unknown'}`,
+      )
       if (this.links.get(fingerprint) === link) this.links.delete(fingerprint)
       this.emit('disconnected', fingerprint)
       if (wire.ping != null) this.schedule(fingerprint)
@@ -532,6 +545,10 @@ export class NodeRegistry extends EventEmitter {
         )
         return true
       } catch (error) {
+        // The node answered but the link did not come up.
+        this.options.log?.(
+          `Link to ${row.role} ${row.name} failed in the handshake: ${(error as Error).message}`,
+        )
         wire.close(CLOSE.refused)
         throw error
       }
