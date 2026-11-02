@@ -413,4 +413,31 @@ export class Pushes {
   async settled(): Promise<void> {
     await Promise.all([...this.writes])
   }
+
+  /**
+   * The push branches of a branch's build, for the pages: what its last
+   * setup recorded. Undefined when no setup has run on it.
+   */
+  cached(project: Project, branch: string): PushBranches | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT triggers FROM push_triggers WHERE project_id=? AND branch=?',
+      )
+      .get(project.id, branch)
+    return row == null
+      ? undefined
+      : (JSON.parse(String(row.triggers)) as PushBranches)
+  }
+
+  /** The push branches the project's most recent setup recorded, on any branch. */
+  latest(project: Project): PushBranches | undefined {
+    const row = this.db
+      .prepare(
+        'SELECT triggers FROM push_triggers WHERE project_id=? ORDER BY updated DESC LIMIT 1',
+      )
+      .get(project.id)
+    return row == null
+      ? undefined
+      : (JSON.parse(String(row.triggers)) as PushBranches)
+  }
 }

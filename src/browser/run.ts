@@ -9,7 +9,7 @@ import {
   statusDot,
   type QueueEntry,
 } from '../view/dashboard.js'
-import { escape } from '../view/html.js'
+import { escape, since, stamp } from '../view/html.js'
 import { ansiLine } from '../view/log.js'
 import { stepItems, type StepRow } from '../view/steps.js'
 import {
@@ -518,8 +518,36 @@ export interface RunWindow {
   live: LiveWindow
 }
 
+/**
+ * Writes each `<time data-format>` in the viewer's own zone: `since` as
+ * `2:31 ago` within a day, else, like `date`, as `2026-11-01 1435 PT`.
+ * Whether any is a `since` time, which the page keeps current.
+ */
+export function localTimes(
+  doc: Document,
+  now: number,
+  timeZone?: string,
+): boolean {
+  let relative = false
+  for (const node of doc.querySelectorAll<HTMLElement>(
+    'time[data-at][data-format]',
+  )) {
+    const at = Number(node.dataset.at)
+    if (!Number.isFinite(at)) continue
+    if (node.dataset.format === 'since') {
+      relative = true
+      node.textContent = since(at, now, timeZone)
+    } else node.textContent = stamp(at, timeZone)
+  }
+  return relative
+}
+
 /** Wires the run view, the action forms and the dashboard's queue on a page. */
 export function start(doc: Document, win: RunWindow): void {
+  const times = (): void => {
+    if (localTimes(doc, Date.now())) win.live.setTimeout(times, 30_000)
+  }
+  times()
   const csrf =
     doc.querySelector<HTMLMetaElement>('meta[name="mason-csrf"]')?.content ?? ''
   for (const form of doc.querySelectorAll<HTMLFormElement>(

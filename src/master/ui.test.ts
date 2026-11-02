@@ -1049,7 +1049,73 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.equal(runsTab.status, 200)
     assert.match(runsTab.text, /aria-current="page">Runs and builds</)
-    assert.match(runsTab.text, /<table class="list">|No runs yet/)
+    assert.match(runsTab.text, /<table class="list runs">|No runs yet/)
+    // The branches the build's push trigger names lead the list, a glob by its branches with runs.
+    const db = c.master.master!.database.db
+    const project = c.master.master!.projects.get('wizard')
+    const job = db.prepare(
+      "INSERT INTO jobs(id,project_id,workflow,number,branch,trigger,status,created,request) VALUES(?,?,'build',?,?,'request','succeeded',?,'{}')",
+    )
+    const now = Date.now()
+    job.run('m2-a', project.id, 9001, 'release/1', now + 1000)
+    job.run('m2-b', project.id, 9002, 'feature/x', now + 2000)
+    db.prepare(
+      "INSERT INTO build_number_reservations(project_id,key,reservation,value,created_at) VALUES(?,'app.example.wizard','m2-a','26110201',1)",
+    ).run(project.id)
+    // With no setup of the default branch, the latest of any branch's.
+    db.prepare('DELETE FROM push_triggers WHERE project_id=?').run(project.id)
+    const pushTriggers = db.prepare(
+      "INSERT INTO push_triggers(project_id,branch,sources,triggers,commit_sha,updated) VALUES(?,?,'',?,'',?) ON CONFLICT(project_id,branch) DO UPDATE SET triggers=excluded.triggers",
+    )
+    pushTriggers.run(
+      project.id,
+      'some/branch',
+      JSON.stringify({ build: ['develop', 'release/*'] }),
+      1,
+    )
+    const order = async (): Promise<string[]> =>
+      [
+        ...(
+          await request(
+            c.master,
+            'GET',
+            '/projects/wizard/runs',
+            signIn('developer'),
+          )
+        ).text.matchAll(/runs\?branch=([^"]+)"/g),
+      ].map((match) => decodeURIComponent(match[1]!))
+    assert.deepEqual((await order()).slice(0, 3), [
+      'develop',
+      'release/1',
+      'feature/x',
+    ])
+    // The default branch's triggers win; push: true pins the automatic rules.
+    pushTriggers.run(
+      project.id,
+      project.defaultBranch,
+      JSON.stringify({ build: true }),
+      0,
+    )
+    const automatic = project.rules
+      .filter((rule) => rule.mode === 'automatic')
+      .map((rule) => rule.pattern)
+    assert.deepEqual(
+      (await order()).slice(0, automatic.length),
+      automatic.filter((pattern) => !pattern.includes('*')),
+    )
+    assert.match(
+      (
+        await request(
+          c.master,
+          'GET',
+          '/projects/wizard/runs?branch=release%2F1',
+          signIn('developer'),
+        )
+      ).text,
+      /<td class="mono">26110201<\/td>/,
+    )
+    db.prepare("DELETE FROM jobs WHERE id IN ('m2-a','m2-b')").run()
+    db.prepare('DELETE FROM push_triggers WHERE project_id=?').run(project.id)
     assert.match(
       (
         await request(

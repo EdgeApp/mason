@@ -20,7 +20,7 @@ import {
   wizardView,
   type NodeRow,
 } from '../view/admin.js'
-import { artifactsView, runsTable } from '../view/artifacts.js'
+import { artifactsView, projectRunsData } from '../view/artifacts.js'
 import { fqdn } from './cloud/hosts.js'
 import { DEFAULT_MONTHLY_BUDGET } from './cloud/pools.js'
 import { methodsOf } from './hostSettings.js'
@@ -974,9 +974,37 @@ export function masterPages(
       typeof req.query.branch === 'string' && req.query.branch !== ''
         ? req.query.branch
         : undefined
-    const origin = (
-      (master.settings.value('host') ?? {}) as { origin?: string }
-    ).origin
+    const now = master.database.now()
+    // The branches the build's push trigger names, from the default branch's last setup, else any branch's.
+    const push =
+      master.pushes.cached(project, project.defaultBranch) ??
+      master.pushes.latest(project)
+    const pinned =
+      push?.build == null
+        ? []
+        : push.build === true
+          ? project.rules
+              .filter((rule) => rule.mode === 'automatic')
+              .map((rule) => rule.pattern)
+          : push.build
+    const reserved = master.database.db.prepare(
+      'SELECT value FROM build_number_reservations WHERE reservation=? ORDER BY created_at,key LIMIT 1',
+    )
+    const { branches, runs } = projectRunsData(
+      {
+        db: master.database.db,
+        viewer: viewerOf(current),
+        now,
+        appVisible: appVisible(master, current),
+        artifactBase: '',
+        reserved: (run): string | undefined => {
+          const row = reserved.get(run)
+          return row == null ? undefined : String(row.value)
+        },
+      },
+      project.slug,
+      { ...(branch == null ? {} : { branch }), pinned },
+    )
     send(
       res,
       `${project.name} · Runs and builds`,
@@ -985,17 +1013,10 @@ export function masterPages(
           slug: project.slug,
           name: project.name,
           ...(branch == null ? {} : { branch }),
+          branches,
+          runs,
         },
-        runsTable(
-          {
-            db: master.database.db,
-            viewer: viewerOf(current),
-            now: master.database.now(),
-            appVisible: appVisible(master, current),
-            artifactBase: origin ?? '',
-          },
-          { project: project.slug, ...(branch == null ? {} : { branch }) },
-        ),
+        now,
       ),
       current,
       200,
