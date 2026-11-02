@@ -3,7 +3,7 @@ import { ago, duration, escape, runName } from './html.js'
 import { icon, type IconName } from './icons.js'
 import type { Viewer } from './shell.js'
 
-export const platforms = ['ios', 'android', 'macos', 'windows'] as const
+export const platforms = ['ios', 'android', 'macos', 'windows', 'tvos'] as const
 export type Platform = (typeof platforms)[number]
 /**
  * Whether builds row `b` stands for its build: a run's variants are one
@@ -19,12 +19,15 @@ const platformNames: Record<Platform, string> = {
   android: 'Android',
   macos: 'macOS',
   windows: 'Windows',
+  tvos: 'tvOS',
 }
 const platformIcons: Record<Platform, IconName> = {
   ios: 'ios',
   android: 'android',
   macos: 'desktop_mac',
   windows: 'desktop_windows',
+  // The icon font holds no TV glyph; tvOS shares Apple's.
+  tvos: 'ios',
 }
 
 /** A platform chip. */
@@ -209,6 +212,7 @@ export function dashboardData(
     android: 0,
     macos: 0,
     windows: 0,
+    tvos: 0,
   }
   const cards: ProjectCard[] = []
   let appTotal = 0

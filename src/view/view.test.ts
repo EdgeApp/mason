@@ -430,6 +430,7 @@ describe('Design system and views', () => {
       android: 1,
       macos: 1,
       windows: 0,
+      tvos: 0,
     })
     const phones = data.projects[0]!
     assert.deepEqual(

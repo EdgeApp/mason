@@ -23,6 +23,22 @@ type Json = any
 
 const APP = packageFields.bundleId
 
+const TV = 'test.example.tv'
+const tvMasonfile = `
+import type { Setup, Stage } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.buildNumber('${TV}', { start: 5 })
+  m.workflow('build', {}, () => {})
+  m.stage('ship', { on: {}, publishes: ['${TV}'], secrets: ['TV_IPA'], run: ship })
+}
+export async function ship(ctx: Stage) {
+  const { writeFileSync } = await import('node:fs')
+  writeFileSync('TV.ipa', Buffer.from(ctx.secret('TV_IPA'), 'base64'))
+  return await ctx.publish({ app: '${TV}', platform: 'tvos', path: 'TV.ipa' })
+}
+`
+
 const masonfile = `
 import type { Setup, Stage } from '@mason/types'
 export function setup(m: Setup) {
@@ -41,7 +57,7 @@ export async function ship(ctx: Stage) {
 }
 `
 
-describe('iPhone Simulator builds', function () {
+describe('iPhone Simulator and tvOS builds', function () {
   this.timeout(120_000)
   let c: Cluster
   let host: RunningNode
@@ -132,6 +148,13 @@ describe('iPhone Simulator builds', function () {
       repository: repo.url,
       rules: [{ pattern: '*', mode: 'request' }],
       apps: [{ bundleId: APP, name: 'Phone', platforms: ['ios'] }],
+    })
+    const tvRepo = c.repo('fixtures/tvs')
+    tvRepo.commit({ 'Masonfile.ts': tvMasonfile })
+    master.saveProject(localOperator, 'tvs', {
+      repository: tvRepo.url,
+      rules: [{ pattern: '*', mode: 'request' }],
+      apps: [{ bundleId: TV, name: 'Television', platforms: ['tvos'] }],
     })
     tester = await master.people.create(localOperator, {
       email: 'simulator@example.test',
@@ -305,5 +328,97 @@ describe('iPhone Simulator builds', function () {
         .prepare("UPDATE nodes SET version=? WHERE role='host'")
         .run(reported.version)
     }
+  })
+
+  it('U14.13 publishes a tvOS app, which the host offers as an Apple TV download only, never to an older host', async () => {
+    /** A run of the tvOS app, whose IPA is the number `number`. */
+    const tvRun = async (number: string): Promise<Json> => {
+      db().prepare("DELETE FROM project_secrets WHERE name='TV_IPA'").run()
+      seedSecret(db(), 'tvs', {
+        name: 'TV_IPA',
+        kind: 'value',
+        value: zip([
+          [
+            'Payload/TV.app/Info.plist',
+            plistOf({
+              CFBundleIdentifier: TV,
+              CFBundleShortVersionString: '2.0',
+              CFBundleVersion: number,
+              DTPlatformName: 'appletvos',
+            }),
+          ],
+        ]).toString('base64'),
+      })
+      const created = await c.api('POST', '/api/v2/runs', {
+        project: 'tvs',
+        branch: 'master',
+      })
+      assert.equal(created.status, 202, created.text)
+      return await c.until(
+        () => {
+          const found = c.master.master!.run(created.json.id) as Json
+          return ['succeeded', 'failed'].includes(found.status)
+            ? found
+            : undefined
+        },
+        60_000,
+        'the tvOS run',
+      )
+    }
+    // A host older than the master may not know tvOS: nothing is sent to it.
+    const reported = db()
+      .prepare("SELECT version FROM nodes WHERE role='host'")
+      .get() as Json
+    db().prepare("UPDATE nodes SET version='0.0.1' WHERE role='host'").run()
+    const refused = await tvRun('5')
+    db()
+      .prepare("UPDATE nodes SET version=? WHERE role='host'")
+      .run(reported.version)
+    assert.equal(refused.status, 'failed')
+    assert.match(
+      c.master.master!.scheduler.logs(refused.id)!,
+      /The host runs Mason 0\.0\.1, older than this master's .*, and may not show tvOS builds; update the host first/,
+    )
+    const value = await tvRun('6')
+    assert.equal(
+      value.status,
+      'succeeded',
+      c.master.master!.scheduler.logs(value.id),
+    )
+    const build = db()
+      .prepare(
+        'SELECT id,platform,format,version,build_number,bundle_id FROM builds WHERE run=?',
+      )
+      .get(value.id) as Json
+    assert.deepEqual(
+      [
+        build.platform,
+        build.format,
+        build.version,
+        build.build_number,
+        build.bundle_id,
+      ],
+      ['tvos', 'ipa', '2.0', '6', TV],
+    )
+    await c.until(
+      () =>
+        host
+          .host!.cache.db.prepare('SELECT 1 FROM builds WHERE id=?')
+          .get(build.id),
+      5000,
+      'the tvOS build on the host',
+    )
+    const appId = Number(
+      (
+        host
+          .host!.cache.db.prepare('SELECT id FROM apps WHERE slug=?')
+          .get(TV) as Json
+      ).id,
+    )
+    const page = await hostGet(
+      `/apps/${appId}/branches/${Buffer.from('master').toString('base64url')}?platform=tvos`,
+    )
+    assert.match(page, /aria-label="Download 2\.0 build 6 for the Apple TV"/)
+    assert.doesNotMatch(page, /itms-services/)
   })
 })

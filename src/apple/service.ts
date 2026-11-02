@@ -15,7 +15,9 @@ import {
 import { Notary } from './notary.js'
 import {
   certificateKindFor,
+  isApplePlatform,
   Profiles,
+  signingPlatform,
   type ApplePlatform,
   type Distribution,
 } from './profiles.js'
@@ -252,16 +254,12 @@ export class AppleService {
     if (unknown.length !== 0)
       throw new Error(`${appId} does not sign ${unknown.join(', ')}`)
     const distribution = options.distribution
-    const applePlatforms = app.platforms.filter(
-      (platform): platform is ApplePlatform =>
-        platform === 'ios' || platform === 'macos',
+    const applePlatforms = app.platforms.filter(isApplePlatform)
+    const platform = signingPlatform(
+      app.platforms,
+      distribution,
+      options.platform,
     )
-    const platform: ApplePlatform =
-      distribution === 'developerId' || distribution === 'macAppStore'
-        ? 'macos'
-        : applePlatforms.includes('ios')
-          ? 'ios'
-          : 'macos'
     const profiles = []
     for (const bundleId of bundleIds)
       profiles.push(
@@ -303,10 +301,7 @@ export class AppleService {
     if (this.connect(team) == null)
       problems.push(`Team ${team} has no App Store Connect key`)
     else {
-      const platforms = app.platforms.filter(
-        (platform): platform is ApplePlatform =>
-          platform === 'ios' || platform === 'macos',
-      )
+      const platforms = app.platforms.filter(isApplePlatform)
       const wanted: Array<[Distribution, ApplePlatform]> = [
         ...(platforms.includes('ios')
           ? ([
@@ -325,6 +320,13 @@ export class AppleService {
               ['developerId', 'macos'],
             ] as Array<[Distribution, ApplePlatform]>)
           : []),
+        ...(platforms.includes('tvos')
+          ? ([
+              ['development', 'tvos'],
+              ['adHoc', 'tvos'],
+              ['appStore', 'tvos'],
+            ] as Array<[Distribution, ApplePlatform]>)
+          : []),
       ]
       for (const [distribution, platform] of wanted) {
         const kind = certificateKindFor(distribution)
@@ -338,11 +340,11 @@ export class AppleService {
             .ensure({ team, bundleId, distribution, platform, platforms })
             .catch((error: unknown) => {
               problems.push(
-                `The ${distribution} profile of ${bundleId} could not be made: ${(error as Error).message}`,
+                `The ${platform === 'tvos' ? 'tvOS ' : ''}${distribution} profile of ${bundleId} could not be made: ${(error as Error).message}`,
               )
             })
       }
-      if (platforms.includes('ios')) {
+      if (platforms.includes('ios') || platforms.includes('tvos')) {
         const records = await this.connect(team)!
           .all<{ bundleId: string }>(
             `/v1/apps?filter[bundleId]=${encodeURIComponent(app.bundleId)}`,

@@ -20,10 +20,12 @@ function selected(req: Request): Platform {
     req.get('user-agent') ?? '',
   )
 }
-function pill(path: string, chosen: Platform): string {
+/** The platform switch: only the platforms the apps shown have a channel for. */
+function pill(path: string, chosen: Platform, platforms: Platform[]): string {
   return `<div class="platforms" role="group" aria-label="Build platform">${Object.entries(
     labels,
   )
+    .filter(([value]) => platforms.includes(value as Platform))
     .map(
       ([value, label]) =>
         `<a data-platform="${value}" href="${escape(path)}?platform=${value}" aria-current="${chosen === value ? 'true' : 'false'}">${label}</a>`,
@@ -87,7 +89,22 @@ export function catalogRoutes(
       }
       const chosen = selected(req),
         apps = store.apps().filter((app) => store.visible(account.id, app.id))
-      const nav = pill(req.path, chosen) + navigation(session, account)
+      // The platforms of the app shown, or of every app the list shows.
+      const shown =
+        req.params.appId == null
+          ? apps
+          : apps.filter((item) => String(item.id) === req.params.appId)
+      const platforms = (
+        shown.length === 0
+          ? []
+          : store.db
+              .prepare(
+                `SELECT DISTINCT platform FROM channels WHERE enabled=1 AND app_id IN (${shown.map(() => '?').join(',')})`,
+              )
+              .all(...shown.map((item) => item.id))
+      ).map((row) => String(row.platform) as Platform)
+      const nav =
+        pill(req.path, chosen, platforms) + navigation(session, account)
       const query = `?platform=${chosen}`
       if (req.params.appId == null) {
         const cards = apps

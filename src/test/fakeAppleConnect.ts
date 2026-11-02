@@ -129,6 +129,8 @@ export class FakeAppleConnect {
   readonly bundleIds = new Map<string, Doc>()
   readonly capabilities = new Map<string, string[]>()
   readonly devices: Doc[] = []
+  /** The class Apple gives a registered UDID, when not an iPhone. */
+  readonly deviceClasses = new Map<string, string>()
   readonly profiles = new Map<string, Doc>()
   readonly apps: Doc[] = []
   readonly groups: Doc[] = []
@@ -419,14 +421,15 @@ export class FakeAppleConnect {
         this.failDevices--
         return { status: 500, json: { errors: [{ title: 'Apple is busy' }] } }
       }
-      // Apple tells the class from the UDID; registrations here are iPhones.
+      // Apple tells the class from the UDID; here an iPhone unless set.
       const item = {
         type: 'devices',
         id: this.id('DEVICE'),
         attributes: {
           ...data!.attributes,
           status: 'ENABLED',
-          deviceClass: 'IPHONE',
+          deviceClass:
+            this.deviceClasses.get(String(data!.attributes.udid)) ?? 'IPHONE',
         },
       }
       this.devices.push(item)

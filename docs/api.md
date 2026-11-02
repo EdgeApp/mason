@@ -689,7 +689,7 @@ platforms. It answers the app.
 | --- | --- |
 | `bundleId` | required, up to 160 characters |
 | `name` | required, up to 120 characters |
-| `platforms` | required: one or more of `ios`, `android`, `macos`, `windows`, each once |
+| `platforms` | required: one or more of `ios`, `android`, `macos`, `windows`, `tvos`, each once |
 | `apple` | `{ "team": "<10 capitals and digits>", "bundleIds": [...] }`: the Apple team and every bundle ID it signs, the app ID or its extensions (default: the app ID alone) |
 
 409 when the app ID belongs to another project.
@@ -732,7 +732,7 @@ no project yet, so a key scoped to projects cannot use it.
   `{ "bundleId", "platforms", "bundleIds" }`) and `triggers` by workflow.
 - **`wizard/apps`** takes `{ "apps": "app.example.one,app.example.two",
   "team": "ABCDE12345" }`: a comma-separated list of app IDs the discovery
-  found, and an optional Apple team for those built for iOS or macOS. It
+  found, and an optional Apple team for those built for iOS, macOS or tvOS. It
   answers the project. 400 for an app ID the Masonfile does not declare.
 - **`wizard/rules`** takes `{ "rules": "master automatic\n*" }`: one rule
   per line, a pattern and an optional mode (default `request`). It answers
@@ -1270,7 +1270,7 @@ master.
 | `GET /api/v2/apple/certificates` | The signing certificates, without private keys. |
 | `POST /api/v2/apple/certificates` | Imports or creates a certificate. 201. |
 | `DELETE /api/v2/apple/certificates/:id` | Removes a certificate. |
-| `GET /api/v2/apple/profiles` | The provisioning profiles. |
+| `GET /api/v2/apple/profiles` | The provisioning profiles: `{ team, bundleId, distribution, platform, name, uuid, expiresAt }` each, `platform` being `ios`, `macos` or `tvos`. |
 
 - The session routes answer the state:
   `{ "appleId", "state", "since", "notice", "codeVia", "error" }`, `state`

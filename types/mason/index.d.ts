@@ -25,7 +25,7 @@ export type Duration = `${number}s` | `${number}m` | `${number}h` | `${number}d`
 export type Os = 'macos' | 'linux' | 'windows'
 export type Arch = 'arm64' | 'x64'
 export type Role = 'admin' | 'manager' | 'developer' | 'tester'
-export type Platform = 'ios' | 'android' | 'macos' | 'windows'
+export type Platform = 'ios' | 'android' | 'macos' | 'windows' | 'tvos'
 export type TriggerKind =
   | 'push'
   | 'request'
@@ -155,6 +155,12 @@ export interface AppleOptions {
   app?: string
   /** Defaults to every bundle ID configured for `app`. */
   bundleIds?: string[]
+  /**
+   * The Apple platform the stage signs for, one of the app's: needed only
+   * to sign the tvOS app of an app ID that is also iOS (iOS is the
+   * default then); a tvOS-only app ID signs for tvOS.
+   */
+  platform?: 'ios' | 'macos' | 'tvos'
 }
 
 /** A stage function: an exported function receiving the stage context. */

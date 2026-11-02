@@ -378,6 +378,14 @@ describe('pipeline graph', () => {
     }, /apple distribution/)
     fails((m) => {
       m.apiVersion(1)
+      m.stage('x', {
+        on: 'linux',
+        run: fn,
+        apple: { distribution: 'adHoc', platform: 'watchos' as 'tvos' },
+      })
+    }, /apple\.platform is ios, macos or tvos/)
+    fails((m) => {
+      m.apiVersion(1)
       m.workflow('nightly', { triggers: [{ schedule: 'daily' }] }, () => {})
     }, /5-field cron/)
     fails((m) => {

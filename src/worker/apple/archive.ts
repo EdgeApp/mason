@@ -88,8 +88,16 @@ export function archiveArgs(
     options.destination ??
       (signing.platform === 'macos'
         ? 'generic/platform=macOS'
-        : 'generic/platform=iOS'),
-    ...(options.sdk == null ? [] : ['-sdk', options.sdk]),
+        : signing.platform === 'tvos'
+          ? 'generic/platform=tvOS'
+          : 'generic/platform=iOS'),
+    // The tvOS SDK goes with the default destination only; a stage that
+    // names its own destination names its SDK too, if it needs one.
+    ...(options.sdk != null
+      ? ['-sdk', options.sdk]
+      : signing.platform === 'tvos' && options.destination == null
+        ? ['-sdk', 'appletvos']
+        : []),
     '-archivePath',
     archivePath,
     '-derivedDataPath',

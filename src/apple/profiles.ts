@@ -11,7 +11,43 @@ export const distributions = [
   'macAppStore',
 ] as const
 export type Distribution = (typeof distributions)[number]
-export type ApplePlatform = 'ios' | 'macos'
+export type ApplePlatform = 'ios' | 'macos' | 'tvos'
+export const applePlatforms: readonly ApplePlatform[] = ['ios', 'macos', 'tvos']
+export const isApplePlatform = (value: string): value is ApplePlatform =>
+  (applePlatforms as readonly string[]).includes(value)
+
+/**
+ * The platform a stage signs for: macOS for Developer ID and Mac App
+ * Store; else the stage's `apple.platform`, which must be one of the app's;
+ * else iOS when the app has it, tvOS when it has it, macOS otherwise.
+ */
+export function signingPlatform(
+  platforms: readonly string[],
+  distribution: Distribution,
+  wanted?: string,
+): ApplePlatform {
+  const apple = platforms.filter(isApplePlatform)
+  if (distribution === 'developerId' || distribution === 'macAppStore') {
+    if (wanted != null && wanted !== 'macos')
+      throw new Error(`A ${distribution} build is for macOS, not ${wanted}`)
+    return 'macos'
+  }
+  if (wanted != null) {
+    if (
+      !isApplePlatform(wanted) ||
+      (apple.length > 0 && !apple.includes(wanted))
+    )
+      throw new Error(
+        `apple.platform ${wanted} is not one of the app's platforms (${apple.join(', ')})`,
+      )
+    return wanted
+  }
+  return apple.includes('ios')
+    ? 'ios'
+    : apple.includes('tvos')
+      ? 'tvos'
+      : 'macos'
+}
 
 /**
  * The device classes each platform's profiles carry. Apple lists Apple TVs
@@ -23,14 +59,16 @@ export type ApplePlatform = 'ios' | 'macos'
 export const deviceClasses: Record<ApplePlatform, readonly string[]> = {
   ios: ['IPHONE', 'IPAD', 'IPOD', 'APPLE_WATCH', 'APPLE_VISION_PRO'],
   macos: ['MAC'],
+  tvos: ['APPLE_TV'],
 }
 /** Every class some platform's profiles carry. */
 const profiledClasses = (): string[] => Object.values(deviceClasses).flat()
 
-/** The platform App Store Connect lists a platform's devices under. */
+/** The platform App Store Connect lists a platform's devices under: Apple TVs are `IOS`. */
 const devicePlatform: Record<ApplePlatform, string> = {
   ios: 'IOS',
   macos: 'MAC_OS',
+  tvos: 'IOS',
 }
 
 /** A device's class from its product type (`iPhone14,5`, `AppleTV11,1`), as Apple names classes. */
@@ -59,6 +97,7 @@ const classNames: Record<string, [string, string]> = {
 const platformNames: Record<ApplePlatform, string> = {
   ios: 'iOS',
   macos: 'macOS',
+  tvos: 'tvOS',
 }
 
 /** The certificate each distribution signs with. */
@@ -88,6 +127,11 @@ export function profileType(
       appStore: 'MAC_APP_STORE',
       macAppStore: 'MAC_APP_STORE',
       developerId: 'MAC_APP_DIRECT',
+    },
+    tvos: {
+      development: 'TVOS_APP_DEVELOPMENT',
+      adHoc: 'TVOS_APP_ADHOC',
+      appStore: 'TVOS_APP_STORE',
     },
   }
   const type = types[platform][distribution]
@@ -215,12 +259,13 @@ export class Profiles {
           attributes: {
             identifier,
             name: `Mason ${identifier.replace(/[^A-Za-z0-9 ]/g, ' ')}`,
-            platform:
-              platforms.includes('ios') && platforms.includes('macos')
+            // App Store Connect has no tvOS bundle ID platform: a tvOS
+            // app's is IOS, and one shared with macOS UNIVERSAL.
+            platform: !platforms.includes('macos')
+              ? 'IOS'
+              : platforms.some((entry) => entry !== 'macos')
                 ? 'UNIVERSAL'
-                : platforms.includes('macos')
-                  ? 'MAC_OS'
-                  : 'IOS',
+                : 'MAC_OS',
           },
         },
       })
@@ -387,9 +432,11 @@ export class Profiles {
     const devices = withDevices ? await this.devices(team, platform) : []
     const current = this.db
       .prepare(
-        'SELECT * FROM apple_profiles WHERE team_id=? AND bundle_id=? AND distribution=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1',
+        'SELECT * FROM apple_profiles WHERE team_id=? AND bundle_id=? AND distribution=? AND platform=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 1',
       )
-      .get(team, bundleId, distribution) as Record<string, unknown> | undefined
+      .get(team, bundleId, distribution, platform) as
+      | Record<string, unknown>
+      | undefined
     if (
       current != null &&
       Number(current.expires_at) > this.master.now() + 14 * DAY &&
@@ -418,7 +465,7 @@ export class Profiles {
       data: {
         type: 'profiles',
         attributes: {
-          name: `Mason ${labels[distribution]} ${bundleId} ${stamp}`,
+          name: `Mason ${platform === 'tvos' ? 'tvOS ' : ''}${labels[distribution]} ${bundleId} ${stamp}`,
           profileType: type,
         },
         relationships: {
@@ -440,12 +487,13 @@ export class Profiles {
     const id = Number(
       this.db
         .prepare(
-          'INSERT INTO apple_profiles(team_id,bundle_id,distribution,apple_id,name,uuid,content,expires_at,certificate_id,devices,capabilities,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+          'INSERT INTO apple_profiles(team_id,bundle_id,distribution,platform,apple_id,name,uuid,content,expires_at,certificate_id,devices,capabilities,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
         )
         .run(
           team,
           bundleId,
           distribution,
+          platform,
           created.data.id,
           attributes.name,
           attributes.uuid,
@@ -533,18 +581,20 @@ export class Profiles {
     Omit<StageProfile, 'content'> & {
       team: string
       distribution: string
+      platform: string
       expiresAt: number
     }
   > {
     return this.db
       .prepare(
-        'SELECT team_id,bundle_id,distribution,name,uuid,expires_at FROM apple_profiles WHERE deleted_at IS NULL ORDER BY team_id,bundle_id,distribution',
+        'SELECT team_id,bundle_id,distribution,platform,name,uuid,expires_at FROM apple_profiles WHERE deleted_at IS NULL ORDER BY team_id,bundle_id,distribution,platform',
       )
       .all()
       .map((row) => ({
         team: String(row.team_id),
         bundleId: String(row.bundle_id),
         distribution: String(row.distribution),
+        platform: String(row.platform),
         name: String(row.name),
         uuid: String(row.uuid),
         expiresAt: Number(row.expires_at),

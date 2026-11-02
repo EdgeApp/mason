@@ -840,6 +840,13 @@ describe('Re-signing an iOS build', function () {
     assert(
       !readFileSync(fromApp.ipa, 'utf8').split('\n').includes('SwiftSupport/'),
     )
+    // A tvOS app is laid out as an iOS app, and signed the same way.
+    const tv = await resign(
+      { ...context, signing: { ...context.signing, platform: 'tvos' } },
+      { path: 'build/App.app', output: 'build/TV.ipa' },
+    )
+    assert.equal(tv.ipa, path.join(dir, 'build', 'TV.ipa'))
+    assert(readFileSync(tv.ipa, 'utf8').split('\n').includes('Payload/'))
   })
 
   it('names the bundle IDs a build needs when the stage lacks a profile, or a bundle has no identifier', async () => {
@@ -1050,7 +1057,7 @@ describe('Re-signing an iOS build', function () {
         { ...context, signing: { ...context.signing, platform: 'macos' } },
         { path: 'build/edge.xcarchive' },
       ),
-      /signs iOS builds; this stage signs for macOS/,
+      /signs iOS and tvOS builds; this stage signs for macOS/,
     )
     const refusals: Array<[unknown, RegExp]> = [
       [{}, /needs the path of an \.ipa, \.xcarchive or \.app/],

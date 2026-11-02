@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 import express, { Router } from 'express'
+import { isApplePlatform } from '../apple/profiles.js'
 import { alternatives, type Graph } from '../pipeline/graph.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
 import { allow } from './permissions.js'
@@ -25,7 +26,8 @@ const applePlatform: Record<string, string> = {
 
 /**
  * The app IDs a graph's stages publish or sign, across every workflow, and
- * the platforms they build them for: Apple distributions name iOS or macOS,
+ * the platforms they build them for: Apple distributions name iOS or macOS
+ * (or the stage's apple.platform, such as tvOS),
  * a stage that installs the Android SDK builds Android, a stage on Windows
  * builds Windows.
  */
@@ -45,7 +47,11 @@ export function declaredApps(graph: Graph): DeclaredApp[] {
     for (const stage of [...workflow.stages, ...workflow.post]) {
       const platforms = new Set<string>()
       if (stage.apple != null)
-        platforms.add(applePlatform[stage.apple.distribution] ?? 'ios')
+        platforms.add(
+          stage.apple.platform ??
+            applePlatform[stage.apple.distribution] ??
+            'ios',
+        )
       if ((stage.tools?.android?.length ?? 0) > 0) platforms.add('android')
       if (
         alternatives(stage.on).some(
@@ -250,9 +256,7 @@ export function wizardApi(master: Master): Router {
         const app = declared.find((entry) => entry.bundleId === bundleId)
         if (app == null)
           throw new Error(`The Masonfile does not declare ${bundleId}`)
-        const apple = app.platforms.some(
-          (platform) => platform === 'ios' || platform === 'macos',
-        )
+        const apple = app.platforms.some(isApplePlatform)
         master.projects.addApp(actor, slug, {
           bundleId,
           name: bundleId,

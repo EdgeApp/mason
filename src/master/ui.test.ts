@@ -414,6 +414,32 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
         } as never),
         [{ bundleId: 'app.example.win', platforms: ['windows'] }],
       )
+    // A stage that signs for tvOS builds tvOS; one that only distributes, iOS.
+    assert.deepEqual(
+      declaredApps({
+        apiVersion: 1,
+        workflows: [
+          {
+            stages: [
+              {
+                publishes: ['app.example.tv'],
+                buildNumbers: [],
+                apple: { distribution: 'adHoc', platform: 'tvos' },
+              },
+              {
+                publishes: ['app.example.tv'],
+                buildNumbers: [],
+                apple: { distribution: 'appStore' },
+              },
+            ],
+            post: [],
+          },
+        ],
+        buildNumbers: {},
+        warnings: [],
+      } as never),
+      [{ bundleId: 'app.example.tv', platforms: ['ios', 'tvos'] }],
+    )
     // A build-number sequence keyed by an app ID names that app ID.
     assert.deepEqual(
       declaredApps({

@@ -49,6 +49,7 @@ export const formatsFor: Record<string, Format[]> = {
   android: ['apk'],
   macos: ['dmg'],
   windows: ['exe', 'msi'],
+  tvos: ['ipa'],
 }
 
 /** Whether Mason version `a` (`0.4.3`) is older than `b`, by number. */
@@ -329,14 +330,21 @@ export class Artifacts {
     )
       throw new Error('A publication needs the file’s SHA-256 and size')
     // A host older than this master may not know an iPhone Simulator zip,
-    // and would refuse it as a broken desktop package.
-    if (request.format === 'zip' && this.options.version != null) {
+    // which it would refuse as a broken desktop package, or tvOS, which
+    // could keep it from listing the app's builds.
+    const newer =
+      request.format === 'zip'
+        ? 'take zip builds'
+        : request.platform === 'tvos'
+          ? 'show tvOS builds'
+          : undefined
+    if (newer != null && this.options.version != null) {
       const older = (this.options.hostVersions?.() ?? []).find(
         (entry) => entry !== '' && olderVersion(entry, this.options.version!),
       )
       if (older != null)
         throw new Error(
-          `The host runs Mason ${older}, older than this master's ${this.options.version}, and may not take ${request.format} builds; update the host first`,
+          `The host runs Mason ${older}, older than this master's ${this.options.version}, and may not ${newer}; update the host first`,
         )
     }
     const row = this.db

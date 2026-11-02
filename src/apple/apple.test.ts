@@ -41,9 +41,17 @@ import {
   asConnectKey,
   connectToken,
 } from './connect.js'
-import { capabilitiesOf, profileType, type StageProfile } from './profiles.js'
+import {
+  capabilitiesOf,
+  profileType,
+  signingPlatform,
+  type StageProfile,
+} from './profiles.js'
 import { appleArea, AppleService } from './service.js'
 
+// Apple's request bodies are read field by field.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Json = any
 const TEAM = 'ABCDE12345'
 const root = (name: string): string =>
   mkdtempSync(path.join(realpathSync(process.env.MASON_TEST_ROOT!), name))
@@ -580,7 +588,7 @@ describe('Apple on the master', function () {
         undefined,
       )
       assert.deepEqual(lines, [
-        `Left 1 device of no class and 2 Apple TVs off iOS profiles for team ${TEAM}: Den, Living Room, Mystery`,
+        `Left 1 device of no class off iOS profiles for team ${TEAM}: Mystery`,
       ])
       // The same devices left out again are not logged again; a change is.
       await logged.profiles.devices(TEAM, 'ios', true)
@@ -590,11 +598,18 @@ describe('Apple on the master', function () {
       assert.equal(lines.length, 2)
       assert.match(
         lines[1]!,
-        /^Left 1 device of no class, 1 APPLE_TOASTER device and/,
+        /^Left 1 device of no class and 1 APPLE_TOASTER device off iOS/,
+      )
+      // Apple TVs are tvOS's: a tvOS list logs nothing for the iPhones it leaves out.
+      await logged.profiles.devices(TEAM, 'tvos', true)
+      assert.equal(lines.length, 3)
+      assert.match(
+        lines[2]!,
+        /^Left 1 device of no class and 1 APPLE_TOASTER device off tvOS profiles for team [A-Z0-9]+: Mystery, Toaster$/,
       )
       apple.devices.splice(4)
       await logged.profiles.devices(TEAM, 'ios', true)
-      assert.equal(lines.length, 2)
+      assert.equal(lines.length, 3)
       // Apple refuses an Apple TV on an iOS ad hoc profile, as Mason once sent it.
       const certificate = logged.certificates.current(TEAM, 'distribution')!
       device('TV4', 'APPLE_TV', 'Office')
@@ -1016,6 +1031,174 @@ describe('Apple on the master', function () {
     assert(
       !service.notices().some((line) => line.includes('app.example.setup')),
     )
+  })
+
+  it('U14.13 tvOS apps: tvOS profiles carry only Apple TVs beside the same bundle ID’s iOS ones, stages sign for tvOS, TestFlight uploads say TV_OS', async () => {
+    assert.equal(profileType('development', 'tvos'), 'TVOS_APP_DEVELOPMENT')
+    assert.equal(profileType('adHoc', 'tvos'), 'TVOS_APP_ADHOC')
+    assert.equal(profileType('appStore', 'tvos'), 'TVOS_APP_STORE')
+    assert.throws(
+      () => profileType('developerId', 'tvos'),
+      /no developerId distribution for tvos/,
+    )
+    // Which platform a stage signs for.
+    assert.equal(signingPlatform(['tvos'], 'adHoc'), 'tvos')
+    assert.equal(signingPlatform(['ios', 'tvos'], 'adHoc'), 'ios')
+    assert.equal(signingPlatform(['ios', 'tvos'], 'adHoc', 'tvos'), 'tvos')
+    assert.equal(signingPlatform(['macos', 'tvos'], 'developerId'), 'macos')
+    assert.equal(signingPlatform(['android'], 'development', 'tvos'), 'tvos')
+    assert.throws(
+      () => signingPlatform(['ios'], 'adHoc', 'tvos'),
+      /apple\.platform tvos is not one of the app's platforms \(ios\)/,
+    )
+    assert.throws(
+      () => signingPlatform(['macos'], 'developerId', 'tvos'),
+      /A developerId build is for macOS, not tvos/,
+    )
+    const before = apple.devices.splice(0)
+    for (const [id, deviceClass] of [
+      ['PHONE9', 'IPHONE'],
+      ['TV9', 'APPLE_TV'],
+      ['WATCH9', 'APPLE_WATCH'],
+    ] as const)
+      apple.devices.push({
+        type: 'devices',
+        id,
+        attributes: { status: 'ENABLED', platform: 'IOS', deviceClass },
+      })
+    for (const platform of ['ios', 'tvos'])
+      database.db
+        .prepare('DELETE FROM apple_cache WHERE key=?')
+        .run(`devices2:${TEAM}:${platform}`)
+    try {
+      // One bundle ID for both, as universal purchase has it.
+      const app = {
+        id: 9,
+        bundleId: 'app.example.tv',
+        name: 'TV',
+        platforms: ['ios' as const, 'tvos' as const],
+        apple: { team: TEAM, bundleIds: ['app.example.tv'] },
+      }
+      apple.apps.push({
+        type: 'apps',
+        id: 'APPTV',
+        attributes: { bundleId: 'app.example.tv' },
+      })
+      assert.deepEqual(await service.setupApp(app), [])
+      const bundle = [...apple.bundleIds.values()].find(
+        (item) => item.attributes.identifier === 'app.example.tv',
+      )!
+      // App Store Connect has no tvOS bundle ID platform: it is IOS.
+      assert.equal(bundle.attributes.platform, 'IOS')
+      assert.deepEqual(
+        service.profiles
+          .list()
+          .filter((profile) => profile.bundleId === 'app.example.tv')
+          .map((profile) => `${profile.platform} ${profile.distribution}`),
+        [
+          'ios adHoc',
+          'tvos adHoc',
+          'ios appStore',
+          'tvos appStore',
+          'ios development',
+          'tvos development',
+        ],
+      )
+      const posted = (type: string): Json =>
+        apple.calls
+          .filter(
+            (call) =>
+              call.path === '/v1/profiles' &&
+              call.method === 'POST' &&
+              call.body!.data.attributes.profileType === type,
+          )
+          .at(-1)!.body!.data
+      const devices = (type: string): string[] =>
+        (posted(type).relationships.devices.data as Array<{ id: string }>).map(
+          (entry) => entry.id,
+        )
+      assert.deepEqual(devices('TVOS_APP_ADHOC'), ['TV9'])
+      assert.deepEqual(devices('TVOS_APP_DEVELOPMENT'), ['TV9'])
+      assert.deepEqual(devices('IOS_APP_ADHOC'), ['PHONE9', 'WATCH9'])
+      assert.equal(posted('TVOS_APP_STORE').relationships.devices, undefined)
+      assert.match(
+        posted('TVOS_APP_ADHOC').attributes.name,
+        /^Mason tvOS AdHoc app\.example\.tv \d{14}-[0-9a-f]{4}$/,
+      )
+      // A bundle ID for tvOS and macOS is universal.
+      await service.profiles.bundleId(TEAM, 'app.example.tvmac', [
+        'tvos',
+        'macos',
+      ])
+      assert.equal(
+        [...apple.bundleIds.values()].find(
+          (item) => item.attributes.identifier === 'app.example.tvmac',
+        )!.attributes.platform,
+        'UNIVERSAL',
+      )
+      // A stage signs for tvOS when it says so, or when its app is tvOS only.
+      const project = (apps: unknown[]): Json => ({ apps })
+      const stage = (apple: Record<string, unknown>): Json => ({
+        name: 'sign',
+        apple,
+      })
+      const tv = await service.signing(
+        project([app]),
+        stage({ distribution: 'adHoc', platform: 'tvos' }),
+      )
+      assert.equal(tv.platform, 'tvos')
+      assert.equal(
+        tv.profiles[0]!.uuid,
+        service.profiles
+          .list()
+          .find(
+            (profile) =>
+              profile.bundleId === 'app.example.tv' &&
+              profile.platform === 'tvos' &&
+              profile.distribution === 'adHoc',
+          )!.uuid,
+      )
+      assert.equal(
+        (
+          await service.signing(
+            project([app]),
+            stage({ distribution: 'adHoc' }),
+          )
+        ).platform,
+        'ios',
+      )
+      const only = { ...app, id: 10, platforms: ['tvos' as const] }
+      assert.equal(
+        (
+          await service.signing(
+            project([only]),
+            stage({ distribution: 'appStore' }),
+          )
+        ).platform,
+        'tvos',
+      )
+      // TestFlight takes a tvOS build as TV_OS.
+      await service.testflight.start({
+        job: 'jobtv',
+        stage: 'ship',
+        team: TEAM,
+        bundleId: 'app.example.tv',
+        platform: 'tvos',
+        fileName: 'TV.ipa',
+        fileSize: 10,
+        version: '1.0',
+        buildNumber: '7',
+        options: {},
+      })
+      const upload = apple.calls
+        .filter(
+          (call) => call.path === '/v1/buildUploads' && call.method === 'POST',
+        )
+        .at(-1)!
+      assert.equal(upload.body!.data.attributes.platform, 'TV_OS')
+    } finally {
+      apple.devices.splice(0, apple.devices.length, ...before)
+    }
   })
 
   it('U14.10 Apple base URLs are refused without --test-endpoints and ignored with a warning when already stored', async () => {

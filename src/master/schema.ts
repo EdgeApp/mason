@@ -7,7 +7,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 28
+export const MASTER_SCHEMA = 29
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -732,6 +732,18 @@ const migrations: Array<(db: DatabaseSync) => void> = [
         ).run(String(row.app_id), Date.now())
       }
     }
+  },
+  // 29: each Apple profile's platform, so a bundle ID's iOS and tvOS
+  // profiles are two. One made before is macOS when its distribution is
+  // macOS-only, or its bundle ID is macOS-only; iOS otherwise.
+  (db): void => {
+    const columns = db.prepare('PRAGMA table_info(apple_profiles)').all()
+    if (!columns.some((column) => column.name === 'platform'))
+      db.exec(
+        "ALTER TABLE apple_profiles ADD COLUMN platform TEXT NOT NULL DEFAULT 'ios'",
+      )
+    db.exec(`UPDATE apple_profiles SET platform='macos' WHERE distribution IN ('developerId','macAppStore')
+      OR EXISTS (SELECT 1 FROM apple_bundle_ids b WHERE b.team_id=apple_profiles.team_id AND b.identifier=apple_profiles.bundle_id AND b.platform='MAC_OS')`)
   },
 ]
 

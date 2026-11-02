@@ -13,7 +13,13 @@ import { pipeline } from 'node:stream/promises'
 import { Accounts, randomToken, type Session } from '../auth/accounts.js'
 import { csrf, navigation, sessionContext } from '../auth/routes.js'
 import { Store, digest } from '../store.js'
-import { asId, integer, type Build, type Format } from '../validation.js'
+import {
+  asId,
+  downloadOnly,
+  integer,
+  type Build,
+  type Format,
+} from '../validation.js'
 import { escape } from '../view/html.js'
 import { page } from '../view/shell.js'
 
@@ -105,7 +111,8 @@ export class Installations {
     return build != null && devices.eligible(build, device) ? build : undefined
   }
   manifest(build: Build, token: string): string {
-    if (build.format !== 'ipa') throw new Error('Not an iOS application')
+    if (build.format !== 'ipa' || downloadOnly(build) != null)
+      throw new Error('Not an iOS application')
     return `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>items</key><array><dict><key>assets</key><array><dict><key>kind</key><string>software-package</string><key>url</key><string>${escape(this.url(token, 'artifact'))}</string></dict></array><key>metadata</key><dict><key>bundle-identifier</key><string>${escape(build.bundle_id)}</string><key>bundle-version</key><string>${escape(build.build_number)}</string><key>kind</key><string>software</string><key>title</key><string>${escape(this.store.apps().find((app) => app.id === build.app_id)!.name)}</string></dict></dict></array></dict></plist>`
   }
   url(token: string, resource: 'manifest.plist' | 'artifact'): string {
@@ -184,7 +191,8 @@ export function installationRoutes(
       context.session,
       selected,
     )
-    if (result.build.format !== 'ipa') {
+    // Only an iOS IPA installs over the air; the rest (a tvOS app too) download.
+    if (result.build.format !== 'ipa' || downloadOnly(result.build) != null) {
       res.redirect(303, installs.url(result.token, 'artifact'))
       return
     }
@@ -200,7 +208,11 @@ export function installationRoutes(
   })
   router.get('/install/:token/manifest.plist', (req, res) => {
     const build = installs.build(req.params.token)
-    if (build == null || build.format !== 'ipa') {
+    if (
+      build == null ||
+      build.format !== 'ipa' ||
+      downloadOnly(build) != null
+    ) {
       res.status(404).send('Installation link is unavailable or expired')
       return
     }

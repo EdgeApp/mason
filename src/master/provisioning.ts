@@ -1,5 +1,6 @@
 import { AppleApiError } from '../apple/connect.js'
 import {
+  applePlatforms,
   deviceClasses,
   deviceClassOf,
   type ApplePlatform,
@@ -128,9 +129,11 @@ export class Provisioning {
         (team) => this.options.apple.connect(team) != null,
       )
     const registered: Array<{ id: number; projects: Project[] }> = []
-    const changed = new Set<string>()
+    // Each team a device went to, with the platforms whose profiles carry it.
+    const changed = new Map<string, Set<ApplePlatform>>()
     for (const device of pending) {
-      const projects = this.projectsFor(deviceClassOf(device.product))
+      const deviceClass = deviceClassOf(device.product)
+      const projects = this.projectsFor(deviceClass)
       const teams = signing(projects)
       if (teams.length === 0) {
         this.setStatus(
@@ -147,7 +150,13 @@ export class Provisioning {
           id: device.id,
           projects: projects.map((entry) => entry.project),
         })
-        for (const team of teams) changed.add(team)
+        for (const team of teams) {
+          const platforms = changed.get(team) ?? new Set<ApplePlatform>()
+          for (const platform of applePlatforms)
+            if (deviceClasses[platform].includes(deviceClass ?? ''))
+              platforms.add(platform)
+          changed.set(team, platforms)
+        }
         this.db
           .prepare('DELETE FROM apple_cache WHERE key=?')
           .run(`attempts:${device.id}`)
@@ -170,30 +179,33 @@ export class Provisioning {
     }
     if (registered.length === 0) return
     // The profiles that list devices are made again, each with every enabled device.
-    for (const team of [...changed].sort()) {
-      await this.options.apple.profiles.devices(team, 'ios', true)
-      const profiles = this.db
-        .prepare(
-          "SELECT DISTINCT bundle_id,distribution FROM apple_profiles WHERE team_id=? AND distribution IN ('development','adHoc') AND deleted_at IS NULL ORDER BY bundle_id,distribution",
-        )
-        .all(team) as Array<{
-        bundle_id: string
-        distribution: 'development' | 'adHoc'
-      }>
-      for (const profile of profiles)
-        await this.options.apple.profiles
-          .ensure({
-            team,
-            bundleId: profile.bundle_id,
-            distribution: profile.distribution,
-            platform: 'ios',
-          })
-          .catch((error: unknown) => {
-            this.options.log?.(
-              `Could not make the ${profile.distribution} profile of ${profile.bundle_id} again: ${(error as Error).message}`,
-            )
-          })
-    }
+    for (const [team, platforms] of [...changed].sort(([a], [b]) =>
+      a.localeCompare(b),
+    ))
+      for (const platform of [...platforms].sort()) {
+        await this.options.apple.profiles.devices(team, platform, true)
+        const profiles = this.db
+          .prepare(
+            "SELECT DISTINCT bundle_id,distribution FROM apple_profiles WHERE team_id=? AND platform=? AND distribution IN ('development','adHoc') AND deleted_at IS NULL ORDER BY bundle_id,distribution",
+          )
+          .all(team, platform) as Array<{
+          bundle_id: string
+          distribution: 'development' | 'adHoc'
+        }>
+        for (const profile of profiles)
+          await this.options.apple.profiles
+            .ensure({
+              team,
+              bundleId: profile.bundle_id,
+              distribution: profile.distribution,
+              platform,
+            })
+            .catch((error: unknown) => {
+              this.options.log?.(
+                `Could not make the ${profile.distribution} profile of ${profile.bundle_id} again: ${(error as Error).message}`,
+              )
+            })
+      }
     for (const { id } of registered) this.setStatus(id, 'registered')
     this.queueBuilds([
       ...new Set(registered.flatMap((entry) => entry.projects)),

@@ -465,6 +465,74 @@ describe('Mason protected catalog and installation', () => {
     )
     assert.throws(() => installs.manifest(simulator, 'fixture'))
   })
+  it('U14.13 offers a tvOS app as an Apple TV download: no install link, no manifest', async () => {
+    ;(store.config as { devices?: unknown }).devices = {
+      trustStoreFile: path.join(root, 'roots.pem'),
+      openssl: 'openssl',
+    }
+    const tv = publish('tvos', 'master', '300', 'ipa')
+    const html = await (
+      await request(
+        `/apps/${app}/branches/${branchKey('master')}?platform=tvos`,
+      )
+    ).text()
+    assert.match(html, /<p class="intro">tvOS builds · newest first<\/p>/)
+    // The platform switch shows only the platforms the app has.
+    const switchOf = (page: string): string[] =>
+      [
+        ...(
+          /<div class="platforms"[^>]*>(.*?)<\/div>/.exec(page)?.[1] ?? ''
+        ).matchAll(/data-platform="([a-z]+)"/g),
+      ].map((match) => match[1]!)
+    assert.deepEqual(switchOf(html), ['tvos'])
+    publish('android', 'master', '301')
+    assert.deepEqual(
+      switchOf(await (await request(`/apps/${app}?platform=tvos`)).text()),
+      ['android', 'tvos'],
+    )
+    const other = store.addApp({
+      slug: 'test.example.other',
+      name: 'Other',
+      position: 1,
+    })
+    store.addChannel({
+      appId: other,
+      platform: 'windows',
+      key: 'other-windows',
+      allowedFormats: ['exe'],
+    })
+    assert.deepEqual(switchOf(await (await request('/')).text()), [
+      'android',
+      'windows',
+      'tvos',
+    ])
+    assert.deepEqual(switchOf(await (await request(`/apps/${other}`)).text()), [
+      'windows',
+    ])
+    assert.match(
+      html,
+      /aria-label="Download 1\.2\.3 build 300 for the Apple TV"/,
+    )
+    assert.match(html, /<\/time> · Apple TV · 0\.0 MB<\/small>/)
+    assert.doesNotMatch(html, /itms-services/)
+    const response = await request(`/builds/${tv.id}/install`, {
+      method: 'POST',
+      headers: {
+        origin: store.config.origin,
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({ csrf: user.session.csrf }),
+    })
+    assert.equal(response.status, 303)
+    const url = response.headers.get('location')!
+    assert.equal((await request(url, {}, false)).status, 200)
+    assert.equal(
+      (await request(url.replace('/artifact', '/manifest.plist'), {}, false))
+        .status,
+      404,
+    )
+    assert.throws(() => installs.manifest(tv, 'fixture'))
+  })
   it('selects platforms safely and round-trips arbitrary branch names without paths', () => {
     for (const [agent, expected] of [
       ['iPhone', 'ios'],

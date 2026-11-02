@@ -427,6 +427,36 @@ describe('Master database, setup and import', function () {
     db.close()
   })
 
+  it('U14.13 schema 29 gives each Apple profile its platform: macOS by distribution or bundle ID, else iOS', () => {
+    const db = new DatabaseSync(path.join(root, 'profiles.sqlite'))
+    migrateMaster(db)
+    db.exec(`ALTER TABLE apple_profiles DROP COLUMN platform;
+    INSERT INTO apple_bundle_ids(team_id,identifier,apple_id,platform,updated_at) VALUES
+      ('T','a.ios','B1','IOS',0),('T','a.mac','B2','MAC_OS',0),('T','a.both','B3','UNIVERSAL',0);
+    INSERT INTO apple_profiles(team_id,bundle_id,distribution,apple_id,name,uuid,content,expires_at,certificate_id,devices,capabilities,created_at) VALUES
+      ('T','a.ios','adHoc','P1','n','u1','c',0,1,'','[]',0),
+      ('T','a.mac','development','P2','n','u2','c',0,1,'','[]',0),
+      ('T','a.both','development','P3','n','u3','c',0,1,'','[]',0),
+      ('T','a.both','developerId','P4','n','u4','c',0,1,'','[]',0);
+    UPDATE meta SET value='28' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      db
+        .prepare(
+          'SELECT apple_id,platform FROM apple_profiles ORDER BY apple_id',
+        )
+        .all()
+        .map((row) => [row.apple_id, row.platform]),
+      [
+        ['P1', 'ios'],
+        ['P2', 'macos'],
+        ['P3', 'ios'],
+        ['P4', 'macos'],
+      ],
+    )
+    db.close()
+  })
+
   it('U12.16 schema 22 records each published or staged reservation as its default variant', () => {
     const db = new DatabaseSync(path.join(root, 'publications.sqlite'))
     migrateMaster(db)

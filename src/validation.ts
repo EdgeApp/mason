@@ -67,7 +67,13 @@ export const asFlag = (value: unknown): number => {
   const out = integer(0, 1)(value)
   return out
 }
-export const asPlatform = oneOf(['ios', 'android', 'macos', 'windows'] as const)
+export const asPlatform = oneOf([
+  'ios',
+  'android',
+  'macos',
+  'windows',
+  'tvos',
+] as const)
 export type Platform = ReturnType<typeof asPlatform>
 /**
  * A published file's format, its file extension. An iOS `zip` is an iPhone
@@ -87,6 +93,7 @@ export const formats: Record<Platform, readonly Format[]> = {
   android: ['apk'],
   macos: ['dmg'],
   windows: ['exe', 'msi'],
+  tvos: ['ipa'],
 }
 
 /** Formats whose app ID, version and build number come from the package itself. */
@@ -94,7 +101,8 @@ export const packagedFormats: readonly Format[] = ['ipa', 'apk', 'zip']
 
 /**
  * What a build that is only downloaded, never installed on a device from
- * the host, is for (`iPhone Simulator`); undefined for one people install.
+ * the host, is for (`iPhone Simulator`, `Apple TV`: tvOS has no web
+ * install); undefined for one people install.
  */
 export function downloadOnly(build: {
   platform: string
@@ -102,7 +110,9 @@ export function downloadOnly(build: {
 }): string | undefined {
   return build.platform === 'ios' && build.format === 'zip'
     ? 'iPhone Simulator'
-    : undefined
+    : build.platform === 'tvos'
+      ? 'Apple TV'
+      : undefined
 }
 
 /** A variant name: 1 to 32 letters, digits, `.`, `_` or `-`, starting with a letter or digit. */

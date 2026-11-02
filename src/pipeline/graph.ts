@@ -1021,6 +1021,11 @@ export class Recorder {
       throw new GraphError(
         `${what}: apple.app is an app ID and apple.bundleIds a list of bundle IDs`,
       )
+    if (
+      apple?.platform != null &&
+      !['ios', 'macos', 'tvos'].includes(apple.platform as string)
+    )
+      throw new GraphError(`${what}: apple.platform is ios, macos or tvos`)
     return {
       ...defaults(stageName, extra.failFast ?? workflow.failFast),
       ...(extra.group == null ? {} : { group: extra.group }),
