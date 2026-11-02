@@ -722,6 +722,30 @@ describe('Host cache, sign-in and offline serving', function () {
       await (await developer.get('/projects/edge')).text(),
       /Recent runs/,
     )
+    // Each recent run opens its run's page on the host.
+    const master = c.master.master!.database
+    master.db
+      .prepare(
+        "INSERT INTO jobs(id,project_id,workflow,number,branch,trigger,status,created,request) VALUES('m4-run',?,'build',4242,'develop','request','succeeded',?,'{}')",
+      )
+      .run(c.master.master!.projects.get('edge').id, master.now())
+    master.change('job', 'm4-run')
+    await c.until(
+      () =>
+        runtime()
+          .cache.db.prepare("SELECT 1 FROM jobs WHERE id='m4-run'")
+          .get(),
+      10000,
+      'the run on the host',
+    )
+    const home = await (await developer.get('/projects/edge')).text()
+    assert.match(
+      home,
+      /<a class="list-row" href="\/runs\/m4-run"><div><strong>Run 4242<\/strong><small>develop · /,
+    )
+    assert.equal((await developer.get('/runs/m4-run')).status, 200)
+    master.db.prepare("DELETE FROM jobs WHERE id='m4-run'").run()
+    master.change('job', 'm4-run', 'delete')
   })
 
   it('U10.10 a permission-version change ends that account’s host sessions', async () => {
