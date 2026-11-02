@@ -571,8 +571,10 @@ export class Recorder {
   private workflow(name: string, options: WorkflowOptions): GraphWorkflow {
     if (!isRecord(options))
       throw new GraphError(`Workflow ${name} needs an options object`)
+    // Own properties only: an inherited `triggers` (a `__proto__` key, or a
+    // polluted Object.prototype) is not what the master reads from source.
     const triggers =
-      options.triggers ??
+      (Object.hasOwn(options, 'triggers') ? options.triggers : undefined) ??
       (name === 'build' ? [{ push: true }, { request: true }] : [])
     if (!Array.isArray(triggers))
       throw new GraphError(`Workflow ${name}: triggers must be a list`)
@@ -581,6 +583,17 @@ export class Recorder {
       const kind = keys.find((key) => triggerKinds.includes(key))
       if (kind == null)
         throw new GraphError(`Workflow ${name}: unknown trigger`)
+      if (kind === 'push') {
+        const t = trigger as { push: unknown; branches?: unknown }
+        if (
+          t.push !== true ||
+          (t.branches != null && !Array.isArray(t.branches))
+        )
+          throw new GraphError(
+            `Workflow ${name}: a push trigger is { push: true, branches?: [...] }`,
+          )
+        strings(t.branches, `Workflow ${name} push branches`)
+      }
       if (kind === 'schedule') {
         const t = trigger as { schedule: unknown; branches?: unknown }
         if (

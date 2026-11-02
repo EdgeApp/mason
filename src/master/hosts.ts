@@ -11,6 +11,7 @@ import type { Jobs } from './jobs.js'
 import { repositoryName } from './mirrors.js'
 import type { NodeRegistry } from './nodes.js'
 import type { Projects } from './projects.js'
+import type { Pushes } from './pushes.js'
 import {
   PublicationRefused,
   type Artifacts,
@@ -23,7 +24,7 @@ export const outboxKinds = ['device', 'prepare', 'artifact'] as const
 export type OutboxKind = (typeof outboxKinds)[number]
 
 export interface WebhookResult {
-  status: 'scheduled' | 'unchanged' | 'ignored' | 'ok' | 'refused'
+  status: 'accepted' | 'scheduled' | 'unchanged' | 'ignored' | 'ok' | 'refused'
   job?: string
   /** For a refused delivery: the HTTP status the host answers with, and why. */
   http?: 401 | 404 | 422
@@ -59,6 +60,8 @@ export class HostLinks {
       changes: Changes
       projects: Projects
       jobs: Jobs
+      /** Decides each push; without it a push on an automatic branch always builds. */
+      pushes?: Pick<Pushes, 'later'>
       /** Signs download grants for the host's Xcode mirror. */
       privateKey: KeyObject
       /** The host's public origins, from the `host` setting. */
@@ -127,7 +130,7 @@ export class HostLinks {
     return node.fingerprint
   }
 
-  /** Verifies a GitHub delivery with the project's webhook secret and schedules a push under its branch rules. */
+  /** Verifies a GitHub delivery with the project's webhook secret and decides the push under its branch rules and Masonfile. */
   webhook(params: unknown): WebhookResult {
     const {
       project: slug,
@@ -181,6 +184,12 @@ export class HostLinks {
       return { status: 'ignored' }
     if (ruleFor(project.rules, branch)?.mode !== 'automatic')
       return { status: 'ignored' }
+    // The master decides the push after answering: GitHub, and the host's
+    // link, wait seconds at most, and deciding may fetch the repository.
+    if (this.options.pushes != null) {
+      void this.options.pushes.later(project, branch, commit)
+      return { status: 'accepted' }
+    }
     const job = this.options.jobs.automatic(project, branch, commit)
     return job == null
       ? { status: 'unchanged' }

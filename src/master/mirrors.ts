@@ -185,6 +185,73 @@ export class Mirrors {
     ]).catch(() => undefined)
   }
 
+  /**
+   * A file at a commit the mirror holds: its blob hash, and its text when
+   * it is at most `maxBytes`. Undefined when the commit has no such file;
+   * a symlink, a submodule or a failure to read the mirror throws, so it
+   * is never taken for that.
+   */
+  async file(
+    project: string,
+    repository: string,
+    commit: string,
+    file: string,
+    maxBytes: number,
+  ): Promise<{ blob: string; text?: string } | undefined> {
+    if (!sha.test(commit) || !/^[\w./-]+$/.test(file) || file.includes('..'))
+      throw new Error('Name a commit and a file in it')
+    const dir = this.dir(project, repository)
+    const listed = await this.git(dir, [
+      'ls-tree',
+      '-l',
+      '--full-tree',
+      commit,
+      '--',
+      file,
+    ])
+    if (listed === '') return undefined
+    // A symlink or a submodule is not the file's text: the caller cannot read it here.
+    const entry = /^100(?:644|755) blob ([0-9a-f]+)\s+(\d+)\t/.exec(listed)
+    if (entry == null) throw new Error(`${file} is not a regular file`)
+    const [, blob, size] = entry
+    if (Number(size) > maxBytes) return { blob: blob! }
+    return {
+      blob: blob!,
+      text: await this.git(dir, ['cat-file', 'blob', blob!]),
+    }
+  }
+
+  /**
+   * The entries of a directory at a commit the mirror holds (`dir` empty
+   * for the root, else a path of directories), or undefined when there is
+   * no such directory.
+   */
+  async tree(
+    project: string,
+    repository: string,
+    commit: string,
+    dir: string,
+  ): Promise<Array<{ mode: string; name: string }> | undefined> {
+    if (
+      !sha.test(commit) ||
+      (dir !== '' && (!/^[\w./-]+$/.test(dir) || dir.includes('..')))
+    )
+      throw new Error('Name a commit and a directory in it')
+    const listed = await this.git(this.dir(project, repository), [
+      'ls-tree',
+      '-z',
+      dir === '' ? commit : `${commit}:${dir}`,
+    ]).catch(() => undefined)
+    if (listed == null) return undefined
+    return listed
+      .split('\0')
+      .filter((line) => line !== '')
+      .map((line) => {
+        const tab = line.indexOf('\t')
+        return { mode: line.split(' ')[0]!, name: line.slice(tab + 1) }
+      })
+  }
+
   /** Whether the master can reach a repository, and its default branch. */
   async defaultBranch(repository: string): Promise<string> {
     const remote = await this.remote(repository)

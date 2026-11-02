@@ -25,6 +25,7 @@ import { BuildNumbers } from './buildNumbers.js'
 import { GitHub, storedConnection, type GitHubOptions } from './github.js'
 import { Jobs } from './jobs.js'
 import { gitHeadLister, Poller, type HeadLister } from './poller.js'
+import { Pushes } from './pushes.js'
 import { Projects, type ProjectApp } from './projects.js'
 import { clusterCheck } from './clusterCheck.js'
 import { integer } from '../validation.js'
@@ -232,6 +233,7 @@ export class Master {
   readonly buildNumbers: BuildNumbers
   readonly github: GitHub
   readonly poller: Poller
+  readonly pushes: Pushes
   readonly mirrors: Mirrors
   readonly stashes: Stashes
   readonly scheduler: Scheduler
@@ -322,13 +324,6 @@ export class Master {
         )((input as { countBase?: unknown } | null)?.countBase ?? 0),
       }),
     })
-    this.poller = new Poller(
-      this.database,
-      this.projects,
-      this.jobs,
-      options.headLister ??
-        gitHeadLister(this.github, options.scratch ?? '/tmp'),
-    )
     const dir = options.dir ?? options.scratch ?? '/tmp'
     this.mirrors = new Mirrors(
       path.join(dir, 'mirrors'),
@@ -347,6 +342,19 @@ export class Master {
           const lfs = githubLfs(access)
           return { ...access, ...(lfs == null ? {} : { lfs }) }
         }),
+    )
+    this.pushes = new Pushes({
+      master: this.database,
+      jobs: this.jobs,
+      mirrors: this.mirrors,
+      log: (line): void => (this.options.log ?? console.log)(line),
+    })
+    this.poller = new Poller(
+      this.database,
+      this.projects,
+      this.pushes,
+      options.headLister ??
+        gitHeadLister(this.github, options.scratch ?? '/tmp'),
     )
     this.stashes = new Stashes(
       this.database,
@@ -412,6 +420,7 @@ export class Master {
       master: this.database,
       projects: this.projects,
       jobs: this.jobs,
+      pushes: this.pushes,
       buildNumbers: this.buildNumbers,
       registry: this.registry,
       mirrors: this.mirrors,
@@ -542,6 +551,7 @@ export class Master {
       changes: this.changes,
       projects: this.projects,
       jobs: this.jobs,
+      pushes: this.pushes,
       artifacts: this.artifacts,
       privateKey: identity.privateKey,
       onDevices: (): void => {

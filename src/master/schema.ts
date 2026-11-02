@@ -5,7 +5,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 25
+export const MASTER_SCHEMA = 26
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -660,6 +660,24 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       FROM audit a WHERE a.action='key.create' AND a.target=api_keys.id ORDER BY a.id LIMIT 1)
       WHERE created_by IS NULL;
     UPDATE api_keys SET created_by='account:'||creator WHERE created_by IS NULL AND creator IS NOT NULL;`)
+  },
+  // 26: pushes decided without a node: the push triggers each branch's last
+  // setup recorded, valid while its Masonfile and local imports are the
+  // same, and the commit of a branch a push did not build, with why and
+  // where its Masonfile was looked for.
+  (db): void => {
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS push_triggers (
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE, branch TEXT NOT NULL,
+      sources TEXT NOT NULL, triggers TEXT NOT NULL, commit_sha TEXT NOT NULL, updated INTEGER NOT NULL,
+      PRIMARY KEY(project_id, branch)
+    ) STRICT`)
+    const columns = db.prepare('PRAGMA table_info(automatic_branches)').all()
+    if (!columns.some((column) => column.name === 'skipped_commit'))
+      db.exec(`
+      ALTER TABLE automatic_branches ADD COLUMN skipped_commit TEXT;
+      ALTER TABLE automatic_branches ADD COLUMN skipped_key TEXT;
+      ALTER TABLE automatic_branches ADD COLUMN skipped_reason TEXT;`)
   },
 ]
 

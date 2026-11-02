@@ -300,7 +300,7 @@ m.workflow('release', {
 
 | Trigger | Starts a run when |
 | --- | --- |
-| `{ push: true }` | A new commit appears on a branch whose master branch rule is `automatic` — reported by a GitHub webhook within seconds, or found by the master's poll. |
+| `{ push: true, branches?: [...] }` | A new commit appears on a branch whose master branch rule is `automatic` — reported by a GitHub webhook within seconds, or found by the master's poll — and, with `branches`, that one of its globs matches (`*` within a path segment, `**` across). Without `branches`, every automatic branch. |
 | `{ request: true }` | A developer, manager or admin, or a `build` API key, requests it. |
 | `{ schedule: '<cron>', branches: [...] }` | The cron time passes (master's time zone). |
 | `{ after: { workflow, status?: 'success' \| 'completed' } }` | Another workflow of the same project finishes a run of the same commit. Runs of other projects cannot be started or awaited. |
@@ -309,6 +309,58 @@ m.workflow('release', {
 The master's **branch rules decide which branches may build at all**. A
 Masonfile trigger can narrow that, never widen it: a schedule on a branch with
 no rule does nothing, and a push trigger fires only on `automatic` branches.
+So, as in Jenkins, the Masonfile says which branches build on push and the
+master's rule is the ceiling: with the rule `*` → automatic,
+
+```ts fragment
+m.workflow('build', {
+  triggers: [{ push: true, branches: ['master', 'develop', 'staging', 'beta'] }, { request: true }],
+}, (w) => { /* … */ })
+```
+
+builds pushes to those four branches, and any other branch only on request.
+
+**Deciding a push.** The master decides each push itself and starts no node
+for one it will not build, cheapest first:
+
+1. A commit with no Masonfile builds nothing — unless a node might still
+   find one: a name that matches ignoring case, or a path through a
+   symlinked directory or a submodule, is left to setup.
+2. When every `m.workflow(…)` is a statement of `setup`'s own body with a
+   literal name, and its `triggers` and their `branches` are written out as
+   literals (or left out), the master reads them from the Masonfile's source
+   without running it or anything it imports. `setup` must take that one
+   parameter, used only as `m.<name>` and never handed to other code; the
+   options must be plain properties (no `__proto__`, getters or methods);
+   and nothing else in the file may name `setup` (no other declaration,
+   assignment, loop head or export alias). Nor may code that runs while
+   the module loads or setup runs — top-level statements, setup with what
+   it defines, and the functions they call or pass on (a stage's `run:`
+   function does not count) — use `arguments`, `eval`, `Function`,
+   `globalThis`, `Object`, `Reflect` or `Proxy`, reach a `prototype`,
+   `__proto__` or `constructor`, delete, or write to any member or to a
+   name it does not declare.
+3. Otherwise (a computed list, a workflow declared by a helper or only on
+   some branches) the master uses the push triggers the branch's last push
+   setup of `build` recorded, while the Masonfile and the files it imports
+   are the same as then. **Cached push triggers may depend only on the
+   Masonfile and its relative imports** (`./…`, `../…`, and theirs; JSON
+   files too): a Masonfile is never decided this way when any of those
+   files imports anything else (a package, `#…`, any `node:` module), uses
+   `import()`, `import.meta`, `process`, `require`, `globalThis`, `fetch`
+   or `eval`, reaches a `constructor` or `prototype` or a member by a
+   computed key, is a symlink or reaches one, is missing, is over 256 KB,
+   or there are more than 200 of them.
+4. Only when neither tells — a new branch, a changed Masonfile, or a mirror
+   that does not answer within 20 seconds — does the push run setup, which
+   records the triggers for the next push. A run its push trigger does not
+   cover ends cancelled: "Not built: `<branch>` is not in the push trigger's
+   branches".
+
+A push that is not built is recorded on its branch (`skippedReason` in the
+build settings API) and decided once per commit, again only if the
+project's Masonfile path changes. A push trigger's triggers may depend on
+`m.branch`.
 
 **Webhooks.** The host exposes `POST /api/webhooks/github/<project>`. GitHub
 calls it on every push; the host checks the size and rate, and passes the raw

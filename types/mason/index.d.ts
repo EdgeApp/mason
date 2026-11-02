@@ -122,7 +122,12 @@ export type ParamSpec =
     }
 
 export type Trigger =
-  | { push: true }
+  /**
+   * A new commit on a branch whose master rule is `automatic` and, with
+   * `branches`, that one of its globs matches (`*` within a path segment,
+   * `**` across segments).
+   */
+  | { push: true; branches?: string[] }
   | { request: true }
   | { schedule: string; branches?: string[] }
   | { after: { workflow: string; status?: 'success' | 'completed' } }

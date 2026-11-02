@@ -990,7 +990,7 @@ describe('Host cache, sign-in and offline serving', function () {
     }
   })
 
-  it('U10.12 relays a signed push to the master, which verifies it and schedules it under the branch rules', async () => {
+  it('U10.12 relays a signed push to the master, which verifies it, answers, then decides it under the branch rules', async () => {
     const jobs = (): Json[] =>
       c.master
         .master!.database.db.prepare(
@@ -998,9 +998,25 @@ describe('Host cache, sign-in and offline serving', function () {
         )
         .all() as Json[]
     assert.equal((await deliver('ping', { zen: 'hi' })).status, 202)
-    const scheduled = await deliver('push', push('develop', 'e'.repeat(40)))
+    // The master answers before it decides the push, which may wait on a fetch.
+    const pushes = c.master.master!.pushes
+    const schedule = pushes.schedule.bind(pushes)
+    let release: () => void = () => undefined
+    pushes.schedule = async (...args): ReturnType<typeof schedule> => {
+      await new Promise<void>((resolve) => (release = resolve))
+      return await schedule(...args)
+    }
+    let scheduled: Response
+    try {
+      scheduled = await deliver('push', push('develop', 'e'.repeat(40)))
+      assert.equal(jobs().length, 0)
+    } finally {
+      pushes.schedule = schedule
+      release()
+    }
     assert.equal(scheduled.status, 202)
-    assert.equal(((await scheduled.json()) as Json).status, 'scheduled')
+    assert.equal(((await scheduled.json()) as Json).status, 'accepted')
+    await c.until(() => jobs().length === 1, 10000, 'the push decided')
     assert.deepEqual(
       jobs().map((row) => row.requested_commit),
       ['e'.repeat(40)],
@@ -1090,6 +1106,16 @@ describe('Host cache, sign-in and offline serving', function () {
       () => runtime().webhooks.queued().length === 0,
       10000,
       'the deliveries forwarded',
+    )
+    await c.until(
+      () =>
+        db
+          .prepare(
+            "SELECT 1 FROM jobs WHERE trigger='push' AND status<>'cancelled'",
+          )
+          .get(),
+      10000,
+      'the forwarded push decided',
     )
     const develop = db
       .prepare(
