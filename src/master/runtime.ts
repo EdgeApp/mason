@@ -731,6 +731,8 @@ export class Master {
       this.releases,
       (fingerprint) => this.scheduler.inventoryOf(fingerprint),
       (fingerprint) => this.scheduler.busy(fingerprint),
+      Date.now,
+      (fingerprint) => this.pools.owns(fingerprint),
     )
     this.registry.on('retyped', (fingerprint: string) => {
       this.nodeStates.reconcile(fingerprint)

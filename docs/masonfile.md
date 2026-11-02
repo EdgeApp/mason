@@ -238,6 +238,11 @@ until it has been idle for an hour:
   provider's firewall admits the link port only from the master's public
   address; the master checks that address every minute and updates the rule
   when it changes.
+- **Kept on the master's release.** A machine that runs an older Mason than
+  the master (the master was updated since it started) takes no new stage:
+  it finishes the one it is running, then retires, and the next machine
+  installs the master's release. The master does not push updates to pool
+  machines.
 - `maxNodes` caps concurrent machines; stages wait rather than exceed it.
   `maxHoursPerNode` retires a machine after its current stage even if it never
   goes idle. On startup the master lists the provider's machines and snapshots
