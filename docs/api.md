@@ -1144,6 +1144,13 @@ The routes answer the host's record: its `name`, `account`, `region`,
 still waits to pair) and `certificate` (`internal`, `waiting` or `trusted`).
 Pairing and Space secrets are never shown.
 
+The host's DigitalOcean firewall, which Mason writes when it makes the
+host, again after the master restarts and whenever the master's address
+changes, opens ports 80 and 443 to everyone and SSH (22) and
+the link port to the master's public address only, so SSH from the
+master's network keeps working (SSH keys are still the operator's to
+install). A cloud node's firewall opens only the link port to the master.
+
 - **`…/space`** takes `{ "bucket", "region" }`, a bucket of 3–63 lowercase
   letters, digits and dashes and a Spaces region such as `sfo3`. The host's
   storage switches to the Space once it exists. An administrator's request

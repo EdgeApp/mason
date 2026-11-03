@@ -144,6 +144,10 @@ describe('Permanent cloud nodes on DigitalOcean', function () {
         .map((rule) => [rule.port, rule.sources]),
       [[9310, ['203.0.113.7']]],
     )
+    // Unlike a host's, a node's firewall keeps SSH closed, even to the master.
+    assert(
+      !cloud.firewalls.some((rule) => rule.name === tag && rule.port === 22),
+    )
   })
 
   it('U3.3 it pairs as a worker with its name, type and labels, and never touches DNS, Spaces or the host setting', async () => {

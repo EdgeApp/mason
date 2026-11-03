@@ -689,7 +689,7 @@ export class CloudHosts {
         this.update(name, { state: 'installing', error: null })
         return this.get(name, role)!
       }
-      // 2. The firewall: the web ports from anywhere, the link port from the master only.
+      // 2. The firewall: the web ports from anywhere, SSH and the link port from the master only.
       await this.firewall(name, role, provider)
       // 3. DNS, when the host has a name.
       const current = this.get(name, role)!
@@ -802,7 +802,11 @@ export class CloudHosts {
   }
 
   private readonly firewallFor = new Map<string, string>()
-  /** A host's firewall opens the web ports to all and the link port to the master; a node's, only the link port. */
+  /**
+   * A host's firewall opens the web ports to all, and SSH and the link port
+   * to the master's address, so the master's network can reach the host
+   * with the operator's keys; a node's opens only the link port.
+   */
   private async firewall(
     name: string,
     role: CloudRole,
@@ -823,7 +827,10 @@ export class CloudHosts {
           : []),
         ...(master == null
           ? []
-          : [{ port: this.options.linkPort ?? 9310, sources: [master] }]),
+          : [
+              ...(role === 'host' ? [{ port: 22, sources: [master] }] : []),
+              { port: this.options.linkPort ?? 9310, sources: [master] },
+            ]),
       ],
       this.tag(name, role),
     )
