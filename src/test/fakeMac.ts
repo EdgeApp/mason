@@ -325,6 +325,7 @@ export class FakeMac {
         }
       },
       restartService: async () => undefined,
+      restartHelper: async () => undefined,
     }
   }
 

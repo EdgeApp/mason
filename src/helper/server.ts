@@ -4,6 +4,7 @@ import net from 'node:net'
 import path from 'node:path'
 import { promisify } from 'node:util'
 import { baseEnvironment } from '../builder/config.js'
+import { HELPER_LABEL } from '../node/service.js'
 import { perform, Refused, type HelperContext } from './catalog.js'
 
 const exec = promisify(execFile)
@@ -89,18 +90,56 @@ export function systemContext(
         )
       else await program('systemctl', ['restart', 'mason-worker'], { env })
     },
+    async restartHelper(): Promise<void> {
+      const env = baseEnvironment()
+      // The service manager stops and starts this process; on Linux the
+      // restart is queued so systemctl does not wait on its own caller.
+      if (platform === 'darwin')
+        await program(
+          'launchctl',
+          ['kickstart', '-k', `system/${HELPER_LABEL}`],
+          {
+            env,
+          },
+        )
+      else
+        await program('systemctl', ['--no-block', 'restart', 'mason-helper'], {
+          env,
+        })
+    },
   }
 }
 
 /**
  * Serves the catalog on a socket only the service's user (and root) can
  * open: the directory is root's, the socket is the user's with mode 0600.
- * Each line is one request `{ id, op, args }`; each answer one line.
+ * Each line is one request `{ id, op, args }`; each answer one line. The
+ * helper restarts itself only once every request in progress is answered,
+ * and takes no new one meanwhile.
  */
 export async function serveHelper(
   socket: string,
   context: HelperContext,
 ): Promise<net.Server> {
+  let inProgress = 0
+  let restarting = false
+  let idle: Array<() => void> = []
+  const settled = (): void => {
+    if (--inProgress > 0) return
+    const waiting = idle
+    idle = []
+    for (const resolve of waiting) resolve()
+  }
+  const served: HelperContext = {
+    ...context,
+    restartHelper: async (): Promise<void> => {
+      // From now on no new request starts; those in progress finish.
+      restarting = true
+      while (inProgress > 0)
+        await new Promise<void>((resolve) => idle.push(resolve))
+      await context.restartHelper()
+    },
+  }
   mkdirSync(path.dirname(socket), { recursive: true, mode: 0o755 })
   if (existsSync(socket)) rmSync(socket, { force: true })
   const server = net.createServer((connection) => {
@@ -128,25 +167,39 @@ export async function serveHelper(
           )
           return
         }
-        perform(request.op, request.args, context).then(
-          (result) =>
-            connection.write(
-              JSON.stringify({
-                id: request.id,
-                ok: true,
-                result: result ?? null,
-              }) + '\n',
-            ),
-          (error: unknown) =>
-            connection.write(
-              JSON.stringify({
-                id: request.id,
-                ok: false,
-                refused: error instanceof Refused,
-                error: error instanceof Error ? error.message : String(error),
-              }) + '\n',
-            ),
-        )
+        if (restarting) {
+          connection.write(
+            JSON.stringify({
+              id: request.id,
+              ok: false,
+              error:
+                'The helper is restarting into a new release; ask again in a moment',
+            }) + '\n',
+          )
+          continue
+        }
+        inProgress++
+        perform(request.op, request.args, served)
+          .then(
+            (result) =>
+              connection.write(
+                JSON.stringify({
+                  id: request.id,
+                  ok: true,
+                  result: result ?? null,
+                }) + '\n',
+              ),
+            (error: unknown) =>
+              connection.write(
+                JSON.stringify({
+                  id: request.id,
+                  ok: false,
+                  refused: error instanceof Refused,
+                  error: error instanceof Error ? error.message : String(error),
+                }) + '\n',
+              ),
+          )
+          .finally(settled)
       }
     })
     connection.on('error', () => undefined)
