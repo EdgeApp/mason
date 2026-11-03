@@ -43,6 +43,8 @@ export class FakeApple {
   readonly signoutCookies: string[] = []
   /** App Store Connect's website, as a signed-in session sees it. */
   web: FakeAppleWebSession | undefined
+  /** The developer site's own API (`/services-account/v1/`), served by a fake App Store Connect, its session cookie given. */
+  portal: { origin: string; cookie: string } | undefined
   private salt = randomBytes(16)
   private verifier: bigint
   private pending = new Map<string, { b: bigint; B: bigint; A: bigint }>()
@@ -135,6 +137,40 @@ export class FakeApple {
         ...(text === '' ? {} : { body: text }),
       })
       return { status: response.status, body: await response.text() }
+    }
+    if (
+      this.portal != null &&
+      signedIn &&
+      url.pathname.startsWith('/services-account/v1/')
+    ) {
+      const response = await fetch(`${this.portal.origin}${req.url}`, {
+        method: req.method ?? 'GET',
+        headers: {
+          cookie: this.portal.cookie,
+          ...Object.fromEntries(
+            [
+              'content-type',
+              'x-requested-with',
+              'x-http-method-override',
+              'csrf',
+              'csrf_ts',
+            ]
+              .filter((name) => req.headers[name] != null)
+              .map((name) => [name, String(req.headers[name])]),
+          ),
+        },
+        ...(text === '' ? {} : { body: text }),
+      })
+      return {
+        status: response.status,
+        body: await response.text(),
+        headers: Object.fromEntries(
+          ['csrf', 'csrf_ts'].flatMap((name) => {
+            const value = response.headers.get(name)
+            return value == null ? [] : [[name, value]]
+          }),
+        ),
+      }
     }
     switch (url.pathname) {
       case '/logout':

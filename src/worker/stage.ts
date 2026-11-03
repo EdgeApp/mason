@@ -1804,11 +1804,12 @@ export class WorkerRuntime {
       exportOptions: prepared.exportOptions,
       exec: this.appleExec(assignment),
       log: say,
-      entitlements: async (values) =>
+      entitlements: async (values, options) =>
         await this.request('apple.entitlements', {
           key: assignment.key,
           token: assignment.token,
           entitlements: values,
+          ...(options?.failed === true ? { failed: true } : {}),
         }),
       reinstall: (profiles): void => {
         removeProfiles(prepared.profiles)

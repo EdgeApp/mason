@@ -14,6 +14,7 @@ import { People } from './people.js'
 import { Provisioning } from './provisioning.js'
 import type { StageSigning } from '../pipeline/assignment.js'
 import { appleArea, AppleService } from '../apple/service.js'
+import type { DeveloperPortal } from '../apple/profiles.js'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { backupArea, Backups, type BackupSetting } from './backup.js'
@@ -378,6 +379,17 @@ export class Master {
       ...(options.appleFetch == null ? {} : { fetch: options.appleFetch }),
       ...(options.appleSleep == null ? {} : { sleep: options.appleSleep }),
       log: (line): void => (this.options.log ?? console.log)(line),
+      // Capabilities the App Store Connect API cannot enable go through the
+      // developer site with the Apple ID the master is signed in with.
+      portal: (): DeveloperPortal | undefined =>
+        this.apple.ready()
+          ? {
+              base: (options.appleEndpoints ?? appleEndpoints).developer,
+              request: async (url, init): Promise<Response> =>
+                await this.apple.webRequest(url, init),
+              tokens: (): boolean => this.apple.portalTokens(),
+            }
+          : undefined,
       clone: async (repository, branch, into): Promise<void> => {
         const access = /github\.com/.test(repository)
           ? await this.github

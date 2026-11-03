@@ -53,9 +53,14 @@ export interface ArchiveContext {
   exportOptions: string
   exec: Exec
   log: (text: string) => void
-  /** Reports entitlements per bundle ID; the master answers with new profiles when it added capabilities. */
+  /**
+   * Reports entitlements per bundle ID; the master answers with new
+   * profiles when it added capabilities. `failed`: signing failed for a
+   * missing capability, so a key Mason does not know fails the stage.
+   */
   entitlements: (
     values: Record<string, Record<string, unknown>>,
+    options?: { failed?: boolean },
   ) => Promise<{ changed: boolean; profiles?: StageSigning['profiles'] }>
   /** Installs replacement profiles after the master made them again. */
   reinstall: (profiles: StageSigning['profiles']) => void
@@ -227,6 +232,55 @@ async function archiveEntitlements(
   return out
 }
 
+/** The entitlements a profile grants, from the CMS envelope Apple signs it in. */
+async function profileGrants(
+  context: ArchiveContext,
+  profile: StageSigning['profiles'][number],
+): Promise<Record<string, unknown> | undefined> {
+  const file = path.join(context.scratch, `${profile.uuid}.mobileprovision`)
+  writeFileSync(file, Buffer.from(profile.content, 'base64'))
+  const decoded = await context.exec(
+    '/usr/bin/security',
+    ['cms', '-D', '-i', file, '-o', `${file}.plist`],
+    { cwd: context.dir },
+  )
+  if (decoded.code !== 0) return undefined
+  const extracted = await context.exec(
+    '/usr/bin/plutil',
+    ['-extract', 'Entitlements', 'json', '-o', '-', `${file}.plist`],
+    { cwd: context.dir },
+  )
+  if (extracted.code !== 0) return undefined
+  try {
+    return JSON.parse(extracted.output) as Record<string, unknown>
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Of each bundle's entitlements, the keys its profile does not grant; a
+ * bundle whose profile grants them all, or that has none of its own, is
+ * left out. A profile that cannot be read grants nothing.
+ */
+async function ungranted(
+  context: ArchiveContext,
+  values: Record<string, Record<string, unknown>>,
+  profiles: StageSigning['profiles'],
+): Promise<Record<string, Record<string, unknown>>> {
+  const out: Record<string, Record<string, unknown>> = {}
+  for (const [bundleId, entitlements] of Object.entries(values)) {
+    const profile = profiles.find((entry) => entry.bundleId === bundleId)
+    const granted =
+      profile == null ? undefined : await profileGrants(context, profile)
+    const left = Object.fromEntries(
+      Object.entries(entitlements).filter(([key]) => !(key in (granted ?? {}))),
+    )
+    if (Object.keys(left).length > 0) out[bundleId] = left
+  }
+  return out
+}
+
 /** The environment a stage adds for xcodebuild: names a shell accepts, string values. */
 export function archiveEnvironment(value: unknown): Record<string, string> {
   if (value == null) return {}
@@ -299,7 +353,7 @@ export async function archive(
     if (result.code === 0) break
     if (attempt === 1 && capabilityFailure(result.output)) {
       const values = await buildEntitlements(context, derivedData)
-      const answer = await context.entitlements(values)
+      const answer = await context.entitlements(values, { failed: true })
       if (answer.changed && answer.profiles != null) {
         context.log(
           'The master added the capabilities these entitlements need and made new profiles; archiving again\n',
@@ -314,12 +368,19 @@ export async function archive(
       .catch(() => undefined)
     throw new Error(`xcodebuild archive failed (exit ${result.code})`)
   }
-  // Capabilities follow the archive's entitlements, ready for the next build.
-  const values = await archiveEntitlements(context, archivePath)
-  const synced = await context.entitlements(values)
-  if (synced.changed && synced.profiles != null) {
-    profiles = synced.profiles
-    context.reinstall(profiles)
+  // Capabilities follow the archive's entitlements, ready for the next
+  // build: only the keys the bundle's own profile does not grant already.
+  const values = await ungranted(
+    context,
+    await archiveEntitlements(context, archivePath),
+    profiles,
+  )
+  if (Object.keys(values).length > 0) {
+    const synced = await context.entitlements(values)
+    if (synced.changed && synced.profiles != null) {
+      profiles = synced.profiles
+      context.reinstall(profiles)
+    }
   }
   const exportLog = path.join(out, 'xcodebuild-export.log')
   const exported = await xcodebuild(

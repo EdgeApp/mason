@@ -2677,7 +2677,10 @@ export class Scheduler {
     project: Project,
   ): {
     stage: GraphStage
-    signing: Pick<StageSigning, 'team' | 'app' | 'platform' | 'bundleIds'>
+    signing: Pick<
+      StageSigning,
+      'team' | 'app' | 'platform' | 'bundleIds' | 'distribution'
+    >
     service: AppleService
   } {
     const service = this.options.apple?.service
@@ -2704,6 +2707,7 @@ export class Scheduler {
         team: app.apple.team,
         app: app.bundleId,
         bundleIds: stage.apple!.bundleIds ?? app.apple.bundleIds,
+        distribution,
         platform: signingPlatform(
           app.platforms,
           distribution,
@@ -3066,7 +3070,13 @@ export class Scheduler {
             throw new LinkError((error as Error).message, 'failed')
           }
         },
-        /** An archive's entitlements: capabilities they need are added, and the stage's profiles made again when any was. */
+        /**
+         * An archive's entitlements: capabilities they need are added, and
+         * the stage's profiles made again when any was. A key Mason does not
+         * know, or a capability Apple will not enable, fails only when
+         * signing `failed` for a missing capability; after a build that
+         * signed it is a warning in the stage's log.
+         */
         'apple.entitlements': async (params, link): Promise<unknown> => {
           const { job, name, project } = this.authorize(params, link)
           const { stage, signing, service } = this.appleStage(
@@ -3076,17 +3086,43 @@ export class Scheduler {
           )
           const entitlements = ((params as { entitlements?: unknown })
             .entitlements ?? {}) as Record<string, Record<string, unknown>>
+          const failed = (params as { failed?: unknown }).failed === true
           return await this.appleCall(async () => {
+            const warn = (bundleId: string, message: string): void => {
+              this.appendLog(
+                String(job.id),
+                name,
+                `Apple signing: ${bundleId}: ${message}; it was signed as its profile allows\n`,
+              )
+            }
             let changed = false
             for (const [bundleId, values] of Object.entries(entitlements)) {
               if (!signing.bundleIds.includes(bundleId)) continue
+              const synced = service.profiles.syncCapabilities(
+                signing.team,
+                bundleId,
+                values,
+                {
+                  platform: signing.platform,
+                  distribution: signing.distribution,
+                  ...(failed
+                    ? {}
+                    : {
+                        warn: (message: string): void => {
+                          warn(bundleId, message)
+                        },
+                      }),
+                },
+              )
+              // After a build that signed, what cannot be enabled is only
+              // logged; the next build that needs it fails on it.
               changed =
-                (await service.profiles.syncCapabilities(
-                  signing.team,
-                  bundleId,
-                  values,
-                  [signing.platform],
-                )) || changed
+                (failed
+                  ? await synced
+                  : await synced.catch((error: unknown) => {
+                      warn(bundleId, (error as Error).message)
+                      return false
+                    })) || changed
             }
             if (!changed) return { changed: false }
             const again = await this.options.apple!.signing(project, stage)

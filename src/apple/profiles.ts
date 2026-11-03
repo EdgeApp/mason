@@ -1,6 +1,12 @@
 import { createHash, randomBytes } from 'node:crypto'
 import type { MasterDatabase } from '../master/database.js'
 import type { CertificateKind, Certificates } from './certificates.js'
+import {
+  capabilitiesFor,
+  publicCapabilityTypes,
+  unknownKeys,
+  type NeededCapability,
+} from './capabilities.js'
 import { AppleApiError, type AppStoreConnect } from './connect.js'
 
 export const distributions = [
@@ -148,40 +154,20 @@ const labels: Record<Distribution, string> = {
   macAppStore: 'MacAppStore',
 }
 
-/** Capabilities Apple requires on the bundle ID for entitlements an archive carries. */
-const capabilityFor: Record<string, string> = {
-  'aps-environment': 'PUSH_NOTIFICATIONS',
-  'com.apple.developer.aps-environment': 'PUSH_NOTIFICATIONS',
-  'com.apple.security.application-groups': 'APP_GROUPS',
-  'com.apple.developer.icloud-container-identifiers': 'ICLOUD',
-  'com.apple.developer.icloud-services': 'ICLOUD',
-  'com.apple.developer.ubiquity-kvstore-identifier': 'ICLOUD',
-  'com.apple.developer.associated-domains': 'ASSOCIATED_DOMAINS',
-  'com.apple.developer.healthkit': 'HEALTHKIT',
-  'com.apple.developer.homekit': 'HOMEKIT',
-  'com.apple.developer.in-app-payments': 'APPLE_PAY',
-  'com.apple.developer.applesignin': 'APPLE_ID_AUTH',
-  'com.apple.developer.networking.wifi-info': 'ACCESS_WIFI_INFORMATION',
-  'com.apple.developer.nfc.readersession.formats': 'NFC_TAG_READING',
-  'com.apple.developer.siri': 'SIRIKIT',
-  'com.apple.developer.pass-type-identifiers': 'WALLET',
-  'com.apple.developer.networking.networkextension': 'NETWORK_EXTENSIONS',
-  'com.apple.developer.networking.vpn.api': 'PERSONAL_VPN',
-  'com.apple.developer.usernotifications.time-sensitive':
-    'USER_NOTIFICATIONS_TIME_SENSITIVE',
-  'com.apple.developer.game-center': 'GAME_CENTER',
-  'com.apple.developer.default-data-protection': 'DATA_PROTECTION',
-}
-export function capabilitiesOf(
-  entitlements: Record<string, unknown>,
-): string[] {
-  return [
-    ...new Set(
-      Object.keys(entitlements)
-        .map((key) => capabilityFor[key])
-        .filter((type): type is string => type != null),
-    ),
-  ].sort()
+/** The developer site with the signed-in Apple ID's session. */
+export interface DeveloperPortal {
+  /** `https://developer.apple.com`, or a fake's. */
+  base: string
+  request: (
+    url: string,
+    init: {
+      method?: string
+      headers?: Record<string, string>
+      body?: unknown
+    },
+  ) => Promise<Response>
+  /** Whether the session holds the developer site's CSRF tokens, which `request` sends. */
+  tokens: () => boolean
 }
 
 /** A profile a stage installs. */
@@ -218,6 +204,8 @@ export class Profiles {
       /** How long the enabled device list is trusted before asking Apple again. */
       devicesMs?: number
       log?: (line: string) => void
+      /** The signed-in Apple ID's session on the developer site, when there is one. */
+      portal?: () => DeveloperPortal | undefined
     },
   ) {}
   private get db(): MasterDatabase['db'] {
@@ -530,16 +518,42 @@ export class Profiles {
   }
 
   /**
-   * Adds the capabilities an archive's entitlements need to its bundle ID;
-   * true when any was added, which makes its profiles regenerate.
+   * Enables on its bundle ID the capabilities an archive's entitlements
+   * need for the stage's platform and distribution, with the settings Apple
+   * needs for them; true when any was enabled, which makes every profile of
+   * the bundle ID — development, ad hoc and App Store alike — be made again
+   * at its next `ensure`. The App Store Connect API enables the types its
+   * specification lists; the others go through the developer site with the
+   * master's Apple ID session, as Xcode enables them. Entitlement keys Mason
+   * does not know fail before anything changes at Apple, and a capability
+   * Apple does not enable fails once the others are enabled — unless `warn`
+   * takes them, for a build that signed already.
    */
   async syncCapabilities(
     team: string,
     bundleId: string,
     entitlements: Record<string, unknown>,
-    platforms: ApplePlatform[] = ['ios'],
+    stage: {
+      platform: ApplePlatform
+      distribution: Distribution
+      platforms?: ApplePlatform[]
+      warn?: (message: string) => void
+    },
   ): Promise<boolean> {
-    const appleBundle = await this.bundleId(team, bundleId, platforms)
+    const { needed, unknown } = capabilitiesFor(
+      entitlements,
+      stage.platform,
+      stage.distribution,
+    )
+    if (unknown.length > 0) {
+      if (stage.warn == null) throw new Error(unknownKeys(unknown))
+      stage.warn(unknownKeys(unknown))
+    }
+    const appleBundle = await this.bundleId(
+      team,
+      bundleId,
+      stage.platforms ?? [stage.platform],
+    )
     const connect = this.connect(team)
     const existing = new Set(
       (
@@ -548,20 +562,55 @@ export class Profiles {
         )
       ).map((item) => item.attributes.capabilityType),
     )
-    const missing = capabilitiesOf(entitlements).filter(
-      (type) => !existing.has(type),
-    )
-    for (const capabilityType of missing) {
-      await connect.request('POST', '/v1/bundleIdCapabilities', {
-        data: {
-          type: 'bundleIdCapabilities',
-          attributes: { capabilityType },
-          relationships: {
-            bundleId: { data: { type: 'bundleIds', id: appleBundle } },
-          },
-        },
-      })
-      existing.add(capabilityType)
+    const missing = needed.filter((entry) => !existing.has(entry.type))
+    let enabled = 0
+    let failure: Error | undefined
+    for (const capability of missing) {
+      try {
+        if (!publicCapabilityTypes.has(capability.type))
+          await this.enableOnPortal(team, bundleId, appleBundle, capability)
+        else
+          await connect
+            .request('POST', '/v1/bundleIdCapabilities', {
+              data: {
+                type: 'bundleIdCapabilities',
+                attributes: {
+                  capabilityType: capability.type,
+                  ...(capability.settings == null
+                    ? {}
+                    : { settings: capability.settings }),
+                },
+                relationships: {
+                  bundleId: { data: { type: 'bundleIds', id: appleBundle } },
+                },
+              },
+            })
+            .catch(async (error: unknown) => {
+              // The API's enum may lag behind a type it lists.
+              if (
+                !(error instanceof AppleApiError) ||
+                error.status !== 409 ||
+                error.code !== 'ENTITY_ERROR.ATTRIBUTE.INVALID'
+              )
+                throw error
+              await this.enableOnPortal(team, bundleId, appleBundle, capability)
+            })
+      } catch (error) {
+        const refusal =
+          error instanceof AppleApiError
+            ? new AppleApiError(
+                error.status,
+                `${bundleId} needs the ${capability.name} capability (${capability.type}) for ${capability.keys.join(', ')}${capability.requested ? ', which Apple grants a team only on request' : ''}: ${error.message}`,
+                error.code,
+              )
+            : (error as Error)
+        // The other capabilities are still enabled.
+        if (stage.warn == null) failure ??= refusal
+        else stage.warn(refusal.message)
+        continue
+      }
+      existing.add(capability.type)
+      enabled++
     }
     this.db
       .prepare(
@@ -573,7 +622,119 @@ export class Profiles {
         team,
         bundleId,
       )
-    return missing.length > 0
+    if (failure != null) throw failure
+    return enabled > 0
+  }
+
+  /**
+   * Enables a capability the App Store Connect API does not take through
+   * the developer site's own API with the Apple ID session, the request
+   * Fastlane's `patch_bundle_id_capability` sends: the team chosen by
+   * `teamId`, the bundle ID's seed ID beside it, and the site's CSRF tokens.
+   */
+  private async enableOnPortal(
+    team: string,
+    bundleId: string,
+    appleBundle: string,
+    capability: NeededCapability,
+  ): Promise<void> {
+    const remedy = `enable ${capability.name} for ${bundleId} in the Apple Developer portal, or sign the Apple ID in on the master`
+    const portal = this.options.portal?.()
+    if (portal == null)
+      throw new Error(
+        `${bundleId} needs ${capability.name} (${capability.type}) for ${capability.keys.join(', ')}, which only the developer site enables: ${remedy}`,
+      )
+    const bundle = await this.connect(team).request<{
+      data?: { attributes?: { seedId?: string } }
+    }>('GET', `/v1/bundleIds/${appleBundle}?fields[bundleIds]=seedId`)
+    const url = `${portal.base}/services-account/v1/bundleIds/${appleBundle}`
+    const failed = (error: unknown): never => {
+      throw new Error(
+        `${bundleId} needs ${capability.name} (${capability.type}): ${(error as Error).message}; ${remedy}`,
+      )
+    }
+    // A change needs the site's CSRF tokens, which come with its answers:
+    // with none yet, read the bundle ID first, as Fastlane's proxied GET.
+    if (!portal.tokens())
+      await (
+        await portal
+          .request(url, {
+            method: 'POST',
+            headers: {
+              Accept: 'application/vnd.api+json, application/json',
+              'Content-Type': 'application/vnd.api+json',
+              'X-HTTP-Method-Override': 'GET',
+              'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: {
+              urlEncodedQueryParams: new URLSearchParams({
+                'fields[bundleIds]': 'seedId',
+              }).toString(),
+              teamId: team,
+            },
+          })
+          .catch(failed)
+      ).body?.cancel()
+    const response = await portal
+      .request(url, {
+        method: 'PATCH',
+        headers: {
+          Accept: 'application/vnd.api+json, application/json',
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: {
+          data: {
+            type: 'bundleIds',
+            id: appleBundle,
+            attributes: {
+              permissions: { edit: true, delete: true },
+              seedId: bundle.data?.attributes?.seedId ?? team,
+              teamId: team,
+            },
+            relationships: {
+              bundleIdCapabilities: {
+                data: [
+                  {
+                    type: 'bundleIdCapabilities',
+                    attributes: {
+                      enabled: true,
+                      settings: capability.settings ?? [],
+                    },
+                    relationships: {
+                      capability: {
+                        data: { type: 'capabilities', id: capability.type },
+                      },
+                    },
+                  },
+                ],
+              },
+            },
+          },
+        },
+      })
+      .catch(failed)
+    const text = await response.text()
+    if (response.status === 401)
+      throw new Error(
+        `${bundleId} needs ${capability.name} (${capability.type}), and the Apple ID session has ended: ${remedy}`,
+      )
+    if (!response.ok) {
+      let detail = text.slice(0, 300)
+      try {
+        const first = (
+          JSON.parse(text) as {
+            errors?: Array<{ title?: string; detail?: string }>
+          }
+        ).errors?.[0]
+        if (first != null)
+          detail = [first.title, first.detail].filter(Boolean).join(': ')
+      } catch {}
+      throw new AppleApiError(
+        response.status,
+        `PATCH /services-account/v1/bundleIds/${appleBundle}: HTTP ${response.status}${detail === '' ? '' : `: ${detail}`}`,
+      )
+    }
   }
 
   /** Profiles Mason holds, for the API. */
