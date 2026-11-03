@@ -190,6 +190,7 @@ button.list-row{border-color:var(--color-border);min-height:0}
 .build-group{border:1px solid var(--color-border);border-radius:var(--radius-panel);background:var(--color-panel);padding:12px 12px 4px;margin-bottom:8px}
 .build-group-head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;padding:4px 4px 12px}
 .build-group .list-row{margin-bottom:8px}
+.group-list,.group-list+.panel,.group-page{max-width:760px}.group-page [hidden]{display:none!important}.group-name{margin:0 0 16px}.group-name .list-row small{margin:0}.group-name input{max-width:none}.picker-bar{display:flex;gap:8px;align-items:center}.picker-bar input{flex:1;max-width:none}.group-picker label.check{justify-content:space-between;flex-wrap:nowrap}.group-picker label.check small{margin:0}
 .download-label{font-size:13px;color:var(--color-primary);font-weight:500}`
 
 /** Breakpoints: tablet collapses the rail to icons; phone is one column. */

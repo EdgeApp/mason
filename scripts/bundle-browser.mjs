@@ -1,10 +1,12 @@
 // Bundles the browser code with esbuild: the master's page script, the
-// password worker, which carries hash-wasm, and the run view's script, which
-// shares the server's log renderer. The output ships in lib/.
+// password worker, which carries hash-wasm, the run view's script, which
+// shares the server's log renderer, and the group page's script. The output
+// ships in lib/.
 import { build } from 'esbuild'
 
 await build({
   entryPoints: {
+    groups: 'src/browser/groups.ts',
     'password-worker': 'src/browser/passwordWorker.ts',
     master: 'src/browser/master.ts',
     run: 'src/browser/run.ts',
