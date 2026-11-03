@@ -2211,6 +2211,49 @@ describe('People and groups pages', () => {
     )
   })
 
+  it('U20.12 a group page offers Add App and Add member over a catalog in the page', () => {
+    const tricky = [
+      ...apps,
+      { id: 11, name: '</script><b>x', slug: 'app.example.x', enabled: true },
+    ]
+    const html = groupView({ group, apps: tricky, people, canChange: true })
+    for (const [kind, add, find] of [
+      ['apps', 'Add App', 'Find an app'],
+      ['members', 'Add member', 'Find a person'],
+    ]) {
+      const part = html.slice(
+        html.indexOf(`data-group-section="${kind}"`),
+        html.indexOf(
+          '</section>',
+          html.indexOf(`data-group-section="${kind}"`),
+        ),
+      )
+      // The picker is hidden, its field has Done after it; the message sits
+      // outside it, so it outlasts Done, and Add stays last.
+      assert.match(
+        part,
+        new RegExp(
+          `</ul><div class="group-picker" data-group-picker hidden><div class="picker-bar"><input type="search" data-group-query aria-label="${find}" [^>]*><button type="button" class="secondary" data-group-done>Done</button></div><div data-group-choices></div></div><p class="notice" role="alert" data-group-error hidden></p><button type="button" class="secondary" data-group-add>.*${add}</button>$`,
+        ),
+        kind,
+      )
+    }
+    const source =
+      /<script type="application\/json" data-group-catalog>(.*?)<\/script>/.exec(
+        html,
+      )![1]!
+    assert(!source.includes('<'))
+    assert.deepEqual(JSON.parse(source), {
+      apps: tricky,
+      people,
+      group: { apps: [3, 7], members: [2] },
+    })
+    assert.equal(html.match(/<\/script>/g)!.length, 1)
+    // Without groups.change: no pickers and no catalog.
+    const read = groupView({ group, apps, people, canChange: false })
+    assert.doesNotMatch(read, /data-group-add|data-group-catalog|Add App/)
+  })
+
   it('U20.4 the Settings intro links People and Groups', () => {
     const html = settingsView({
       apple: { signedIn: false, needsCode: false },

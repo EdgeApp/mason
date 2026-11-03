@@ -2033,7 +2033,8 @@ export function groupsView(data: {
 
 /**
  * A group: its name, which becomes a text field when tapped, its apps and its
- * members, and Remove group. Viewers who cannot change groups see text.
+ * members, each with a picker that adds and removes them, and Remove group.
+ * Viewers who cannot change groups see text.
  */
 export function groupView(data: {
   group: { id: number; name: string; apps: number[]; members: number[] }
@@ -2051,13 +2052,28 @@ export function groupView(data: {
   const nameRow = data.canChange
     ? `<div class="group-name" data-group-name><button type="button" class="list-row" data-group-rename>${label}${icon('edit')}</button><input name="name" maxlength="120" value="${name}" aria-label="Group name" autocomplete="off" data-group-name-input hidden><p class="notice" role="alert" data-group-name-error hidden></p></div>`
     : `<div class="group-name"><div class="list-row">${label}</div></div>`
+  // Add App and Add member: a search field with Done on its right, the
+  // choices under it, and the Add button at the bottom of the section.
+  const picker = (add: string, find: string, placeholder: string): string =>
+    data.canChange
+      ? `<div class="group-picker" data-group-picker hidden><div class="picker-bar"><input type="search" data-group-query aria-label="${escape(find)}" placeholder="${escape(placeholder)}" autocomplete="off"><button type="button" class="secondary" data-group-done>Done</button></div><div data-group-choices></div></div><p class="notice" role="alert" data-group-error hidden></p><button type="button" class="secondary" data-group-add>${icon('add')} ${escape(add)}</button>`
+      : ''
   const section = (
     kind: 'apps' | 'members',
     title: string,
     heading: string,
     rows: string,
+    controls: string,
   ): string =>
-    `<section class="panel" data-group-section="${kind}"><h2>${heading}${escape(title)}</h2><ul data-group-rows>${rows}</ul></section>`
+    `<section class="panel" data-group-section="${kind}"><h2>${heading}${escape(title)}</h2><ul data-group-rows>${rows}</ul>${controls}</section>`
+  // The picker filters this in the browser; `<` is escaped so no text closes the element.
+  const catalog = data.canChange
+    ? `<script type="application/json" data-group-catalog>${JSON.stringify({
+        apps: data.apps,
+        people: data.people,
+        group: { apps: group.apps, members: group.members },
+      }).replaceAll('<', '\\u003c')}</script>`
+    : ''
   const remove = data.canChange
     ? apiForm(
         `/api/v2/groups/${group.id}`,
@@ -2071,10 +2087,12 @@ export function groupView(data: {
     'Apps',
     icon('apps'),
     sectionRows(data.apps, group.apps, appRow),
+    picker('Add App', 'Find an app', 'App name or ID'),
   )}${section(
     'members',
     'Group Members',
     icon('group'),
     sectionRows(data.people, group.members, memberRow),
-  )}${remove}</div>`
+    picker('Add member', 'Find a person', 'Name or email'),
+  )}${remove}${catalog}</div>`
 }

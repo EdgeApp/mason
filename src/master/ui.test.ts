@@ -1278,6 +1278,32 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     assert.match(page.text, /<title>Ui &lt;crew&gt; · Mason<\/title>/)
     assert.match(page.text, /<h1 data-group-title>Ui &lt;crew&gt;<\/h1>/)
     assert.match(page.text, /data-group-rename/)
+    assert.match(page.text, /data-group-add>.*Add App<\/button>/)
+    assert.match(page.text, /data-group-add>.*Add member<\/button>/)
+    const catalog = JSON.parse(
+      /<script type="application\/json" data-group-catalog>(.*?)<\/script>/.exec(
+        page.text,
+      )![1]!,
+    )
+    const names = (
+      db.prepare('SELECT name FROM apps ORDER BY position,id').all() as Json[]
+    ).map((row) => row.name)
+    assert.deepEqual(
+      catalog.apps.map((entry: Json) => entry.name),
+      names,
+    )
+    for (const name of names) assert(page.text.includes(JSON.stringify(name)))
+    assert(
+      catalog.people.some(
+        (person: Json) =>
+          person.id === people.tester &&
+          person.email === 'tester.person@example.test',
+      ),
+    )
+    assert.deepEqual(catalog.group, {
+      apps: [app.id],
+      members: [people.tester],
+    })
     assert.match(page.text, /<h2>.*Apps<\/h2>/)
     assert.match(page.text, /<h2>.*Group Members<\/h2>/)
     assert.match(
