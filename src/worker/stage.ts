@@ -1810,6 +1810,7 @@ export class WorkerRuntime {
           token: assignment.token,
           entitlements: values,
           ...(options?.failed === true ? { failed: true } : {}),
+          ...(options?.before === true ? { before: true } : {}),
         }),
       reinstall: (profiles): void => {
         removeProfiles(prepared.profiles)
