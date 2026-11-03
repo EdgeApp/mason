@@ -231,7 +231,7 @@ function fakeXcodebuild(
     if (name === 'codesign')
       return {
         code: 0,
-        output: `<?xml version="1.0"?><plist>${JSON.stringify({ 'aps-environment': 'production' })}</plist>`,
+        output: `<?xml version="1.0"?><plist>${JSON.stringify({ 'aps-environment': 'production', 'com.apple.developer.associated-domains': ['applinks:example.app'], 'com.apple.developer.declared-age-range': true, 'com.apple.developer.carplay-maps': true })}</plist>`,
       }
     if (name === 'ditto') {
       writeFileSync(args.at(-1)!, 'zip')
@@ -501,6 +501,14 @@ describe('Apple signing on a worker', function () {
           code: 0,
           output: `<?xml version="1.0"?><plist>${JSON.stringify({ 'aps-environment': 'production', 'com.apple.security.application-groups': ['group.example'] })}</plist>`,
         }
+      // The stage's profile grants push, and no app group.
+      if (name === 'security' && args[0] === 'cms') {
+        writeFileSync(
+          args[args.indexOf('-o') + 1]!,
+          JSON.stringify({ 'aps-environment': 'production' }),
+        )
+        return { code: 0, output: '' }
+      }
       if (name === 'ditto') {
         writeFileSync(args.at(-1)!, 'zip')
         return { code: 0, output: '' }
@@ -509,6 +517,7 @@ describe('Apple signing on a worker', function () {
     }
     const logs: string[] = []
     const reported: Array<Record<string, unknown>> = []
+    const reportedOptions: unknown[] = []
     const reinstalled: number[] = []
     const kept: string[] = []
     const signing = signingFixture()
@@ -521,8 +530,9 @@ describe('Apple signing on a worker', function () {
         exportOptions: '/k/ExportOptions.plist',
         exec,
         log: (text) => logs.push(text),
-        entitlements: async (values) => {
+        entitlements: async (values, options) => {
           reported.push(values)
+          reportedOptions.push(options)
           return reported.length === 1
             ? { changed: true, profiles: signing.profiles }
             : { changed: false }
@@ -554,10 +564,17 @@ describe('Apple signing on a worker', function () {
     )
     assert.match(result.archive, /App\.xcarchive$/)
     assert.deepEqual(Object.keys(reported[0]!), ['app.example.signed'])
-    assert.deepEqual(Object.keys(reported[1]!).sort(), [
-      'app.example.signed',
-      'app.example.signed.widgets',
-    ])
+    // After the archive signed, only what each bundle's profile does not
+    // grant goes to the master, and an unknown key there only warns.
+    assert.deepEqual(reported[1], {
+      'app.example.signed': {
+        'com.apple.security.application-groups': ['group.example'],
+      },
+      'app.example.signed.widgets': {
+        'com.apple.security.application-groups': ['group.example'],
+      },
+    })
+    assert.deepEqual(reportedOptions, [{ failed: true }, undefined])
     assert.deepEqual(reinstalled, [2])
     const archives = commands.filter((command) => command[2] === 'archive')
     assert.equal(archives.length, 2)
@@ -950,13 +967,32 @@ export async function sign(ctx: Stage) {
       assert.equal(envOf('-exportArchive').FIXTURE_SET_BY, 'call')
       assert.equal(envOf('stapler').FIXTURE_STAGE, 'stage')
       assert.equal(envOf('stapler').FIXTURE_SET_BY, 'stage')
-      // The archive's entitlements added push to both bundle IDs on Apple's side.
+      // The archive's entitlements added associated domains to both bundle
+      // IDs on Apple's side; push, which the profiles grant, was not asked for.
       assert(
         [...apple.capabilities.values()].every((types) =>
-          types.includes('PUSH_NOTIFICATIONS'),
+          types.includes('ASSOCIATED_DOMAINS'),
+        ),
+      )
+      assert(
+        !apple.calls.some(
+          (call) =>
+            call.path === '/v1/bundleIdCapabilities' &&
+            call.body?.data?.attributes?.capabilityType ===
+              'PUSH_NOTIFICATIONS',
         ),
       )
       assert.match(log!, /capabilities added from the archive’s entitlements/)
+      // The build signed, so what Mason cannot enable only warns: a key it
+      // does not know, and Declared Age Range with no Apple ID signed in.
+      assert.match(
+        log!,
+        /Apple signing: app\.example\.signed: com\.apple\.developer\.carplay-maps needs a capability Mason cannot enable; it was signed as its profile allows/,
+      )
+      assert.match(
+        log!,
+        /Apple signing: app\.example\.signed: .*Declared Age Range .*sign the Apple ID in on the master; it was signed as its profile allows/,
+      )
       assert(
         !xcodeCalls.some((call) => /ruby|bundle|fastlane/.test(call.join(' '))),
       )

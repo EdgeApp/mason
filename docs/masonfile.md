@@ -1302,7 +1302,24 @@ set changes.
 Bundle IDs missing from the Apple account are created (Fastlane `produce`);
 their capabilities (push, App Groups, iCloud, …) are taken from the
 entitlements of the previous successful archive and kept in sync, so a new
-capability needs only an entitlements change and one build. Profiles are
+capability needs only an entitlements change and one build. Every capability
+App Store Connect can enable is mapped from its entitlement keys, with the
+settings Apple needs for it (iCloud with CloudKit, the data protection level
+the entitlement names, Sign in with Apple as the primary App ID), and only on
+the platforms and distributions it applies to. The App Store Connect API
+enables the capability types its specification lists; the others (Declared
+Age Range, App Attest, Time Sensitive Notifications, …) go through the
+developer site with the Apple ID the master is signed in with, as Xcode
+enables them, and without one the stage says to enable it in the Apple
+Developer portal or sign the Apple ID in on the master. A capability Apple
+grants only on request must be granted to the team first; Apple's refusal
+names it. When signing failed for a missing capability, an entitlement key
+Mason does not know fails the stage, naming the key; after a build that
+signed, it and any capability Apple would not enable are warnings in the
+log, and only keys the stage's profile does not grant are checked. A
+changed capability set makes each of the bundle ID's profiles (development,
+ad hoc, App Store) again the next time a stage or the app's setup asks for
+it. Profiles are
 cached on the master and delivered with the stage; a stage never waits on
 Apple to start unless a profile must be regenerated.
 

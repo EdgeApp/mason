@@ -695,6 +695,8 @@ describe('Releases, install.sh and updates', function () {
         utimesSync(path.join(prefix, old), day, day)
       }
       const ran: string[][] = []
+      // The root helper still runs an old release until it is restarted.
+      let helper = `/bin/sh ${prefix}/0.0.9/mason helper --user paul`
       const saved = { ...process.env }
       Object.assign(process.env, {
         HOME: home,
@@ -713,9 +715,20 @@ describe('Releases, install.sh and updates', function () {
           system: () =>
             ({
               platform: 'darwin',
-              run: (command: string, args: string[]) =>
-                ran.push([command, ...args]),
+              euid: 0,
+              exists: (file: string) =>
+                file === '/Library/LaunchDaemons/app.mason.helper.plist',
+              run: (command: string, args: string[]) => {
+                ran.push([command, ...args])
+                if (args.at(-1) === 'system/app.mason.helper')
+                  helper = `/bin/sh ${prefix}/0.1.2/mason helper --user paul`
+              },
             }) as unknown as ServiceSystem,
+          processes: () => [helper],
+          // A helper from before it was asked to restart itself.
+          helperRequest: async () => {
+            throw new Error('shell is not a helper operation')
+          },
         })
         assert.equal(await nodeMain(['update'], out), 0, out.errors.join('\n'))
         assert.equal(readlinkSync(path.join(prefix, 'current')), '0.1.2')
@@ -729,9 +742,19 @@ describe('Releases, install.sh and updates', function () {
           out.lines.join('\n'),
           /Removed older releases: .*0\.0\.8.*/,
         )
+        // The helper restarts after the services, before older releases go.
         assert.deepEqual(
-          ran.map((call) => call[3]?.split('/').pop()),
-          ['app.mason.master', 'app.mason.worker', 'app.mason.host'],
+          ran.map((call) => call[3]),
+          [
+            `gui/${process.getuid!()}/app.mason.master`,
+            `gui/${process.getuid!()}/app.mason.worker`,
+            `gui/${process.getuid!()}/app.mason.host`,
+            'system/app.mason.helper',
+          ],
+        )
+        assert.match(
+          out.lines.join('\n'),
+          /Restarted the privileged helper into the new release\./,
         )
         assert.equal(readFileSync(path.join(data, 'keep.txt'), 'utf8'), 'kept')
         assert.match(out.lines.join('\n'), /data directories are unchanged/)
@@ -772,6 +795,12 @@ describe('Releases, install.sh and updates', function () {
       })
       const update = async (
         args: string[],
+        helper: {
+          euid?: number
+          installed?: boolean
+          answers?: boolean
+          systemctl?: boolean
+        } = {},
       ): Promise<{ status: number; out: ReturnType<typeof io> }> => {
         const out = io({
           version: '0.1.1',
@@ -783,11 +812,30 @@ describe('Releases, install.sh and updates', function () {
           system: () =>
             ({
               platform: 'linux',
-              run: () => undefined,
+              euid: helper.euid ?? 0,
+              exists: (file: string) =>
+                file === '/etc/systemd/system/mason-helper.service' &&
+                helper.installed !== false,
+              run: (command: string, args: string[]) => {
+                ran.push([command, ...args])
+                if (
+                  args.at(-1) === 'mason-helper' &&
+                  helper.systemctl === false
+                )
+                  throw new Error('exit 1')
+              },
             }) as unknown as ServiceSystem,
+          helperRequest: async (socket, op, _args, timeout) => {
+            asked.push([socket, op, String(timeout)])
+            if (helper.answers === false)
+              throw new Error('connect EACCES /run/mason/helper.sock')
+            return { restarting: true }
+          },
         })
         return { status: await nodeMain(['update', ...args], out), out }
       }
+      const ran: string[][] = []
+      const asked: string[][] = []
       try {
         for (const [body, refusal] of [
           ['{"version":"0.1.2 --user"}', /not a release version/],
@@ -816,6 +864,55 @@ describe('Releases, install.sh and updates', function () {
         assert.equal(updated.status, 0, updated.out.errors.join('\n'))
         assert(!existsSync(request))
         assert.equal(readlinkSync(path.join(prefix, 'current')), '0.1.2')
+        // The updater restarts the services, then asks the root helper to
+        // restart once what it is doing is done.
+        const services = [
+          ['systemctl', 'try-restart', 'mason-master'],
+          ['systemctl', 'try-restart', 'mason-worker'],
+          ['systemctl', 'try-restart', 'mason-host'],
+        ]
+        assert.deepEqual(ran, services)
+        assert.deepEqual(asked, [
+          ['/run/mason/helper.sock', 'helper.restart', '10000'],
+        ])
+        assert.match(
+          updated.out.lines.join('\n'),
+          /The privileged helper restarts into the new release once the requests it is serving are done\./,
+        )
+        const again = async (
+          helper: Parameters<typeof update>[1],
+        ): Promise<string> => {
+          ran.length = 0
+          asked.length = 0
+          writeFileSync(request, '{"version":"0.1.2","at":2}')
+          const result = await update(['--request', request], helper)
+          assert.equal(result.status, 0, result.out.errors.join('\n'))
+          return result.out.lines.join('\n')
+        }
+        // A helper that does not answer, not as root: said, not claimed.
+        assert.match(
+          await again({ euid: 1000, answers: false }),
+          /Could not restart the privileged helper: it did not take the request \(connect EACCES \/run\/mason\/helper\.sock\), and restarting its service needs root\. Run sudo systemctl try-restart mason-helper\./,
+        )
+        assert.deepEqual(ran, services)
+        // As root, its service is restarted; when that fails too, it is said.
+        assert.match(
+          await again({ answers: false }),
+          /Restarted the privileged helper into the new release\./,
+        )
+        assert.deepEqual(ran.at(-1), [
+          'systemctl',
+          'try-restart',
+          'mason-helper',
+        ])
+        assert.match(
+          await again({ answers: false, systemctl: false }),
+          /Could not restart the privileged helper: .*systemctl failed \(exit 1\)\./,
+        )
+        // No helper installed: nothing asked, nothing said.
+        const none = await again({ installed: false })
+        assert.deepEqual(asked, [])
+        assert.doesNotMatch(none, /privileged helper/)
       } finally {
         for (const key of Object.keys(process.env))
           if (!(key in saved)) delete process.env[key]
@@ -966,6 +1063,7 @@ describe('Releases, install.sh and updates', function () {
     ): HelperContext & {
       ran: string[][]
       restarted: number
+      restarts: string[]
       signed: boolean
     } => {
       const out = {
@@ -980,6 +1078,7 @@ describe('Releases, install.sh and updates', function () {
         },
         ran: [] as string[][],
         restarted: 0,
+        restarts: [] as string[],
         signed: true,
         async run(
           command: string,
@@ -1018,6 +1117,10 @@ describe('Releases, install.sh and updates', function () {
         },
         async restartService(): Promise<void> {
           out.restarted++
+          out.restarts.push('worker')
+        },
+        async restartHelper(): Promise<void> {
+          out.restarts.push('helper')
         },
       }
       return out
@@ -1099,10 +1202,11 @@ describe('Releases, install.sh and updates', function () {
         readlinkSync(path.join(ctx.paths.bindir, 'mason')),
         path.join(ctx.paths.prefix, 'current', 'mason'),
       )
-      // The service restarts a second after the answer.
+      // The service restarts a second after the answer, then the helper itself.
       assert.equal(ctx.restarted, 0)
       await new Promise((resolve) => setTimeout(resolve, 1200))
       assert.equal(ctx.restarted, 1)
+      assert.deepEqual(ctx.restarts, ['worker', 'helper'])
       const older = {
         ...manifest,
         version: '0.1.1',
@@ -1320,6 +1424,81 @@ describe('Releases, install.sh and updates', function () {
         )
       } finally {
         server.close()
+      }
+    })
+
+    it('U9.2 a pushed release restarts the worker, then the helper itself once no other request is in progress', async () => {
+      const dir = root()
+      const ctx = context(dir)
+      mkdirSync(path.join(dir, 'master'))
+      const master = loadIdentity(path.join(dir, 'master'))
+      const tarball = path.join(
+        releases['0.1.2']!,
+        tarballName('0.1.2', here as never),
+      )
+      const manifest = {
+        version: '0.1.2',
+        platform: here,
+        sha256: sha256(tarball),
+      }
+      // A request still running when the release is installed.
+      let release: () => void = () => undefined
+      const gate = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const run = ctx.run.bind(ctx)
+      ctx.run = async (
+        command,
+        args,
+        options,
+      ): Promise<{ stdout: string; stderr: string }> => {
+        if (command === 'pmset') await gate
+        return await run(command, args, options)
+      }
+      const socket = path.join(dir, 'run', 'helper.sock')
+      const server = await serveHelper(socket, ctx)
+      try {
+        await helperRequest(socket, 'key.set', {
+          publicKey: master.publicKey
+            .export({ type: 'spki', format: 'der' })
+            .toString('base64'),
+        })
+        const slow = helperRequest(socket, 'settings.apply', {
+          name: 'noSleep',
+        })
+        assert.deepEqual(
+          await helperRequest(socket, 'release.install', {
+            tarball,
+            manifest,
+            signature: signRelease(manifest, master.privateKey),
+          }),
+          { installed: path.join(ctx.paths.prefix, '0.1.2') },
+        )
+        await new Promise((resolve) => setTimeout(resolve, 1300))
+        assert.deepEqual(ctx.restarts, ['worker'])
+        // Once the restart is pending, no new request starts.
+        await assert.rejects(
+          helperRequest(socket, 'settings.apply', { name: 'noSleep' }),
+          /The helper is restarting into a new release; ask again in a moment/,
+        )
+        release()
+        await slow
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        assert.deepEqual(ctx.restarts, ['worker', 'helper'])
+      } finally {
+        server.close()
+      }
+      // mason update asks for the restart itself: answered first, then done.
+      const asked = context(dir)
+      const again = await serveHelper(socket, asked)
+      try {
+        assert.deepEqual(await helperRequest(socket, 'helper.restart', {}), {
+          restarting: true,
+        })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        assert.deepEqual(asked.restarts, ['helper'])
+      } finally {
+        again.close()
       }
     })
 
@@ -1680,6 +1859,7 @@ describe('Releases, install.sh and updates', function () {
       )
       await mac.run('brew', ['install', 'jq'], { asUser: true })
       await mac.restartService()
+      await mac.restartHelper()
       const linux = systemContext('linux', user, {}, program)
       assert.equal(linux.paths.keyFile, '/etc/mason/master.pub')
       assert.deepEqual(helperPaths('linux'), {
@@ -1688,6 +1868,7 @@ describe('Releases, install.sh and updates', function () {
         work: '/var/lib/mason-helper/work',
       })
       await linux.restartService()
+      await linux.restartHelper()
       assert.deepEqual(ran, [
         {
           file: 'xcodebuild',
@@ -1703,7 +1884,15 @@ describe('Releases, install.sh and updates', function () {
           file: 'launchctl',
           args: ['kickstart', '-k', 'gui/502/app.mason.worker'],
         },
+        {
+          file: 'launchctl',
+          args: ['kickstart', '-k', 'system/app.mason.helper'],
+        },
         { file: 'systemctl', args: ['restart', 'mason-worker'] },
+        {
+          file: 'systemctl',
+          args: ['--no-block', 'restart', 'mason-helper'],
+        },
       ])
       // The default runs the program itself.
       const real = systemContext('darwin', user)
@@ -1909,6 +2098,8 @@ describe('Releases, install.sh and updates', function () {
         home: dir,
       }
       let restarted = 0
+      // How many worker restarts came before the helper's own.
+      let helperRestarted: number | undefined
       const helper: HelperContext = {
         platform: 'darwin',
         user,
@@ -1923,9 +2114,12 @@ describe('Releases, install.sh and updates', function () {
         restartService: async () => {
           restarted++
         },
+        restartHelper: async () => {
+          helperRestarted = restarted
+        },
       }
       // The helper has no master key yet: it was not listening when the worker paired.
-      const server = await serveHelper(base.helperSocket, helper)
+      let server = await serveHelper(base.helperSocket, helper)
       try {
         const stream = new EventEmitter() as EventEmitter & {
           written: Buffer[]
@@ -1963,9 +2157,14 @@ describe('Releases, install.sh and updates', function () {
         // The helper answers before it restarts the worker's service.
         assert.equal(restarted, 0)
         const deadline = Date.now() + 5000
-        while (restarted === 0 && Date.now() < deadline)
+        while (helperRestarted == null && Date.now() < deadline)
           await new Promise((resolve) => setTimeout(resolve, 50))
         assert.equal(restarted, 1)
+        // Then itself, after the worker; it takes nothing new until its
+        // service manager has started it again.
+        assert.equal(helperRestarted, 1)
+        server.close()
+        server = await serveHelper(base.helperSocket, helper)
         assert.equal(
           readFileSync(helper.paths.keyFile, 'utf8').trim(),
           spki(master.publicKey),

@@ -49,6 +49,11 @@ export interface HelperContext {
   ): Promise<{ stdout: string; stderr: string }>
   /** Restarts the worker service so it runs the newly installed release. */
   restartService(): Promise<void>
+  /**
+   * Has the helper's own service manager restart it into the newly
+   * installed release, once no other request is in progress.
+   */
+  restartHelper(): Promise<void>
 }
 
 export class Refused extends Error {}
@@ -173,7 +178,7 @@ export const operations: Record<string, Operation> = {
     return { stored: true }
   },
 
-  /** Installs a Mason release the master signed, then restarts the worker into it. */
+  /** Installs a Mason release the master signed, then restarts the worker and the helper into it. */
   'release.install': async (args, context) => {
     const key = storedKey(context)
     if (key == null) throw new Refused('No master key is set')
@@ -202,9 +207,14 @@ export const operations: Record<string, Operation> = {
       manifest,
     )
     // Answer first: the worker waits for this answer, so restarting it now
-    // would hold its shutdown until the service manager kills it.
+    // would hold its shutdown until the service manager kills it. The
+    // helper goes last, so it is not left on the release it ran before.
     setTimeout(() => {
-      context.restartService().catch(() => undefined)
+      void context
+        .restartService()
+        .catch(() => undefined)
+        .then(async () => await context.restartHelper())
+        .catch(() => undefined)
     }, 1000)
     return { installed: dest }
   },
@@ -343,6 +353,17 @@ export const operations: Record<string, Operation> = {
     await context.run('systemctl', ['enable', '--now', 'docker'])
     return null
   },
+  /**
+   * Restarts the helper into the installed release once the requests in
+   * progress are done, for `mason update`; the answer comes first.
+   */
+  'helper.restart': async (_args, context) => {
+    setImmediate(() => {
+      context.restartHelper().catch(() => undefined)
+    })
+    return { restarting: true }
+  },
+
   /** Settings builds need; machine-level choices (auto-login, FileVault) are never touched. */
   'settings.apply': async (args, context) => {
     switch (args.name) {

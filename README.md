@@ -92,11 +92,16 @@ administrator in the browser at the master's address, or from its terminal:
 mason setup --username ada --password-stdin --api-key-out ~/.mason/admin.key
 ```
 
-`mason update` installs a newer release on a node and restarts its services.
-It keeps the new release and the one that ran before it, and removes older
-releases and failed installs from the install directory (`/opt/mason`, or
-`~/.mason/app` for a user install). Worker updates the master pushes do the
-same.
+`mason update` installs a newer release on a node and restarts its services,
+then asks the root helper (`mason-helper`, or `app.mason.helper` on macOS) to
+restart into it once the requests it is serving are done; a helper that does
+not answer is restarted by its service manager as root, and the update says
+when it could not be. It keeps the new release and the one that ran before
+it, and removes older releases and failed installs from the install directory
+(`/opt/mason`, or `~/.mason/app` for a user install). Worker updates the
+master pushes do the same: the helper answers the push, restarts the worker,
+and restarts itself once no other request is in progress, taking no new one
+meanwhile.
 
 ## Pairing nodes
 

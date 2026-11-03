@@ -1,7 +1,12 @@
 import { existsSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { formatCheck, type ClusterReport } from '../master/clusterCheck.js'
 import { spawn } from 'node:child_process'
-import { helperPaths, serveHelper, systemContext } from '../helper/server.js'
+import {
+  helperPaths,
+  helperRequest,
+  serveHelper,
+  systemContext,
+} from '../helper/server.js'
 import {
   currentRelease,
   pruneReleases,
@@ -34,6 +39,7 @@ import type { AccountView } from '../master/cloud/accounts.js'
 import { prepareDataDir, writePrivate } from './dataDir.js'
 import { PAIRING_FILE, readPairingFile } from './identity.js'
 import {
+  HELPER_LABEL,
   hostSystem,
   installService,
   uninstallService,
@@ -63,6 +69,10 @@ export interface MainIO {
   prompt?(question: string, hidden: boolean): Promise<string>
   /** The running Mason's version; this package's by default. */
   version?: string
+  /** The command lines of this computer's processes, which pruning keeps the releases of; `ps` by default. */
+  processes?: () => string[] | undefined
+  /** Asks the privileged helper for an operation; over its socket by default. */
+  helperRequest?: typeof helperRequest
 }
 
 /** Reads one line from the terminal, without echo for a password. */
@@ -864,18 +874,6 @@ async function updateCommand(argv: string[], io: MainIO): Promise<number> {
     })
   })
   if (status !== 0) return status
-  // Only the new release and the one that ran before it stay installed.
-  const current = currentRelease(install.prefix!)
-  const { removed, failed } = pruneReleases(install.prefix!, [
-    ...(current == null ? [] : [current]),
-    path.basename(install.appRoot),
-  ])
-  if (removed.length > 0)
-    io.out(`Removed older releases: ${removed.join(', ')}.`)
-  if (failed.length > 0)
-    io.out(
-      `Could not remove older releases: ${failed.join(', ')}. Run mason update with sudo to remove them.`,
-    )
   const system = io.system()
   const uid = Number(process.env.SUDO_UID ?? process.getuid?.() ?? 0)
   for (const role of ['master', 'worker', 'host'])
@@ -889,7 +887,68 @@ async function updateCommand(argv: string[], io: MainIO): Promise<number> {
   io.out(
     'Restarted the Mason services of this account into the new release; their data directories are unchanged.',
   )
+  await restartHelper(system, io)
+  // Only the new release and the one that ran before it stay installed;
+  // the services restarted, so none of them holds an older one.
+  const current = currentRelease(install.prefix!)
+  const { removed, failed } = pruneReleases(
+    install.prefix!,
+    [...(current == null ? [] : [current]), path.basename(install.appRoot)],
+    io.processes == null ? {} : { commands: io.processes() },
+  )
+  if (removed.length > 0)
+    io.out(`Removed older releases: ${removed.join(', ')}.`)
+  if (failed.length > 0)
+    io.out(
+      `Could not remove older releases: ${failed.join(', ')}. Run mason update with sudo to remove them.`,
+    )
   return 0
+}
+
+/**
+ * After an update, the root helper too, once the services it serves run
+ * the new release: asked over its socket, it restarts when the requests in
+ * progress (a package or Xcode install) are done. A helper that does not
+ * answer (one from before this was asked of it) is restarted by its service
+ * manager, which needs root; what could not be done is said.
+ */
+async function restartHelper(system: ServiceSystem, io: MainIO): Promise<void> {
+  const darwin = system.platform === 'darwin'
+  const unit = darwin
+    ? `/Library/LaunchDaemons/${HELPER_LABEL}.plist`
+    : '/etc/systemd/system/mason-helper.service'
+  if (!(system.exists ?? existsSync)(unit)) return
+  try {
+    await (io.helperRequest ?? helperRequest)(
+      helperPaths(system.platform).socket,
+      'helper.restart',
+      {},
+      10_000,
+    )
+    io.out(
+      'The privileged helper restarts into the new release once the requests it is serving are done.',
+    )
+    return
+  } catch (error) {
+    const [command, args] = darwin
+      ? ['launchctl', ['kickstart', '-k', `system/${HELPER_LABEL}`]]
+      : ['systemctl', ['try-restart', 'mason-helper']]
+    const why = `it did not take the request (${(error as Error).message})`
+    if (system.euid !== 0) {
+      io.out(
+        `Could not restart the privileged helper: ${why}, and restarting its service needs root. Run sudo ${command} ${args.join(' ')}.`,
+      )
+      return
+    }
+    try {
+      system.run(command, args)
+      io.out('Restarted the privileged helper into the new release.')
+    } catch (failure) {
+      io.out(
+        `Could not restart the privileged helper: ${why}, and ${command} failed (${(failure as Error).message}).`,
+      )
+    }
+  }
 }
 
 async function runsCommand(argv: string[], io: MainIO): Promise<number> {

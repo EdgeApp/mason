@@ -36,6 +36,8 @@ export interface ServiceSystem {
   ): void
   /** Runs a command; `allowFailure` ignores a nonzero exit. */
   run(command: string, args: string[], allowFailure?: boolean): void
+  /** Whether a file exists; `existsSync` when absent. */
+  exists?(file: string): boolean
 }
 
 export interface ServiceRequest {

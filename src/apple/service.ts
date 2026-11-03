@@ -19,6 +19,7 @@ import {
   Profiles,
   signingPlatform,
   type ApplePlatform,
+  type DeveloperPortal,
   type Distribution,
 } from './profiles.js'
 import { TestFlight } from './testflight.js'
@@ -159,6 +160,8 @@ export class AppleService {
       scratch?: string
       sleep?: (ms: number) => Promise<void>
       log?: (line: string) => void
+      /** The signed-in Apple ID's session on the developer site, when there is one. */
+      portal?: () => DeveloperPortal | undefined
     },
   ) {
     const connect = (team: string): AppStoreConnect | undefined =>
@@ -174,6 +177,7 @@ export class AppleService {
       connect,
       certificates: this.certificates,
       ...(options.log == null ? {} : { log: options.log }),
+      ...(options.portal == null ? {} : { portal: options.portal }),
     })
     this.testflight = new TestFlight(master, connect)
     this.notary = new Notary(

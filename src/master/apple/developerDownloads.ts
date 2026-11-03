@@ -293,6 +293,11 @@ interface Stored {
   appleId: string
   password: string
   cookies: Cookie[]
+  /**
+   * The developer site's `csrf` and `csrf_ts`, from its latest answer that
+   * carried them; its own API's changes need them back, as Fastlane sends.
+   */
+  csrf?: Record<string, string>
   state: AppleState
   since: number
   error?: string
@@ -453,6 +458,19 @@ export class AppleDownloads {
     return this.load()?.state === 'signedIn'
   }
 
+  /** Whether the session holds the developer site's CSRF tokens yet. */
+  portalTokens(): boolean {
+    return this.load()?.csrf != null
+  }
+
+  /** A call to the developer site's own services, which trade CSRF tokens. */
+  private portal(target: URL): boolean {
+    return (
+      target.origin === new URL(this.endpoints.developer).origin &&
+      target.pathname.startsWith('/services-account/')
+    )
+  }
+
   private async request(
     stored: Stored,
     url: string,
@@ -465,6 +483,7 @@ export class AppleDownloads {
     const jar = new CookieJar(stored.cookies)
     let target = new URL(url)
     for (let hop = 0; hop < 6; hop++) {
+      const portal = this.portal(target)
       const response = await fetch(target, {
         method: init.method ?? 'GET',
         redirect: 'manual',
@@ -472,6 +491,7 @@ export class AppleDownloads {
           'User-Agent': 'Mason',
           ...(init.body == null ? {} : { 'Content-Type': 'application/json' }),
           ...init.headers,
+          ...(portal ? stored.csrf : {}),
           ...(jar.header(target, this.master.now()) === ''
             ? {}
             : { Cookie: jar.header(target, this.master.now()) }),
@@ -487,6 +507,10 @@ export class AppleDownloads {
       })
       jar.store(target, response.headers, this.master.now())
       stored.cookies = jar.cookies
+      const csrf = response.headers.get('csrf')
+      const csrfTs = response.headers.get('csrf_ts')
+      if (portal && csrf != null && csrfTs != null)
+        stored.csrf = { csrf, csrf_ts: csrfTs }
       const location = response.headers.get('location')
       if (response.status >= 300 && response.status < 400 && location != null) {
         await response.body?.cancel()

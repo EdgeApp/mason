@@ -1,3 +1,4 @@
+import { publicCapabilityTypes } from '../apple/capabilities.js'
 import {
   createPublicKey,
   createVerify,
@@ -128,6 +129,14 @@ export class FakeAppleConnect {
   readonly certificates = new Map<string, Doc>()
   readonly bundleIds = new Map<string, Doc>()
   readonly capabilities = new Map<string, string[]>()
+  /** Capability types Apple refuses to enable, as one granted only on request. */
+  readonly refuseCapabilities = new Set<string>()
+  /** API types this fake's enum leaves out, as when Apple's enum changes. */
+  readonly unlistedTypes = new Set<string>()
+  /** The CSRF tokens the developer site hands the session and wants back on a change. */
+  readonly portalCsrf = { csrf: 'fake-csrf-token', csrf_ts: '1793600000000' }
+  /** The Apple ID session's cookie the developer site takes; undefined: none. */
+  portalCookie: string | undefined = 'myacinfo=fake-session'
   readonly devices: Doc[] = []
   /** The class Apple gives a registered UDID, when not an iPhone. */
   readonly deviceClasses = new Map<string, string>()
@@ -207,6 +216,91 @@ export class FakeAppleConnect {
       notary: `${this.origin}/notary/v2`,
       s3: `${this.origin}/s3`,
     }
+  }
+
+  /**
+   * The developer site's `/services-account/v1/bundleIds/{id}`, as Fastlane
+   * calls it with an Apple ID session: a read proxied as a POST with
+   * `X-HTTP-Method-Override: GET`, and a PATCH enabling one capability, the
+   * team named by `teamId`. Every answer carries the session's CSRF tokens;
+   * a PATCH without them is refused, as Apple refuses it.
+   */
+  private portal(
+    req: IncomingMessage,
+    id: string,
+    json: Doc | undefined,
+  ): { status: number; json?: unknown; headers?: Record<string, string> } {
+    if (
+      this.portalCookie == null ||
+      !String(req.headers.cookie ?? '').includes(this.portalCookie)
+    )
+      return { status: 401, json: { errors: [{ title: 'Unauthorized' }] } }
+    const headers = { ...this.portalCsrf }
+    const teams = [this.team, ...this.teamKeys.map((entry) => entry.team)]
+    if (
+      req.method === 'POST' &&
+      req.headers['x-http-method-override'] === 'GET' &&
+      req.headers['x-requested-with'] === 'XMLHttpRequest' &&
+      teams.includes(json?.teamId)
+    ) {
+      const item = this.bundleIds.get(id)
+      return item == null
+        ? { status: 404, headers, json: { errors: [{ title: 'Not found' }] } }
+        : { status: 200, headers, json: { data: item } }
+    }
+    if (
+      req.headers.csrf !== this.portalCsrf.csrf ||
+      req.headers.csrf_ts !== this.portalCsrf.csrf_ts
+    )
+      return {
+        status: 403,
+        headers,
+        json: {
+          errors: [{ title: 'Forbidden', detail: 'Invalid CSRF token' }],
+        },
+      }
+    const data = json?.data as Doc | undefined
+    const capability = data?.relationships?.bundleIdCapabilities?.data?.[0]
+    if (
+      req.method !== 'PATCH' ||
+      req.headers['content-type'] !== 'application/json' ||
+      req.headers['x-requested-with'] !== 'XMLHttpRequest' ||
+      data?.type !== 'bundleIds' ||
+      data.id !== id ||
+      !teams.includes(data.attributes?.teamId) ||
+      data.attributes?.seedId == null ||
+      capability?.attributes?.enabled !== true ||
+      capability.relationships?.capability?.data?.type !== 'capabilities'
+    )
+      return {
+        status: 400,
+        headers,
+        json: {
+          errors: [{ title: 'Bad request', detail: 'Not as Xcode sends it' }],
+        },
+      }
+    if (!this.bundleIds.has(id))
+      return {
+        status: 404,
+        headers,
+        json: { errors: [{ title: 'Not found' }] },
+      }
+    const type = capability.relationships.capability.data.id as string
+    if (this.refuseCapabilities.has(type))
+      return {
+        status: 403,
+        headers,
+        json: {
+          errors: [
+            {
+              title: 'Forbidden',
+              detail: `${type} is not available for this team`,
+            },
+          ],
+        },
+      }
+    this.capabilities.set(id, [...(this.capabilities.get(id) ?? []), type])
+    return { status: 200, headers, json: { data: this.bundleIds.get(id) } }
   }
 
   /** The team whose key signed the request's JWT, if one did. */
@@ -300,6 +394,9 @@ export class FakeAppleConnect {
       path: p + url.search,
       ...(json == null ? {} : { body: json }),
     })
+    // The developer site's own API, with the Apple ID session's cookie.
+    const portalBundle = /^\/services-account\/v1\/bundleIds\/([^/]+)$/.exec(p)
+    if (portalBundle != null) return this.portal(req, portalBundle[1]!, json)
     const team = this.authorized(req)
     if (team == null)
       return {
@@ -378,9 +475,20 @@ export class FakeAppleConnect {
       )
       return { status: 200, json: this.page(url, items) }
     }
+    const bundleItem = /^\/v1\/bundleIds\/([^/]+)$/.exec(p)
+    if (bundleItem != null && method === 'GET') {
+      const item = this.bundleIds.get(bundleItem[1]!)
+      return item == null
+        ? { status: 404, json: { errors: [{ title: 'Not found' }] } }
+        : { status: 200, json: { data: item } }
+    }
     if (p === '/v1/bundleIds' && method === 'POST') {
       const id = this.id('BUNDLE')
-      const item = { type: 'bundleIds', id, attributes: data!.attributes }
+      const item = {
+        type: 'bundleIds',
+        id,
+        attributes: { ...data!.attributes, seedId: team },
+      }
       this.bundleIds.set(id, item)
       return { status: 201, json: { data: item } }
     }
@@ -400,9 +508,39 @@ export class FakeAppleConnect {
       }
     if (p === '/v1/bundleIdCapabilities' && method === 'POST') {
       const bundle = data!.relationships.bundleId.data.id as string
+      const type = data!.attributes.capabilityType as string
+      // Apple checks the type against the API's own enum.
+      if (!publicCapabilityTypes.has(type) || this.unlistedTypes.has(type))
+        return {
+          status: 409,
+          json: {
+            errors: [
+              {
+                status: '409',
+                code: 'ENTITY_ERROR.ATTRIBUTE.INVALID',
+                title: 'An attribute value is invalid.',
+                detail: `'${type}' is not a valid value for the attribute 'capabilityType'.`,
+                source: { pointer: '/data/attributes/capabilityType' },
+              },
+            ],
+          },
+        }
+      if (this.refuseCapabilities.has(type))
+        return {
+          status: 409,
+          json: {
+            errors: [
+              {
+                code: 'ENTITY_ERROR.ATTRIBUTE.INVALID',
+                title: 'An attribute value is invalid.',
+                detail: `${type} is not available for this team`,
+              },
+            ],
+          },
+        }
       this.capabilities.set(bundle, [
         ...(this.capabilities.get(bundle) ?? []),
-        data!.attributes.capabilityType as string,
+        type,
       ])
       return {
         status: 201,

@@ -41,10 +41,11 @@ import {
   asConnectKey,
   connectToken,
 } from './connect.js'
+import { capabilities, capabilitiesFor } from './capabilities.js'
 import {
-  capabilitiesOf,
   profileType,
   signingPlatform,
+  type DeveloperPortal,
   type StageProfile,
 } from './profiles.js'
 import { appleArea, AppleService } from './service.js'
@@ -135,6 +136,8 @@ describe('Apple on the master', function () {
   let database: MasterDatabase
   let settings: Settings
   let service: AppleService
+  let portalSignedIn = true
+  let csrf: Record<string, string> | undefined
   before(async () => {
     await apple.start()
     database = new MasterDatabase(new DatabaseSync(':memory:'), () => clock)
@@ -146,6 +149,33 @@ describe('Apple on the master', function () {
       testEndpoints: true,
       sleep: instant,
       scratch: dir,
+      // The developer site with an Apple ID session: the fake's cookie.
+      portal: (): DeveloperPortal | undefined =>
+        portalSignedIn
+          ? {
+              base: apple.origin,
+              // The session's CSRF tokens, from the site's last answer.
+              request: async (url, init): Promise<Response> => {
+                const response = await fetch(url, {
+                  method: init.method ?? 'GET',
+                  headers: {
+                    ...init.headers,
+                    ...csrf,
+                    cookie: 'myacinfo=fake-session',
+                  },
+                  ...(init.body == null
+                    ? {}
+                    : { body: JSON.stringify(init.body) }),
+                })
+                const token = response.headers.get('csrf')
+                const stamp = response.headers.get('csrf_ts')
+                if (token != null && stamp != null)
+                  csrf = { csrf: token, csrf_ts: stamp }
+                return response
+              },
+              tokens: (): boolean => csrf != null,
+            }
+          : undefined,
       clone: async (repository, branch, into): Promise<void> => {
         execFileSync('git', [
           'clone',
@@ -464,25 +494,29 @@ describe('Apple on the master', function () {
     assert.notEqual(recertified.uuid, renewed.uuid)
     // Capabilities from entitlements: added to the bundle ID, and the profile made again.
     assert.equal(
-      await service.profiles.syncCapabilities(TEAM, 'app.example.signed', {
-        'aps-environment': 'production',
-        'com.apple.security.application-groups': ['group.example'],
-        'get-task-allow': false,
-      }),
+      await service.profiles.syncCapabilities(
+        TEAM,
+        'app.example.signed',
+        {
+          'aps-environment': 'production',
+          'com.apple.security.application-groups': ['group.example'],
+          'get-task-allow': false,
+        },
+        { platform: 'ios', distribution: 'appStore' },
+      ),
       true,
     )
     assert.equal(
-      await service.profiles.syncCapabilities(TEAM, 'app.example.signed', {
-        'aps-environment': 'production',
-      }),
+      await service.profiles.syncCapabilities(
+        TEAM,
+        'app.example.signed',
+        { 'aps-environment': 'production' },
+        { platform: 'ios', distribution: 'appStore' },
+      ),
       false,
     )
     const withPush = await ensure('appStore')
     assert.notEqual(withPush.uuid, recertified.uuid)
-    assert.deepEqual(
-      capabilitiesOf({ 'aps-environment': 'development', x: 1 }),
-      ['PUSH_NOTIFICATIONS'],
-    )
     // A profile made by hand is never deleted; only Mason's own IDs are.
     for (const call of apple.calls.filter((entry) => entry.method === 'DELETE'))
       assert.match(call.path, /^\/v1\/profiles\/PROFILE/)
@@ -1030,6 +1064,488 @@ describe('Apple on the master', function () {
     )
     assert(
       !service.notices().some((line) => line.includes('app.example.setup')),
+    )
+  })
+
+  it('U14.14 an archive’s Declared Age Range is enabled through the developer site, API types through the API, and the bundle ID’s profiles are made again; settings, platforms, distributions, no session and an unknown key', async () => {
+    const app = {
+      id: 3,
+      bundleId: 'app.example.setup',
+      name: 'Setup',
+      platforms: ['ios' as const, 'macos' as const],
+      apple: {
+        team: TEAM,
+        bundleIds: ['app.example.setup', 'app.example.setup.widgets'],
+      },
+    }
+    const iosProfiles = (): Record<string, string> =>
+      Object.fromEntries(
+        service.profiles
+          .list()
+          .filter(
+            (profile) =>
+              profile.bundleId === 'app.example.setup' &&
+              profile.platform === 'ios',
+          )
+          .map((profile) => [profile.distribution, profile.uuid]),
+      )
+    const before = iosProfiles()
+    assert.deepEqual(Object.keys(before).sort(), [
+      'adHoc',
+      'appStore',
+      'development',
+    ])
+    // What reached Apple: the API's POSTs and the developer site's PATCHes.
+    let seen = apple.calls.length
+    const sent = (): { posted: Json[]; patched: Json[]; read?: Json[] } => {
+      const calls = apple.calls.slice(seen)
+      seen = apple.calls.length
+      return {
+        posted: calls
+          .filter(
+            (call) =>
+              call.path === '/v1/bundleIdCapabilities' &&
+              call.method === 'POST',
+          )
+          .map((call) => call.body!.data.attributes),
+        patched: calls
+          .filter(
+            (call) =>
+              call.path.startsWith('/services-account/') &&
+              call.method === 'PATCH',
+          )
+          .map((call) => call.body!.data),
+        // The developer site's reads, proxied as POSTs, where there were any.
+        ...(calls.some(
+          (call) =>
+            call.path.startsWith('/services-account/') &&
+            call.method === 'POST',
+        )
+          ? {
+              read: calls
+                .filter(
+                  (call) =>
+                    call.path.startsWith('/services-account/') &&
+                    call.method !== 'PATCH',
+                )
+                .map((call) => [call.method, call.path, call.body]),
+            }
+          : {}),
+      }
+    }
+    const capabilityOf = (data: Json): string =>
+      data.relationships.bundleIdCapabilities.data[0].relationships.capability
+        .data.id
+    const bundle = [...apple.bundleIds.values()].find(
+      (item) => item.attributes.identifier === 'app.example.setup',
+    )!
+    const enabledTypes = (): string[] => apple.capabilities.get(bundle.id) ?? []
+    const sync = async (
+      entitlements: Record<string, unknown>,
+      platform: 'ios' | 'macos' | 'tvos' = 'ios',
+      distribution: 'development' | 'adHoc' | 'appStore' = 'adHoc',
+      warn?: (message: string) => void,
+    ): Promise<boolean> =>
+      await service.profiles.syncCapabilities(
+        TEAM,
+        'app.example.setup',
+        entitlements,
+        { platform, distribution, ...(warn == null ? {} : { warn }) },
+      )
+    // TeamStation's archive: Declared Age Range beside what Xcode adds.
+    assert.equal(
+      await sync({
+        'application-identifier': `${TEAM}.app.example.setup`,
+        'com.apple.developer.team-identifier': TEAM,
+        'get-task-allow': false,
+        'com.apple.developer.associated-domains': ['applinks:example.app'],
+        'com.apple.developer.declared-age-range': true,
+      }),
+      true,
+    )
+    // The API took the type its enum lists; the developer site the other,
+    // as Fastlane sends it. The session held no CSRF tokens yet, so the
+    // bundle ID was read there first; its answer's tokens went with the PATCH.
+    assert.deepEqual(sent(), {
+      read: [
+        [
+          'POST',
+          `/services-account/v1/bundleIds/${bundle.id}`,
+          {
+            urlEncodedQueryParams: 'fields%5BbundleIds%5D=seedId',
+            teamId: TEAM,
+          },
+        ],
+      ],
+      posted: [{ capabilityType: 'ASSOCIATED_DOMAINS' }],
+      patched: [
+        {
+          type: 'bundleIds',
+          id: bundle.id,
+          attributes: {
+            permissions: { edit: true, delete: true },
+            seedId: TEAM,
+            teamId: TEAM,
+          },
+          relationships: {
+            bundleIdCapabilities: {
+              data: [
+                {
+                  type: 'bundleIdCapabilities',
+                  attributes: { enabled: true, settings: [] },
+                  relationships: {
+                    capability: {
+                      data: { type: 'capabilities', id: 'DECLARED_AGE_RANGE' },
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+      ],
+    })
+    assert(enabledTypes().includes('DECLARED_AGE_RANGE'))
+    // Every distribution's profile is made again at its next ensure.
+    await service.setupApp(app)
+    const after = iosProfiles()
+    for (const distribution of ['development', 'adHoc', 'appStore'])
+      assert.notEqual(after[distribution], before[distribution], distribution)
+    // Settings Apple needs: iCloud with CloudKit, the entitlement's data
+    // protection level, Sign in with Apple as the primary App ID.
+    sent()
+    assert.equal(
+      await sync({
+        'com.apple.developer.icloud-services': ['CloudKit'],
+        'com.apple.developer.icloud-container-identifiers': ['iCloud.example'],
+        'com.apple.developer.default-data-protection':
+          'NSFileProtectionCompleteUnlessOpen',
+        'com.apple.developer.applesignin': ['Default'],
+        'com.apple.developer.usernotifications.time-sensitive': true,
+        'com.apple.developer.devicecheck.appattest-environment': 'production',
+      }),
+      true,
+    )
+    const settings = sent()
+    assert.deepEqual(settings.posted, [
+      {
+        capabilityType: 'APPLE_ID_AUTH',
+        settings: [
+          {
+            key: 'APPLE_ID_AUTH_APP_CONSENT',
+            options: [{ key: 'PRIMARY_APP_CONSENT' }],
+          },
+        ],
+      },
+      {
+        capabilityType: 'DATA_PROTECTION',
+        settings: [
+          {
+            key: 'DATA_PROTECTION_PERMISSION_LEVEL',
+            options: [{ key: 'PROTECTED_UNLESS_OPEN' }],
+          },
+        ],
+      },
+      {
+        capabilityType: 'ICLOUD',
+        settings: [{ key: 'ICLOUD_VERSION', options: [{ key: 'XCODE_6' }] }],
+      },
+    ])
+    // With the tokens held, the PATCHes go at once.
+    assert.equal(settings.read, undefined)
+    assert.deepEqual(settings.patched.map(capabilityOf), [
+      'APP_ATTEST',
+      'USERNOTIFICATIONS_TIMESENSITIVE',
+    ])
+    // Tokens Apple no longer takes: refused, as Apple refuses a PATCH without them.
+    csrf = { csrf: 'stale', csrf_ts: '1' }
+    await assert.rejects(
+      sync({ 'com.apple.developer.group-session': true }),
+      /needs the Group Activities capability \(GROUP_ACTIVITIES\) .*HTTP 403: Forbidden: Invalid CSRF token$/,
+    )
+    // The refusal's answer carried fresh tokens, which the next PATCH sends.
+    assert.equal(
+      await sync({ 'com.apple.developer.group-session': true }),
+      true,
+    )
+    sent()
+    await assert.rejects(
+      sync({
+        'com.apple.developer.default-data-protection': 'NSFileSomething',
+      }),
+      /default-data-protection is NSFileSomething, not one of NSFileProtectionComplete/,
+    )
+    // An API type the API's enum has dropped goes through the developer site.
+    apple.unlistedTypes.add('MAPS')
+    assert.equal(
+      await sync({ 'com.apple.developer.maps': true }, 'macos', 'appStore'),
+      true,
+    )
+    const maps = sent()
+    assert.deepEqual(maps.posted, [{ capabilityType: 'MAPS' }])
+    assert.deepEqual(maps.patched.map(capabilityOf), ['MAPS'])
+    apple.unlistedTypes.clear()
+    // Without a signed-in Apple ID, or once its session ended, the developer
+    // site's types fail naming the capability, the bundle ID and the remedy.
+    portalSignedIn = false
+    await assert.rejects(
+      sync({
+        'com.apple.developer.weatherkit': true,
+        'com.apple.developer.homekit': true,
+      }),
+      /^Error: app\.example\.setup needs WeatherKit \(WEATHERKIT\) for com\.apple\.developer\.weatherkit, which only the developer site enables: enable WeatherKit for app\.example\.setup in the Apple Developer portal, or sign the Apple ID in on the master$/,
+    )
+    // The API's types are enabled all the same.
+    assert(enabledTypes().includes('HOMEKIT'))
+    // A build that signed already only warns.
+    const unsigned: string[] = []
+    assert.equal(
+      await sync(
+        { 'com.apple.developer.shared-with-you': true },
+        'ios',
+        'adHoc',
+        (message) => unsigned.push(message),
+      ),
+      false,
+    )
+    assert.match(
+      unsigned.join('\n'),
+      /^app\.example\.setup needs Shared with You \(SHARED_WITH_YOU\) .*sign the Apple ID in on the master$/,
+    )
+    portalSignedIn = true
+    apple.portalCookie = undefined
+    await assert.rejects(
+      sync({ 'com.apple.developer.weatherkit': true }),
+      /the Apple ID session has ended: enable WeatherKit for app\.example\.setup in the Apple Developer portal, or sign the Apple ID in on the master$/,
+    )
+    apple.portalCookie = 'myacinfo=fake-session'
+    assert(!enabledTypes().includes('WEATHERKIT'))
+    // Entitlements no capability grants change nothing.
+    sent()
+    assert.equal(
+      await sync({
+        'keychain-access-groups': [`${TEAM}.*`],
+        'beta-reports-active': true,
+        'com.apple.security.app-sandbox': true,
+        'com.apple.security.network.client': true,
+        'com.apple.developer.family-controls': false,
+        'com.apple.developer.maps': true,
+      }),
+      false,
+    )
+    assert.deepEqual(sent(), { posted: [], patched: [] })
+    // An unknown key fails, naming it, before anything changes at Apple...
+    await assert.rejects(
+      sync({
+        'com.apple.developer.weatherkit': true,
+        'com.apple.developer.foo': true,
+        'com.apple.developer.mail-client': true,
+      }),
+      /^Error: com\.apple\.developer\.foo, com\.apple\.developer\.mail-client need capabilities Mason cannot enable$/,
+    )
+    await assert.rejects(
+      sync({ 'com.apple.developer.foo': true }),
+      /^Error: com\.apple\.developer\.foo needs a capability Mason cannot enable$/,
+    )
+    assert.deepEqual(sent(), { posted: [], patched: [] })
+    // ...unless the caller only warns: then the rest is enabled.
+    const warnings: string[] = []
+    assert.equal(
+      await sync(
+        {
+          'com.apple.developer.weatherkit': true,
+          'com.apple.developer.mail-client': true,
+        },
+        'ios',
+        'adHoc',
+        (message) => warnings.push(message),
+      ),
+      true,
+    )
+    assert.deepEqual(warnings, [
+      'com.apple.developer.mail-client needs a capability Mason cannot enable',
+    ])
+    assert(enabledTypes().includes('WEATHERKIT'))
+    // Platforms: User Management is a tvOS capability.
+    assert.equal(
+      await sync({
+        'com.apple.developer.user-management': ['get-current-user'],
+      }),
+      false,
+    )
+    assert.equal(
+      await sync(
+        { 'com.apple.developer.user-management': ['get-current-user'] },
+        'tvos',
+      ),
+      true,
+    )
+    // A capability Apple grants only on request: its refusal names it and the key.
+    apple.refuseCapabilities.add('FAMILY_CONTROLS_DISTRIBUTION')
+    const refused = await sync({
+      'com.apple.developer.family-controls': true,
+    }).catch((error: unknown) => error)
+    assert(refused instanceof AppleApiError)
+    assert.equal(refused.status, 403)
+    assert.match(
+      refused.message,
+      /^app\.example\.setup needs the Family Controls \(Distribution\) capability \(FAMILY_CONTROLS_DISTRIBUTION\) for com\.apple\.developer\.family-controls, which Apple grants a team only on request: PATCH \/services-account\/v1\/bundleIds\/BUNDLE\d+: HTTP 403: Forbidden: .*not available for this team$/,
+    )
+    // Development profiles take the development-only Family Controls.
+    assert.equal(
+      await sync(
+        { 'com.apple.developer.family-controls': true },
+        'ios',
+        'development',
+      ),
+      true,
+    )
+    assert(enabledTypes().includes('FAMILY_CONTROLS'))
+    apple.refuseCapabilities.clear()
+  })
+
+  it('U14.14 every capability in the table is chosen for its entitlement on some platform and distribution, and the OpenAPI enum’s types are all there', () => {
+    const chosen = new Set<string>()
+    for (const entry of capabilities)
+      for (const key of entry.keys)
+        for (const platform of entry.platforms)
+          for (const distribution of entry.distributions ?? [
+            'development' as const,
+            'adHoc' as const,
+            'appStore' as const,
+            'developerId' as const,
+          ])
+            for (const found of capabilitiesFor(
+              {
+                [key]:
+                  key === 'com.apple.developer.default-data-protection'
+                    ? 'NSFileProtectionComplete'
+                    : entry.values?.[key] == null
+                      ? true
+                      : [entry.values[key].at(-1)],
+              },
+              platform,
+              distribution,
+            ).needed)
+              chosen.add(found.type)
+    // Two share a key and its values with a capability that wins over them.
+    assert.deepEqual(
+      capabilities
+        .map((entry) => entry.type)
+        .filter((type) => !chosen.has(type)),
+      ['DRIVERKIT_USBTRANSPORT_VENDORPRODUCT', 'ONDEMANDINSTALL_EXTENSIONS'],
+    )
+    assert.equal(capabilities.length, 209)
+    // App Store Connect API 4.5.1's CapabilityType enum, but In-App Purchase, which no entitlement needs.
+    const enumTypes = [
+      'ICLOUD',
+      'GAME_CENTER',
+      'PUSH_NOTIFICATIONS',
+      'WALLET',
+      'INTER_APP_AUDIO',
+      'MAPS',
+      'ASSOCIATED_DOMAINS',
+      'PERSONAL_VPN',
+      'APP_GROUPS',
+      'HEALTHKIT',
+      'HOMEKIT',
+      'WIRELESS_ACCESSORY_CONFIGURATION',
+      'APPLE_PAY',
+      'DATA_PROTECTION',
+      'SIRIKIT',
+      'NETWORK_EXTENSIONS',
+      'MULTIPATH',
+      'HOT_SPOT',
+      'NFC_TAG_READING',
+      'CLASSKIT',
+      'AUTOFILL_CREDENTIAL_PROVIDER',
+      'ACCESS_WIFI_INFORMATION',
+      'NETWORK_CUSTOM_PROTOCOL',
+      'COREMEDIA_HLS_LOW_LATENCY',
+      'SYSTEM_EXTENSION_INSTALL',
+      'USER_MANAGEMENT',
+      'APPLE_ID_AUTH',
+    ]
+    for (const type of enumTypes) assert(chosen.has(type), type)
+    // Where several share a key, its value chooses.
+    const one = (
+      entitlements: Record<string, unknown>,
+      distribution: 'development' | 'adHoc' = 'adHoc',
+    ): string[] =>
+      capabilitiesFor(entitlements, 'ios', distribution).needed.map(
+        (entry) => entry.type,
+      )
+    assert.deepEqual(
+      one({ 'com.apple.developer.healthkit.access': ['health-records'] }),
+      ['HEALTHKIT'],
+    )
+    assert.deepEqual(
+      one({
+        'com.apple.developer.healthkit': true,
+        'com.apple.developer.healthkit.access': ['verifiable-health-records'],
+      }),
+      ['HEALTHKIT', 'HEALTHKIT_ACCESS_VHR'],
+    )
+    assert.deepEqual(one({ 'com.apple.developer.user-fonts': ['app-usage'] }), [
+      'FONT_INSTALLATION',
+    ])
+    assert.deepEqual(
+      one({ 'com.apple.developer.user-fonts': ['font-enumeration'] }),
+      ['FONTS_MANAGED'],
+    )
+    assert.deepEqual(
+      one({
+        'com.apple.developer.driverkit.family.audio': true,
+      }),
+      ['DRIVERKIT_FAMILY_AUDIO'],
+    )
+    assert.deepEqual(
+      one(
+        { 'com.apple.developer.driverkit.family.audio': true },
+        'development',
+      ),
+      ['DRIVERKIT_FAMILY_AUDIO_PUB'],
+    )
+    // An unmatched value still finds the key's capability.
+    assert.deepEqual(one({ 'com.apple.developer.user-fonts': ['other'] }), [
+      'FONT_INSTALLATION',
+    ])
+    // HealthKit's value is a choice for its access key only.
+    assert.deepEqual(
+      capabilities.find((entry) => entry.type === 'HEALTHKIT')!.values,
+      { 'com.apple.developer.healthkit.access': ['health-records'] },
+    )
+    // Sign in with Apple signs Developer ID apps too.
+    assert.deepEqual(
+      capabilitiesFor(
+        { 'com.apple.developer.applesignin': ['Default'] },
+        'macos',
+        'developerId',
+      ).needed.map((entry) => entry.type),
+      ['APPLE_ID_AUTH'],
+    )
+    // Keys of one capability are reported together; unknown ones apart.
+    assert.deepEqual(
+      capabilitiesFor(
+        {
+          'aps-environment': 'production',
+          'com.apple.developer.aps-environment': 'production',
+          'com.apple.developer.carplay-maps': true,
+        },
+        'ios',
+        'appStore',
+      ),
+      {
+        needed: [
+          {
+            type: 'PUSH_NOTIFICATIONS',
+            name: 'Push Notifications',
+            keys: ['aps-environment', 'com.apple.developer.aps-environment'],
+            requested: false,
+          },
+        ],
+        unknown: ['com.apple.developer.carplay-maps'],
+      },
     )
   })
 

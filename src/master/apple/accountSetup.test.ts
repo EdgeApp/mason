@@ -832,4 +832,66 @@ describe('Apple setup on a master', function () {
     web.refuse = undefined
     web.refusePath = undefined
   })
+
+  it('U14.14 a capability the API cannot enable goes through the developer site with the signed-in Apple ID’s session; signed out, it names the remedy', async () => {
+    const master = c.master.master!
+    apple.portal = { origin: connect.origin, cookie: connect.portalCookie! }
+    await master.settings.set(admin, 'apple', {
+      teams: { ABCDE12345: { ...connectKey, name: 'Example Team' } },
+    })
+    // The sign-in's own setup may make the team a key; it is one the fake trusts.
+    web.nextKeys.push({
+      keyId: connectKey.keyId,
+      privateKey: connectKey.privateKey,
+    })
+    const from = web.calls.length
+    await signInTrusted()
+    await settled(from)
+    const sync = async (): Promise<boolean> =>
+      await master.appleSigning.profiles.syncCapabilities(
+        'ABCDE12345',
+        'app.example.ages',
+        { 'com.apple.developer.declared-age-range': true },
+        { platform: 'ios', distribution: 'adHoc' },
+      )
+    assert.equal(await sync(), true)
+    const bundle = [...connect.bundleIds.values()].find(
+      (item) => item.attributes.identifier === 'app.example.ages',
+    )!
+    assert.deepEqual(connect.capabilities.get(bundle.id), [
+      'DECLARED_AGE_RANGE',
+    ])
+    // No CSRF tokens yet: the bundle ID was read on the site first, and the
+    // tokens its answer carried were kept with the session and sent.
+    const portal = (): string[] =>
+      connect.calls
+        .filter((call) => call.path.startsWith('/services-account/'))
+        .map((call) => `${call.method} ${call.path}`)
+    assert.deepEqual(portal(), [
+      `POST /services-account/v1/bundleIds/${bundle.id}`,
+      `PATCH /services-account/v1/bundleIds/${bundle.id}`,
+    ])
+    assert(master.apple.portalTokens())
+    // Held now, they go with the next PATCH at once.
+    assert.equal(
+      await master.appleSigning.profiles.syncCapabilities(
+        'ABCDE12345',
+        'app.example.ages',
+        { 'com.apple.developer.weatherkit': true },
+        { platform: 'ios', distribution: 'adHoc' },
+      ),
+      true,
+    )
+    assert.deepEqual(portal().slice(2), [
+      `PATCH /services-account/v1/bundleIds/${bundle.id}`,
+    ])
+    // Signed out, nothing reaches Apple and the failure says what to do.
+    await master.apple.signOut()
+    connect.capabilities.delete(bundle.id)
+    await assert.rejects(
+      sync(),
+      /enable Declared Age Range for app\.example\.ages in the Apple Developer portal, or sign the Apple ID in on the master$/,
+    )
+    apple.portal = undefined
+  })
 })
