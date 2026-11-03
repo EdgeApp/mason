@@ -944,7 +944,8 @@ describe('Typed form fields', () => {
       ),
       false,
     )
-    // On a page, relative times are rewritten every 30 seconds.
+    // On a page, relative times are rewritten every 30 seconds, from the real clock.
+    recent.dataset.at = String(Date.now() - (2 * 3_600_000 + 31 * 60_000))
     const live = new FakeLiveWindow()
     start(doc as unknown as Document, {
       fetch: (async () => reply(200, {})) as typeof fetch,
