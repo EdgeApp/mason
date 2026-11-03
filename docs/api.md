@@ -303,7 +303,7 @@ The body of `POST` and `PUT` takes these fields, all optional for `PUT`:
 | Field | Type |
 | --- | --- |
 | `name` | text, up to 120 characters |
-| `username` | 1–64 letters, digits, dots, dashes or underscores; unique, ignoring case |
+| `username` | 1–64 letters, digits, dots, dashes or underscores; unique, ignoring case (a person may change only its case) |
 | `role` | `admin`, `manager`, `developer` or `tester` (default `tester`) |
 | `disabled` | boolean |
 | `email` | an email address, up to 320 characters; unique |
@@ -311,7 +311,13 @@ The body of `POST` and `PUT` takes these fields, all optional for `PUT`:
 | `password` | `{ "clientHash": "<64 hex>", "clientParameters": { … } }`, with parameters of at least 32 MiB, 6 iterations and 4 lanes |
 
 `POST` needs `email`, and `name` or `username`; a password needs a
-username. `POST` also takes `"invite": true`, which makes the person's
+username. Setting a password is audited as `person.password` besides
+`person.create` or `person.update`; only `people.change` (administrators)
+may set another person's, and the People page does it with a client hash
+the browser makes from a password typed twice, as the sign-in page hashes
+one. Mason never sees the password, so its length and character rules are
+checked in the browser; the master holds the hash's costs to the minimums
+above. `POST` also takes `"invite": true`, which makes the person's
 invitation link at once and adds `"invitation": { "url", "expiresAt" }` to
 the answer. Every `PUT` bumps the person's permission version, which ends
 their sessions. A raw `password` string is refused (400). 404 for an unknown
@@ -341,7 +347,9 @@ adding anyone. It is audited as `person.invite`.
 
 **`DELETE /api/v2/people/:id/invitation`** revokes the link
 (`person.invite.revoke`) and answers `null`, also when there was none.
-Disabling or removing the person revokes it too.
+Disabling or removing the person revokes it too, and so does setting
+their password, by an administrator or themselves (audited as
+`person.invite.revoke`).
 
 The link opens a page on the host or the master (`GET /auth/invite`) whose
 script reads the token from the fragment and makes two requests, which

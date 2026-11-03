@@ -224,6 +224,8 @@ export class People {
         [ANY_METHOD]: email,
       })
       this.master.audit(actor, 'person.create', String(id))
+      if (record != null)
+        this.master.audit(actor, 'person.password', String(id))
       this.master.change('account', id)
       return id
     })
@@ -261,7 +263,7 @@ export class People {
       if (before.role === 'admin' && !before.disabled)
         if (role !== 'admin' || disabled) this.keepAnAdmin(id)
       if (input.username != null && input.username !== before.username)
-        this.usernameFree(input.username)
+        this.usernameFree(input.username, id)
       if (record != null && (input.username ?? before.username) == null)
         throw new Error('A master password needs a username')
       this.db
@@ -281,9 +283,16 @@ export class People {
       if (input.addresses != null) this.setAddresses(id, input.addresses)
       if (input.email != null)
         this.setAddresses(id, { [ANY_METHOD]: input.email })
-      // A disabled person's invitation link stops working.
-      if (disabled) this.dropInvitation(id)
+      // A disabled person's invitation link stops working, and so does one
+      // a password set another way makes needless: revoked once, and
+      // audited when a password ended it.
+      const revoked = (disabled || record != null) && this.dropInvitation(id)
       this.master.audit(actor, 'person.update', String(id))
+      if (record != null) {
+        this.master.audit(actor, 'person.password', String(id))
+        if (revoked)
+          this.master.audit(actor, 'person.invite.revoke', String(id))
+      }
       this.master.change('account', id)
     })
     return this.person(id)!
@@ -602,12 +611,15 @@ export class People {
     }
   }
 
-  private usernameFree(username: string | undefined): void {
+  /** Refuses a username anyone else has, ignoring case; `except` may change its own case. */
+  private usernameFree(username: string | undefined, except?: number): void {
     if (
       username != null &&
       this.db
-        .prepare('SELECT 1 FROM accounts WHERE username=? COLLATE NOCASE')
-        .get(username) != null
+        .prepare(
+          'SELECT 1 FROM accounts WHERE username=? COLLATE NOCASE AND id IS NOT ?',
+        )
+        .get(username, except ?? null) != null
     )
       throw new Conflict('That username is taken')
   }

@@ -501,8 +501,11 @@ export function masterPages(
       current: MasterSession,
       req: express.Request,
     ) => Promise<string> | string,
+    /** Whether the page hashes passwords in the browser. */
+    passwords = false,
   ): void => {
     app.get(path, (req, res) => {
+      if (passwords) hashing(res)
       const current = session(req)
       if (current == null) {
         res.redirect(303, master.configured() ? '/sign-in' : '/')
@@ -853,25 +856,35 @@ export function masterPages(
       })
     },
   )
-  guarded('/people', 'people.read', 'People', 'people', (current) => {
-    const actor = sessionActor(current)
-    return peopleView({
-      people: master.people.list(actor).map((person) => ({
-        id: person.id,
-        name: person.name,
-        role: person.role,
-        ...(person.email == null ? {} : { email: person.email }),
-        addresses: person.addresses,
-        ...(person.username == null ? {} : { username: person.username }),
-        disabled: person.disabled,
-        ...(person.invitation == null ? {} : { invitation: person.invitation }),
-      })),
-      now: master.database.now(),
-      groups: can(actor, 'groups.read') ? master.people.groups(actor) : [],
-      canChange: can(actor, 'people.change'),
-      canChangeGroups: can(actor, 'groups.change'),
-    })
-  })
+  guarded(
+    '/people',
+    'people.read',
+    'People',
+    'people',
+    (current) => {
+      const actor = sessionActor(current)
+      return peopleView({
+        people: master.people.list(actor).map((person) => ({
+          id: person.id,
+          name: person.name,
+          role: person.role,
+          ...(person.email == null ? {} : { email: person.email }),
+          addresses: person.addresses,
+          ...(person.username == null ? {} : { username: person.username }),
+          disabled: person.disabled,
+          password: person.password,
+          ...(person.invitation == null
+            ? {}
+            : { invitation: person.invitation }),
+        })),
+        now: master.database.now(),
+        groups: can(actor, 'groups.read') ? master.people.groups(actor) : [],
+        canChange: can(actor, 'people.change'),
+        canChangeGroups: can(actor, 'groups.change'),
+      })
+    },
+    true,
+  )
   guarded(
     '/projects/new',
     'projects.change',

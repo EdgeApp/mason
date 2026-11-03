@@ -5,6 +5,7 @@ import type { WorkerRequest, WorkerResponse } from './passwordWorker.js'
 export interface Field {
   value: string
   readOnly?: boolean
+  checked?: boolean
   files?: { length: number; 0?: { text: () => Promise<string> } } | null
 }
 export interface Output {
@@ -21,6 +22,8 @@ export interface Form {
     /** An invitation form's endpoints: whom the token is for, and using it. */
     lookup?: string
     accept?: string
+    /** A person's form: the API path it sends to. */
+    path?: string
   }
   addEventListener: (
     type: 'submit',
@@ -65,6 +68,23 @@ function newPassword(form: Form): string {
   return password
 }
 
+/** A link shown once in a form's copy box (`data-field="token"`). */
+interface LinkBox {
+  hidden: boolean
+  querySelector: (selector: string) => unknown
+}
+function reveal(form: Form, text: string): void {
+  const box = form.querySelector('[data-field="token"]') as LinkBox | null
+  if (box == null) return
+  box.hidden = false
+  const pre = box.querySelector('pre') as Output | null
+  if (pre != null) pre.textContent = text
+  const copy = box.querySelector('button[data-copy]') as {
+    dataset: { copy?: string }
+  } | null
+  if (copy != null) copy.dataset.copy = text
+}
+
 /** A refusal's message, with when to retry when the master says. */
 async function failure(response: Response): Promise<string> {
   const body = (await response.json().catch(() => ({}))) as {
@@ -76,7 +96,7 @@ async function failure(response: Response): Promise<string> {
   return `${message}. Try again at ${new Date(body.retryAt).toLocaleTimeString()}.`
 }
 
-/** Wires the master's forms: sign-in, first-run setup, restore, backups, sign-out and invitations. */
+/** Wires the master's forms: sign-in, first-run setup, restore, backups, sign-out, invitations and people's passwords. */
 export function start(doc: PageDocument, deps: PageDeps): void {
   const csrf =
     (
@@ -181,6 +201,52 @@ export function start(doc: PageDocument, deps: PageDeps): void {
     'sign-out': async () => {
       await call('DELETE', '/api/v2/session')
       deps.assign('/sign-in')
+    },
+    // An administrator sets a person's password: only its client hash leaves the page.
+    'person-password': async (form) => {
+      const password = newPassword(form)
+      const { clientHash, clientParameters } = await hashed({
+        kind: 'new',
+        password,
+      })
+      const saved = await call('PUT', form.dataset.path ?? '', {
+        username: field(form, 'username'),
+        password: { clientHash, clientParameters },
+      })
+      if (!saved.ok) throw new Error(await failure(saved))
+      deps.assign('/people')
+    },
+    // Adds a person, with a password or an invitation link when asked.
+    'person-add': async (form) => {
+      const username = field(form, 'username')
+      const typed = field(form, 'password') !== ''
+      if (typed && username === '')
+        throw new Error('A password needs a username')
+      const password = typed
+        ? await hashed({ kind: 'new', password: newPassword(form) })
+        : undefined
+      const invite =
+        (form.elements.namedItem('invite') as Field | null)?.checked === true
+      const added = await call('POST', '/api/v2/people', {
+        name: field(form, 'name'),
+        role: field(form, 'role'),
+        email: field(form, 'email'),
+        invite,
+        ...(username === '' ? {} : { username }),
+        ...(password == null
+          ? {}
+          : {
+              password: {
+                clientHash: password.clientHash,
+                clientParameters: password.clientParameters,
+              },
+            }),
+      })
+      if (!added.ok) throw new Error(await failure(added))
+      const url = ((await added.json()) as { invitation?: { url?: string } })
+        .invitation?.url
+      if (url == null) deps.assign('/people')
+      else reveal(form, url)
     },
     invite: async (form) => {
       const password = newPassword(form)

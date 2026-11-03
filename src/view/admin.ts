@@ -1485,6 +1485,8 @@ export function peopleView(data: {
     addresses: Record<string, string>
     username?: string
     disabled?: boolean
+    /** Whether they have a password. */
+    password?: boolean
     /** An unused invitation link: when it expires. */
     invitation?: { expiresAt: number }
   }>
@@ -1518,6 +1520,23 @@ export function peopleView(data: {
       { kind: 'secondary' },
     )}`
   }
+  const passwordFields = (prefix: string, required: boolean): string =>
+    `<label for="${prefix}-password">${required ? 'Password' : 'Password (optional)'}</label><input id="${prefix}-password" name="password" type="password" autocomplete="new-password"${required ? ' required' : ''}><label for="${prefix}-confirm">Confirm the password</label><input id="${prefix}-confirm" name="confirm" type="password" autocomplete="new-password"${required ? ' required' : ''}><small class="hint">At least 8 characters with uppercase, lowercase and a number, or 17 characters or more. The browser hashes it; Mason never sees it.</small>`
+  const usernameField = (
+    prefix: string,
+    value: string | undefined,
+    required: boolean,
+  ): string =>
+    `<label for="${prefix}-username">${required ? 'Username' : 'Username (needed for a password)'}</label><input id="${prefix}-username" name="username" autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}" maxlength="64" value="${escape(value ?? '')}"${required ? ' required' : ''}>`
+  // Setting it ends the person's sessions; they sign in with it on the host and the master.
+  const password = (person: (typeof data.people)[number]): string =>
+    !data.canChange || person.disabled === true
+      ? ''
+      : action(
+          person.password === true ? 'Change password' : 'Set password',
+          `<form data-mason="person-password" data-path="/api/v2/people/${person.id}"><p>${escape(person.name)} signs in with this username and password on the host and the master. Their sessions end.</p>${usernameField(`person-${person.id}`, person.username, true)}${passwordFields(`person-${person.id}`, true)}<button>${icon('key')} Set password</button>${statusLine}</form>`,
+          { kind: 'secondary' },
+        )
   const people = data.people
     .map(
       (person) =>
@@ -1542,11 +1561,11 @@ export function peopleView(data: {
                 },
               )
             : escape(person.role)
-        }</td><td>${invitation(person)}${data.canChange ? apiForm(`/api/v2/people/${person.id}`, '', 'Remove', { method: 'DELETE', then: 'reload', className: 'danger' }) : ''}</td></tr>`,
+        }</td><td>${invitation(person)}${password(person)}${data.canChange ? apiForm(`/api/v2/people/${person.id}`, '', 'Remove', { method: 'DELETE', then: 'reload', className: 'danger' }) : ''}</td></tr>`,
     )
     .join('')
   const add = data.canChange
-    ? `<section class="panel"><h2>${icon('add')}Add a person</h2>${apiForm('/api/v2/people', `<label for="person-name">Name</label><input id="person-name" name="name" required><label for="person-role">Role</label><select id="person-role" name="role">${roles.map((role) => `<option${role === 'tester' ? ' selected' : ''}>${role}</option>`).join('')}</select><label for="person-email">Email</label><input id="person-email" name="email" type="email" required><p>They sign in with any enabled sign-in method that confirms this address.</p>${field('person-invite', 'Make an invitation link', '<input id="person-invite" name="invite" type="checkbox" data-kind="checkbox">', 'A link, valid for a week, where they choose a username and password. Mason sends no email: copy it to them.')}${linkBox}`, `${icon('add')} Add`, { fields: ['name', 'email', 'role', 'invite'], then: 'link' })}</section>`
+    ? `<section class="panel"><h2>${icon('add')}Add a person</h2><form data-mason="person-add"><label for="person-name">Name</label><input id="person-name" name="name" required><label for="person-role">Role</label><select id="person-role" name="role">${roles.map((role) => `<option${role === 'tester' ? ' selected' : ''}>${role}</option>`).join('')}</select><label for="person-email">Email</label><input id="person-email" name="email" type="email" required><p>They sign in with any enabled sign-in method that confirms this address, with a password you set here, or with one they choose from an invitation link.</p>${usernameField('person-new', undefined, false)}${passwordFields('person-new', false)}${field('person-invite', 'Make an invitation link', '<input id="person-invite" name="invite" type="checkbox">', 'A link, valid for a week, where they choose a username and password. Mason sends no email: copy it to them.')}${linkBox}<button>${icon('add')} Add</button>${statusLine}</form></section>`
     : ''
   const name = new Map(data.people.map((person) => [person.id, person.name]))
   const groups = data.groups

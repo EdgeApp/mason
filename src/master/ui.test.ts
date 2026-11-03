@@ -997,13 +997,14 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     const adminPeople = (
       await request(c.master, 'GET', '/people', signIn('admin'))
     ).text
-    assert.match(adminPeople, /data-path="\/api\/v2\/people"/)
+    assert.match(adminPeople, /<form data-mason="person-add">/)
     assert.match(adminPeople, /name="email" type="email" required/)
     assert.doesNotMatch(adminPeople, /addresses\./)
     const managerPeople = (
       await request(c.master, 'GET', '/people', signIn('manager'))
     ).text
     assert.doesNotMatch(managerPeople, /data-path="\/api\/v2\/people/)
+    assert.doesNotMatch(managerPeople, /data-mason="person-(add|password)"/)
     assert.match(managerPeople, /tester person/)
     // A project's page names its secrets and never shows their values.
     const manager2 = signIn('manager')

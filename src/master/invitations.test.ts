@@ -538,4 +538,269 @@ describe('Invitation links', function () {
     assert.match(page.text, /name="invite" type="checkbox"/)
     assert(!page.text.includes(tokenOf(made.json.invitation.url)))
   })
+
+  /** An administrator's browser session on the master, and its CSRF proof. */
+  const adminSession = async (): Promise<{ b: Browser; csrf: string }> => {
+    const b = onMaster()
+    const secret = await password('Correct-Horse-9', '0f')
+    const signedIn = await b.send('POST', '/api/v2/session', {
+      username: 'paul',
+      clientHash: secret.clientHash,
+    })
+    assert.equal(signedIn.status, 200)
+    return { b, csrf: signedIn.json.csrf as string }
+  }
+
+  it('M4.3 an administrator sets a person’s password and username: their sessions end, it is audited, and it signs them in on the master and the host', async () => {
+    const made = await c.api('POST', '/api/v2/people', {
+      name: 'Sam Set',
+      email: 'sam@example.test',
+      invite: true,
+    })
+    const id = made.json.id as number
+    // Sam is signed in on the master already, through an invitation.
+    const sam = onMaster()
+    const first = await password('Sam-First-9', 'a3')
+    assert.equal(
+      (
+        await sam.send('POST', '/auth/invite', {
+          token: tokenOf(made.json.invitation.url),
+          username: 'sam-first',
+          ...first,
+        })
+      ).status,
+      200,
+    )
+    assert.equal((await sam.send('GET', '/api/v2/session')).status, 200)
+    const before = master().people.get(admin, id).permissionVersion
+    const { b, csrf } = await adminSession()
+    const chosen = await password('Sam-Second-9', 'b4')
+    const set = await b.send(
+      'PUT',
+      `/api/v2/people/${id}`,
+      { username: 'sam', password: chosen },
+      { 'x-mason-csrf': csrf },
+    )
+    assert.equal(set.status, 200, set.text)
+    assert.equal(set.json.username, 'sam')
+    assert.equal(set.json.password, true)
+    assert(set.json.permissionVersion > before)
+    assert(!set.text.includes(chosen.clientHash))
+    assert.equal(
+      (await sam.send('GET', '/api/v2/session')).status,
+      401,
+      'their sessions end',
+    )
+    const paul = master()
+      .database.db.prepare('SELECT id FROM accounts WHERE username=?')
+      .get('paul') as { id: number }
+    const audit = master()
+      .database.db.prepare(
+        "SELECT actor FROM audit WHERE action='person.password' AND target=?",
+      )
+      .all(String(id))
+      .map((row) => row.actor)
+    assert.deepEqual(audit, [paul.id])
+    // The old password is gone; the new one signs in on the master…
+    assert.equal(
+      (
+        await onMaster().send('POST', '/api/v2/session', {
+          username: 'sam',
+          clientHash: first.clientHash,
+        })
+      ).status,
+      401,
+    )
+    const master1 = await onMaster().send('POST', '/api/v2/session', {
+      username: 'sam',
+      clientHash: chosen.clientHash,
+    })
+    assert.equal(master1.status, 200)
+    assert.equal(master1.json.name, 'Sam Set')
+    // …and on the host.
+    const host1 = await onHost().send('POST', '/auth/password', {
+      username: 'sam',
+      clientHash: chosen.clientHash,
+    })
+    assert.equal(host1.status, 200, host1.text)
+  })
+
+  it('M4.4 only an administrator sets another’s password, a person only their own, and a new password must meet the minimum costs', async () => {
+    const made = await c.api('POST', '/api/v2/people', {
+      name: 'Morgan Manager',
+      username: 'morgan',
+      role: 'manager',
+      email: 'morgan@example.test',
+    })
+    const target = await c.api('POST', '/api/v2/people', {
+      name: 'Nobody Yet',
+      email: 'nobody@example.test',
+    })
+    const chosen = await password('Morgan-Horse-9', 'c5')
+    const manager = master().keys.create(admin, {
+      role: 'manager',
+      name: 'manager key',
+    }).token
+    const refused = await c.api(
+      'PUT',
+      `/api/v2/people/${target.json.id}`,
+      { username: 'nobody', password: chosen },
+      manager,
+    )
+    assert.equal(refused.status, 403)
+    assert.equal(master().people.get(admin, target.json.id).password, false)
+    // A manager may still set their own password.
+    const self = onMaster()
+    await master().people.update(admin, made.json.id, { password: chosen })
+    const signedIn = await self.send('POST', '/api/v2/session', {
+      username: 'morgan',
+      clientHash: chosen.clientHash,
+    })
+    const own = await self.send(
+      'PUT',
+      `/api/v2/people/${made.json.id}`,
+      { password: await password('Morgan-Again-9', 'c6') },
+      { 'x-mason-csrf': signedIn.json.csrf },
+    )
+    assert.equal(own.status, 200, own.text)
+    const weak = {
+      clientHash: chosen.clientHash,
+      clientParameters: { ...chosen.clientParameters, iterations: 2 },
+    }
+    const low = await c.api('PUT', `/api/v2/people/${target.json.id}`, {
+      username: 'nobody',
+      password: weak,
+    })
+    assert.equal(low.status, 400)
+    assert.match(low.json.error, /at least 32 MiB, 6 iterations and 4 lanes/)
+    assert.equal(
+      (
+        await c.api('PUT', `/api/v2/people/${target.json.id}`, {
+          password: chosen,
+        })
+      ).json.error,
+      'A master password needs a username',
+    )
+    assert.equal(
+      (
+        await c.api('PUT', `/api/v2/people/${target.json.id}`, {
+          username: 'nobody',
+          password: 'Plain-Text-9',
+        })
+      ).status,
+      400,
+    )
+    assert.equal(master().people.get(admin, target.json.id).password, false)
+  })
+
+  it('M4.5 the People page lets an administrator set a password, and loads the password hashing it needs', async () => {
+    const { b } = await adminSession()
+    const page = await b.send('GET', '/people')
+    assert.match(
+      page.headers.get('content-security-policy')!,
+      /'wasm-unsafe-eval'/,
+    )
+    assert.match(
+      page.text,
+      /<form data-mason="person-password" data-path="\/api\/v2\/people\/\d+">/,
+    )
+    assert.match(page.text, /Change password/)
+    assert.match(page.text, /<form data-mason="person-add">/)
+    assert.match(page.text, /name="confirm" type="password"/)
+  })
+
+  it('M4.6 setting a password, by an administrator or by the person, ends their invitation link', async () => {
+    const made = await c.api('POST', '/api/v2/people', {
+      name: 'Ivy Invited',
+      username: 'ivy',
+      email: 'ivy@example.test',
+      invite: true,
+    })
+    const id = made.json.id as number
+    const lookup = async (url: string): Promise<number> =>
+      (
+        await onMaster().send('POST', '/auth/invite/lookup', {
+          token: tokenOf(url),
+        })
+      ).status
+    assert.equal(await lookup(made.json.invitation.url), 200)
+    const chosen = await password('Ivy-Horse-9', 'f1')
+    const set = await c.api('PUT', `/api/v2/people/${id}`, {
+      password: chosen,
+    })
+    assert.equal(set.status, 200, set.text)
+    assert.equal(set.json.invitation, undefined)
+    assert.equal(await lookup(made.json.invitation.url), 404)
+    // Her own change ends a newer link too.
+    const again = (await c.api('POST', `/api/v2/people/${id}/invitation`)).json
+      .url as string
+    const ivy = onMaster()
+    const signedIn = await ivy.send('POST', '/api/v2/session', {
+      username: 'ivy',
+      clientHash: chosen.clientHash,
+    })
+    const own = await ivy.send(
+      'PUT',
+      `/api/v2/people/${id}`,
+      { password: await password('Ivy-Again-9', 'f2') },
+      { 'x-mason-csrf': signedIn.json.csrf },
+    )
+    assert.equal(own.status, 200, own.text)
+    assert.equal(await lookup(again), 404)
+    const actions = master()
+      .database.db.prepare(
+        "SELECT action,actor FROM audit WHERE action='person.invite.revoke' AND target=? ORDER BY id",
+      )
+      .all(String(id))
+      .map((row) => row.actor)
+    assert.equal(actions.length, 2)
+    assert.equal(actions[1], id, 'her own change is audited as hers')
+  })
+
+  it('M4.8 disabling a person and setting their password at once revokes their link once and audits it', async () => {
+    const made = await c.api('POST', '/api/v2/people', {
+      name: 'Della Both',
+      username: 'della',
+      email: 'della@example.test',
+      invite: true,
+    })
+    const id = made.json.id as number
+    const changed = await c.api('PUT', `/api/v2/people/${id}`, {
+      disabled: true,
+      password: await password('Della-Horse-9', 'f3'),
+    })
+    assert.equal(changed.status, 200, changed.text)
+    assert.equal(
+      (
+        await onMaster().send('POST', '/auth/invite/lookup', {
+          token: tokenOf(made.json.invitation.url),
+        })
+      ).status,
+      404,
+    )
+    const actions = master()
+      .database.db.prepare(
+        "SELECT action FROM audit WHERE target=? AND action IN ('person.password','person.invite.revoke') ORDER BY id",
+      )
+      .all(String(id))
+      .map((row) => row.action)
+    assert.deepEqual(actions, ['person.password', 'person.invite.revoke'])
+  })
+
+  it('M4.7 a person’s username may change case, but not to another’s in any case', async () => {
+    const made = await c.api('POST', '/api/v2/people', {
+      name: 'Sam Case',
+      username: 'SamCase',
+      email: 'samcase@example.test',
+    })
+    const lower = await c.api('PUT', `/api/v2/people/${made.json.id}`, {
+      username: 'samcase',
+    })
+    assert.equal(lower.status, 200, lower.text)
+    assert.equal(lower.json.username, 'samcase')
+    const taken = await c.api('PUT', `/api/v2/people/${made.json.id}`, {
+      username: 'PAUL',
+    })
+    assert.equal(taken.status, 409)
+  })
 })

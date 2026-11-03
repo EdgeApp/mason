@@ -178,6 +178,9 @@ invitation link instead (**Invite**, or **Make an invitation link** when
 adding them). Mason sends no email: copy the link to them. It opens on the
 host, valid for a week and once, and lets them choose a username and a
 password that then sign them in on the host and the master.
+An administrator can instead set a person's username and password on the
+People page (**Set password**, or the Add form), and tell them; setting it
+ends the person's sessions.
 
 ## Projects
 
