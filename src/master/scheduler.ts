@@ -3074,8 +3074,9 @@ export class Scheduler {
          * An archive's entitlements: capabilities they need are added, and
          * the stage's profiles made again when any was. A key Mason does not
          * know, or a capability Apple will not enable, fails only when
-         * signing `failed` for a missing capability; after a build that
-         * signed it is a warning in the stage's log.
+         * signing `failed` for a missing capability; `before` the archive
+         * signs, and after a build that signed, it is a warning in the
+         * stage's log.
          */
         'apple.entitlements': async (params, link): Promise<unknown> => {
           const { job, name, project } = this.authorize(params, link)
@@ -3087,12 +3088,13 @@ export class Scheduler {
           const entitlements = ((params as { entitlements?: unknown })
             .entitlements ?? {}) as Record<string, Record<string, unknown>>
           const failed = (params as { failed?: unknown }).failed === true
+          const before = (params as { before?: unknown }).before === true
           return await this.appleCall(async () => {
             const warn = (bundleId: string, message: string): void => {
               this.appendLog(
                 String(job.id),
                 name,
-                `Apple signing: ${bundleId}: ${message}; it was signed as its profile allows\n`,
+                `Apple signing: ${bundleId}: ${message}; ${before ? 'the archive goes ahead with its profile as it is' : 'it was signed as its profile allows'}\n`,
               )
             }
             let changed = false
@@ -3114,8 +3116,9 @@ export class Scheduler {
                       }),
                 },
               )
-              // After a build that signed, what cannot be enabled is only
-              // logged; the next build that needs it fails on it.
+              // Before the archive, and after a build that signed, what
+              // cannot be enabled is only logged; it fails a build only
+              // when signing failed on it.
               changed =
                 (failed
                   ? await synced
@@ -3129,7 +3132,7 @@ export class Scheduler {
             this.appendLog(
               String(job.id),
               name,
-              'Apple signing: capabilities added from the archive’s entitlements; profiles made again\n',
+              `Apple signing: capabilities added from the ${before ? 'project’s' : 'archive’s'} entitlements; profiles made again\n`,
             )
             return { changed: true, profiles: again.profiles }
           })

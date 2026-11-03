@@ -1300,9 +1300,26 @@ no platform's profiles carry is logged by the master, once each time that
 set changes.
 
 Bundle IDs missing from the Apple account are created (Fastlane `produce`);
-their capabilities (push, App Groups, iCloud, …) are taken from the
-entitlements of the previous successful archive and kept in sync, so a new
-capability needs only an entitlements change and one build. Every capability
+their capabilities (push, App Groups, iCloud, …) follow the targets'
+entitlements and are kept in sync, so a new capability needs only an
+entitlements change and one build. Before the archive, `ctx.apple.archive`
+runs `xcodebuild -showBuildSettings` with the archive's workspace or
+project, scheme, configuration, destination, SDK and `xcargs`, and its
+DerivedData in the stage's scratch directory, without the signing settings.
+When the scheme's targets leave out a bundle ID the stage signs (an
+extension or watch app the scheme builds only as a dependency), each of
+their projects is read again with `-alltargets`, the same configuration,
+SDK, `xcargs` and DerivedData. For every target whose `PRODUCT_BUNDLE_IDENTIFIER` the
+stage signs, the file its evaluated `CODE_SIGN_ENTITLEMENTS` names (relative
+to its `SRCROOT`, and only inside the workspace) is read, and the build
+settings its values name, `$(NAME)` or `${NAME}`, are replaced by that
+target's; a key whose value still names a setting the read did not print
+(`$(TeamIdentifierPrefix)`, or a setting with an operator) waits for the
+build. Only the keys the stage's installed profile does not grant go to the
+master, and what it cannot enable then is a warning: the archive goes ahead
+with the profiles it has, as it does when the read or the master fails. A
+failed build's generated entitlements and a successful archive are read
+too. Every capability
 App Store Connect can enable is mapped from its entitlement keys, with the
 settings Apple needs for it (iCloud with CloudKit, the data protection level
 the entitlement names, Sign in with Apple as the primary App ID), and only on
@@ -1314,9 +1331,10 @@ enables them, and without one the stage says to enable it in the Apple
 Developer portal or sign the Apple ID in on the master. A capability Apple
 grants only on request must be granted to the team first; Apple's refusal
 names it. When signing failed for a missing capability, an entitlement key
-Mason does not know fails the stage, naming the key; after a build that
-signed, it and any capability Apple would not enable are warnings in the
-log, and only keys the stage's profile does not grant are checked. A
+Mason does not know fails the stage, naming the key; before the archive and
+after a build that signed, it and any capability Apple would not enable are
+warnings in the log, and only keys the stage's profile does not grant are
+checked. A
 changed capability set makes each of the bundle ID's profiles (development,
 ad hoc, App Store) again the next time a stage or the app's setup asks for
 it. Profiles are

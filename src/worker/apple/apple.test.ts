@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import path from 'node:path'
@@ -28,7 +29,12 @@ import {
   archiveArgs,
   archiveEnvironment,
   capabilityFailure,
+  entitlementFile,
+  expandEntitlements,
   keepLine,
+  projectSettingsArgs,
+  schemeSettingsArgs,
+  targetSettings,
   type Exec,
 } from './archive.js'
 import {
@@ -166,6 +172,25 @@ function fakeXcodebuild(
     commands.push([file, ...args])
     envs.push(options.env)
     const name = path.basename(file)
+    // The app names its entitlements; its project has the widget too.
+    if (name === 'xcrun' && args[1] === '-showBuildSettings')
+      return {
+        code: 0,
+        output: [
+          'Build settings for action build and target App:',
+          '    CODE_SIGN_ENTITLEMENTS = App.entitlements',
+          '    PRODUCT_BUNDLE_IDENTIFIER = app.example.signed',
+          `    PROJECT_FILE_PATH = ${path.join(options.cwd, 'App.xcodeproj')}`,
+          `    SRCROOT = ${options.cwd}`,
+          ...(args.includes('-alltargets')
+            ? [
+                'Build settings for action build and target Widgets:',
+                '    CODE_SIGN_ENTITLEMENTS = ',
+                '    PRODUCT_BUNDLE_IDENTIFIER = app.example.signed.widgets',
+              ]
+            : []),
+        ].join('\n'),
+      }
     if (name === 'xcrun' && args[1] === 'archive') {
       const archivePath = args[args.indexOf('-archivePath') + 1]!
       const app = path.join(archivePath, 'Products', 'Applications', 'App.app')
@@ -428,6 +453,8 @@ describe('Apple signing on a worker', function () {
       const say = (lines: string[]): void => {
         for (const line of lines) options.onLine?.(line)
       }
+      if (name === 'xcrun' && args[1] === '-showBuildSettings')
+        return { code: 0, output: '' }
       if (name === 'xcrun' && args[1] === 'archive') {
         if (failOnce) {
           failOnce = false
@@ -550,8 +577,8 @@ describe('Apple signing on a worker', function () {
         env: { TS_BUILD_INFO: '{"app":"app.example.signed"}' },
       },
     )
-    // The stage's environment reaches every xcodebuild: both archives and the export.
-    assert.equal(environments.length, 3)
+    // The stage's environment reaches every xcodebuild: the settings read, both archives and the export.
+    assert.equal(environments.length, 4)
     for (const env of environments)
       assert.deepEqual(env, { TS_BUILD_INFO: '{"app":"app.example.signed"}' })
     assert.equal(
@@ -704,6 +731,647 @@ describe('Apple signing on a worker', function () {
     )
   })
 
+  it('reads each target’s evaluated settings from showBuildSettings, the command line’s settings first', () => {
+    // As xcodebuild prints them with -sdk or a setting on the command line:
+    // those settings come before the targets, and every value is evaluated.
+    const output = [
+      'Command line invocation:',
+      '    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -showBuildSettings -project App.xcodeproj -alltargets -sdk iphoneos FOO=bar',
+      '',
+      'User defaults from command line:',
+      '    IDECustomDerivedDataLocation = /scratch/DerivedData',
+      '',
+      'Build settings from command line:',
+      '    FOO = bar',
+      '    SDKROOT = iphoneos26.5',
+      '',
+      'Resolve Package Graph',
+      '',
+      'Build settings for action build and target App:',
+      '    CODE_SIGN_ENTITLEMENTS = /work/app/ios/App/App.entitlements',
+      '    FOO = bar',
+      '    PRODUCT_BUNDLE_IDENTIFIER = app.example.signed',
+      '    PROJECT_FILE_PATH = /work/app/ios/App.xcodeproj',
+      '    SRCROOT = /work/app/ios',
+      '',
+      'Build settings for action build and target Widgets:',
+      '    CODE_SIGN_ENTITLEMENTS = Widgets/Widgets.entitlements',
+      '    PRODUCT_BUNDLE_IDENTIFIER = app.example.signed.widgets',
+      '    SRCROOT = /work/app/ios',
+      '',
+      'Build settings for action build and target Pods:',
+      '    CODE_SIGN_ENTITLEMENTS = ',
+      '',
+      'Build settings from command line:',
+      '    PRODUCT_BUNDLE_IDENTIFIER = app.example.command',
+    ].join('\r\n')
+    assert.deepEqual(targetSettings(output), [
+      {
+        CODE_SIGN_ENTITLEMENTS: '/work/app/ios/App/App.entitlements',
+        FOO: 'bar',
+        PRODUCT_BUNDLE_IDENTIFIER: 'app.example.signed',
+        PROJECT_FILE_PATH: '/work/app/ios/App.xcodeproj',
+        SRCROOT: '/work/app/ios',
+      },
+      {
+        CODE_SIGN_ENTITLEMENTS: 'Widgets/Widgets.entitlements',
+        PRODUCT_BUNDLE_IDENTIFIER: 'app.example.signed.widgets',
+        SRCROOT: '/work/app/ios',
+      },
+      { CODE_SIGN_ENTITLEMENTS: '' },
+    ])
+    assert.deepEqual(targetSettings(''), [])
+  })
+
+  it('names an entitlements file only inside the workspace, and expands the build settings its values name', () => {
+    const dir = root('entitlement-file-')
+    const outside = root('entitlement-outside-')
+    mkdirSync(path.join(dir, 'ios', 'App'), { recursive: true })
+    writeFileSync(path.join(dir, 'ios', 'App', 'App.entitlements'), '{}')
+    writeFileSync(path.join(outside, 'Other.entitlements'), '{}')
+    symlinkSync(
+      path.join(outside, 'Other.entitlements'),
+      path.join(dir, 'ios', 'Linked.entitlements'),
+    )
+    const srcroot = path.join(dir, 'ios')
+    const file = path.join(srcroot, 'App', 'App.entitlements')
+    // Evaluated absolute paths, and paths relative to SRCROOT.
+    assert.equal(entitlementFile(file, srcroot, dir), file)
+    assert.equal(entitlementFile('App/App.entitlements', srcroot, dir), file)
+    assert.equal(entitlementFile('App/App.entitlements', 'ios', dir), file)
+    assert.equal(entitlementFile('  ', srcroot, dir), undefined)
+    assert.equal(
+      entitlementFile(path.join(outside, 'Other.entitlements'), srcroot, dir),
+      undefined,
+    )
+    assert.equal(
+      entitlementFile('../../outside.entitlements', srcroot, dir),
+      undefined,
+    )
+    assert.equal(entitlementFile('.', dir, dir), undefined)
+    // A link in the workspace to a file outside it is outside.
+    assert.equal(
+      entitlementFile('Linked.entitlements', srcroot, dir),
+      undefined,
+    )
+    assert.deepEqual(
+      expandEntitlements(
+        {
+          'aps-environment': 'production',
+          'com.apple.developer.default-data-protection': '$(PROTECTION)',
+          'com.apple.developer.associated-domains': [
+            'applinks:${LINK_HOST}',
+            'webcredentials:$(LINK_HOST)',
+          ],
+          'com.apple.developer.icloud-container-environment': {
+            nested: '$(MISSING)',
+          },
+          'com.apple.security.application-groups': [
+            '$(TeamIdentifierPrefix)group.example',
+          ],
+          'com.apple.developer.ubiquity-kvstore-identifier':
+            '$(PRODUCT_BUNDLE_IDENTIFIER:lower)',
+          'com.apple.developer.healthkit': true,
+        },
+        {
+          PROTECTION: 'NSFileProtectionComplete',
+          LINK_HOST: 'example.app',
+          PRODUCT_BUNDLE_IDENTIFIER: 'app.example.signed',
+        },
+      ),
+      {
+        values: {
+          'aps-environment': 'production',
+          'com.apple.developer.default-data-protection':
+            'NSFileProtectionComplete',
+          'com.apple.developer.associated-domains': [
+            'applinks:example.app',
+            'webcredentials:example.app',
+          ],
+          'com.apple.developer.healthkit': true,
+        },
+        unresolved: [
+          'com.apple.developer.icloud-container-environment',
+          'com.apple.security.application-groups',
+          'com.apple.developer.ubiquity-kvstore-identifier',
+        ],
+      },
+    )
+  })
+
+  it('reads settings with the archive’s target, DerivedData and xcargs, and every target of a project with its SDK', () => {
+    const signing = signingFixture()
+    const options = {
+      workspace: 'ios/App.xcworkspace',
+      scheme: 'App',
+      configuration: 'Beta',
+      xcargs: ['-xcconfig', 'ios/Release.xcconfig', 'FOO=bar'],
+    }
+    assert.deepEqual(schemeSettingsArgs(options, signing, '/s/DerivedData'), [
+      '-showBuildSettings',
+      '-workspace',
+      'ios/App.xcworkspace',
+      '-scheme',
+      'App',
+      '-configuration',
+      'Beta',
+      '-destination',
+      'generic/platform=iOS',
+      '-derivedDataPath',
+      '/s/DerivedData',
+      '-xcconfig',
+      'ios/Release.xcconfig',
+      'FOO=bar',
+    ])
+    assert.deepEqual(
+      projectSettingsArgs(
+        '/w/ios/App.xcodeproj',
+        options,
+        signing,
+        '/s/DerivedData',
+      ),
+      [
+        '-showBuildSettings',
+        '-project',
+        '/w/ios/App.xcodeproj',
+        '-alltargets',
+        '-configuration',
+        'Beta',
+        '-sdk',
+        'iphoneos',
+        '-IDECustomDerivedDataLocation=/s/DerivedData',
+        '-xcconfig',
+        'ios/Release.xcconfig',
+        'FOO=bar',
+      ],
+    )
+    const sdkOf = (
+      extra: { sdk?: string; destination?: string },
+      platform: StageSigning['platform'],
+    ): string[] => {
+      const args = projectSettingsArgs(
+        'P.xcodeproj',
+        { project: 'P.xcodeproj', scheme: 'P', ...extra },
+        { ...signing, platform },
+        '/d',
+      )
+      return args.slice(6, 8)
+    }
+    assert.deepEqual(sdkOf({}, 'tvos'), ['-sdk', 'appletvos'])
+    assert.deepEqual(sdkOf({}, 'macos'), ['-sdk', 'macosx'])
+    assert.deepEqual(sdkOf({ sdk: 'appletvos26.0' }, 'tvos'), [
+      '-sdk',
+      'appletvos26.0',
+    ])
+    assert.deepEqual(
+      sdkOf({ destination: 'generic/platform=iOS Simulator' }, 'ios'),
+      ['-destination', 'generic/platform=iOS Simulator'],
+    )
+    assert.equal(
+      projectSettingsArgs(
+        'P.xcodeproj',
+        { project: 'P.xcodeproj', scheme: 'P' },
+        signing,
+        '/d',
+      ).at(-1),
+      '-IDECustomDerivedDataLocation=/d',
+    )
+  })
+
+  /**
+   * A Mac whose xcodebuild prints the given settings: the scheme's read and
+   * each project's `-alltargets` read answer apart, the profiles grant
+   * `grants`, and the archive signs.
+   */
+  function settingsMac(input: {
+    scheme: { code: number; output: string } | Error
+    project?: { code: number; output: string }
+    grants: Record<string, unknown>
+    order: string[]
+    commands: string[][]
+  }): Exec {
+    return async (file, args, options) => {
+      input.commands.push([path.basename(file), ...args])
+      const name = path.basename(file)
+      if (name === 'xcrun' && args[1] === '-showBuildSettings') {
+        if (args.includes('-alltargets')) {
+          input.order.push('project settings')
+          return input.project ?? { code: 0, output: '' }
+        }
+        input.order.push('scheme settings')
+        if (input.scheme instanceof Error) throw input.scheme
+        return input.scheme
+      }
+      if (name === 'xcrun' && args[1] === 'archive') {
+        input.order.push('archive')
+        options.onLine?.('** ARCHIVE SUCCEEDED **')
+        return { code: 0, output: '' }
+      }
+      if (name === 'xcrun' && args[1] === '-exportArchive') {
+        writeFileSync(
+          path.join(args[args.indexOf('-exportPath') + 1]!, 'App.ipa'),
+          'ipa',
+        )
+        return { code: 0, output: '' }
+      }
+      if (name === 'security' && args[0] === 'cms') {
+        writeFileSync(
+          args[args.indexOf('-o') + 1]!,
+          JSON.stringify({ Entitlements: input.grants }),
+        )
+        return { code: 0, output: '' }
+      }
+      if (name === 'plutil' && args[0] === '-extract')
+        return {
+          code: 0,
+          output: JSON.stringify(
+            (
+              JSON.parse(readFileSync(args.at(-1)!, 'utf8')) as Record<
+                string,
+                unknown
+              >
+            )[args[1]!],
+          ),
+        }
+      if (name === 'plutil') {
+        input.order.push(`read ${path.basename(args.at(-1)!)}`)
+        return existsSync(args.at(-1)!)
+          ? { code: 0, output: readFileSync(args.at(-1)!, 'utf8') }
+          : { code: 1, output: 'file does not exist' }
+      }
+      return { code: 1, output: `unexpected ${name}` }
+    }
+  }
+
+  it('enables before the archive only what the installed profiles lack, from every signed target, and installs the new profiles first', async () => {
+    const dir = root('settings-')
+    const scratch = root('settings-scratch-')
+    const srcroot = path.join(dir, 'ios')
+    mkdirSync(path.join(srcroot, 'App'), { recursive: true })
+    mkdirSync(path.join(srcroot, 'Widgets'), { recursive: true })
+    mkdirSync(path.join(srcroot, 'Tests'), { recursive: true })
+    writeFileSync(
+      path.join(srcroot, 'App', 'App.entitlements'),
+      JSON.stringify({
+        // The profile grants these: push as the archive signs it, and a
+        // key Mason does not know, enabled by hand in the portal.
+        'aps-environment': 'development',
+        'com.apple.developer.carplay-audio': true,
+        // A value written as a build setting the read does not print.
+        'com.apple.developer.default-data-protection': '$(PROTECTION)',
+        // What the profile lacks.
+        'com.apple.security.application-groups': ['group.example'],
+      }),
+    )
+    writeFileSync(
+      path.join(srcroot, 'Widgets', 'Widgets.entitlements'),
+      JSON.stringify({
+        'com.apple.developer.associated-domains': ['applinks:$(LINK_HOST)'],
+      }),
+    )
+    writeFileSync(
+      path.join(srcroot, 'Tests', 'Tests.entitlements'),
+      JSON.stringify({ 'com.apple.developer.healthkit': true }),
+    )
+    const project = path.join(srcroot, 'App.xcodeproj')
+    const app = [
+      'Build settings for action build and target App:',
+      `    CODE_SIGN_ENTITLEMENTS = ${path.join(srcroot, 'App', 'App.entitlements')}`,
+      '    PRODUCT_BUNDLE_IDENTIFIER = app.example.signed',
+      `    PROJECT_FILE_PATH = ${project}`,
+      `    SRCROOT = ${srcroot}`,
+      '',
+    ]
+    const commands: string[][] = []
+    const order: string[] = []
+    const reported: unknown[] = []
+    const reportedOptions: unknown[] = []
+    const reinstalled: number[] = []
+    const logs: string[] = []
+    const signing = signingFixture()
+    const exec = settingsMac({
+      scheme: {
+        code: 0,
+        output: [
+          'Command line invocation:',
+          '    /usr/bin/xcodebuild -showBuildSettings',
+          '',
+          'Build settings from command line:',
+          '    FOO = bar',
+          '',
+          ...app,
+        ].join('\n'),
+      },
+      project: {
+        code: 0,
+        output: [
+          'Build settings from command line:',
+          '    FOO = bar',
+          '',
+          ...app,
+          'Build settings for action build and target Widgets:',
+          '    CODE_SIGN_ENTITLEMENTS = Widgets/Widgets.entitlements',
+          '    LINK_HOST = example.app',
+          '    PRODUCT_BUNDLE_IDENTIFIER = app.example.signed.widgets',
+          `    PROJECT_FILE_PATH = ${project}`,
+          `    SRCROOT = ${srcroot}`,
+          '',
+          'Build settings for action build and target Tests:',
+          '    CODE_SIGN_ENTITLEMENTS = Tests/Tests.entitlements',
+          '    PRODUCT_BUNDLE_IDENTIFIER = app.example.tests',
+          `    SRCROOT = ${srcroot}`,
+        ].join('\n'),
+      },
+      grants: {
+        'application-identifier': `${TEAM}.app.example.signed`,
+        'aps-environment': 'production',
+        'com.apple.developer.carplay-audio': true,
+      },
+      order,
+      commands,
+    })
+    const result = await archive(
+      {
+        dir,
+        scratch,
+        signing,
+        keychain: '/k/stage.keychain-db',
+        exportOptions: '/k/ExportOptions.plist',
+        exec,
+        log: (text) => logs.push(text),
+        entitlements: async (values, options) => {
+          order.push('entitlements')
+          reported.push(values)
+          reportedOptions.push(options)
+          return { changed: true, profiles: signing.profiles }
+        },
+        reinstall: (profiles) => {
+          order.push('reinstall')
+          reinstalled.push(profiles.length)
+        },
+      },
+      {
+        workspace: 'ios/App.xcworkspace',
+        scheme: 'App',
+        xcargs: ['-xcconfig', 'ios/Release.xcconfig'],
+        env: { TS_BUILD_INFO: 'stage' },
+      },
+    )
+    assert.equal(
+      result.ipa,
+      path.join(dir, 'build', 'mason-archive', 'App.ipa'),
+    )
+    // The extension the scheme builds only as a dependency is read from
+    // its project; a target the stage does not sign is not read at all.
+    assert.deepEqual(order.slice(0, 7), [
+      'scheme settings',
+      'project settings',
+      'read App.entitlements',
+      'read Widgets.entitlements',
+      'entitlements',
+      'reinstall',
+      'archive',
+    ])
+    assert(!order.includes('read Tests.entitlements'))
+    assert.deepEqual(reported[0], {
+      'app.example.signed': {
+        'com.apple.security.application-groups': ['group.example'],
+      },
+      'app.example.signed.widgets': {
+        'com.apple.developer.associated-domains': ['applinks:example.app'],
+      },
+    })
+    assert.deepEqual(reportedOptions[0], { before: true })
+    assert.equal(reported.length, 1)
+    assert.deepEqual(reinstalled, [2])
+    const log = logs.join('')
+    assert.match(
+      log,
+      /app\.example\.signed: com\.apple\.developer\.default-data-protection names a build setting known only to the build/,
+    )
+    assert.match(
+      log,
+      /The master added the capabilities these entitlements need and made new profiles/,
+    )
+    const reads = commands.filter((command) =>
+      command.includes('-showBuildSettings'),
+    )
+    const derivedData = path.join(scratch, 'DerivedData')
+    assert.deepEqual(reads[0]!.slice(1), [
+      'xcodebuild',
+      '-showBuildSettings',
+      '-workspace',
+      'ios/App.xcworkspace',
+      '-scheme',
+      'App',
+      '-configuration',
+      'Release',
+      '-destination',
+      'generic/platform=iOS',
+      '-derivedDataPath',
+      derivedData,
+      '-xcconfig',
+      'ios/Release.xcconfig',
+    ])
+    assert.deepEqual(reads[1]!.slice(1), [
+      'xcodebuild',
+      '-showBuildSettings',
+      '-project',
+      project,
+      '-alltargets',
+      '-configuration',
+      'Release',
+      '-sdk',
+      'iphoneos',
+      `-IDECustomDerivedDataLocation=${derivedData}`,
+      '-xcconfig',
+      'ios/Release.xcconfig',
+    ])
+    const archived = commands.find((command) => command[2] === 'archive')!
+    assert.equal(
+      archived[archived.indexOf('-derivedDataPath') + 1],
+      derivedData,
+    )
+    assert(
+      existsSync(
+        path.join(dir, 'build', 'mason-archive', 'xcodebuild-settings.log'),
+      ),
+    )
+    assert(
+      existsSync(
+        path.join(dir, 'build', 'mason-archive', 'xcodebuild-settings-1.log'),
+      ),
+    )
+  })
+
+  it('archives with the installed profiles when the settings read or the master fails, or when the profiles grant every key', async () => {
+    const signing = signingFixture()
+    const run = async (
+      input: Omit<Parameters<typeof settingsMac>[0], 'order' | 'commands'>,
+      answer: (
+        values: Record<string, Record<string, unknown>>,
+      ) => Promise<{ changed: boolean }>,
+      entitlements: Record<string, Record<string, unknown>> = {
+        App: { 'com.apple.security.application-groups': ['group.example'] },
+      },
+    ): Promise<{
+      order: string[]
+      commands: string[][]
+      log: string
+      reported: unknown[]
+    }> => {
+      const dir = root('settings-fails-')
+      for (const [name, values] of Object.entries(entitlements))
+        writeFileSync(
+          path.join(dir, `${name}.entitlements`),
+          JSON.stringify(values),
+        )
+      const order: string[] = []
+      const commands: string[][] = []
+      const logs: string[] = []
+      const reported: unknown[] = []
+      const scheme =
+        input.scheme instanceof Error
+          ? input.scheme
+          : {
+              ...input.scheme,
+              output: input.scheme.output.replaceAll('$DIR', dir),
+            }
+      await archive(
+        {
+          dir,
+          scratch: root('settings-fails-scratch-'),
+          signing,
+          keychain: '/k',
+          exportOptions: '/k/e',
+          exec: settingsMac({ ...input, scheme, order, commands }),
+          log: (text) => logs.push(text),
+          entitlements: async (values) => {
+            reported.push(values)
+            return await answer(values)
+          },
+          reinstall: () => {
+            throw new Error('nothing to reinstall')
+          },
+        },
+        { project: 'App.xcodeproj', scheme: 'App' },
+      )
+      return { order, commands, log: logs.join(''), reported }
+    }
+    const target = (bundleId: string, file: string): string[] => [
+      'Build settings for action build and target T:',
+      `    CODE_SIGN_ENTITLEMENTS = ${file}`,
+      `    PRODUCT_BUNDLE_IDENTIFIER = ${bundleId}`,
+      '    PROJECT_FILE_PATH = $DIR/App.xcodeproj',
+      '    SRCROOT = $DIR',
+    ]
+    const both = [
+      ...target('app.example.signed', 'App.entitlements'),
+      ...target('app.example.signed.widgets', ''),
+    ].join('\n')
+    const unchanged = async (): Promise<{ changed: boolean }> => ({
+      changed: false,
+    })
+
+    // The settings read exits non-zero: the archive goes ahead, nothing sent.
+    const exited = await run(
+      { scheme: { code: 65, output: 'error: no such scheme' }, grants: {} },
+      unchanged,
+    )
+    assert.deepEqual(exited.order, ['scheme settings', 'archive'])
+    assert.deepEqual(exited.reported, [])
+    assert.match(
+      exited.log,
+      /were not checked before the archive \(xcodebuild -showBuildSettings failed \(exit 65\)\); archiving with the profiles already installed/,
+    )
+
+    // xcodebuild could not be run at all.
+    const hung = await run(
+      { scheme: new Error('xcodebuild hung'), grants: {} },
+      unchanged,
+    )
+    assert.deepEqual(hung.order, ['scheme settings', 'archive'])
+    assert.match(hung.log, /not checked before the archive \(xcodebuild hung\)/)
+
+    // The master or Apple fails: a warning, and the archive goes ahead.
+    const refused = await run(
+      { scheme: { code: 0, output: both }, grants: {} },
+      async () => {
+        throw new Error('Apple answered 503')
+      },
+    )
+    assert.deepEqual(refused.reported, [
+      {
+        'app.example.signed': {
+          'com.apple.security.application-groups': ['group.example'],
+        },
+      },
+    ])
+    assert.equal(refused.order.at(-1), 'archive')
+    assert.match(
+      refused.log,
+      /not checked before the archive \(Apple answered 503\); archiving with the profiles already installed/,
+    )
+    // The scheme named every signed target, so no project was read.
+    assert(!refused.order.includes('project settings'))
+
+    // A project's read fails: the scheme's own targets are still checked.
+    const partial = await run(
+      {
+        scheme: {
+          code: 0,
+          output: target('app.example.signed', 'App.entitlements').join('\n'),
+        },
+        project: { code: 74, output: 'error: unreadable project' },
+        grants: {},
+      },
+      unchanged,
+    )
+    assert.deepEqual(partial.order.slice(0, 3), [
+      'scheme settings',
+      'project settings',
+      'read App.entitlements',
+    ])
+    assert.equal(partial.reported.length, 1)
+    assert.match(
+      partial.log,
+      /App\.xcodeproj: xcodebuild -showBuildSettings failed \(exit 74\); reading the scheme’s own targets only/,
+    )
+
+    // Every key is one the profile grants, a key Mason does not know among
+    // them: nothing goes to the master, and the archive goes ahead.
+    const granted = await run(
+      {
+        scheme: { code: 0, output: both },
+        grants: { 'com.apple.developer.carplay-audio': true },
+      },
+      unchanged,
+      { App: { 'com.apple.developer.carplay-audio': true } },
+    )
+    assert.deepEqual(granted.reported, [])
+    assert.equal(granted.order.at(-1), 'archive')
+    assert.doesNotMatch(granted.log, /not checked/)
+
+    // A target with no file, a file that cannot be read, or one outside
+    // the workspace is not read.
+    const unread = await run(
+      {
+        scheme: {
+          code: 0,
+          output: [
+            ...target('app.example.signed', 'Missing.entitlements'),
+            ...target('app.example.signed.widgets', '/etc/hosts'),
+          ].join('\n'),
+        },
+        grants: {},
+      },
+      unchanged,
+      {},
+    )
+    assert.deepEqual(unread.reported, [])
+    assert.equal(unread.order.at(-1), 'archive')
+  })
+
   describe('on a cluster', () => {
     let c: Cluster
     let apple: FakeAppleConnect
@@ -794,6 +1462,7 @@ export async function sign(ctx: Stage) {
   const path = await import('node:path')
   const signing = ctx.apple.signing
   if (ctx.run.params.mode === 'ship') {
+    writeFileSync('App.entitlements', JSON.stringify({ 'aps-environment': 'development', 'com.apple.developer.carplay-audio': true, 'com.apple.developer.associated-domains': ['applinks:example.app'] }))
     const built = await ctx.apple.archive({ project: 'App.xcodeproj', scheme: 'App', version: '1.0', buildNumber: '7', env: { FIXTURE_SET_BY: 'call' } })
     const testflight = await ctx.apple.testflight({ path: path.relative(ctx.workspace, built.ipa!), groups: ['Internal'], whatToTest: 'Fixture' })
     writeFileSync('App.dmg', 'disk image')
@@ -981,6 +1650,14 @@ export async function sign(ctx: Stage) {
             call.body?.data?.attributes?.capabilityType ===
               'PUSH_NOTIFICATIONS',
         ),
+      )
+      // Before the archive, associated domains came from the project's
+      // entitlements; a key Mason does not know only warned, and push,
+      // which the profile grants, was not sent.
+      assert.match(log!, /capabilities added from the project’s entitlements/)
+      assert.match(
+        log!,
+        /Apple signing: app\.example\.signed: com\.apple\.developer\.carplay-audio needs a capability Mason cannot enable; the archive goes ahead with its profile as it is/,
       )
       assert.match(log!, /capabilities added from the archive’s entitlements/)
       // The build signed, so what Mason cannot enable only warns: a key it
