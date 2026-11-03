@@ -28,6 +28,8 @@ import {
   archiveArgs,
   archiveEnvironment,
   capabilityFailure,
+  entitlementFile,
+  entitlementTargets,
   keepLine,
   type Exec,
 } from './archive.js'
@@ -166,6 +168,8 @@ function fakeXcodebuild(
     commands.push([file, ...args])
     envs.push(options.env)
     const name = path.basename(file)
+    if (name === 'xcrun' && args[1] === '-showBuildSettings')
+      return { code: 0, output: '' }
     if (name === 'xcrun' && args[1] === 'archive') {
       const archivePath = args[args.indexOf('-archivePath') + 1]!
       const app = path.join(archivePath, 'Products', 'Applications', 'App.app')
@@ -428,6 +432,8 @@ describe('Apple signing on a worker', function () {
       const say = (lines: string[]): void => {
         for (const line of lines) options.onLine?.(line)
       }
+      if (name === 'xcrun' && args[1] === '-showBuildSettings')
+        return { code: 0, output: '' }
       if (name === 'xcrun' && args[1] === 'archive') {
         if (failOnce) {
           failOnce = false
@@ -550,8 +556,8 @@ describe('Apple signing on a worker', function () {
         env: { TS_BUILD_INFO: '{"app":"app.example.signed"}' },
       },
     )
-    // The stage's environment reaches every xcodebuild: both archives and the export.
-    assert.equal(environments.length, 3)
+    // The stage's environment reaches every xcodebuild: the settings read, both archives and the export.
+    assert.equal(environments.length, 4)
     for (const env of environments)
       assert.deepEqual(env, { TS_BUILD_INFO: '{"app":"app.example.signed"}' })
     assert.equal(
@@ -702,6 +708,222 @@ describe('Apple signing on a worker', function () {
         'Provisioning profile "x" doesn\'t include the com.apple.developer.healthkit entitlement',
       ),
     )
+  })
+
+  it('names each target’s entitlements file from showBuildSettings, inside the workspace', () => {
+    const output = [
+      'Command line invocation:',
+      '    xcodebuild -showBuildSettings',
+      'Build settings for action build and target App:',
+      '    CODE_SIGN_ENTITLEMENTS = $(SRCROOT)/App/App.entitlements',
+      '    PRODUCT_BUNDLE_IDENTIFIER = app.example.signed',
+      '    SRCROOT = /work/app/ios',
+      'Build settings for action build and target Widgets:',
+      '    CODE_SIGN_ENTITLEMENTS = ',
+      '    PRODUCT_BUNDLE_IDENTIFIER = app.example.signed.widgets',
+      '    SRCROOT = /work/app/ios',
+      'Build settings for action build and target Pods:',
+      '    CODE_SIGN_ENTITLEMENTS = Pods.entitlements',
+      '    PRODUCT_BUNDLE_IDENTIFIER = ',
+      '    SRCROOT = /work/app/ios',
+      'Build settings from command line:',
+      '    CODE_SIGN_ENTITLEMENTS = /tmp/not-a-target.entitlements',
+      '    PRODUCT_BUNDLE_IDENTIFIER = app.example.command',
+    ].join('\n')
+    assert.deepEqual(entitlementTargets(output), [
+      {
+        bundleId: 'app.example.signed',
+        entitlements: '$(SRCROOT)/App/App.entitlements',
+        srcroot: '/work/app/ios',
+      },
+      {
+        bundleId: 'app.example.signed.widgets',
+        entitlements: '',
+        srcroot: '/work/app/ios',
+      },
+    ])
+    assert.equal(
+      entitlementFile(
+        '$(SRCROOT)/App/App.entitlements',
+        '/work/app/ios',
+        '/work/app',
+      ),
+      '/work/app/ios/App/App.entitlements',
+    )
+    assert.equal(
+      entitlementFile(
+        '${SRCROOT}/App/App.entitlements',
+        '/work/app/ios',
+        '/work/app',
+      ),
+      '/work/app/ios/App/App.entitlements',
+    )
+    assert.equal(
+      entitlementFile('App/App.entitlements', 'ios', '/work/app'),
+      '/work/app/ios/App/App.entitlements',
+    )
+    assert.equal(entitlementFile('  ', '/work/app/ios', '/work/app'), undefined)
+    assert.equal(
+      entitlementFile(
+        '/tmp/outside.entitlements',
+        '/work/app/ios',
+        '/work/app',
+      ),
+      undefined,
+    )
+    assert.equal(
+      entitlementFile(
+        '../../outside.entitlements',
+        '/work/app/ios',
+        '/work/app',
+      ),
+      undefined,
+    )
+  })
+
+  it('reads CODE_SIGN_ENTITLEMENTS before archiving and installs the new profiles first', async () => {
+    const dir = root('settings-')
+    const scratch = root('settings-scratch-')
+    const srcroot = path.join(dir, 'ios')
+    mkdirSync(path.join(srcroot, 'App'), { recursive: true })
+    const entitlements = {
+      'com.apple.developer.declared-age-range': true,
+      'com.apple.developer.associated-domains': ['applinks:example.app'],
+    }
+    writeFileSync(
+      path.join(srcroot, 'App', 'App.entitlements'),
+      JSON.stringify(entitlements),
+    )
+    const settings = [
+      'Command line invocation:',
+      '    /usr/bin/xcodebuild -showBuildSettings',
+      'Build settings for action build and target App:',
+      '    CODE_SIGN_ENTITLEMENTS = $(SRCROOT)/App/App.entitlements',
+      '    PRODUCT_BUNDLE_IDENTIFIER = app.example.signed',
+      `    SRCROOT = ${srcroot}`,
+      'Build settings for action build and target Widgets:',
+      '    CODE_SIGN_ENTITLEMENTS = ',
+      '    PRODUCT_BUNDLE_IDENTIFIER = app.example.signed.widgets',
+      `    SRCROOT = ${srcroot}`,
+      'Build settings for action build and target Escape:',
+      '    CODE_SIGN_ENTITLEMENTS = ../../outside.entitlements',
+      '    PRODUCT_BUNDLE_IDENTIFIER = app.example.escape',
+      `    SRCROOT = ${srcroot}`,
+      'Build settings from command line:',
+      '    CODE_SIGN_STYLE = Manual',
+    ].join('\n')
+    const commands: string[][] = []
+    const order: string[] = []
+    const reported: unknown[] = []
+    const reportedOptions: unknown[] = []
+    const reinstalled: number[] = []
+    const logs: string[] = []
+    const signing = signingFixture()
+    const exec: Exec = async (file, args, options) => {
+      commands.push([path.basename(file), ...args])
+      const name = path.basename(file)
+      if (name === 'xcrun' && args[1] === '-showBuildSettings') {
+        order.push('settings')
+        assert.deepEqual(options.env, { TS_BUILD_INFO: 'stage' })
+        return { code: 0, output: settings }
+      }
+      if (name === 'xcrun' && args[1] === 'archive') {
+        order.push('archive')
+        return { code: 0, output: '' }
+      }
+      if (name === 'xcrun' && args[1] === '-exportArchive') {
+        writeFileSync(
+          path.join(args[args.indexOf('-exportPath') + 1]!, 'App.ipa'),
+          'ipa',
+        )
+        return { code: 0, output: '' }
+      }
+      if (name === 'plutil')
+        return { code: 0, output: readFileSync(args.at(-1)!, 'utf8') }
+      return { code: 1, output: `unexpected ${name}` }
+    }
+    const result = await archive(
+      {
+        dir,
+        scratch,
+        signing,
+        keychain: '/k/stage.keychain-db',
+        exportOptions: '/k/ExportOptions.plist',
+        exec,
+        log: (text) => logs.push(text),
+        entitlements: async (values, options) => {
+          order.push('entitlements')
+          reported.push(values)
+          reportedOptions.push(options)
+          return { changed: true, profiles: signing.profiles }
+        },
+        reinstall: (profiles) => {
+          order.push('reinstall')
+          reinstalled.push(profiles.length)
+        },
+      },
+      {
+        workspace: 'ios/App.xcworkspace',
+        scheme: 'App',
+        env: { TS_BUILD_INFO: 'stage' },
+      },
+    )
+    assert.equal(
+      result.ipa,
+      path.join(dir, 'build', 'mason-archive', 'App.ipa'),
+    )
+    assert.deepEqual(order, [
+      'settings',
+      'entitlements',
+      'reinstall',
+      'archive',
+    ])
+    assert.deepEqual(reported, [{ 'app.example.signed': entitlements }])
+    assert.deepEqual(reportedOptions, [{ failed: true }])
+    assert.deepEqual(reinstalled, [2])
+    assert.match(
+      logs.join(''),
+      /The master added the capabilities these entitlements need and made new profiles/,
+    )
+    const read = commands.find((command) => command[2] === '-showBuildSettings')!
+    assert.deepEqual(read.slice(1), [
+      'xcodebuild',
+      '-showBuildSettings',
+      '-workspace',
+      'ios/App.xcworkspace',
+      '-scheme',
+      'App',
+      '-configuration',
+      'Release',
+      '-destination',
+      'generic/platform=iOS',
+    ])
+    assert.equal(
+      commands.filter((command) => command[2] === 'archive').length,
+      1,
+    )
+    const noted: string[] = []
+    await assert.rejects(
+      archive(
+        {
+          dir,
+          scratch,
+          signing,
+          keychain: '/k',
+          exportOptions: '/k/e',
+          exec: async (_file, args) => {
+            if (args[1] === '-showBuildSettings') throw new Error('xcodebuild hung')
+            return { code: 70, output: 'error: no such scheme' }
+          },
+          log: (text) => noted.push(text),
+          entitlements: async () => ({ changed: false }),
+          reinstall: () => undefined,
+        },
+        { project: 'App.xcodeproj', scheme: 'App' },
+      ),
+      /xcodebuild archive failed \(exit 70\)/,
+    )
+    assert.match(noted.join(''), /could not be read \(xcodebuild hung\)/)
   })
 
   describe('on a cluster', () => {

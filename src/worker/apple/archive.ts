@@ -68,20 +68,19 @@ export interface ArchiveContext {
   keep?: (name: string, file: string) => Promise<void>
 }
 
-/** The `xcodebuild archive` arguments: the stage's signing, version and build number, nothing edited in the project. */
-export function archiveArgs(
+/**
+ * Workspace, scheme, configuration, destination and SDK. The archive and
+ * the settings read share these, so both resolve the same target.
+ */
+export function targetArgs(
   options: ArchiveOptions,
   signing: StageSigning,
-  keychain: string,
-  archivePath: string,
-  derivedData: string,
 ): string[] {
   if ((options.project == null) === (options.workspace == null))
     throw new Error(
       'ctx.apple.archive needs a project or a workspace, not both',
     )
   return [
-    'archive',
     ...(options.workspace != null
       ? ['-workspace', options.workspace]
       : ['-project', options.project!]),
@@ -103,6 +102,20 @@ export function archiveArgs(
       : signing.platform === 'tvos' && options.destination == null
         ? ['-sdk', 'appletvos']
         : []),
+  ]
+}
+
+/** The `xcodebuild archive` arguments: the stage's signing, version and build number, nothing edited in the project. */
+export function archiveArgs(
+  options: ArchiveOptions,
+  signing: StageSigning,
+  keychain: string,
+  archivePath: string,
+  derivedData: string,
+): string[] {
+  return [
+    'archive',
+    ...targetArgs(options, signing),
     '-archivePath',
     archivePath,
     '-derivedDataPath',
@@ -138,6 +151,73 @@ export function capabilityFailure(output: string): boolean {
   return /doesn['’]t (include|support) the .*(entitlement|capability)|Provisioning profile .* doesn['’]t (include|match)/i.test(
     output,
   )
+}
+
+/** One target's resolved settings that name its entitlements file. */
+export interface EntitlementTarget {
+  bundleId: string
+  entitlements: string
+  srcroot: string
+}
+
+/**
+ * Targets in `xcodebuild -showBuildSettings` output. A block that starts
+ * `Build settings for action` is one target; settings from the command
+ * line are not. A target with no bundle identifier is left out.
+ */
+export function entitlementTargets(output: string): EntitlementTarget[] {
+  const targets: EntitlementTarget[] = []
+  let settings: Record<string, string> | undefined
+  const finish = (): void => {
+    if (settings == null) return
+    const bundleId = (settings.PRODUCT_BUNDLE_IDENTIFIER ?? '').trim()
+    if (bundleId !== '')
+      targets.push({
+        bundleId,
+        entitlements: settings.CODE_SIGN_ENTITLEMENTS ?? '',
+        srcroot: settings.SRCROOT ?? '',
+      })
+    settings = undefined
+  }
+  for (const line of output.replaceAll('\r\n', '\n').split('\n')) {
+    if (line.startsWith('Build settings for action ')) {
+      finish()
+      settings = {}
+      continue
+    }
+    // Command-line settings are not a target, and they follow the last one.
+    if (line.startsWith('Build settings ')) {
+      finish()
+      continue
+    }
+    if (settings == null) continue
+    const match = /^ {4}([A-Za-z0-9_]+) = (.*)$/.exec(line)
+    if (match != null) settings[match[1]!] = match[2] ?? ''
+  }
+  finish()
+  return targets
+}
+
+/**
+ * The entitlements file a target names, inside the workspace. `$(SRCROOT)`
+ * and `${SRCROOT}` expand to that target's `SRCROOT`. An empty name, or a
+ * path that leaves the workspace, is left out.
+ */
+export function entitlementFile(
+  entitlements: string,
+  srcroot: string,
+  workspace: string,
+): string | undefined {
+  const named = entitlements.trim()
+  if (named === '') return undefined
+  const root = srcroot.trim()
+  const expanded = named
+    .replaceAll('$(SRCROOT)', root)
+    .replaceAll('${SRCROOT}', root)
+  const file = path.resolve(path.resolve(workspace, root), expanded)
+  const dir = path.resolve(workspace)
+  if (file !== dir && !file.startsWith(dir + path.sep)) return undefined
+  return file
 }
 
 /** Files below a directory, by extension, skipping what cannot be read. */
@@ -317,11 +397,65 @@ async function xcodebuild(
 }
 
 /**
+ * Entitlements each target's project file names, from
+ * `xcodebuild -showBuildSettings`. The archive's signing check can fail
+ * before Xcode writes a `.xcent`, so the file has to be read first. Signing
+ * settings are left off this invocation: they name the profile the archive
+ * is about to test. A failure here does not stop the archive.
+ */
+async function projectEntitlements(
+  context: ArchiveContext,
+  options: ArchiveOptions,
+  out: string,
+  env: Record<string, string>,
+): Promise<Record<string, Record<string, unknown>>> {
+  const settingsArgs = [
+    '-showBuildSettings',
+    ...targetArgs(options, context.signing),
+  ]
+  let result: { code: number; output: string }
+  try {
+    result = await xcodebuild(
+      context,
+      settingsArgs,
+      path.join(out, 'xcodebuild-settings.log'),
+      env,
+    )
+  } catch (error) {
+    context.log(
+      `xcodebuild -showBuildSettings could not be read (${error instanceof Error ? error.message : 'failed'}); archiving with the profiles already installed\n`,
+    )
+    return {}
+  }
+  if (result.code !== 0) {
+    context.log(
+      'xcodebuild -showBuildSettings failed; archiving with the profiles already installed\n',
+    )
+    return {}
+  }
+  const values: Record<string, Record<string, unknown>> = {}
+  for (const target of entitlementTargets(result.output)) {
+    if (values[target.bundleId] != null) continue
+    const file = entitlementFile(
+      target.entitlements,
+      target.srcroot,
+      context.dir,
+    )
+    if (file == null) continue
+    const read = await plist(context, file)
+    if (read == null) continue
+    values[target.bundleId] = read
+  }
+  return values
+}
+
+/**
  * `ctx.apple.archive`: `xcodebuild archive` and `-exportArchive` with the
- * stage's signing. The archive's entitlements go to the master, which keeps
- * the bundle IDs' capabilities in step; when a build fails because a profile
- * lacked a capability, the master adds it, makes the profiles again, and the
- * archive is tried once more.
+ * stage's signing. Each target's entitlements are read before the archive
+ * and sent to the master, which keeps the bundle IDs' capabilities in step.
+ * When a build still fails because a profile lacked a capability, the
+ * generated `.xcent` files are sent the same way, the master makes the
+ * profiles again, and the archive is tried once more.
  */
 export async function archive(
   context: ArchiveContext,
@@ -338,6 +472,17 @@ export async function archive(
   const archivePath = path.join(out, `${options.scheme}.xcarchive`)
   const archiveLog = path.join(out, 'xcodebuild-archive.log')
   let profiles = context.signing.profiles
+  const preset = await projectEntitlements(context, options, out, env)
+  if (Object.keys(preset).length > 0) {
+    const answer = await context.entitlements(preset, { failed: true })
+    if (answer.changed && answer.profiles != null) {
+      context.log(
+        'The master added the capabilities these entitlements need and made new profiles\n',
+      )
+      profiles = answer.profiles
+      context.reinstall(profiles)
+    }
+  }
   for (let attempt = 1; ; attempt++) {
     const args = archiveArgs(
       options,

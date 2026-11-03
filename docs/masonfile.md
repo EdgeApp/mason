@@ -1300,9 +1300,11 @@ no platform's profiles carry is logged by the master, once each time that
 set changes.
 
 Bundle IDs missing from the Apple account are created (Fastlane `produce`);
-their capabilities (push, App Groups, iCloud, …) are taken from the
-entitlements of the previous successful archive and kept in sync, so a new
-capability needs only an entitlements change and one build. Every capability
+their capabilities (push, App Groups, iCloud, …) are read from each target's
+`CODE_SIGN_ENTITLEMENTS` before the archive, through `xcodebuild
+-showBuildSettings`, and kept in sync, so a new capability needs only an
+entitlements change and one build. A failed build's generated entitlements
+and a successful archive are read the same way. Every capability
 App Store Connect can enable is mapped from its entitlement keys, with the
 settings Apple needs for it (iCloud with CloudKit, the data protection level
 the entitlement names, Sign in with Apple as the primary App ID), and only on
