@@ -6,8 +6,11 @@ import { MasterDatabase } from '../master/database.js'
 import {
   action,
   field,
+  groupsView,
+  groupView,
   masonfileView,
   nodesView,
+  peopleView,
   projectRunsView,
   projectTabs,
   projectView,
@@ -347,9 +350,19 @@ describe('Design system and views', () => {
       'nodes',
       'cloud',
       'people',
+      'groups',
       'settings',
       'backups',
     ])
+    assert.deepEqual(
+      railItems(viewer('manager'))
+        .filter((item) => ['people', 'groups'].includes(item.key))
+        .map((item) => [item.href, item.icon]),
+      [
+        ['/people', 'person'],
+        ['/groups', 'group'],
+      ],
+    )
     assert.deepEqual(keys(viewer('developer')), ['dashboard', 'artifacts'])
     assert(atLeast(viewer('manager'), 'developer'))
     assert(!atLeast(viewer('developer'), 'manager'))
@@ -361,7 +374,7 @@ describe('Design system and views', () => {
     })
     assert.doesNotMatch(
       host,
-      /\/backups|\/cloud|\/people|\/settings|data-mason="/,
+      /\/backups|\/cloud|\/people|\/groups|\/settings|data-mason="/,
     )
     assert.match(host, /<a href="\/artifacts" aria-current="page"/)
     // Testers' pages are phone-first, without the rail.
@@ -2048,5 +2061,167 @@ describe('Project tabs and the Secrets tab', () => {
       'Audit',
     ])
       assert(!html.includes(control), control)
+  })
+})
+
+describe('People and groups pages', () => {
+  const people: Array<{
+    id: number
+    name: string
+    role: string
+    email?: string
+    addresses: Record<string, string>
+    username?: string
+  }> = [
+    {
+      id: 1,
+      name: 'Ada <Admin>',
+      role: 'admin',
+      email: 'ada@example.com',
+      addresses: {},
+      username: 'ada',
+    },
+    {
+      id: 2,
+      name: 'Tess',
+      role: 'tester',
+      addresses: { google: 'tess@gmail.example' },
+    },
+  ]
+  const apps = [
+    { id: 7, name: 'Wallet', slug: 'app.example.wallet', enabled: true },
+    { id: 3, name: 'Maps & more', slug: 'app.example.maps', enabled: true },
+    { id: 9, name: 'Old', slug: 'app.example.old', enabled: false },
+  ]
+  const group = { id: 5, name: 'Beta "crew"', apps: [3, 7], members: [2] }
+
+  it('U20.1 People lists people and, for administrators, the add form; it has no groups', () => {
+    const admin = peopleView({ people, canChange: true })
+    assert.match(admin, /<h1>People<\/h1>/)
+    assert.match(admin, /<strong>Ada &lt;Admin&gt;<\/strong>/)
+    assert.match(admin, /<small>google: tess@gmail\.example<\/small>/)
+    assert.match(admin, /name="email" type="email" required/)
+    assert.doesNotMatch(admin, /\/api\/v2\/groups|Tester groups/)
+    const manager = peopleView({ people, canChange: false })
+    assert.doesNotMatch(manager, /name="email"|data-path=/)
+    assert.match(manager, /<td>tester<\/td>/)
+    assert.match(peopleView({ people: [], canChange: false }), /Nobody yet\./)
+  })
+
+  it('U20.2 the Groups list links one row per group and adds a group by name', () => {
+    const html = groupsView({
+      groups: [
+        { id: 4, name: 'Alpha' },
+        { id: 12, name: 'Beta <b>' },
+      ],
+      canChange: true,
+    })
+    assert.match(html, /<h1>Groups<\/h1>/)
+    assert.deepEqual(
+      [
+        ...html.matchAll(
+          /<a class="list-row" href="([^"]+)"><strong>([^<]*)</g,
+        ),
+      ].map((match) => [match[1], match[2]]),
+      [
+        ['/groups/4', 'Alpha'],
+        ['/groups/12', 'Beta &lt;b&gt;'],
+      ],
+    )
+    assert.doesNotMatch(html, /No groups\./)
+    const form = html.slice(html.indexOf('<form'))
+    assert.match(form, /data-path="\/api\/v2\/groups"/)
+    assert.match(form, /data-fields="name"/)
+    assert.match(form, /data-then="group"/)
+    assert.match(
+      form,
+      /<input id="group-name" name="name" maxlength="120" required>/,
+    )
+    assert.doesNotMatch(form, /data-method=/)
+    const empty = groupsView({ groups: [], canChange: false })
+    assert.match(empty, /<p class="empty-state">No groups\.<\/p>/)
+    assert.doesNotMatch(empty, /<form|list-row/)
+  })
+
+  it('U20.3 a group page: the name row, one row per app and member, and Remove group', () => {
+    const html = groupView({ group, apps, people, canChange: true })
+    assert.match(html, /<h1 data-group-title>Beta &quot;crew&quot;<\/h1>/)
+    assert.match(
+      html,
+      /<span>Groups<\/span><span>\/<\/span><span data-group-title>Beta &quot;crew&quot;<\/span>/,
+    )
+    assert.match(html, /<div class="group-page" data-group="5">/)
+    // The name row comes first, as a button, with its hidden field.
+    const page = html.slice(html.indexOf('data-group="5"'))
+    assert.match(
+      page,
+      /^data-group="5"><div class="group-name" data-group-name><button type="button" class="list-row" data-group-rename><span><small>Name<\/small><strong data-group-name-text>Beta &quot;crew&quot;<\/strong>/,
+    )
+    assert.match(
+      page,
+      /<input name="name" maxlength="120" value="Beta &quot;crew&quot;" aria-label="Group name" autocomplete="off" data-group-name-input hidden>/,
+    )
+    // Apps in catalog order, with the slug; members with their email or address.
+    const appsSection = page.slice(
+      page.indexOf('data-group-section="apps"'),
+      page.indexOf('data-group-section="members"'),
+    )
+    assert.match(appsSection, /<h2>.*Apps<\/h2>/)
+    assert.deepEqual(
+      [
+        ...appsSection.matchAll(
+          /<li data-id="(\d+)"><div><strong>([^<]*)<\/strong><small class="mono">([^<]*)</g,
+        ),
+      ].map((match) => [match[1], match[2], match[3]]),
+      [
+        ['7', 'Wallet', 'app.example.wallet'],
+        ['3', 'Maps &amp; more', 'app.example.maps'],
+      ],
+    )
+    const members = page.slice(page.indexOf('data-group-section="members"'))
+    assert.match(members, /<h2>.*Group Members<\/h2>/)
+    assert.match(
+      members,
+      /<ul data-group-rows><li data-id="2"><div><strong>Tess<\/strong><small>tess@gmail\.example<\/small><\/div><\/li><\/ul>/,
+    )
+    // Remove group is a DELETE that returns to the list.
+    const remove = page.slice(page.lastIndexOf('<form'))
+    assert.match(
+      remove,
+      /data-path="\/api\/v2\/groups\/5" data-method="DELETE"/,
+    )
+    assert.match(remove, /data-then="groups"/)
+    assert.match(remove, /Remove group/)
+    // Without groups.change: text, and no forms.
+    const read = groupView({
+      group: { id: 5, name: 'Beta', apps: [], members: [1] },
+      apps,
+      people,
+      canChange: false,
+    })
+    assert.match(
+      read,
+      /<div class="group-name"><div class="list-row"><span><small>Name<\/small><strong data-group-name-text>Beta<\/strong><\/span><\/div><\/div>/,
+    )
+    assert.doesNotMatch(read, /<form|<button|data-group-rename/)
+    assert.match(read, /<ul data-group-rows><\/ul>/)
+    assert.match(
+      read,
+      /<strong>Ada &lt;Admin&gt;<\/strong><small>ada@example\.com/,
+    )
+  })
+
+  it('U20.4 the Settings intro links People and Groups', () => {
+    const html = settingsView({
+      apple: { signedIn: false, needsCode: false },
+      keys: [],
+      canChange: true,
+      canCreate: true,
+      canRevoke: true,
+    })
+    assert.match(
+      html,
+      /<p><a href="\/people">People<\/a> · <a href="\/groups">Groups<\/a> · <a href="\/backups">Backups<\/a> · <a href="\/nodes">Nodes<\/a><\/p>/,
+    )
   })
 })

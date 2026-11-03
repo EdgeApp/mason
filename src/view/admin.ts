@@ -6,6 +6,13 @@ import {
   type ProjectRunRow,
 } from './artifacts.js'
 import { icon } from './icons.js'
+import {
+  appRow,
+  memberRow,
+  sectionRows,
+  type GroupApp,
+  type GroupPerson,
+} from './groups.js'
 import { spacesRegions } from '../master/cloud/regions.js'
 import { SETUP_LABEL } from '../pipeline/graph.js'
 
@@ -967,7 +974,7 @@ export function settingsView(data: {
       .join('') || '<tr><td colspan="6">No keys.</td></tr>'
   }</tbody></table></section>`
   const cards = data.canChange ? settingsCards(data) : ''
-  return `${head('Settings', 'How this master signs people in, reaches GitHub and Apple, keeps its backups and runs its nodes.', ['Settings'])}<p><a href="/people">People and groups</a> · <a href="/backups">Backups</a> · <a href="/nodes">Nodes</a></p>${apple}${keys}${cards}`
+  return `${head('Settings', 'How this master signs people in, reaches GitHub and Apple, keeps its backups and runs its nodes.', ['Settings'])}<p><a href="/people">People</a> · <a href="/groups">Groups</a> · <a href="/backups">Backups</a> · <a href="/nodes">Nodes</a></p>${apple}${keys}${cards}`
 }
 
 /** A sign-in method as Settings shows it: every field but the client secret. */
@@ -1475,7 +1482,7 @@ function nodeTypesCard(types: Record<string, NodeTypeView>): string {
 /** The box an invitation link appears in, once, with Copy. */
 const linkBox = `<div data-field="token" hidden><p class="notice">Copy this link to them now: Mason sends no email, keeps only a hash of it and cannot show it again. It works once.</p><div class="command"><pre class="mono"></pre><button type="button" class="secondary copy" data-copy="">${icon('content_copy')}<span data-copy-label>Copy</span></button></div><p><a href="/people">Done</a></p></div>`
 
-/** People and groups: roles and per-method addresses; administrators change them. */
+/** People: roles and per-method addresses; administrators change them. */
 export function peopleView(data: {
   people: Array<{
     id: number
@@ -1490,14 +1497,7 @@ export function peopleView(data: {
     /** An unused invitation link: when it expires. */
     invitation?: { expiresAt: number }
   }>
-  groups: Array<{
-    id: number
-    name: string
-    apps: Array<{ id: number; slug: string }>
-    members: number[]
-  }>
   canChange: boolean
-  canChangeGroups: boolean
   /** Now, for when invitations expire. */
   now?: number
 }): string {
@@ -1567,23 +1567,7 @@ export function peopleView(data: {
   const add = data.canChange
     ? `<section class="panel"><h2>${icon('add')}Add a person</h2><form data-mason="person-add"><label for="person-name">Name</label><input id="person-name" name="name" required><label for="person-role">Role</label><select id="person-role" name="role">${roles.map((role) => `<option${role === 'tester' ? ' selected' : ''}>${role}</option>`).join('')}</select><label for="person-email">Email</label><input id="person-email" name="email" type="email" required><p>They sign in with any enabled sign-in method that confirms this address, with a password you set here, or with one they choose from an invitation link.</p>${usernameField('person-new', undefined, false)}${passwordFields('person-new', false)}${field('person-invite', 'Make an invitation link', '<input id="person-invite" name="invite" type="checkbox">', 'A link, valid for a week, where they choose a username and password. Mason sends no email: copy it to them.')}${linkBox}<button>${icon('add')} Add</button>${statusLine}</form></section>`
     : ''
-  const name = new Map(data.people.map((person) => [person.id, person.name]))
-  const groups = data.groups
-    .map(
-      (group) =>
-        `<li><strong>${escape(group.name)}</strong><small>${group.apps.map((app) => escape(app.slug)).join(', ') || 'No apps'} · ${group.members.map((id) => escape(name.get(id) ?? String(id))).join(', ') || 'No members'}</small></li>`,
-    )
-    .join('')
-  return `${head('People', 'Who signs in, with which addresses, and what their role lets them do.', ['Settings', 'People'])}<table class="list"><thead><tr><th>Person</th><th>Addresses</th><th>Role</th><th></th></tr></thead><tbody>${people || '<tr><td colspan="4">Nobody yet.</td></tr>'}</tbody></table><div class="columns"><div>${add}</div><aside><section class="panel"><h2>${icon('group')}Tester groups</h2><ul class="plain">${groups || '<li>No groups.</li>'}</ul>${
-    data.canChangeGroups
-      ? apiForm(
-          '/api/v2/groups',
-          '<label for="group-json">New group (JSON: name, apps, members)</label><textarea id="group-json" name="value" rows="4" class="mono">{"name": "", "apps": [], "members": []}</textarea>',
-          `${icon('add')} Add group`,
-          { json: 'value', then: 'reload', className: 'secondary' },
-        )
-      : ''
-  }</section></aside></div>`
+  return `${head('People', 'Who signs in, with which addresses, and what their role lets them do.', ['Settings', 'People'])}<table class="list"><thead><tr><th>Person</th><th>Addresses</th><th>Role</th><th></th></tr></thead><tbody>${people || '<tr><td colspan="4">Nobody yet.</td></tr>'}</tbody></table>${add}`
 }
 
 /** The add-project wizard: repository, then the Masonfile's app IDs, then branches and triggers. */
@@ -2019,4 +2003,78 @@ export function cloudView(data: {
       )}</section>`
     : ''
   return `${head('Cloud', 'The provider accounts cloud pools and hosts are made in.', ['Cloud'])}${accounts || '<p class="empty-state">No cloud accounts yet.</p>'}${add}`
+}
+
+/** Groups: one row per group, each opening its page, and a name field that adds one. */
+export function groupsView(data: {
+  groups: Array<{ id: number; name: string }>
+  canChange: boolean
+}): string {
+  const rows = data.groups
+    .map(
+      (group) =>
+        `<a class="list-row" href="/groups/${group.id}"><strong>${escape(group.name)}</strong>${icon('chevron_right')}</a>`,
+    )
+    .join('')
+  const add = data.canChange
+    ? `<section class="panel"><h2>${icon('add')}Add a group</h2>${apiForm(
+        '/api/v2/groups',
+        field(
+          'group-name',
+          'Name',
+          '<input id="group-name" name="name" maxlength="120" required>',
+        ),
+        `${icon('add')} Add group`,
+        { fields: ['name'], then: 'group' },
+      )}</section>`
+    : ''
+  return `${head('Groups', 'The apps each group’s members see in their catalog.', ['Groups'])}<div class="group-list">${rows || '<p class="empty-state">No groups.</p>'}</div>${add}`
+}
+
+/**
+ * A group: its name, which becomes a text field when tapped, its apps and its
+ * members, and Remove group. Viewers who cannot change groups see text.
+ */
+export function groupView(data: {
+  group: { id: number; name: string; apps: number[]; members: number[] }
+  apps: GroupApp[]
+  people: GroupPerson[]
+  canChange: boolean
+}): string {
+  const { group } = data
+  const name = escape(group.name)
+  const crumbs = ['Mason', 'Master', 'Groups']
+    .map((part) => `<span>${escape(part)}</span>`)
+    .join('<span>/</span>')
+  const top = `<div class="page-head"><div><div class="breadcrumbs">${crumbs}<span>/</span><span data-group-title>${name}</span></div><h1 data-group-title>${name}</h1><p>Its members see its apps in their catalog.</p></div></div>`
+  const label = `<span><small>Name</small><strong data-group-name-text>${name}</strong></span>`
+  const nameRow = data.canChange
+    ? `<div class="group-name" data-group-name><button type="button" class="list-row" data-group-rename>${label}${icon('edit')}</button><input name="name" maxlength="120" value="${name}" aria-label="Group name" autocomplete="off" data-group-name-input hidden><p class="notice" role="alert" data-group-name-error hidden></p></div>`
+    : `<div class="group-name"><div class="list-row">${label}</div></div>`
+  const section = (
+    kind: 'apps' | 'members',
+    title: string,
+    heading: string,
+    rows: string,
+  ): string =>
+    `<section class="panel" data-group-section="${kind}"><h2>${heading}${escape(title)}</h2><ul data-group-rows>${rows}</ul></section>`
+  const remove = data.canChange
+    ? apiForm(
+        `/api/v2/groups/${group.id}`,
+        '',
+        `${icon('delete')} Remove group`,
+        { method: 'DELETE', then: 'groups', className: 'danger' },
+      )
+    : ''
+  return `${top}<div class="group-page" data-group="${group.id}">${nameRow}${section(
+    'apps',
+    'Apps',
+    icon('apps'),
+    sectionRows(data.apps, group.apps, appRow),
+  )}${section(
+    'members',
+    'Group Members',
+    icon('group'),
+    sectionRows(data.people, group.members, memberRow),
+  )}${remove}</div>`
 }

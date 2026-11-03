@@ -315,6 +315,41 @@ describe('Run view script', () => {
     assert.deepEqual(visits, ['/runs/r9', '/here', '/projects/new?slug=repo'])
   })
 
+  it('U20.5 a new group opens its page, and a removed group returns to the list', async () => {
+    const visits: string[] = []
+    const answers = [reply(201, { id: 4, name: 'Beta' }), reply(200, null)]
+    const fetcher = (async () => answers.shift()!) as unknown as typeof fetch
+    assert.equal(
+      await submitAction(
+        form(
+          '/api/v2/groups',
+          { name: 'Beta' },
+          { then: 'group' },
+        ) as unknown as HTMLFormElement,
+        'proof',
+        fetcher,
+        (href) => visits.push(href),
+        '/groups',
+      ),
+      undefined,
+    )
+    assert.equal(
+      await submitAction(
+        form(
+          '/api/v2/groups/4',
+          {},
+          { method: 'DELETE', then: 'groups' },
+        ) as unknown as HTMLFormElement,
+        'proof',
+        fetcher,
+        (href) => visits.push(href),
+        '/groups/4',
+      ),
+      undefined,
+    )
+    assert.deepEqual(visits, ['/groups/4', '/groups'])
+  })
+
   it('applies live frames to the page: run status, stages, the shown stage’s steps and its log, following the running stage', () => {
     const recorded: string[] = []
     const page: RunPage = {

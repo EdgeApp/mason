@@ -260,8 +260,9 @@ export function formPath(form: HTMLFormElement): string {
 }
 
 /**
- * Sends an action form to its API path, then reloads, opens the new run, or
- * (the wizard's first step) creates the project it checked and continues.
+ * Sends an action form to its API path, then reloads, opens the new run or
+ * group, returns to the groups, or (the wizard's first step) creates the
+ * project it checked and continues.
  */
 export async function submitAction(
   form: HTMLFormElement,
@@ -321,6 +322,10 @@ export async function submitAction(
   }
   if (form.dataset.then === 'run' && body.id != null)
     go(`/runs/${encodeURIComponent(body.id)}`)
+  // A new group opens its page; a removed one returns to the list.
+  else if (form.dataset.then === 'group' && body.id != null)
+    go(`/groups/${encodeURIComponent(body.id)}`)
+  else if (form.dataset.then === 'groups') go('/groups')
   else if (form.dataset.then === 'wizard' && body.slug != null) {
     const created = await send(
       `/api/v2/projects/${encodeURIComponent(body.slug)}`,

@@ -9,6 +9,8 @@ import {
 } from '../node/webApp.js'
 import { escape } from '../view/html.js'
 import {
+  groupsView,
+  groupView,
   masonfileView,
   nodesView,
   peopleView,
@@ -41,6 +43,7 @@ import { search } from '../view/search.js'
 import { runLog } from './runsApi.js'
 import { discovery } from './wizard.js'
 import { shell, type Viewer } from '../view/shell.js'
+import type { GroupApp } from '../view/groups.js'
 import { MASTER_SESSION_COOKIE, type MasterSession } from './auth.js'
 import { can } from './permissions.js'
 import { sessionActor } from './auth.js'
@@ -234,6 +237,19 @@ function testerApps(master: Master, session: MasterSession): string {
 
 /** Set by "Skip for now": the dashboard stops sending an administrator to Backups for this browser session. */
 const BACKUP_LATER_COOKIE = 'mason-backups-later'
+
+/** Every app, in the order the catalog lists them, for a group page. */
+function groupApps(master: Master): GroupApp[] {
+  return master.database.db
+    .prepare('SELECT id,name,slug,enabled FROM apps ORDER BY position,id')
+    .all()
+    .map((row) => ({
+      id: Number(row.id),
+      name: String(row.name),
+      slug: String(row.slug),
+      enabled: Number(row.enabled) === 1,
+    }))
+}
 
 /** The master's pages: setup until the first account exists, then sign-in, home and backups. */
 export function masterPages(
@@ -878,9 +894,7 @@ export function masterPages(
             : { invitation: person.invitation }),
         })),
         now: master.database.now(),
-        groups: can(actor, 'groups.read') ? master.people.groups(actor) : [],
         canChange: can(actor, 'people.change'),
-        canChangeGroups: can(actor, 'groups.change'),
       })
     },
     true,
@@ -911,6 +925,74 @@ export function masterPages(
       })
     },
   )
+  guarded('/groups', 'groups.read', 'Groups', 'groups', (current) => {
+    const actor = sessionActor(current)
+    return groupsView({
+      groups: master.people
+        .groups(actor)
+        .map((group) => ({ id: group.id, name: group.name })),
+      canChange: can(actor, 'groups.change'),
+    })
+  })
+  // Not `guarded`: an unknown group answers 404, where `guarded` answers 400.
+  app.get('/groups/:id', (req, res) => {
+    const current = session(req)
+    if (current == null) {
+      res.redirect(303, master.configured() ? '/sign-in' : '/')
+      return
+    }
+    const actor = sessionActor(current)
+    if (!can(actor, 'groups.read')) {
+      send(
+        res,
+        'Groups',
+        '<p>Groups is for those whose role allows it.</p>',
+        current,
+        403,
+        'groups',
+      )
+      return
+    }
+    const id = String(req.params.id)
+    const group = /^[1-9]\d{0,15}$/.test(id)
+      ? master.people.group(Number(id))
+      : undefined
+    if (group == null) {
+      send(
+        res,
+        'Groups',
+        '<p class="empty-state">No such group</p>',
+        current,
+        404,
+        'groups',
+      )
+      return
+    }
+    send(
+      res,
+      group.name,
+      groupView({
+        group: {
+          id: group.id,
+          name: group.name,
+          apps: group.apps.map((app) => app.id),
+          members: group.members,
+        },
+        apps: groupApps(master),
+        people: master.people.list(actor).map((person) => ({
+          id: person.id,
+          name: person.name,
+          ...(person.email == null ? {} : { email: person.email }),
+          addresses: person.addresses,
+        })),
+        canChange: can(actor, 'groups.change'),
+      }),
+      current,
+      200,
+      'groups',
+      ['/assets/groups.js'],
+    )
+  })
   /**
    * The project a project page is about, for a signed-in developer or more;
    * otherwise the page answers (sign-in, 403 or 404) and this returns nothing.

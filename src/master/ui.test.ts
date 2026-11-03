@@ -951,7 +951,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     assert(!settings.text.includes('ghp_fixture'))
     assert.match(settings.text, /policy|No keys|admin/)
     // The host has no settings, nodes or Apple pages.
-    for (const route of ['/settings', '/nodes', '/people'])
+    for (const route of ['/settings', '/nodes', '/people', '/groups'])
       assert(
         [403, 404].includes(
           (await request(host, 'GET', route, onHost('admin'))).status,
@@ -966,14 +966,15 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       '/nodes',
       '/settings',
       '/people',
+      '/groups',
       '/backups',
       `/runs/${run}`,
     ]
     const expected: Record<string, number[]> = {
-      admin: [200, 200, 200, 200, 200, 200],
-      manager: [200, 200, 200, 200, 200, 200],
-      developer: [200, 403, 403, 403, 403, 200],
-      tester: [200, 403, 403, 403, 403, 403],
+      admin: [200, 200, 200, 200, 200, 200, 200],
+      manager: [200, 200, 200, 200, 200, 200, 200],
+      developer: [200, 403, 403, 403, 403, 403, 200],
+      tester: [200, 403, 403, 403, 403, 403, 403],
     }
     for (const [role, statuses] of Object.entries(expected)) {
       const session = signIn(role)
@@ -986,7 +987,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       .text
     assert.doesNotMatch(
       developer,
-      /href="\/(nodes|settings|people|backups)"|Add project/,
+      /href="\/(nodes|settings|people|groups|backups)"|Add project/,
     )
     const manager = (await request(c.master, 'GET', '/', signIn('manager')))
       .text
@@ -1227,5 +1228,137 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       (await request(c.master, 'GET', '/', signIn('tester'))).text,
       /Your apps/,
     )
+  })
+
+  it('U20.11 Groups lists the groups and opens a page for each; People no longer holds them', async () => {
+    const admin = signIn('admin')
+    const manager = signIn('manager')
+    const adminPeople = (await request(c.master, 'GET', '/people', admin)).text
+    assert.match(adminPeople, /name="email" type="email" required/)
+    assert.doesNotMatch(adminPeople, /\/api\/v2\/groups/)
+    const managerPeople = (await request(c.master, 'GET', '/people', manager))
+      .text
+    assert.doesNotMatch(managerPeople, /name="email"|\/api\/v2\/groups/)
+    assert.match(
+      (await request(c.master, 'GET', '/', admin)).text,
+      /<a href="\/people"[^>]*>.*?<span class="label">People<\/span><\/a><a href="\/groups"[^>]*>.*?<span class="label">Groups<\/span>/,
+    )
+    const db = c.master.master!.database.db
+    const app = db
+      .prepare('SELECT id,name,slug FROM apps ORDER BY position,id LIMIT 1')
+      .get() as Json
+    assert(app != null, 'the wizard made an app')
+    const created = await request(c.master, 'POST', '/api/v2/groups', {
+      ...manager,
+      body: {
+        name: 'Ui <crew>',
+        apps: [app.id],
+        members: [people.tester],
+      },
+    })
+    assert.equal(created.status, 201, created.text)
+    const list = await request(c.master, 'GET', '/groups', manager)
+    assert.equal(list.status, 200)
+    assert.match(
+      list.text,
+      new RegExp(
+        `<a class="list-row" href="/groups/${created.json.id}"><strong>Ui &lt;crew&gt;</strong>`,
+      ),
+    )
+    assert.match(list.text, /<input id="group-name" name="name"/)
+    assert.match(list.text, /aria-current="page" title="Groups"/)
+    assert.doesNotMatch(list.text, /src="\/assets\/groups\.js"/)
+    const page = await request(
+      c.master,
+      'GET',
+      `/groups/${created.json.id}`,
+      manager,
+    )
+    assert.equal(page.status, 200)
+    assert.match(page.text, /<title>Ui &lt;crew&gt; · Mason<\/title>/)
+    assert.match(page.text, /<h1 data-group-title>Ui &lt;crew&gt;<\/h1>/)
+    assert.match(page.text, /data-group-rename/)
+    assert.match(page.text, /<h2>.*Apps<\/h2>/)
+    assert.match(page.text, /<h2>.*Group Members<\/h2>/)
+    assert.match(
+      page.text,
+      new RegExp(
+        `<li data-id="${app.id}"><div><strong>[^<]*</strong><small class="mono">${app.slug.replaceAll('.', '\\.')}<`,
+      ),
+    )
+    assert.match(
+      page.text,
+      new RegExp(
+        `<li data-id="${people.tester}"><div><strong>tester person</strong><small>tester\\.person@example\\.test<`,
+      ),
+    )
+    assert.match(
+      page.text,
+      /data-method="DELETE" data-fields="" data-then="groups"/,
+    )
+    assert.match(
+      page.text,
+      /<script type="module" src="\/assets\/groups\.js"><\/script>/,
+    )
+    const script = await request(c.master, 'GET', '/assets/groups.js')
+    assert.equal(script.status, 200)
+    assert.match(script.type, /javascript/)
+    assert.match(script.text, /data-group-rename/)
+    for (const route of [
+      '/groups/999999',
+      '/groups/0',
+      '/groups/x',
+      '/groups/1.5',
+    ]) {
+      const missing = await request(c.master, 'GET', route, manager)
+      assert.equal(missing.status, 404, route)
+      assert.match(missing.text, /No such group/, route)
+    }
+    for (const role of ['developer', 'tester'])
+      assert.equal(
+        (
+          await request(
+            c.master,
+            'GET',
+            `/groups/${created.json.id}`,
+            signIn(role),
+          )
+        ).status,
+        403,
+        role,
+      )
+    assert.equal(
+      (await request(c.master, 'GET', `/groups/${created.json.id}`)).status,
+      303,
+    )
+    assert(
+      [403, 404].includes(
+        (
+          await request(
+            host,
+            'GET',
+            `/groups/${created.json.id}`,
+            onHost('admin'),
+          )
+        ).status,
+      ),
+    )
+    assert.equal(
+      (
+        await request(c.master, 'DELETE', `/api/v2/groups/${created.json.id}`, {
+          ...manager,
+        })
+      ).status,
+      200,
+    )
+    // A removed group's page is gone.
+    const removed = await request(
+      c.master,
+      'GET',
+      `/groups/${created.json.id}`,
+      manager,
+    )
+    assert.equal(removed.status, 404)
+    assert.match(removed.text, /No such group/)
   })
 })

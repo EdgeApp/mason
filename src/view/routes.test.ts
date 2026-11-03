@@ -178,21 +178,26 @@ describe('Pages on the master and the host', function () {
       const reply = await get(host, route, onHost('admin'))
       assert.doesNotMatch(
         reply.text,
-        /href="\/(backups|people|settings)|data-mason="/,
+        /href="\/(backups|people|groups|settings)|data-mason="/,
         route,
       )
     }
-    for (const route of ['/backups', '/people', '/api/v2/settings/backup'])
+    for (const route of [
+      '/backups',
+      '/people',
+      '/groups',
+      '/groups/1',
+      '/api/v2/settings/backup',
+    ])
       assert(
         [403, 404].includes((await get(host, route, onHost('admin'))).status),
         route,
       )
-    assert.match(
-      (await get(c.master, '/', onMaster('admin'))).text,
-      /href="\/backups"/,
-    )
+    const admin = (await get(c.master, '/', onMaster('admin'))).text
+    assert.match(admin, /href="\/backups"/)
+    assert.match(admin, /href="\/groups"/)
     const developer = await get(c.master, '/', onMaster('developer'))
-    assert.doesNotMatch(developer.text, /href="\/backups"/)
+    assert.doesNotMatch(developer.text, /href="\/(backups|groups)"/)
     assert.match(
       developer.text,
       /<strong>Developer Person<\/strong><small>developer · master/,
