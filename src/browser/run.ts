@@ -293,21 +293,29 @@ export async function submitAction(
   const body = (await response.json().catch(() => ({}))) as {
     id?: string
     token?: string
+    url?: string
+    invitation?: { url?: string }
     error?: string
     slug?: string
     repository?: string
     defaultBranch?: string
   }
   if (!response.ok) return body.error ?? `Request failed (${response.status})`
-  // A new API key's token, shown once in the form's command box.
-  if (form.dataset.then === 'token' && typeof body.token === 'string') {
+  // A new API key's token or an invitation link, shown once in the form's command box.
+  const shown =
+    form.dataset.then === 'token'
+      ? body.token
+      : form.dataset.then === 'link'
+        ? (body.url ?? body.invitation?.url)
+        : undefined
+  if (typeof shown === 'string') {
     const out = form.querySelector<HTMLElement>('[data-field="token"]')
     if (out != null) {
       out.hidden = false
       const pre = out.querySelector('pre')
-      if (pre != null) pre.textContent = body.token
+      if (pre != null) pre.textContent = shown
       const copy = out.querySelector<HTMLElement>('button[data-copy]')
-      if (copy != null) copy.dataset.copy = body.token
+      if (copy != null) copy.dataset.copy = shown
     }
     return undefined
   }

@@ -7,7 +7,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 29
+export const MASTER_SCHEMA = 31
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -744,6 +744,42 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       )
     db.exec(`UPDATE apple_profiles SET platform='macos' WHERE distribution IN ('developerId','macAppStore')
       OR EXISTS (SELECT 1 FROM apple_bundle_ids b WHERE b.team_id=apple_profiles.team_id AND b.identifier=apple_profiles.bundle_id AND b.platform='MAC_OS')`)
+  },
+  // 30: a person's invitation link, at most one each: only the SHA-256 of
+  // its token is kept, and it is gone once used, replaced or revoked.
+  (db): void =>
+    db.exec(`
+    CREATE TABLE IF NOT EXISTS person_invitations (
+      account_id INTEGER PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+      token_hash TEXT NOT NULL UNIQUE,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL
+    ) STRICT;`),
+  // 31: a host is made only in a cloud account whose key an administrator
+  // entered. An account a host was made in before counts as one; any other
+  // needs its key entered again.
+  (db): void => {
+    const row = db
+      .prepare("SELECT value FROM settings WHERE area='cloudAccounts'")
+      .get() as { value: string } | undefined
+    if (row == null) return
+    const hosts = new Set(
+      db
+        .prepare(
+          "SELECT account FROM cloud_hosts WHERE role='host' AND state<>'removed'",
+        )
+        .all()
+        .map((host) => String(host.account)),
+    )
+    const value = JSON.parse(row.value) as {
+      accounts?: Array<Record<string, unknown>>
+    }
+    for (const account of value.accounts ?? [])
+      if (hosts.has(String(account.id))) account.adminKeyed = true
+    db.prepare("UPDATE settings SET value=? WHERE area='cloudAccounts'").run(
+      JSON.stringify(value),
+    )
   },
 ]
 

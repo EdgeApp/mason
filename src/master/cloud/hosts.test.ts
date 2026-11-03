@@ -14,9 +14,10 @@ import { after, before, describe, it } from 'mocha'
 import { nodeMain, type MainIO } from '../../node/main.js'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeCloud } from '../../test/fakeCloud.js'
-import { nodesView, type CloudHostView } from '../../view/admin.js'
+import { cloudView, nodesView, type CloudHostView } from '../../view/admin.js'
 import { clusterCheck, formatCheck } from '../clusterCheck.js'
 import { localOperator } from '../roles.js'
+import type { CloudProvider } from './digitalocean.js'
 import type { CloudHostRow } from './hosts.js'
 
 // API replies are read field by field.
@@ -106,6 +107,94 @@ describe('Mason hosts on DigitalOcean', function () {
     }
   }
 
+  it('M2.13 a host is made only in an account whose key an administrator entered', async () => {
+    const master = c.master.master!
+    const manager = master.keys.create(localOperator, {
+      role: 'manager',
+      name: 'accounts manager',
+    }).token
+    const refusal =
+      /An administrator must re-enter the key of account (\S+) before a host is made in it/
+    // A manager's own account, however it is named.
+    const added = await c.api(
+      'POST',
+      '/api/v2/cloud/accounts',
+      {
+        id: 'company-do',
+        name: 'Company DO',
+        provider: 'digitalocean',
+        key: 'dop_v1_' + 'a'.repeat(64),
+      },
+      manager,
+    )
+    assert.equal(added.status, 201, added.text)
+    assert.equal(added.json.adminKeyed, false)
+    const theirs = await c.api('POST', '/api/v2/cloud/hosts', {
+      ...host,
+      account: 'company-do',
+    })
+    assert.equal(theirs.status, 409)
+    assert.match(theirs.json.error, refusal)
+    // A manager re-keys the account before any host is made in it.
+    const accounts = (key: unknown): unknown => ({
+      accounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean', key },
+        { id: 'mac', name: 'NoMac', provider: 'nomac', key: { keep: true } },
+        {
+          id: 'company-do',
+          name: 'Company DO',
+          provider: 'digitalocean',
+          key: { keep: true },
+        },
+      ],
+    })
+    assert.equal(
+      (
+        await c.api(
+          'PUT',
+          '/api/v2/settings/cloudAccounts',
+          accounts('dop_v1_' + 'b'.repeat(64)),
+          manager,
+        )
+      ).status,
+      200,
+    )
+    assert.equal(master.cloudAccounts.get('do')!.adminKeyed, undefined)
+    const rekeyed = await c.api('POST', '/api/v2/cloud/hosts', host)
+    assert.equal(rekeyed.status, 409)
+    assert.match(rekeyed.json.error, /account do before/)
+    assert.equal(master.cloudHosts.list().length, 0, 'nothing made')
+    // Keeping the key, even an administrator's save does not vouch for it.
+    await c.api(
+      'PUT',
+      '/api/v2/settings/cloudAccounts',
+      accounts({ keep: true }),
+    )
+    assert.equal(master.cloudAccounts.get('do')!.adminKeyed, undefined)
+    // An administrator enters the key again.
+    assert.equal(
+      (await c.api('PUT', '/api/v2/settings/cloudAccounts', accounts(KEY)))
+        .status,
+      200,
+    )
+    assert.equal(master.cloudAccounts.get('do')!.adminKeyed, true)
+    assert.equal(
+      (await c.api('DELETE', '/api/v2/cloud/accounts/company-do')).status,
+      200,
+    )
+    const page = await c.api('GET', '/api/v2/cloud/accounts')
+    assert.deepEqual(
+      page.json.map((account: { id: string; adminKeyed: boolean }) => [
+        account.id,
+        account.adminKeyed,
+      ]),
+      [
+        ['do', true],
+        ['mac', true],
+      ],
+    )
+  })
+
   it('U4.8 a provider failure leaves the host in error with the reason, and the next reconcile tries again', async () => {
     assert.equal(
       (await c.api('POST', '/api/v2/cloud/hosts', { ...host, account: 'mac' }))
@@ -163,6 +252,7 @@ describe('Mason hosts on DigitalOcean', function () {
       [
         [80, ['0.0.0.0/0', '::/0']],
         [443, ['0.0.0.0/0', '::/0']],
+        [22, ['203.0.113.7']],
         [9310, ['203.0.113.7']],
       ],
     )
@@ -196,6 +286,65 @@ describe('Mason hosts on DigitalOcean', function () {
     assert.deepEqual(
       listed.json.map((entry: Json) => [entry.name, entry.state]),
       [['e2e', 'ready']],
+    )
+  })
+
+  it('M2.11 a manager cannot make, reconcile or remove the host, nor re-key the account it was made in', async () => {
+    const master = c.master.master!
+    const manager = master.keys.create(localOperator, {
+      role: 'manager',
+      name: 'hosts manager',
+    }).token
+    const origin = (): unknown =>
+      (master.settings.value('host') as { origin?: string } | undefined)?.origin
+    const before = origin()
+    assert.notEqual(before, undefined)
+    for (const [verb, route, body] of [
+      ['POST', '/api/v2/cloud/hosts', { ...host, name: 'mine' }],
+      ['POST', '/api/v2/cloud/hosts/e2e/reconcile', {}],
+      ['DELETE', '/api/v2/cloud/hosts/e2e', { confirm: 'e2e' }],
+    ] as const) {
+      const reply = await c.api(verb, route, body, manager)
+      assert.equal(reply.status, 403, `${verb} ${route}: ${reply.text}`)
+    }
+    assert.equal(row().state, 'ready')
+    assert.equal(master.cloudHosts.get('mine'), undefined)
+    assert.equal(origin(), before, 'the host origin is unchanged')
+    const accounts = (key: unknown): unknown => ({
+      accounts: [
+        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean', key },
+        {
+          id: 'mac',
+          name: 'NoMac',
+          provider: 'nomac',
+          key: { keep: true },
+        },
+      ],
+    })
+    const rekey = await c.api(
+      'PUT',
+      '/api/v2/settings/cloudAccounts',
+      accounts('dop_v1_' + 'f'.repeat(64)),
+      manager,
+    )
+    assert.equal(rekey.status, 403)
+    assert.match(rekey.json.error, /makes the host; only an administrator/)
+    // Keeping its key, a manager may still change the other accounts.
+    assert.equal(
+      (
+        await c.api(
+          'PUT',
+          '/api/v2/settings/cloudAccounts',
+          accounts({ keep: true }),
+          manager,
+        )
+      ).status,
+      200,
+    )
+    assert.equal(
+      (await c.api('POST', '/api/v2/cloud/hosts/e2e/reconcile', {})).status,
+      200,
+      'an administrator may',
     )
   })
 
@@ -530,5 +679,254 @@ describe('Mason hosts on DigitalOcean', function () {
       0,
     )
     assert.deepEqual(cli.lines, ['Removed host e2e'])
+  })
+})
+
+describe('A host made while its account changes', function () {
+  this.timeout(60_000)
+  const ADMIN = 'dop_v1_' + 'd'.repeat(64)
+  const MANAGER = 'dop_v1_' + 'a'.repeat(64)
+  let c: Cluster
+  /** The tokens droplets were made with. */
+  const made: string[] = []
+  let duringLookup = async (): Promise<void> => undefined
+  let lookup = async (): Promise<string[]> => {
+    await duringLookup()
+    return ['example.com']
+  }
+  before(async () => {
+    const dir = mkdtempSync(
+      path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'hosts-race-'),
+    )
+    const provider = (token: string): CloudProvider =>
+      ({
+        // The lookup's own promise, so a test can end it at an exact moment.
+        domains: (): Promise<string[]> => lookup(),
+        get: async () => undefined,
+        list: async () => [],
+        create: async (spec: { name: string }) => {
+          made.push(token)
+          return { id: '1', name: spec.name }
+        },
+        destroy: async () => undefined,
+        firewall: async () => undefined,
+      }) as unknown as CloudProvider
+    c = await cluster(path.join(dir, 'cluster'), {
+      workers: [],
+      masterOptions: {
+        cloudHosts: {
+          provider,
+          publicAddress: async () => '203.0.113.7',
+          tickMs: 3_600_000,
+          settleMs: 3_600_000,
+        },
+      },
+    })
+    await c.master.master!.settings.set(localOperator, 'cloudAccounts', {
+      accounts: [
+        {
+          id: 'do',
+          name: 'DigitalOcean',
+          provider: 'digitalocean',
+          key: ADMIN,
+        },
+      ],
+    })
+  })
+  after(async () => {
+    await c?.close()
+  })
+  const spec = {
+    name: 'e2e',
+    account: 'do',
+    region: 'sfo3',
+    size: 's-1vcpu-1gb',
+    dns: { domain: 'example.com', name: 'builds' },
+  }
+
+  it('M2.16 a key a manager swaps in during the DNS lookup makes no host, and no droplet with their key', async () => {
+    const master = c.master.master!
+    const manager = master.keys.create(localOperator, {
+      role: 'manager',
+      name: 'race manager',
+    }).token
+    let swap: { status: number } | undefined
+    duringLookup = async (): Promise<void> => {
+      duringLookup = async (): Promise<void> => undefined
+      swap = await c.api(
+        'PUT',
+        '/api/v2/cloud/accounts/do/key',
+        { key: MANAGER },
+        manager,
+      )
+    }
+    const created = await c.api('POST', '/api/v2/cloud/hosts', spec)
+    assert.equal(swap?.status, 200, 'the account held no host yet')
+    assert.equal(created.status, 409, created.text)
+    assert.match(created.json.error, /re-enter the key of account do/)
+    assert.equal(master.cloudHosts.list().length, 0)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    assert.deepEqual(made, [])
+  })
+
+  it('M2.17 an administrator replaces the key on the Cloud page; a host whose key changed anyway is not reconciled with it', async () => {
+    const master = c.master.master!
+    const page = cloudView({
+      accounts: master.cloudAccounts.list(localOperator),
+      canChange: true,
+      now: 0,
+    })
+    assert.match(page, /No administrator entered this key/)
+    assert.match(
+      page,
+      /data-path="\/api\/v2\/cloud\/accounts\/do\/key" data-method="PUT"/,
+    )
+    const replaced = await c.api('PUT', '/api/v2/cloud/accounts/do/key', {
+      key: ` ${ADMIN}\n`,
+    })
+    assert.equal(replaced.status, 200, replaced.text)
+    assert.equal(replaced.json.adminKeyed, true)
+    assert.equal(master.cloudAccounts.get('do')!.key, ADMIN)
+    assert.match(
+      cloudView({
+        accounts: master.cloudAccounts.list(localOperator),
+        canChange: true,
+        now: 0,
+      }),
+      /entered by an administrator, so a host may be made in it/,
+    )
+    assert.equal(
+      (await c.api('PUT', '/api/v2/cloud/accounts/none/key', { key: ADMIN }))
+        .status,
+      404,
+    )
+    const created = await c.api('POST', '/api/v2/cloud/hosts', spec)
+    assert.equal(created.status, 201, created.text)
+    await c.until(() => made.length === 1, 10_000, 'the droplet')
+    assert.deepEqual(made, [ADMIN])
+    // As a write racing the guard could leave it: another key, not vouched for.
+    const row = master.database.db
+      .prepare("SELECT value FROM settings WHERE area='cloudAccounts'")
+      .get() as { value: string }
+    master.database.db
+      .prepare("UPDATE settings SET value=? WHERE area='cloudAccounts'")
+      .run(
+        JSON.stringify({
+          accounts: (
+            JSON.parse(row.value) as {
+              accounts: Array<Record<string, unknown>>
+            }
+          ).accounts.map((account) => ({
+            id: account.id,
+            name: account.name,
+            provider: account.provider,
+            key: MANAGER,
+          })),
+        }),
+      )
+    master.database.db.prepare('UPDATE cloud_hosts SET provider_id=NULL').run()
+    const reconciled = await c.api(
+      'POST',
+      '/api/v2/cloud/hosts/e2e/reconcile',
+      {},
+    )
+    assert.equal(reconciled.json.state, 'error')
+    assert.match(reconciled.json.error, /re-enter the key of account do/)
+    assert.deepEqual(made, [ADMIN], 'nothing made with the other key')
+  })
+
+  it('M2.18 a manager’s key change validated before the host is recorded cannot land after it', async () => {
+    const master = c.master.master!
+    await master.cloudHosts.remove('e2e', 'e2e')
+    await master.settings.set(localOperator, 'cloudAccounts', {
+      accounts: [
+        {
+          id: 'do',
+          name: 'DigitalOcean',
+          provider: 'digitalocean',
+          key: ADMIN,
+        },
+      ],
+    })
+    made.length = 0
+    let release = (): void => undefined
+    const plain = lookup
+    lookup = (): Promise<string[]> =>
+      new Promise<string[]>((resolve) => {
+        release = (): void => resolve(['example.com'])
+      })
+    const creating = master.cloudHosts.create({ ...spec, name: 'h2' })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    // The lookup ends, and the manager's write is validated before the host is recorded.
+    release()
+    const swapping = master.settings.set(
+      { role: 'manager', label: 'manager' },
+      'cloudAccounts',
+      {
+        accounts: [
+          {
+            id: 'do',
+            name: 'DigitalOcean',
+            provider: 'digitalocean',
+            key: MANAGER,
+          },
+        ],
+      },
+    )
+    const [created, swapped] = await Promise.allSettled([creating, swapping])
+    lookup = plain
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const key = master.cloudAccounts.get('do')!.key
+    if (created.status === 'fulfilled') {
+      assert.equal(swapped.status, 'rejected', 'the host’s account is kept')
+      assert.equal(key, ADMIN)
+    } else assert.match(String(created.reason), /re-enter the key/)
+    assert(!made.includes(MANAGER), 'nothing made with the manager’s key')
+    if (master.cloudHosts.get('h2') != null)
+      await master.cloudHosts.remove('h2', 'h2')
+  })
+
+  it('M2.19 a manager entering the same key again keeps an administrator’s vouching', async () => {
+    const master = c.master.master!
+    await master.settings.set(localOperator, 'cloudAccounts', {
+      accounts: [
+        {
+          id: 'do',
+          name: 'DigitalOcean',
+          provider: 'digitalocean',
+          key: ADMIN,
+        },
+      ],
+    })
+    assert.equal(
+      (await c.api('POST', '/api/v2/cloud/hosts', { ...spec, name: 'h3' }))
+        .status,
+      201,
+    )
+    const manager = master.keys.create(localOperator, {
+      role: 'manager',
+      name: 'same key manager',
+    }).token
+    const same = await c.api(
+      'PUT',
+      '/api/v2/cloud/accounts/do/key',
+      { key: ADMIN },
+      manager,
+    )
+    assert.equal(same.status, 200, same.text)
+    assert.equal(same.json.adminKeyed, true)
+    const checked = await c.api('POST', '/api/v2/cloud/hosts/h3/reconcile', {})
+    assert.notEqual(checked.json.state, 'error', checked.text)
+    assert.equal(
+      (
+        await c.api(
+          'PUT',
+          '/api/v2/cloud/accounts/do/key',
+          { key: MANAGER },
+          manager,
+        )
+      ).status,
+      403,
+    )
   })
 })

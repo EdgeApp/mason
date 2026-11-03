@@ -467,6 +467,56 @@ function hostPassword(host: HostRuntime): NonNullable<AuthOptions['password']> {
   }
 }
 
+/**
+ * Invitation links on the host: the master checks and uses the token and
+ * sets the password; the host waits until its cache has the account at the
+ * permission version the master answered, then signs it in.
+ */
+function hostInvitation(
+  host: HostRuntime,
+  waitMs = 10_000,
+): NonNullable<AuthOptions['invitation']> {
+  const link = (): Link => {
+    const current = host.options.link()
+    if (current == null || current.closed)
+      throw new LinkError('The master is unreachable', 'closed')
+    return current
+  }
+  return {
+    lookup: async (token): Promise<unknown> =>
+      await link().request('auth.invitation', { token }),
+    accept: async (
+      value,
+      address,
+      previousToken,
+    ): Promise<{ token: string; session: Session }> => {
+      const { accountId, permissionVersion } = (await link().request(
+        'auth.accept',
+        {
+          token: value.token,
+          username: value.username,
+          clientHash: value.clientHash,
+          clientParameters: value.clientParameters,
+          address,
+        },
+      )) as { accountId: number; permissionVersion: number }
+      const deadline = Date.now() + waitMs
+      for (;;) {
+        const row = host.cache.db
+          .prepare(
+            'SELECT permission_version FROM accounts WHERE id=? AND disabled=0',
+          )
+          .get(accountId) as { permission_version: number } | undefined
+        if (row != null && row.permission_version >= permissionVersion) break
+        if (Date.now() > deadline)
+          throw new Error('Your password is set; sign in with it in a moment')
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      return host.accounts.startSession(accountId, previousToken)
+    },
+  }
+}
+
 /** The host's public web listener: catalog, installs and sign-in from its cache. */
 export function hostApp(
   context: WebAppContext & { host?: HostRuntime },
@@ -554,6 +604,7 @@ export function hostApp(
       login: hostLogin(host.cache, host.accounts),
       people: false,
       password: hostPassword(host),
+      invitation: hostInvitation(host),
     }),
   )
   app.use(deviceRoutes(host.cache.store, host.accounts, host.devices))

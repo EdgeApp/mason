@@ -1,3 +1,4 @@
+import { createHash, randomBytes } from 'node:crypto'
 import { asArray, asObject, asOptional } from 'cleaners'
 import { asClientHash, rejectRawPassword } from '../auth/passwordProtocol.js'
 import { asUsername } from '../setup/setup.js'
@@ -24,6 +25,8 @@ export interface Person {
   groups: number[]
   permissionVersion: number
   createdAt: number
+  /** An unused invitation link: when it expires. The link itself is shown once. */
+  invitation?: { expiresAt: number }
 }
 
 /** A group: a named set of app IDs a tester sees, and its members. */
@@ -71,6 +74,32 @@ const asPersonInput = asObject({
   addresses: asOptional(asAddresses),
   password: asOptional(asPassword),
 })
+
+/** How long an invitation link lasts unless the admin chooses: a week. */
+export const INVITATION_DAYS = 7
+const DAY_MS = 24 * 60 * 60 * 1000
+const tokenHash = (token: string): string =>
+  createHash('sha256').update(token).digest('hex')
+/** An invitation token: 32 random bytes, base64url. */
+const asToken = (value: unknown): string => {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value))
+    throw new InvitationRefused()
+  return value
+}
+const asAcceptance = asObject({
+  username: asOptional((value: unknown) =>
+    value === '' ? undefined : asUsername(value),
+  ),
+  clientHash: asClientHash,
+  clientParameters: (value: unknown): unknown => value,
+})
+
+/** An invitation link that is unknown, used, revoked or expired. */
+export class InvitationRefused extends Error {
+  constructor() {
+    super('This invitation link is not valid or has expired')
+  }
+}
 
 /** The address row that matches every sign-in method. */
 const ANY_METHOD = '*'
@@ -140,6 +169,16 @@ export class People {
         .map((entry) => Number(entry.group_id)),
       permissionVersion: Number(row.permission_version),
       createdAt: Number(row.created_at),
+      ...((): Pick<Person, 'invitation'> => {
+        const invitation = this.db
+          .prepare(
+            'SELECT expires_at FROM person_invitations WHERE account_id=? AND expires_at>?',
+          )
+          .get(id, this.master.now())
+        return invitation == null
+          ? {}
+          : { invitation: { expiresAt: Number(invitation.expires_at) } }
+      })(),
     }
   }
 
@@ -185,6 +224,8 @@ export class People {
         [ANY_METHOD]: email,
       })
       this.master.audit(actor, 'person.create', String(id))
+      if (record != null)
+        this.master.audit(actor, 'person.password', String(id))
       this.master.change('account', id)
       return id
     })
@@ -222,7 +263,7 @@ export class People {
       if (before.role === 'admin' && !before.disabled)
         if (role !== 'admin' || disabled) this.keepAnAdmin(id)
       if (input.username != null && input.username !== before.username)
-        this.usernameFree(input.username)
+        this.usernameFree(input.username, id)
       if (record != null && (input.username ?? before.username) == null)
         throw new Error('A master password needs a username')
       this.db
@@ -242,7 +283,16 @@ export class People {
       if (input.addresses != null) this.setAddresses(id, input.addresses)
       if (input.email != null)
         this.setAddresses(id, { [ANY_METHOD]: input.email })
+      // A disabled person's invitation link stops working, and so does one
+      // a password set another way makes needless: revoked once, and
+      // audited when a password ended it.
+      const revoked = (disabled || record != null) && this.dropInvitation(id)
       this.master.audit(actor, 'person.update', String(id))
+      if (record != null) {
+        this.master.audit(actor, 'person.password', String(id))
+        if (revoked)
+          this.master.audit(actor, 'person.invite.revoke', String(id))
+      }
       this.master.change('account', id)
     })
     return this.person(id)!
@@ -261,6 +311,7 @@ export class People {
       this.db
         .prepare('DELETE FROM account_addresses WHERE account_id=?')
         .run(id)
+      this.dropInvitation(id)
       const groups = this.db
         .prepare('SELECT group_id FROM group_members WHERE account_id=?')
         .all(id)
@@ -278,6 +329,123 @@ export class People {
       for (const group of groups)
         this.master.change('group', Number(group.group_id))
     })
+  }
+
+  /**
+   * Makes a person's invitation link token, valid for `days` (default 7,
+   * at most 30) and replacing any earlier one. Only its hash is kept: the
+   * token is answered this once.
+   */
+  invite(
+    actor: Actor,
+    id: number,
+    value: unknown = {},
+  ): { token: string; expiresAt: number } {
+    allow(actor, 'people.change')
+    const days = asOptional(
+      integer(1, 30),
+      INVITATION_DAYS,
+    )((value as { days?: unknown } | null)?.days)
+    return this.master.transaction(() => {
+      const person = this.person(id)
+      if (person == null) throw new NotFound('No such person')
+      if (person.disabled)
+        throw new Conflict('A disabled person cannot be invited')
+      const token = randomBytes(32).toString('base64url')
+      const expiresAt = this.master.now() + days * DAY_MS
+      this.db
+        .prepare(
+          'INSERT INTO person_invitations(account_id,token_hash,created_by,created_at,expires_at) VALUES(?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET token_hash=excluded.token_hash,created_by=excluded.created_by,created_at=excluded.created_at,expires_at=excluded.expires_at',
+        )
+        .run(id, tokenHash(token), actor.label, this.master.now(), expiresAt)
+      this.master.audit(actor, 'person.invite', String(id))
+      return { token, expiresAt }
+    })
+  }
+
+  /** Revokes a person's invitation link, if they have one. */
+  revokeInvitation(actor: Actor, id: number): void {
+    allow(actor, 'people.change')
+    this.master.transaction(() => {
+      if (this.person(id) == null) throw new NotFound('No such person')
+      if (this.dropInvitation(id))
+        this.master.audit(actor, 'person.invite.revoke', String(id))
+    })
+  }
+
+  /** Whom a live invitation token is for: their name, and their username if they have one. */
+  invitation(value: unknown): { name: string; username?: string } {
+    const token = asToken(value)
+    const row = this.db
+      .prepare(
+        'SELECT a.name,a.username FROM person_invitations i JOIN accounts a ON a.id=i.account_id WHERE i.token_hash=? AND i.expires_at>? AND a.disabled=0 AND a.removed_at IS NULL',
+      )
+      .get(tokenHash(token), this.master.now())
+    if (row == null) throw new InvitationRefused()
+    return {
+      name: String(row.name),
+      ...(row.username == null ? {} : { username: String(row.username) }),
+    }
+  }
+
+  /**
+   * Uses an invitation token once: the person keeps their username or
+   * chooses one, and their password becomes the client hash the browser
+   * made. Their permission version is bumped, which ends their sessions.
+   * Answers their account.
+   */
+  async acceptInvitation(
+    value: unknown,
+  ): Promise<{ accountId: number; permissionVersion: number }> {
+    refuseRawPassword(value)
+    const token = asToken((value as { token?: unknown } | null)?.token)
+    const input = asAcceptance(value)
+    // Checked before the slow hash; checked again, and used, after it.
+    this.invitation(token)
+    const record = await createPasswordRecord(
+      input.clientHash,
+      input.clientParameters,
+    )
+    return this.master.transaction(() => {
+      const row = this.db
+        .prepare(
+          'SELECT i.account_id,a.username,a.role FROM person_invitations i JOIN accounts a ON a.id=i.account_id WHERE i.token_hash=? AND i.expires_at>? AND a.disabled=0 AND a.removed_at IS NULL',
+        )
+        .get(tokenHash(token), this.master.now())
+      if (row == null) throw new InvitationRefused()
+      const id = Number(row.account_id)
+      const username =
+        row.username == null ? input.username : String(row.username)
+      if (username == null) throw new Error('Choose a username')
+      if (row.username == null) this.usernameFree(username)
+      this.dropInvitation(id)
+      this.db
+        .prepare(
+          'UPDATE accounts SET username=?,password=?,permission_version=permission_version+1 WHERE id=?',
+        )
+        .run(username, record, id)
+      this.master.audit(
+        { role: asRole(row.role), accountId: id, label: `account:${id}` },
+        'person.invite.accept',
+        String(id),
+      )
+      this.master.change('account', id)
+      return {
+        accountId: id,
+        permissionVersion: this.person(id)!.permissionVersion,
+      }
+    })
+  }
+
+  /** Removes a person's invitation; whether there was one. */
+  private dropInvitation(id: number): boolean {
+    return (
+      Number(
+        this.db
+          .prepare('DELETE FROM person_invitations WHERE account_id=?')
+          .run(id).changes,
+      ) > 0
+    )
   }
 
   groups(actor: Actor): Group[] {
@@ -443,12 +611,15 @@ export class People {
     }
   }
 
-  private usernameFree(username: string | undefined): void {
+  /** Refuses a username anyone else has, ignoring case; `except` may change its own case. */
+  private usernameFree(username: string | undefined, except?: number): void {
     if (
       username != null &&
       this.db
-        .prepare('SELECT 1 FROM accounts WHERE username=? COLLATE NOCASE')
-        .get(username) != null
+        .prepare(
+          'SELECT 1 FROM accounts WHERE username=? COLLATE NOCASE AND id IS NOT ?',
+        )
+        .get(username, except ?? null) != null
     )
       throw new Conflict('That username is taken')
   }

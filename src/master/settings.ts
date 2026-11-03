@@ -1,5 +1,5 @@
 import type { MasterDatabase } from './database.js'
-import { allow } from './permissions.js'
+import { allow, type Action } from './permissions.js'
 import type { Actor } from './roles.js'
 import { publishedSettings } from './changes.js'
 
@@ -23,6 +23,17 @@ export interface SettingsArea {
   changed?(value: SettingValue): void
   /** What an administrator sees, for secrets nested below the top level. */
   redact?(value: SettingValue): SettingValue
+  /** A permission changing it needs besides `settings.change`. */
+  permission?: Action
+  /**
+   * Checked again in the write's transaction, against the value stored
+   * then: what `validate` checked may have changed while it was awaited.
+   */
+  check?(
+    value: SettingValue,
+    current: SettingValue | undefined,
+    actor: Actor,
+  ): void
 }
 
 export class UnknownArea extends Error {
@@ -74,12 +85,14 @@ export class Settings {
   async set(actor: Actor, name: string, input: unknown): Promise<SettingValue> {
     allow(actor, 'settings.change')
     const area = this.area(name)
+    if (area.permission != null) allow(actor, area.permission)
     const previous = this.value(name)
     const value = await area.validate(input, previous, {
       actor,
       now: this.master.now(),
     })
     this.master.transaction(() => {
+      area.check?.(value, this.value(name), actor)
       this.master.db
         .prepare(
           'INSERT INTO settings(area,value,updated_at,updated_by) VALUES(?,?,?,?) ON CONFLICT(area) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at,updated_by=excluded.updated_by',

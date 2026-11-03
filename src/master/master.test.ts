@@ -292,6 +292,43 @@ describe('Master database, setup and import', function () {
     db.close()
   })
 
+  it('M2.15 schema 31 counts the account a host was made in as keyed by an administrator, and no other', () => {
+    const db = new DatabaseSync(path.join(root, 'keyed.sqlite'))
+    migrateMaster(db)
+    db.prepare(
+      "INSERT INTO settings(area,value,updated_at,updated_by) VALUES('cloudAccounts',?,1,'paul')",
+    ).run(
+      JSON.stringify({
+        accounts: [
+          { id: 'jack', name: 'Jack', provider: 'digitalocean', key: 'k1' },
+          { id: 'other', name: 'Other', provider: 'digitalocean', key: 'k2' },
+          { id: 'gone', name: 'Gone', provider: 'digitalocean', key: 'k3' },
+        ],
+      }),
+    )
+    db.exec(`INSERT INTO cloud_hosts(name,account,provider,region,size,image,state,created_at,updated_at,role)
+      VALUES('h','jack','digitalocean','sfo3','s','i','ready',1,2,'host'),
+            ('old','gone','digitalocean','sfo3','s','i','removed',1,2,'host'),
+            ('n','other','digitalocean','sfo3','s','i','ready',1,2,'worker');
+    UPDATE meta SET value='30' WHERE key='master_schema';`)
+    migrateMaster(db)
+    const accounts = (
+      JSON.parse(
+        (
+          db
+            .prepare("SELECT value FROM settings WHERE area='cloudAccounts'")
+            .get() as { value: string }
+        ).value,
+      ) as { accounts: Array<{ id: string; adminKeyed?: boolean }> }
+    ).accounts.map((account) => [account.id, account.adminKeyed === true])
+    assert.deepEqual(accounts, [
+      ['jack', true],
+      ['other', false],
+      ['gone', false],
+    ])
+    db.close()
+  })
+
   it('U13.15 schema 18 records which credential pushed each backup', () => {
     const db = new DatabaseSync(path.join(root, 'auth.sqlite'))
     migrateMaster(db)

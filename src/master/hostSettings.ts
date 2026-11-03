@@ -12,6 +12,8 @@ export interface HostSetting {
 }
 
 export const hostArea: SettingsArea = {
+  // Invitation links open at its origin, so a manager may not move it.
+  permission: 'signIn.change',
   validate: (input): SettingValue => {
     const value = (input ?? {}) as Record<string, unknown>
     const origin = asOrigin(value.origin)
@@ -29,6 +31,19 @@ export const hostArea: SettingsArea = {
   },
 }
 
+/**
+ * The master's own public `https` origin, where the browser returns from a
+ * sign-in provider to the master's pages. Empty, the master offers only
+ * username and password sign-in.
+ */
+export const masterArea: SettingsArea = {
+  permission: 'signIn.change',
+  validate: (input): SettingValue => {
+    const origin = ((input ?? {}) as { origin?: unknown }).origin
+    return origin == null || origin === '' ? {} : { origin: asOrigin(origin) }
+  },
+}
+
 export type SignInMethod = ProviderConfig & { enabled: boolean }
 
 export const methodsOf = (value: SettingValue | undefined): SignInMethod[] =>
@@ -42,6 +57,7 @@ export const methodsOf = (value: SettingValue | undefined): SignInMethod[] =>
  * one. A disabled method stays configured but is not offered.
  */
 export const signInArea: SettingsArea = {
+  permission: 'signIn.change',
   validate: (input, previous): SettingValue => {
     const value = (input ?? {}) as { methods?: unknown }
     if (value.methods != null && !Array.isArray(value.methods))

@@ -1094,4 +1094,41 @@ describe('Typed form fields', () => {
     assert.equal(copy.dataset.copy, 'mason_v1_abc.secret')
     assert.deepEqual(visits, [], 'the page stays, so the token can be copied')
   })
+
+  it('M2.3 an invitation link is shown once with Copy; a person added without one reloads the page', async () => {
+    const run = async (
+      answer: unknown,
+    ): Promise<{ box: El; pre: El; copy: El; visits: string[] }> => {
+      const made = typed(
+        '/api/v2/people/7/invitation',
+        {},
+        { then: 'link' },
+      ) as unknown as El
+      const box = new El()
+      const pre = new El()
+      const copy = new El()
+      box.set('pre', pre).set('button[data-copy]', copy)
+      made.set('[data-field="token"]', box)
+      const visits: string[] = []
+      await submitAction(
+        made as unknown as HTMLFormElement,
+        'proof',
+        (async () => reply(201, answer)) as unknown as typeof fetch,
+        (href) => visits.push(href),
+        '/people',
+      )
+      return { box, pre, copy, visits }
+    }
+    const link = 'https://builds.example.test/auth/invite#token'
+    const direct = await run({ url: link, expiresAt: 1 })
+    assert.equal(direct.pre.textContent, link)
+    assert.equal(direct.copy.dataset.copy, link)
+    assert.deepEqual(direct.visits, [])
+    const added = await run({ id: 7, invitation: { url: link } })
+    assert.equal(added.box.hidden, false)
+    assert.equal(added.pre.textContent, link)
+    const plain = await run({ id: 7 })
+    assert.notEqual(plain.box.hidden, false)
+    assert.deepEqual(plain.visits, ['/people'])
+  })
 })

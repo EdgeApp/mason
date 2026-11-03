@@ -1,5 +1,5 @@
-import { allow } from '../permissions.js'
-import type { Actor } from '../roles.js'
+import { allow, can } from '../permissions.js'
+import { Forbidden, type Actor } from '../roles.js'
 import type { Settings, SettingsArea, SettingValue } from '../settings.js'
 
 /**
@@ -17,6 +17,11 @@ export interface CloudAccount {
   name: string
   provider: CloudProviderName
   key: string
+  /**
+   * Whether an administrator set its key: only then may a host be made in
+   * it, since the host's droplet belongs to whoever holds the account.
+   */
+  adminKeyed?: true
 }
 
 export interface CloudAccountsSetting {
@@ -66,9 +71,29 @@ export function accountId(name: string, taken: string[]): string {
  */
 export function cloudAccountsArea(
   usedBy: (id: string) => string[],
+  /** Whether an account makes the host, whose key only an administrator changes. */
+  makesHost: (id: string) => boolean = () => false,
 ): SettingsArea {
+  /** Another key could re-make the host in someone else's account. */
+  const guard = (
+    accounts: CloudAccount[],
+    stored: CloudAccount[],
+    actor: Actor,
+  ): void => {
+    for (const old of stored) {
+      const kept = accounts.find((account) => account.id === old.id)
+      if (
+        (kept == null || kept.key !== old.key) &&
+        makesHost(old.id) &&
+        !can(actor, 'hosts.change')
+      )
+        throw new Forbidden(
+          `Account ${old.id} makes the host; only an administrator changes it`,
+        )
+    }
+  }
   return {
-    validate: (input, previous): SettingValue => {
+    validate: (input, previous, context): SettingValue => {
       const value = (input ?? {}) as Record<string, unknown>
       if (value.accounts != null && !Array.isArray(value.accounts))
         throw new Error('accounts is a list')
@@ -95,6 +120,8 @@ export function cloudAccountsArea(
           )
             throw new Error(`account ${id}: name is up to 80 characters`)
           let key = account.key
+          // A new key is an administrator's only when one entered it.
+          let adminKeyed = can(context.actor, 'hosts.change')
           if (
             key != null &&
             typeof key === 'object' &&
@@ -106,7 +133,14 @@ export function cloudAccountsArea(
             if (kept == null)
               throw new Error(`account ${id}: no stored key to keep`)
             key = kept.key
+            adminKeyed = kept.adminKeyed === true
           }
+          // The same key again keeps whoever vouched for it.
+          const same = stored.find(
+            (old) => old.id === id && old.provider === provider,
+          )
+          if (same != null && same.key === key && same.adminKeyed === true)
+            adminKeyed = true
           if (
             typeof key !== 'string' ||
             !keyFormats[provider as CloudProviderName].some((format) =>
@@ -121,6 +155,7 @@ export function cloudAccountsArea(
             name: name.trim(),
             provider: provider as CloudProviderName,
             key,
+            ...(adminKeyed ? { adminKeyed: true as const } : {}),
           }
         },
       )
@@ -130,6 +165,7 @@ export function cloudAccountsArea(
           throw new Error(`Account ${account.id} is listed twice`)
         ids.add(account.id)
       }
+      guard(accounts, stored, context.actor)
       for (const old of stored) {
         const kept = accounts.find((account) => account.id === old.id)
         if (kept != null && kept.provider === old.provider) continue
@@ -140,6 +176,14 @@ export function cloudAccountsArea(
           )
       }
       return { accounts }
+    },
+    // Again as the value is written: a host may have been recorded meanwhile.
+    check: (value, current, actor): void => {
+      guard(
+        (value as unknown as CloudAccountsSetting).accounts,
+        storedAccounts(current),
+        actor,
+      )
     },
     // Each account's key is a secret one level down.
     redact: (value): SettingValue => ({
@@ -174,6 +218,8 @@ export interface AccountView {
   name: string
   provider: CloudProviderName
   key: { set: true }
+  /** Whether an administrator set its key, so a host may be made in it. */
+  adminKeyed: boolean
   check?: AccountCheck
 }
 
@@ -214,6 +260,7 @@ export class CloudAccounts {
       name: account.name,
       provider: account.provider,
       key: { set: true },
+      adminKeyed: account.adminKeyed === true,
       ...(check == null ? {} : { check }),
     }
   }
@@ -249,6 +296,30 @@ export class CloudAccounts {
     })
     this.checks.delete(id as string)
     return this.view(this.get(id as string)!)
+  }
+
+  /**
+   * Replaces an account's key. Entered by an administrator, the account may
+   * then hold the host; entered by a manager, it may not.
+   */
+  async replaceKey(
+    actor: Actor,
+    id: string,
+    input: unknown,
+  ): Promise<AccountView> {
+    allow(actor, 'settings.change')
+    const account = this.get(id)
+    if (account == null) throw new MissingAccount(id)
+    const key = (input as { key?: unknown } | null)?.key
+    await this.options.settings.set(actor, 'cloudAccounts', {
+      accounts: this.kept().map((entry) =>
+        entry.id === id
+          ? { ...entry, key: typeof key === 'string' ? key.trim() : key }
+          : entry,
+      ),
+    })
+    this.checks.delete(id)
+    return this.view(this.get(id)!)
   }
 
   async remove(actor: Actor, id: string): Promise<void> {

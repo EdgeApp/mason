@@ -116,6 +116,8 @@ export interface PoolAccount {
   }
   /** Domains the account's DNS holds, for a host's name. */
   domains?: string[]
+  /** False when no administrator entered its key: no host is made in it. */
+  adminKeyed?: boolean
   /** Why the catalog could not be read. */
   error?: string
 }
@@ -576,6 +578,8 @@ export function nodesView(data: {
   /** The master's own release, installable from GitHub when no host serves one. */
   release?: { repository: string; version: string }
   canChange: boolean
+  /** Whether the viewer may pair, make or remove the host (administrators). */
+  canChangeHosts?: boolean
 }): string {
   const rows = data.nodes
     .map((node) => {
@@ -681,7 +685,7 @@ export function nodesView(data: {
       (host) =>
         `<section class="panel cloud-host" id="host-${escape(host.name)}" data-state="${escape(host.state)}"><h3>${icon('cloud')}<span class="mono">${escape(host.name)}</span> <small>${escape(host.state)}</small></h3><p>${escape(host.region)} · ${escape(host.size)}${host.address == null ? '' : ` · <span class="mono">${escape(host.address)}</span>`}${host.dnsName == null ? '' : ` · <span class="mono">${escape(host.dnsName)}</span>`}${host.version == null || host.state === 'updating' ? '' : ` · Mason ${escape(host.version)}`}</p>${host.state === 'updating' && host.version != null ? `<p class="notice">Updating to Mason ${escape(host.version)}, as the master asked over its link; it reconnects on its own.</p>` : ''}${host.origin == null ? '' : `<p>Serves <a href="${escape(host.origin)}">${escape(host.origin)}</a></p>`}${host.certificate === 'waiting' ? '<p class="notice">Waiting for its certificate: Caddy asks Let’s Encrypt once the DNS name resolves.</p>' : ''}${host.space == null ? '' : `<p>Builds Space <span class="mono">${escape(host.space.bucket)}</span> (${escape(host.space.region)})</p>`}${host.error == null ? '' : `<p class="state-failed">${escape(host.error)}</p>`}${
           data.canChange
-            ? `${host.space == null ? action(`${icon('storage')} Store builds in a new DigitalOcean Space`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/space`, `<label for="space-${escape(host.name)}">Space name</label><input id="space-${escape(host.name)}" name="bucket" required value="mason-${escape(host.name)}" pattern="[a-z0-9][a-z0-9\\-]{1,61}[a-z0-9]"><label for="space-region-${escape(host.name)}">Space region</label>${spacesRegionSelect(`space-region-${escape(host.name)}`, host.region).replace('name="space.region"', 'name="region"')}<p><small>Mason makes the Space and a key that can use only it. New builds are stored there; earlier ones stay where they are.</small></p>`, `${icon('storage')} Make the Space`, { fields: ['bucket', 'region'] })) : ''}<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">${host.space == null ? '' : `<label for="remove-space-${escape(host.name)}">Its Space ${escape(host.space.bucket)}</label><select id="remove-space-${escape(host.name)}" name="deleteSpace"><option value="keep">Keep the Space and its builds as a storage location</option><option value="delete">Also delete the Space and every build in it</option></select>`}`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: host.space == null ? ['confirm'] : ['confirm', 'deleteSpace'], className: 'danger-fill' }), { kind: 'danger' })}</div>`
+            ? `${host.space == null ? action(`${icon('storage')} Store builds in a new DigitalOcean Space`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/space`, `<label for="space-${escape(host.name)}">Space name</label><input id="space-${escape(host.name)}" name="bucket" required value="mason-${escape(host.name)}" pattern="[a-z0-9][a-z0-9\\-]{1,61}[a-z0-9]"><label for="space-region-${escape(host.name)}">Space region</label>${spacesRegionSelect(`space-region-${escape(host.name)}`, host.region).replace('name="space.region"', 'name="region"')}<p><small>Mason makes the Space and a key that can use only it. New builds are stored there; earlier ones stay where they are.</small></p>`, `${icon('storage')} Make the Space`, { fields: ['bucket', 'region'] })) : ''}${data.canChangeHosts !== true ? '' : `<div class="actions">${apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}/reconcile`, '', `${icon('refresh')} Reconcile`, { className: 'secondary' })}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/cloud/hosts/${encodeURIComponent(host.name)}`, `<label for="remove-${escape(host.name)}">Type ${escape(host.name)} to destroy its droplet and unpair it</label><input id="remove-${escape(host.name)}" name="confirm" required autocomplete="off">${host.space == null ? '' : `<label for="remove-space-${escape(host.name)}">Its Space ${escape(host.space.bucket)}</label><select id="remove-space-${escape(host.name)}" name="deleteSpace"><option value="keep">Keep the Space and its builds as a storage location</option><option value="delete">Also delete the Space and every build in it</option></select>`}`, `${icon('delete')} Remove host`, { method: 'DELETE', fields: host.space == null ? ['confirm'] : ['confirm', 'deleteSpace'], className: 'danger-fill' }), { kind: 'danger' })}</div>`}`
             : ''
         }</section>`,
     )
@@ -693,7 +697,9 @@ export function nodesView(data: {
     .map((account) =>
       action(
         `${icon('cloud')} Create a host on ${escape(account.name)}`,
-        `${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/hosts', hostFields(account), `${icon('add')} Create host`, { fields: ['account', 'name', 'region', 'size', 'image', 'dns.domain', 'dns.name', 'space.bucket', 'space.region'] })}`,
+        account.adminKeyed === false
+          ? `<p class="notice">An administrator must replace this account’s key (<a href="/cloud#account-${escape(account.id)}">Replace key</a> on the Cloud page) before a host is made in it: whoever holds the account holds the host.</p>`
+          : `${account.error == null ? '' : `<p class="notice">${escape(account.error)}</p>`}${apiForm('/api/v2/cloud/hosts', hostFields(account), `${icon('add')} Create host`, { fields: ['account', 'name', 'region', 'size', 'image', 'dns.domain', 'dns.name', 'space.bucket', 'space.region'] })}`,
         { id: `add-host-${account.id}`, className: 'add-host' },
       ),
     )
@@ -711,7 +717,9 @@ export function nodesView(data: {
       ? ''
       : `<section class="panel" id="hosts"><h2>${icon('cloud')}Host</h2><p>A Mason host holds the builds created by the Mason cluster and hosts a web interface for downloading iOS, Android, desktop, and other builds. If it is internet accessible, it is also the proxy to communicate events back to the Mason master, such as GitHub repository change events.</p>${cloudHosts}${
           data.canChange && cloudHosts === '' && data.host == null
-            ? `${hostAccounts || '<p>Add a DigitalOcean account on the <a href="/cloud">Cloud</a> page to create a host there.</p>'}${action(`${icon('terminal')} Install a host yourself`, hostCommands, { id: 'add-host-command', className: 'add-host' })}`
+            ? data.canChangeHosts !== true
+              ? '<p>Only an administrator adds or removes the host.</p>'
+              : `${hostAccounts || '<p>Add a DigitalOcean account on the <a href="/cloud">Cloud</a> page to create a host there.</p>'}${action(`${icon('terminal')} Install a host yourself`, hostCommands, { id: 'add-host-command', className: 'add-host' })}`
             : ''
         }${storagePanel}</section>`
   const cloudNodes = (data.cloudNodes ?? [])
@@ -884,11 +892,15 @@ export function settingsView(data: {
   storageAccounts?: PoolAccount[]
   /** Sign-in methods, without their client secrets. */
   signIn?: SignInMethodView[]
+  /** The master's own public origin, for sign-in on its pages. */
+  master?: { origin?: string }
   /** The cloud pools' monthly budget in dollars. */
   monthlyBudget?: number
   /** Node types: the software and settings every node of a type keeps. */
   nodeTypes?: Record<string, NodeTypeView>
   canChange: boolean
+  /** Whether the viewer may change sign-in methods and addresses (administrators). */
+  canChangeSignIn?: boolean
   canCreate: boolean
   canRevoke: boolean
 }): string {
@@ -1255,30 +1267,64 @@ function settingsCards(data: Parameters<typeof settingsView>[0]): string {
     { id: 'github-ssh-form', open: kind === 'ssh' },
   )}</section>`
   const host = data.host ?? {}
-  const hostCard = `<section class="panel" id="host"><h2>${icon('cloud')}Host</h2><p>Where the host is served. A host the master makes on DigitalOcean fills this in.</p>${apiForm(
-    '/api/v2/settings/host',
-    `${field('host-origin', 'Host address', input('host-origin', 'origin', host.origin ?? '', ' required type="url" pattern="https://.*" placeholder="https://builds.example.com"'), 'The https address people, devices and webhooks use.')}${field('host-workerOrigin', 'Worker address', input('host-workerOrigin', 'workerOrigin', host.workerOrigin ?? '', ' data-optional type="url" pattern="https://.*"'), 'Only when cloud machines reach the host at another address; empty uses the host address.')}${field('host-grace', 'Offline grace hours', input('host-grace', 'offlineGraceHours', String(host.offlineGraceHours ?? 72), ' required type="number" min="1" max="720" data-kind="number"'), 'How long the host keeps serving installs while it cannot reach the master.')}`,
-    `${icon('check')} Save`,
-    {
-      method: 'PUT',
-      fields: ['origin', 'workerOrigin', 'offlineGraceHours'],
-      then: 'reload',
-    },
-  )}</section>`
+  const hostCard = `<section class="panel" id="host"><h2>${icon('cloud')}Host</h2><p>Where the host is served. A host the master makes on DigitalOcean fills this in.</p>${
+    data.canChangeSignIn !== true
+      ? `<p>Host address: ${host.origin == null ? 'not set' : `<span class="mono">${escape(host.origin)}</span>`}${host.workerOrigin == null ? '' : `; workers reach it at <span class="mono">${escape(host.workerOrigin)}</span>`}; it serves from its cache for ${String(host.offlineGraceHours ?? 72)} hours without the master. Invitation links open there, so only an administrator changes it.</p>`
+      : apiForm(
+          '/api/v2/settings/host',
+          `${field('host-origin', 'Host address', input('host-origin', 'origin', host.origin ?? '', ' required type="url" pattern="https://.*" placeholder="https://builds.example.com"'), 'The https address people, devices and webhooks use.')}${field('host-workerOrigin', 'Worker address', input('host-workerOrigin', 'workerOrigin', host.workerOrigin ?? '', ' data-optional type="url" pattern="https://.*"'), 'Only when cloud machines reach the host at another address; empty uses the host address.')}${field('host-grace', 'Offline grace hours', input('host-grace', 'offlineGraceHours', String(host.offlineGraceHours ?? 72), ' required type="number" min="1" max="720" data-kind="number"'), 'How long the host keeps serving installs while it cannot reach the master.')}`,
+          `${icon('check')} Save`,
+          {
+            method: 'PUT',
+            fields: ['origin', 'workerOrigin', 'offlineGraceHours'],
+            then: 'reload',
+          },
+        )
+  }</section>`
   const storage = storageCard({
     ...(data.storage == null ? {} : { storage: data.storage }),
     accounts: data.storageAccounts ?? [],
     heading: 'h2',
   })
   const methods = data.signIn ?? []
-  const signInCard = `<section class="panel" id="signIn"><h2>${icon('login')}Sign-in</h2><p>Ways people sign in besides a username and password: OpenID Connect or OAuth 2 providers such as Google or GitHub.</p>${
+  const masterOrigin = data.master?.origin
+  // The redirect URIs to register with a provider: one per place it is offered.
+  const callbacks = (id: string): string => {
+    const where = [
+      ...(host.origin == null ? [] : [['The host', host.origin]]),
+      ...(masterOrigin == null ? [] : [['The master', masterOrigin]]),
+    ]
+    return where.length === 0
+      ? '<p class="hint">Set the host or master address to see the callback URL to register.</p>'
+      : `<p>Callback URLs to register with the provider:</p>${where.map(([label, origin]) => `<p><small>${escape(label!)}</small></p>${command(`${origin!}/auth/callback/${id}`)}`).join('')}`
+  }
+  const signInEditor = data.canChangeSignIn === true
+  const masterForm = !signInEditor
+    ? `<p>Master address: ${masterOrigin == null ? 'not set' : `<span class="mono">${escape(masterOrigin)}</span>`}. Only an administrator changes sign-in.</p>`
+    : apiForm(
+        '/api/v2/settings/master',
+        field(
+          'master-origin',
+          'Master address',
+          input(
+            'master-origin',
+            'origin',
+            masterOrigin ?? '',
+            ' data-optional type="url" pattern="https://.*" placeholder="https://mason-admin.example.com:9300"',
+          ),
+          'The https address people open the master at. Providers send the browser back here, so it needs a public domain name, though it may resolve to a private address. Empty offers only username and password on the master.',
+        ),
+        `${icon('check')} Save`,
+        { method: 'PUT', fields: ['origin'], then: 'reload' },
+      )
+  const signInCard = `<section class="panel" id="signIn"><h2>${icon('login')}Sign-in</h2><p>Ways people sign in besides a username and password: OpenID Connect or OAuth 2 providers such as Google or GitHub. The host offers them; the master offers them too once its address is set.</p>${masterForm}${
     methods
       .map(
         (method) =>
-          `<section class="panel"><h3>${escape(method.name)} <small class="mono">${escape(method.id)} · ${method.type === 'oidc' ? 'OpenID Connect' : 'OAuth 2'}${method.enabled ? '' : ' · disabled'}</small></h3>${signInForm(method, method.type)}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/settings/signIn/methods/${encodeURIComponent(method.id)}`, `<p>People who sign in with ${escape(method.name)} then use another method.</p>`, `${icon('delete')} Remove ${escape(method.name)}`, { method: 'DELETE', then: 'reload', className: 'secondary' }), { kind: 'secondary' })}</section>`,
+          `<section class="panel"><h3>${escape(method.name)} <small class="mono">${escape(method.id)} · ${method.type === 'oidc' ? 'OpenID Connect' : 'OAuth 2'}${method.enabled ? '' : ' · disabled'}</small></h3>${callbacks(method.id)}${!signInEditor ? '' : `${signInForm(method, method.type)}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/settings/signIn/methods/${encodeURIComponent(method.id)}`, `<p>People who sign in with ${escape(method.name)} then use another method.</p>`, `${icon('delete')} Remove ${escape(method.name)}`, { method: 'DELETE', then: 'reload', className: 'secondary' }), { kind: 'secondary' })}`}</section>`,
       )
       .join('') || '<p>None yet.</p>'
-  }${action(`${icon('add')} Add an OpenID Connect method`, signInForm(undefined, 'oidc'), { id: 'signin-add-oidc' })}${action(`${icon('add')} Add an OAuth 2 method`, signInForm(undefined, 'oauth2'), { id: 'signin-add-oauth2' })}</section>`
+  }${!signInEditor ? '' : `${action(`${icon('add')} Add an OpenID Connect method`, signInForm(undefined, 'oidc'), { id: 'signin-add-oidc' })}${action(`${icon('add')} Add an OAuth 2 method`, signInForm(undefined, 'oauth2'), { id: 'signin-add-oauth2' })}`}</section>`
   const budgetCard = `<section class="panel" id="cloud"><h2>${icon('cloud')}Cloud budget</h2><p>Pools are edited on the <a href="/nodes">Nodes</a> page and cloud accounts on the <a href="/cloud">Cloud</a> page.</p>${apiForm(
     '/api/v2/settings/cloud/budget',
     field(
@@ -1426,6 +1472,9 @@ function nodeTypesCard(types: Record<string, NodeTypeView>): string {
   return `<section class="panel" id="nodeTypes"><h2>${icon('tune')}Node types</h2><p>The software and settings every node of a type keeps. Mason installs what is missing and reports what needs a person on the node’s page.</p>${cards || '<p>None yet.</p>'}${add}</section>`
 }
 
+/** The box an invitation link appears in, once, with Copy. */
+const linkBox = `<div data-field="token" hidden><p class="notice">Copy this link to them now: Mason sends no email, keeps only a hash of it and cannot show it again. It works once.</p><div class="command"><pre class="mono"></pre><button type="button" class="secondary copy" data-copy="">${icon('content_copy')}<span data-copy-label>Copy</span></button></div><p><a href="/people">Done</a></p></div>`
+
 /** People and groups: roles and per-method addresses; administrators change them. */
 export function peopleView(data: {
   people: Array<{
@@ -1435,6 +1484,11 @@ export function peopleView(data: {
     email?: string
     addresses: Record<string, string>
     username?: string
+    disabled?: boolean
+    /** Whether they have a password. */
+    password?: boolean
+    /** An unused invitation link: when it expires. */
+    invitation?: { expiresAt: number }
   }>
   groups: Array<{
     id: number
@@ -1444,8 +1498,45 @@ export function peopleView(data: {
   }>
   canChange: boolean
   canChangeGroups: boolean
+  /** Now, for when invitations expire. */
+  now?: number
 }): string {
   const roles = ['admin', 'manager', 'developer', 'tester']
+  const now = data.now ?? Date.now()
+  const invitation = (person: (typeof data.people)[number]): string => {
+    if (!data.canChange || person.disabled === true) return ''
+    const status =
+      person.invitation == null
+        ? ''
+        : `<p><small>Invited · the link expires ${localTime(person.invitation.expiresAt, now, 'date')}</small></p>${apiForm(`/api/v2/people/${person.id}/invitation`, '', 'Revoke invitation', { method: 'DELETE', then: 'reload', className: 'secondary' })}`
+    return `${status}${action(
+      person.invitation == null ? 'Invite' : 'Invite again',
+      apiForm(
+        `/api/v2/people/${person.id}/invitation`,
+        `<p>A link, valid for a week, where ${escape(person.name)} chooses ${person.username == null ? 'a username and ' : ''}a password.${person.invitation == null ? '' : ' The earlier link stops working.'}</p>${linkBox}`,
+        `${icon('link')} Make the link`,
+        { then: 'link' },
+      ),
+      { kind: 'secondary' },
+    )}`
+  }
+  const passwordFields = (prefix: string, required: boolean): string =>
+    `<label for="${prefix}-password">${required ? 'Password' : 'Password (optional)'}</label><input id="${prefix}-password" name="password" type="password" autocomplete="new-password"${required ? ' required' : ''}><label for="${prefix}-confirm">Confirm the password</label><input id="${prefix}-confirm" name="confirm" type="password" autocomplete="new-password"${required ? ' required' : ''}><small class="hint">At least 8 characters with uppercase, lowercase and a number, or 17 characters or more. The browser hashes it; Mason never sees it.</small>`
+  const usernameField = (
+    prefix: string,
+    value: string | undefined,
+    required: boolean,
+  ): string =>
+    `<label for="${prefix}-username">${required ? 'Username' : 'Username (needed for a password)'}</label><input id="${prefix}-username" name="username" autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}" maxlength="64" value="${escape(value ?? '')}"${required ? ' required' : ''}>`
+  // Setting it ends the person's sessions; they sign in with it on the host and the master.
+  const password = (person: (typeof data.people)[number]): string =>
+    !data.canChange || person.disabled === true
+      ? ''
+      : action(
+          person.password === true ? 'Change password' : 'Set password',
+          `<form data-mason="person-password" data-path="/api/v2/people/${person.id}"><p>${escape(person.name)} signs in with this username and password on the host and the master. Their sessions end.</p>${usernameField(`person-${person.id}`, person.username, true)}${passwordFields(`person-${person.id}`, true)}<button>${icon('key')} Set password</button>${statusLine}</form>`,
+          { kind: 'secondary' },
+        )
   const people = data.people
     .map(
       (person) =>
@@ -1470,11 +1561,11 @@ export function peopleView(data: {
                 },
               )
             : escape(person.role)
-        }</td><td>${data.canChange ? apiForm(`/api/v2/people/${person.id}`, '', 'Remove', { method: 'DELETE', then: 'reload', className: 'danger' }) : ''}</td></tr>`,
+        }</td><td>${invitation(person)}${password(person)}${data.canChange ? apiForm(`/api/v2/people/${person.id}`, '', 'Remove', { method: 'DELETE', then: 'reload', className: 'danger' }) : ''}</td></tr>`,
     )
     .join('')
   const add = data.canChange
-    ? `<section class="panel"><h2>${icon('add')}Add a person</h2>${apiForm('/api/v2/people', `<label for="person-name">Name</label><input id="person-name" name="name" required><label for="person-role">Role</label><select id="person-role" name="role">${roles.map((role) => `<option${role === 'tester' ? ' selected' : ''}>${role}</option>`).join('')}</select><label for="person-email">Email</label><input id="person-email" name="email" type="email" required><p>They sign in with any enabled sign-in method that confirms this address.</p>`, `${icon('add')} Add`, { fields: ['name', 'email', 'role'], then: 'reload' })}</section>`
+    ? `<section class="panel"><h2>${icon('add')}Add a person</h2><form data-mason="person-add"><label for="person-name">Name</label><input id="person-name" name="name" required><label for="person-role">Role</label><select id="person-role" name="role">${roles.map((role) => `<option${role === 'tester' ? ' selected' : ''}>${role}</option>`).join('')}</select><label for="person-email">Email</label><input id="person-email" name="email" type="email" required><p>They sign in with any enabled sign-in method that confirms this address, with a password you set here, or with one they choose from an invitation link.</p>${usernameField('person-new', undefined, false)}${passwordFields('person-new', false)}${field('person-invite', 'Make an invitation link', '<input id="person-invite" name="invite" type="checkbox">', 'A link, valid for a week, where they choose a username and password. Mason sends no email: copy it to them.')}${linkBox}<button>${icon('add')} Add</button>${statusLine}</form></section>`
     : ''
   const name = new Map(data.people.map((person) => [person.id, person.name]))
   const groups = data.groups
@@ -1860,6 +1951,8 @@ export interface CloudAccountRow {
   id: string
   name: string
   provider: 'digitalocean' | 'nomac'
+  /** Whether an administrator entered its key, so a host may be made in it. */
+  adminKeyed?: boolean
   check?: {
     state: 'ok' | 'refused' | 'timeout' | 'unavailable' | 'error'
     checkedAt: number
@@ -1904,9 +1997,15 @@ export function cloudView(data: {
   const accounts = data.accounts
     .map(
       (account) =>
-        `<section class="panel" id="account-${escape(account.id)}" data-account="${escape(account.id)}"><h2>${icon('cloud')}${escape(account.name)}</h2><p>${escape(providerLabels[account.provider])} · <span class="mono">${escape(account.id)}</span></p>${state(account)}${
+        `<section class="panel" id="account-${escape(account.id)}" data-account="${escape(account.id)}"><h2>${icon('cloud')}${escape(account.name)}</h2><p>${escape(providerLabels[account.provider])} · <span class="mono">${escape(account.id)}</span></p>${
+          account.provider === 'nomac'
+            ? ''
+            : account.adminKeyed === true
+              ? '<p><small>Its key was entered by an administrator, so a host may be made in it.</small></p>'
+              : '<p class="notice">No administrator entered this key, so no host is made in it until one replaces it.</p>'
+        }${state(account)}${
           data.canChange
-            ? `<div class="actions">${apiForm(`/api/v2/cloud/accounts/${encodeURIComponent(account.id)}/check`, '', `${icon('refresh')} Check`, { className: 'secondary' })}${apiForm(`/api/v2/cloud/accounts/${encodeURIComponent(account.id)}`, '', `${icon('delete')} Remove`, { method: 'DELETE', className: 'secondary' })}</div>`
+            ? `<div class="actions">${apiForm(`/api/v2/cloud/accounts/${encodeURIComponent(account.id)}/check`, '', `${icon('refresh')} Check`, { className: 'secondary' })}${action(`${icon('key')} Replace key`, apiForm(`/api/v2/cloud/accounts/${encodeURIComponent(account.id)}/key`, `<label for="account-key-${escape(account.id)}">New API key</label><input id="account-key-${escape(account.id)}" name="key" type="password" autocomplete="off" required><p><small>Kept in this master's database and never shown again. Entered by an administrator, a host may be made in the account.</small></p>`, `${icon('key')} Replace key`, { method: 'PUT', fields: ['key'], then: 'reload' }), { kind: 'secondary' })}${apiForm(`/api/v2/cloud/accounts/${encodeURIComponent(account.id)}`, '', `${icon('delete')} Remove`, { method: 'DELETE', className: 'secondary' })}</div>`
             : ''
         }</section>`,
     )

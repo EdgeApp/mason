@@ -48,6 +48,7 @@ import type { Master } from './runtime.js'
 import { repository, version } from '../version.js'
 import { clientAddress } from './forward.js'
 import { ProjectNotFound } from './projects.js'
+import type { ProviderSignIn } from './providerSignIn.js'
 
 /** The signed-in person as the views see them. */
 function viewerOf(session: MasterSession): Viewer {
@@ -170,7 +171,20 @@ const status = '<p class="notice" role="status" data-field="status" hidden></p>'
 
 const setupPage = `<section class="card"><h2>Create the first account</h2><p>Enter the six-digit setup code this master printed in its terminal when it started. The first account is an administrator.</p><form data-mason="setup"><label for="code">Setup code</label><input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password" minlength="12" required><p><button>Create account</button></p>${status}</form></section><section class="card"><h2>Restore from a backup</h2><p>Rebuild this master from its encrypted git backup instead. It comes back as the same master, so its nodes reconnect: stop the master the backup came from first.</p><form data-mason="restore"><label for="restore-code">Setup code</label><input id="restore-code" name="code" inputmode="numeric" pattern="[0-9]{6}" required><label for="repository">Backup repository</label><input id="repository" name="repository" placeholder="git@github.com:owner/mason-backup.git" required><label for="key">Backup key file</label><input id="key" name="key" type="file" required><label for="date">Date (optional, YYYY-MM-DD)</label><input id="date" name="date" pattern="\\d{4}-\\d{2}-\\d{2}"><p><button class="secondary">Restore</button></p>${status}</form></section>`
 
-const signInPage = `<section class="card"><form data-mason="sign-in"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><p><button>Sign in</button></p>${status}</form></section>`
+/** The sign-in page: a button for each provider the master offers, and the password form. */
+function signInPage(signIn: ProviderSignIn): string {
+  const origin = signIn.origin()
+  const links = signIn
+    .offered()
+    .map(
+      (provider) =>
+        `<a class="button" href="${escape(`${origin!}/auth/start/${encodeURIComponent(provider.id)}?return=/`)}">Sign in with ${escape(provider.name)}</a>`,
+    )
+    .join('')
+  return `<section class="card">${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username and password:</p>`}${passwordForm}</section>`
+}
+
+const passwordForm = `<form data-mason="sign-in"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><p><button>Sign in</button></p>${status}</form>`
 
 function backupsPage(master: Master, session: MasterSession): string {
   const actor = sessionActor(session)
@@ -487,8 +501,11 @@ export function masterPages(
       current: MasterSession,
       req: express.Request,
     ) => Promise<string> | string,
+    /** Whether the page hashes passwords in the browser. */
+    passwords = false,
   ): void => {
     app.get(path, (req, res) => {
+      if (passwords) hashing(res)
       const current = session(req)
       if (current == null) {
         res.redirect(303, master.configured() ? '/sign-in' : '/')
@@ -646,12 +663,14 @@ export function masterPages(
               provider: 'digitalocean' as const,
               ...(catalog == null ? {} : { catalog }),
               domains,
+              adminKeyed: account.adminKeyed === true,
             }
           } catch (error) {
             return {
               id: account.id,
               name: account.name,
               error: `Could not list ${account.name}'s regions and sizes: ${(error as Error).message}`,
+              adminKeyed: account.adminKeyed === true,
             }
           }
         }),
@@ -674,6 +693,7 @@ export function masterPages(
           }),
       ...(repository == null ? {} : { release: { repository, version } }),
       canChange: can(sessionActor(current), 'nodes.change'),
+      canChangeHosts: can(sessionActor(current), 'hosts.change'),
     })
   })
   guarded('/cloud', 'settings.read', 'Cloud', 'cloud', async (current) => {
@@ -801,6 +821,9 @@ export function masterPages(
               name: account.name,
               provider: account.provider === 'nomac' ? 'nomac' : 'digitalocean',
             })),
+            master: (master.settings.value('master') ?? {}) as {
+              origin?: string
+            },
             signIn: methodsOf(master.settings.value('signIn')).map((method) => {
               const view = { ...method } as Record<string, unknown>
               delete view.clientSecret
@@ -827,27 +850,41 @@ export function masterPages(
           }
         })()),
         canChange: can(actor, 'settings.change'),
+        canChangeSignIn: can(actor, 'signIn.change'),
         canCreate: can(actor, 'keys.create'),
         canRevoke: can(actor, 'keys.revoke'),
       })
     },
   )
-  guarded('/people', 'people.read', 'People', 'people', (current) => {
-    const actor = sessionActor(current)
-    return peopleView({
-      people: master.people.list(actor).map((person) => ({
-        id: person.id,
-        name: person.name,
-        role: person.role,
-        ...(person.email == null ? {} : { email: person.email }),
-        addresses: person.addresses,
-        ...(person.username == null ? {} : { username: person.username }),
-      })),
-      groups: can(actor, 'groups.read') ? master.people.groups(actor) : [],
-      canChange: can(actor, 'people.change'),
-      canChangeGroups: can(actor, 'groups.change'),
-    })
-  })
+  guarded(
+    '/people',
+    'people.read',
+    'People',
+    'people',
+    (current) => {
+      const actor = sessionActor(current)
+      return peopleView({
+        people: master.people.list(actor).map((person) => ({
+          id: person.id,
+          name: person.name,
+          role: person.role,
+          ...(person.email == null ? {} : { email: person.email }),
+          addresses: person.addresses,
+          ...(person.username == null ? {} : { username: person.username }),
+          disabled: person.disabled,
+          password: person.password,
+          ...(person.invitation == null
+            ? {}
+            : { invitation: person.invitation }),
+        })),
+        now: master.database.now(),
+        groups: can(actor, 'groups.read') ? master.people.groups(actor) : [],
+        canChange: can(actor, 'people.change'),
+        canChangeGroups: can(actor, 'groups.change'),
+      })
+    },
+    true,
+  )
   guarded(
     '/projects/new',
     'projects.change',
@@ -1148,7 +1185,7 @@ export function masterPages(
       return
     }
     hashing(res)
-    send(res, 'Sign in', signInPage)
+    send(res, 'Sign in', signInPage(master.providerSignIn))
   })
   app.get('/backups', (req, res) => {
     const current = session(req)

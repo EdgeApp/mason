@@ -11,6 +11,7 @@ import { MasterKeys } from './keys.js'
 import { MasterAuth } from './auth.js'
 import { Forwarder } from './forward.js'
 import { People } from './people.js'
+import { ProviderSignIn } from './providerSignIn.js'
 import { Provisioning } from './provisioning.js'
 import type { StageSigning } from '../pipeline/assignment.js'
 import { appleArea, AppleService } from '../apple/service.js'
@@ -88,6 +89,7 @@ import { HostLinks } from './hosts.js'
 import {
   hostArea,
   hostProjection,
+  masterArea,
   signInArea,
   storageArea,
   type StorageSetting,
@@ -140,6 +142,8 @@ export interface MasterOptions {
   appleFetch?: typeof fetch
   /** Waits between Apple API retries; instant in tests. */
   appleSleep?: (ms: number) => Promise<void>
+  /** How the master reaches sign-in providers; a fixture in tests. */
+  providerFetch?: typeof fetch
   /** Cloud pool internals for tests: the provider, the master's address, timings. */
   cloud?: Pick<
     PoolsOptions,
@@ -227,6 +231,8 @@ export class Master {
   readonly auth: MasterAuth
   /** People, their roles and addresses, and the groups testers see. */
   readonly people: People
+  /** Sign-in with the enabled providers on the master's own pages. */
+  readonly providerSignIn: ProviderSignIn
   /** The API socket for requests the host forwards. */
   readonly forwarder = new Forwarder()
   readonly settings: Settings
@@ -288,6 +294,14 @@ export class Master {
     this.auth = new MasterAuth(this.database)
     this.people = new People(this.database)
     this.settings = new Settings(this.database)
+    this.providerSignIn = new ProviderSignIn({
+      database: this.database,
+      settings: this.settings,
+      auth: this.auth,
+      ...(options.providerFetch == null
+        ? {}
+        : { transport: options.providerFetch }),
+    })
     this.registry = new NodeRegistry(db, identity, {
       // A NoMac Mac is reached through NoMac's SSH gateway.
       transport: (host, port): (() => Promise<Duplex>) | undefined =>
@@ -509,13 +523,16 @@ export class Master {
     })
     this.settings.register(
       'cloudAccounts',
-      cloudAccountsArea((id) => [
-        ...this.pools
-          .pools()
-          .filter((pool) => pool.account === id)
-          .map((pool) => `pool ${pool.name}`),
-        ...this.cloudHosts.usedBy(id),
-      ]),
+      cloudAccountsArea(
+        (id) => [
+          ...this.pools
+            .pools()
+            .filter((pool) => pool.account === id)
+            .map((pool) => `pool ${pool.name}`),
+          ...this.cloudHosts.usedBy(id),
+        ],
+        (id) => this.cloudHosts.list().some((row) => row.account === id),
+      ),
     )
     this.settings.register(
       'cloud',
@@ -530,6 +547,7 @@ export class Master {
       },
     })
     this.settings.register('signIn', signInArea)
+    this.settings.register('master', masterArea)
     this.backups = new Backups({
       master: this.database,
       dir,
@@ -586,6 +604,13 @@ export class Master {
         parameters: (username): unknown => this.auth.parameters(username),
         verify: async (value, address): Promise<number> =>
           await this.auth.verify(value, address),
+      },
+      invitation: {
+        lookup: (token): unknown => this.people.invitation(token),
+        accept: async (
+          value,
+        ): Promise<{ accountId: number; permissionVersion: number }> =>
+          await this.people.acceptInvitation(value),
       },
       origins: (): { origin?: string; workerOrigin?: string } =>
         (this.settings.value('host') ?? {}) as {

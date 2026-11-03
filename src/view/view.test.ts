@@ -969,7 +969,39 @@ describe('Nodes page', () => {
     pools: [],
     budget: { monthly: 200 },
     canChange: true,
+    canChangeHosts: true,
   }
+  it('M2.12 a manager sees the host and may give it a Space, but only an administrator makes, pairs, reconciles or removes it', () => {
+    const cloudHost = {
+      name: 'h',
+      state: 'ready',
+      account: 'do',
+      region: 'sfo3',
+      size: 's',
+      address: '203.0.113.9',
+      origin: 'https://builds.example.test',
+      error: null,
+      version: '1.2.3',
+    }
+    const manager = nodesView({
+      ...base,
+      canChangeHosts: false,
+      cloudHosts: [cloudHost],
+    })
+    assert.match(manager, /Store builds in a new DigitalOcean Space/)
+    assert.doesNotMatch(manager, /cloud\/hosts\/h\/reconcile|Remove host/)
+    const empty = nodesView({
+      ...base,
+      canChangeHosts: false,
+      poolAccounts: [{ id: 'do', name: 'DO', provider: 'digitalocean' }],
+    })
+    assert.match(empty, /Only an administrator adds or removes the host/)
+    assert.doesNotMatch(empty, /Create a host on|Pair host/)
+    assert.match(empty, /Pair node/, 'workers stay a manager’s')
+    const owner = nodesView({ ...base, cloudHosts: [cloudHost] })
+    assert.match(owner, /cloud\/hosts\/h\/reconcile/)
+    assert.match(owner, /Remove host/)
+  })
   it('gives the copyable install command from the master’s GitHub release, never the host', () => {
     const page = nodesView({
       ...base,
@@ -1569,6 +1601,7 @@ describe('Settings page', () => {
   it('U6.3/U6.4/U6.5 sign-in methods, host, storage and budget as cards; no JSON or build numbers; errors inside the card', () => {
     const html = settingsView({
       ...base,
+      canChangeSignIn: true,
       host: { origin: 'https://builds.example.test', offlineGraceHours: 72 },
       storage: { driver: 'disk' },
       storageAccounts: [

@@ -38,6 +38,17 @@ export const policy = {
   'people.read': 'manager',
   /** Add and remove people and set their roles. */
   'people.change': 'admin',
+  /**
+   * Sign-in methods and the master's and host's addresses: a method's
+   * verified email signs in as whoever has it, and invitation links open at
+   * those addresses, so changing them is changing who can become admin.
+   */
+  'signIn.change': 'admin',
+  /**
+   * Pair, make, re-make or remove the host: it sets where invitation links
+   * open and receives host sign-ins' password hashes, which sign in here.
+   */
+  'hosts.change': 'admin',
   /** The backup key is shown to administrators only. */
   'backups.key': 'admin',
 } as const satisfies Record<string, Role>
