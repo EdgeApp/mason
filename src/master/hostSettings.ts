@@ -12,6 +12,8 @@ export interface HostSetting {
 }
 
 export const hostArea: SettingsArea = {
+  // Invitation links open at its origin, so a manager may not move it.
+  permission: 'signIn.change',
   validate: (input): SettingValue => {
     const value = (input ?? {}) as Record<string, unknown>
     const origin = asOrigin(value.origin)

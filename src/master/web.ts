@@ -13,6 +13,7 @@ import { cloudHostsApi } from './cloudHostsApi.js'
 import { storageApi } from './storageApi.js'
 import { appleApi } from '../apple/api.js'
 import { masterPages } from './pages.js'
+import { invitationRoutes } from './invitations.js'
 import { projectsApi } from './projectsApi.js'
 import { providerSignInRoutes } from './providerSignIn.js'
 import { wizardApi } from './wizard.js'
@@ -79,7 +80,9 @@ export function masterApp(context: MasterWebContext): express.Express {
       },
     }),
   )
+  // After the provider routes, whose limiter covers every /auth request.
   app.use(providerSignInRoutes(master))
+  app.use(invitationRoutes(master))
   masterPages(app, context, master)
   app.use((_req, res) => {
     res.status(404).send('Not found')

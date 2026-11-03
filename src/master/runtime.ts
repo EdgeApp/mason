@@ -523,13 +523,16 @@ export class Master {
     })
     this.settings.register(
       'cloudAccounts',
-      cloudAccountsArea((id) => [
-        ...this.pools
-          .pools()
-          .filter((pool) => pool.account === id)
-          .map((pool) => `pool ${pool.name}`),
-        ...this.cloudHosts.usedBy(id),
-      ]),
+      cloudAccountsArea(
+        (id) => [
+          ...this.pools
+            .pools()
+            .filter((pool) => pool.account === id)
+            .map((pool) => `pool ${pool.name}`),
+          ...this.cloudHosts.usedBy(id),
+        ],
+        (id) => this.cloudHosts.list().some((row) => row.account === id),
+      ),
     )
     this.settings.register(
       'cloud',
@@ -601,6 +604,13 @@ export class Master {
         parameters: (username): unknown => this.auth.parameters(username),
         verify: async (value, address): Promise<number> =>
           await this.auth.verify(value, address),
+      },
+      invitation: {
+        lookup: (token): unknown => this.people.invitation(token),
+        accept: async (
+          value,
+        ): Promise<{ accountId: number; permissionVersion: number }> =>
+          await this.people.acceptInvitation(value),
       },
       origins: (): { origin?: string; workerOrigin?: string } =>
         (this.settings.value('host') ?? {}) as {

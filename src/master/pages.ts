@@ -660,12 +660,14 @@ export function masterPages(
               provider: 'digitalocean' as const,
               ...(catalog == null ? {} : { catalog }),
               domains,
+              adminKeyed: account.adminKeyed === true,
             }
           } catch (error) {
             return {
               id: account.id,
               name: account.name,
               error: `Could not list ${account.name}'s regions and sizes: ${(error as Error).message}`,
+              adminKeyed: account.adminKeyed === true,
             }
           }
         }),
@@ -688,6 +690,7 @@ export function masterPages(
           }),
       ...(repository == null ? {} : { release: { repository, version } }),
       canChange: can(sessionActor(current), 'nodes.change'),
+      canChangeHosts: can(sessionActor(current), 'hosts.change'),
     })
   })
   guarded('/cloud', 'settings.read', 'Cloud', 'cloud', async (current) => {
@@ -860,7 +863,10 @@ export function masterPages(
         ...(person.email == null ? {} : { email: person.email }),
         addresses: person.addresses,
         ...(person.username == null ? {} : { username: person.username }),
+        disabled: person.disabled,
+        ...(person.invitation == null ? {} : { invitation: person.invitation }),
       })),
+      now: master.database.now(),
       groups: can(actor, 'groups.read') ? master.people.groups(actor) : [],
       canChange: can(actor, 'people.change'),
       canChangeGroups: can(actor, 'groups.change'),

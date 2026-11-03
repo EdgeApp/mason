@@ -173,6 +173,12 @@ pages and the callback, and the master calls the provider's token endpoint.
 A provider signs someone in when it confirms an email address that a person
 on the People page has.
 
+Someone added on the People page without a provider can be sent an
+invitation link instead (**Invite**, or **Make an invitation link** when
+adding them). Mason sends no email: copy the link to them. It opens on the
+host, valid for a week and once, and lets them choose a username and a
+password that then sign them in on the host and the master.
+
 ## Projects
 
 A project is a GitHub repository with a Masonfile, the app IDs it owns, its

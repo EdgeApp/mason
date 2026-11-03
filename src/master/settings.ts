@@ -25,6 +25,15 @@ export interface SettingsArea {
   redact?(value: SettingValue): SettingValue
   /** A permission changing it needs besides `settings.change`. */
   permission?: Action
+  /**
+   * Checked again in the write's transaction, against the value stored
+   * then: what `validate` checked may have changed while it was awaited.
+   */
+  check?(
+    value: SettingValue,
+    current: SettingValue | undefined,
+    actor: Actor,
+  ): void
 }
 
 export class UnknownArea extends Error {
@@ -83,6 +92,7 @@ export class Settings {
       now: this.master.now(),
     })
     this.master.transaction(() => {
+      area.check?.(value, this.value(name), actor)
       this.master.db
         .prepare(
           'INSERT INTO settings(area,value,updated_at,updated_by) VALUES(?,?,?,?) ON CONFLICT(area) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at,updated_by=excluded.updated_by',

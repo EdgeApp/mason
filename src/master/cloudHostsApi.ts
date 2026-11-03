@@ -1,7 +1,18 @@
 import express, { Router } from 'express'
-import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
-import { MissingHost, type CloudHostRow } from './cloud/hosts.js'
-import { allow } from './permissions.js'
+import {
+  actorOf,
+  apiErrors,
+  authenticate,
+  Conflict,
+  json,
+  NotFound,
+} from './api.js'
+import {
+  AccountNotVouched,
+  MissingHost,
+  type CloudHostRow,
+} from './cloud/hosts.js'
+import { allow, can } from './permissions.js'
 import type { Master } from './runtime.js'
 
 /** A cloud host as the API shows it: no pairing secret. */
@@ -27,7 +38,9 @@ export function hostView(row: CloudHostRow): Record<string, unknown> {
 /**
  * `/api/v2/cloud/hosts`: Mason hosts the master makes on a cloud provider.
  * `POST` records one and starts making it; `…/:name/reconcile` checks it
- * again; `DELETE …/:name` with `{ confirm: <name> }` destroys it.
+ * again; `DELETE …/:name` with `{ confirm: <name> }` destroys it. Each is an
+ * administrator's (`hosts.change`): the host decides where invitation links
+ * open and receives sign-ins' password hashes.
  */
 export function cloudHostsApi(master: Master): Router {
   const router = Router()
@@ -49,8 +62,12 @@ export function cloudHostsApi(master: Master): Router {
   router.post(
     '/api/v2/cloud/hosts',
     json(async (req, res) => {
-      allow(actorOf(res), 'settings.change')
-      const row = await master.cloudHosts.create(req.body)
+      allow(actorOf(res), 'hosts.change')
+      const row = await master.cloudHosts.create(req.body).catch((error) => {
+        throw error instanceof AccountNotVouched
+          ? new Conflict(error.message)
+          : error
+      })
       res.status(201)
       return hostView(row)
     }),
@@ -58,7 +75,7 @@ export function cloudHostsApi(master: Master): Router {
   router.post(
     '/api/v2/cloud/hosts/:name/reconcile',
     json(async (req, res) => {
-      allow(actorOf(res), 'settings.change')
+      allow(actorOf(res), 'hosts.change')
       return hostView(
         await master.cloudHosts
           .reconcile(String(req.params.name))
@@ -70,9 +87,15 @@ export function cloudHostsApi(master: Master): Router {
     '/api/v2/cloud/hosts/:name/space',
     json(async (req, res) => {
       allow(actorOf(res), 'settings.change')
+      // A manager's Space waits for the next check of the host: only an
+      // administrator makes the host be reconciled.
       return hostView(
         await master.cloudHosts
-          .setSpace(String(req.params.name), req.body)
+          .setSpace(
+            String(req.params.name),
+            req.body,
+            can(actorOf(res), 'hosts.change'),
+          )
           .catch(missing),
       )
     }),
@@ -80,7 +103,7 @@ export function cloudHostsApi(master: Master): Router {
   router.delete(
     '/api/v2/cloud/hosts/:name',
     json(async (req, res) => {
-      allow(actorOf(res), 'settings.change')
+      allow(actorOf(res), 'hosts.change')
       await master.cloudHosts
         .remove(
           String(req.params.name),

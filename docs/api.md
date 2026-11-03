@@ -212,6 +212,7 @@ lowest role each permission needs (`src/master/permissions.ts`):
 | `secrets.change` | manager | | `people.read` | manager |
 | `buildNumbers.seed` | manager | | `people.change` | admin |
 | | | | `signIn.change` | admin |
+| | | | `hosts.change` | admin |
 | | | | `backups.key` | admin |
 
 `builds.read` and `devices.register` are checked on the host, not by the
@@ -270,6 +271,8 @@ or 401 `Not signed in`.
 | `GET /api/v2/people/:id` | One person. | `people.read`, or the person themselves |
 | `PUT /api/v2/people/:id` | Changes a person. | `people.change`; a person may change only their own `password` |
 | `DELETE /api/v2/people/:id` | Removes a person. | `people.change` |
+| `POST /api/v2/people/:id/invitation` | Makes the person's invitation link and answers it, once. 201. | `people.change` |
+| `DELETE /api/v2/people/:id/invitation` | Revokes the person's invitation link. | `people.change` |
 
 A person:
 
@@ -285,13 +288,15 @@ A person:
   "addresses": { "github": "ada@users.example.test" },
   "groups": [2],
   "permissionVersion": 4,
-  "createdAt": 1793450000000
+  "createdAt": 1793450000000,
+  "invitation": { "expiresAt": 1794054800000 }
 }
 ```
 
 `password` says whether the account can sign in to the master with a
 password. `email` matches every sign-in method; `addresses` holds an
-address for one method where it differs.
+address for one method where it differs. `invitation` is there while the
+person has an unused, unexpired invitation link.
 
 The body of `POST` and `PUT` takes these fields, all optional for `PUT`:
 
@@ -306,7 +311,9 @@ The body of `POST` and `PUT` takes these fields, all optional for `PUT`:
 | `password` | `{ "clientHash": "<64 hex>", "clientParameters": { … } }`, with parameters of at least 32 MiB, 6 iterations and 4 lanes |
 
 `POST` needs `email`, and `name` or `username`; a password needs a
-username. Every `PUT` bumps the person's permission version, which ends
+username. `POST` also takes `"invite": true`, which makes the person's
+invitation link at once and adds `"invitation": { "url", "expiresAt" }` to
+the answer. Every `PUT` bumps the person's permission version, which ends
 their sessions. A raw `password` string is refused (400). 404 for an unknown
 person; 409 when the username or an address is taken, or when the change
 would disable, demote or remove the last enabled admin.
@@ -314,6 +321,44 @@ would disable, demote or remove the last enabled admin.
 `DELETE` disables the account, removes its username, password, addresses
 and group memberships, and revokes every key it created. The record stays for
 the audit history. It answers `null`.
+
+#### Invitation links
+
+Mason sends no email. An invitation link lets a person choose a password
+(and a username, if they have none) without one: an administrator makes it
+and copies it to them.
+
+**`POST /api/v2/people/:id/invitation`** takes `{ "days": 7 }` (1–30,
+default 7) and answers `{ "url", "expiresAt" }`. The URL is
+`<origin>/auth/invite#<token>`: the host's origin when the `host` setting
+has one, else the master's (`master` setting), else the address the request
+reached the master at. The token, 32 random bytes, is the fragment, which
+browsers never send to a server; the master keeps only its SHA-256 and
+cannot show it again. A new link replaces the person's earlier one. A
+disabled person cannot be invited (409), and `POST /api/v2/people` with
+both `"invite": true` and `"disabled": true` is refused (400) without
+adding anyone. It is audited as `person.invite`.
+
+**`DELETE /api/v2/people/:id/invitation`** revokes the link
+(`person.invite.revoke`) and answers `null`, also when there was none.
+Disabling or removing the person revokes it too.
+
+The link opens a page on the host or the master (`GET /auth/invite`) whose
+script reads the token from the fragment and makes two requests, which
+must come from that origin's own page (`Origin`) and are limited with the
+other `/auth` pages:
+
+- `POST /auth/invite/lookup` `{ "token" }` answers `{ "name", "username"? }`
+  for a live link, or 404 `This invitation link is not valid or has
+  expired` (400 on the host).
+- `POST /auth/invite` `{ "token", "username", "clientHash",
+  "clientParameters" }` sets the password from a client hash made as for
+  `password` above (a raw `password` is refused) and the username, which a
+  person who has one keeps (409 when it is taken). The link is used up, the
+  permission version bumped, and the browser signed in (`{ "signedIn": true
+  }` with the session cookie). It is audited as `person.invite.accept` by
+  the person. On the host, the master does this over the host's link and
+  the host signs the person in once its cache has the change.
 
 ### Groups
 
@@ -896,9 +941,9 @@ Workers and the host paired with the master.
 | Method and path | What it does | Permission |
 | --- | --- | --- |
 | `GET /api/v2/nodes` | Every paired node with its inventory and software state. | `nodes.read` |
-| `POST /api/v2/nodes` | Pairs a node by its address and pairing key. 201. | `nodes.change` |
+| `POST /api/v2/nodes` | Pairs a node by its address and pairing key. 201. | `nodes.change`; a host also `hosts.change` |
 | `PUT /api/v2/nodes/:fingerprint` | Sets a node's name, type, labels and slots. | `nodes.change` |
-| `DELETE /api/v2/nodes/:fingerprint` | Unpairs a node. | `nodes.change` |
+| `DELETE /api/v2/nodes/:fingerprint` | Unpairs a node. | `nodes.change`; a host also `hosts.change` |
 
 A node:
 
@@ -979,8 +1024,9 @@ host or node; 409 for a pool name in use; 400 otherwise.
 | --- | --- | --- |
 | `GET /api/v2/cloud/accounts` | The accounts and their last check. | `settings.read` |
 | `POST /api/v2/cloud/accounts` | Adds an account. 201. | `settings.change` |
+| `PUT /api/v2/cloud/accounts/:id/key` | Replaces the account's key: `{ "key" }`. | `settings.change`; the host's account also `hosts.change` |
 | `POST /api/v2/cloud/accounts/:id/check` | Asks the provider about the key again. | `settings.read` |
-| `DELETE /api/v2/cloud/accounts/:id` | Removes an account. | `settings.change` |
+| `DELETE /api/v2/cloud/accounts/:id` | Removes an account. | `settings.change`; the host's account also `hosts.change` |
 | `GET /api/v2/cloud/accounts/:id/catalog` | The regions, sizes and images a pool may use. | `settings.read` |
 
 `POST` takes:
@@ -1000,6 +1046,7 @@ An account answers as:
   "name": "DigitalOcean main",
   "provider": "digitalocean",
   "key": { "set": true },
+  "adminKeyed": true,
   "check": {
     "state": "ok",
     "checkedAt": 1793450000000,
@@ -1011,7 +1058,20 @@ An account answers as:
 `check.state` is `ok`, `refused`, `timeout`, `unavailable` or `error`, with a
 `message` when not `ok`; a NoMac check has `nomac` with `credit`,
 `spendableSeconds`, `concurrency` and `spendingBlocked`. `DELETE` answers
-`null`; 400 while a pool or a host uses the account. The catalog answers
+`null`; 400 while a pool or a host uses the account.
+
+`adminKeyed` says whether an administrator entered the account's key. A
+host is made only in such an account, since whoever holds the account
+holds the host's droplet: a key a manager adds or replaces is not one
+(the same key entered again keeps what it was), and
+an administrator must enter it again (**Replace key** on the Cloud page,
+`PUT …/:id/key`, or `POST` a new account) before a host is made in it. The
+account is checked again, with its key unchanged, just before the host is
+recorded, and a host whose account no longer holds such a key is not
+reconciled: it goes to `error` until an administrator replaces the key. Changing
+the key of, or removing, the account a host was made in needs
+`hosts.change`. An account a host was made in before this rule counts as
+keyed by an administrator. The catalog answers
 `{ "regions": [{ "slug", "name" }], "sizes": [{ "slug", "description",
 "priceMonthly", "regions" }], "images": [{ "slug", "name" }] }`; 400 for a
 provider with no catalog (NoMac).
@@ -1045,15 +1105,19 @@ answers `null`.
 
 ### Cloud hosts
 
-A master makes at most one host on DigitalOcean.
+A master makes at most one host on DigitalOcean. Making, reconciling and
+removing it, and pairing or unpairing any host on the Nodes routes, need
+`hosts.change` (administrators): the host decides where invitation links
+open and receives the client hashes of host password sign-ins, which sign
+in to the master too. A manager may still give it a Space.
 
 | Method and path | What it does | Permission |
 | --- | --- | --- |
 | `GET /api/v2/cloud/hosts` | The cloud host, if any. | `settings.read` |
-| `POST /api/v2/cloud/hosts` | Records a host and starts making it. 201. | `settings.change` |
-| `POST /api/v2/cloud/hosts/:name/reconcile` | Checks the host again and continues making it. | `settings.change` |
+| `POST /api/v2/cloud/hosts` | Records a host and starts making it. 201. | `hosts.change` |
+| `POST /api/v2/cloud/hosts/:name/reconcile` | Checks the host again and continues making it. | `hosts.change` |
 | `POST /api/v2/cloud/hosts/:name/space` | Gives the host a new Space for its builds. | `settings.change` |
-| `DELETE /api/v2/cloud/hosts/:name` | Destroys the host. | `settings.change` |
+| `DELETE /api/v2/cloud/hosts/:name` | Destroys the host. | `hosts.change` |
 
 `POST /api/v2/cloud/hosts` takes:
 
@@ -1070,6 +1134,8 @@ A master makes at most one host on DigitalOcean.
 It is refused (400) when the master already has a host, the name is taken,
 the account is not DigitalOcean, the domain is not in the account, or the
 master has no GitHub release for the host to install.
+It is refused (409) in an account whose key no administrator entered
+(see [Cloud accounts](#cloud-accounts)).
 
 The routes answer the host's record: its `name`, `account`, `region`,
 `size`, `image`, `state` (`creating`, `installing`, `pairing`, `ready`,
@@ -1080,7 +1146,10 @@ Pairing and Space secrets are never shown.
 
 - **`…/space`** takes `{ "bucket", "region" }`, a bucket of 3–63 lowercase
   letters, digits and dashes and a Spaces region such as `sfo3`. The host's
-  storage switches to the Space once it exists.
+  storage switches to the Space once it exists. An administrator's request
+  makes the Space at once; a manager's is stored, and the next check of the
+  host (the master's, every ten minutes, or an administrator's reconcile)
+  makes it, so a manager never sets a reconcile going.
 - **`DELETE`** takes `{ "confirm": "<the host's name>", "deleteSpace": true }`
   and answers `null`. It destroys the droplet, firewall and the DNS record
   Mason made, and unpairs the host. The Space and its builds stay unless
@@ -1197,9 +1266,14 @@ send `{ "keep": true }` to keep the stored value.
 | `DELETE /api/v2/settings/nodeTypes/:type` | Removes one node type. | `settings.change` |
 | `PUT /api/v2/settings/cloud/budget` | Sets the cloud pools' monthly budget. | `settings.change` |
 
-An unknown area is 404. Changing `signIn` or `master` also needs
+An unknown area is 404. Changing `signIn`, `master` or `host` (all of
+it: `origin`, `workerOrigin` and `offlineGraceHours`) also needs
 `signIn.change` (administrators): a sign-in method decides who signs in
-as whom, so a manager may not change it. The areas:
+as whom, and invitation links open at the host's or master's origin, so a
+manager may not change them; the Settings page shows managers their
+values without editors. A cloud host the master makes still sets `host`
+itself. In `cloudAccounts`, changing the key of, or removing, the account
+a cloud host was made in needs `hosts.change`. The areas:
 
 | Area | Value |
 | --- | --- |

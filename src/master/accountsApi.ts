@@ -7,6 +7,7 @@ import { MASTER_SESSION_COOKIE, SetupGate, SignInRefused } from './auth.js'
 import { Forbidden } from './roles.js'
 import type { Master } from './runtime.js'
 import { clientAddress } from './forward.js'
+import { invitationUrl } from './invitations.js'
 
 /** The master session cookie: host-only, Strict, until the session expires. */
 export const sessionCookieOptions = (
@@ -184,11 +185,45 @@ export function accountsApi(
     '/api/v2/people',
     json((_req, res) => master.people.list(actorOf(res))),
   )
+  // An invitation link opens at the host, else at the master's address.
+  const link = (req: express.Request, token: string): string =>
+    invitationUrl(master.settings, token, `https://${req.get('host') ?? ''}`)
   router.post(
     '/api/v2/people',
     json(async (req, res) => {
+      const { invite, ...value } = (req.body ?? {}) as Record<string, unknown>
+      if (invite != null && typeof invite !== 'boolean')
+        throw new Error('invite is true or false')
+      // Checked before the person is made, so a refusal makes nothing.
+      if (invite === true && value.disabled === true)
+        throw new Error('A disabled person cannot be invited')
+      const person = await master.people.create(actorOf(res), value)
       res.status(201)
-      return await master.people.create(actorOf(res), req.body)
+      if (invite !== true) return person
+      const made = master.people.invite(actorOf(res), person.id)
+      return {
+        ...master.people.get(actorOf(res), person.id),
+        invitation: { url: link(req, made.token), expiresAt: made.expiresAt },
+      }
+    }),
+  )
+  router.post(
+    '/api/v2/people/:id/invitation',
+    json((req, res) => {
+      const made = master.people.invite(
+        actorOf(res),
+        id(req.params.id),
+        req.body ?? {},
+      )
+      res.status(201)
+      return { url: link(req, made.token), expiresAt: made.expiresAt }
+    }),
+  )
+  router.delete(
+    '/api/v2/people/:id/invitation',
+    json((req, res) => {
+      master.people.revokeInvitation(actorOf(res), id(req.params.id))
+      return null
     }),
   )
   router.get(

@@ -81,6 +81,13 @@ export class HostLinks {
         parameters: (username: unknown) => unknown
         verify: (value: unknown, address: string) => Promise<number>
       }
+      /** Invitation links opened on the host, checked and used by the master. */
+      invitation?: {
+        lookup: (token: unknown) => unknown
+        accept: (
+          value: unknown,
+        ) => Promise<{ accountId: number; permissionVersion: number }>
+      }
     },
   ) {}
 
@@ -505,6 +512,25 @@ export class HostLinks {
     }
   }
 
+  /** Runs an invitation request; a refusal reaches the host as its message. */
+  private async invited<T>(
+    run: (
+      invitation: NonNullable<HostLinks['options']['invitation']>,
+    ) => T | Promise<T>,
+  ): Promise<T> {
+    const invitation = this.options.invitation
+    if (invitation == null)
+      throw new LinkError('Invitations are unavailable', 'failed')
+    try {
+      return await run(invitation)
+    } catch (error) {
+      throw new LinkError(
+        JSON.stringify({ error: (error as Error).message }),
+        'not_allowed',
+      )
+    }
+  }
+
   methods(): MethodTable {
     return {
       requests: {
@@ -570,6 +596,31 @@ export class HostLinks {
               'not_allowed',
             )
           }
+        },
+        /** Whom an invitation link is for, for the host's invitation page. */
+        'auth.invitation': (params, link): unknown => {
+          this.host(link)
+          return this.invited((invitation) =>
+            invitation.lookup((params as { token?: unknown } | null)?.token),
+          )
+        },
+        /** Uses an invitation link opened on the host; answers whose account it set. */
+        'auth.accept': async (
+          params,
+          link,
+        ): Promise<{ accountId: number; permissionVersion: number }> => {
+          this.host(link)
+          const { token, username, clientHash, clientParameters } = (params ??
+            {}) as Record<string, unknown>
+          return await this.invited(
+            async (invitation) =>
+              await invitation.accept({
+                token,
+                username,
+                clientHash,
+                clientParameters,
+              }),
+          )
         },
         'outbox.deliver': (
           params,

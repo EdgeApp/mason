@@ -29,6 +29,7 @@ function form(
     status: { textContent: '', hidden: true },
     deployKey: { textContent: '', hidden: true },
     backupKey: { textContent: '', hidden: true },
+    welcome: { textContent: '', hidden: false },
   }
   return {
     dataset: { mason: kind },
@@ -49,13 +50,18 @@ function page(
   forms: Form[],
   replies: Record<string, { status: number; body: unknown }>,
   csrf = 'proof',
+  fragment = '',
 ): {
   deps: PageDeps
   calls: Array<{ url: string; init: RequestInit }>
   visits: string[]
+  reads: string[]
+  forgotten: string[]
 } {
   const calls: Array<{ url: string; init: RequestInit }> = []
   const visits: string[] = []
+  const reads: string[] = []
+  const forgotten: string[] = []
   const deps: PageDeps = {
     fetch: async (url, init) => {
       calls.push({ url, init })
@@ -81,6 +87,13 @@ function page(
           },
     assign: (url) => visits.push(url),
     copy: async () => undefined,
+    fragment: () => {
+      reads.push(fragment)
+      return fragment
+    },
+    forgetFragment: () => {
+      forgotten.push(fragment)
+    },
   }
   start(
     {
@@ -90,11 +103,135 @@ function page(
     },
     deps,
   )
-  return { deps, calls, visits }
+  return { deps, calls, visits, reads, forgotten }
 }
 const body = (init: RequestInit): unknown => JSON.parse(String(init.body))
 
 describe('Master page script', () => {
+  it('M2.1 an invitation says whom it is for, keeps their username, and sets a new password’s client hash', async () => {
+    const token = 't'.repeat(43)
+    const username: { value: string; readOnly?: boolean } = { value: '' }
+    const fields = {
+      username,
+      password: { value: 'Tess-Horse-9' },
+      confirm: { value: 'Tess-Horse-9' },
+    }
+    const invite = form('invite', fields)
+    Object.assign(invite.dataset, {
+      lookup: '/auth/invite/lookup',
+      accept: '/auth/invite',
+      return: '/',
+    })
+    const { calls, visits, reads, forgotten } = page(
+      [invite],
+      {
+        'POST /auth/invite/lookup': {
+          status: 200,
+          body: { name: 'Tess', username: 'tess' },
+        },
+        'POST /auth/invite': { status: 200, body: { signedIn: true } },
+      },
+      'proof',
+      token,
+    )
+    await settle()
+    assert.deepEqual(body(calls[0]!.init), { token })
+    assert.equal(
+      invite.outputs.welcome!.textContent,
+      'Welcome, Tess. Choose a password to sign in to Mason.',
+    )
+    assert.equal(username.value, 'tess')
+    assert.equal(username.readOnly, true)
+    invite.submit()
+    await settle()
+    assert.deepEqual(body(calls[1]!.init), {
+      token,
+      username: 'tess',
+      clientHash: 'hash-of-Tess-Horse-9',
+      clientParameters: { p: 1 },
+    })
+    assert(!JSON.stringify(calls).includes('"Tess-Horse-9"'))
+    assert.deepEqual(visits, ['/'])
+    // Read once on load, then taken out of the address bar and history.
+    assert.deepEqual(reads, [token])
+    assert.deepEqual(forgotten, [token])
+  })
+
+  it('M2.2 an invitation refuses mismatched or weak passwords before hashing, and shows a refused or incomplete link', async () => {
+    const fields = {
+      username: { value: 'new-person' },
+      password: { value: 'Tess-Horse-9' },
+      confirm: { value: 'Tess-Horse-8' },
+    }
+    const invite = form('invite', fields)
+    Object.assign(invite.dataset, {
+      lookup: '/auth/invite/lookup',
+      accept: '/auth/invite',
+    })
+    const { calls, visits } = page(
+      [invite],
+      {
+        'POST /auth/invite/lookup': { status: 200, body: { name: 'New' } },
+        'POST /auth/invite': {
+          status: 404,
+          body: { error: 'This invitation link is not valid or has expired' },
+        },
+      },
+      'proof',
+      'x'.repeat(43),
+    )
+    await settle()
+    assert.equal(
+      invite.outputs.welcome!.textContent,
+      'Welcome, New. Choose a password and a username to sign in to Mason.',
+    )
+    invite.submit()
+    await settle()
+    assert.equal(
+      invite.outputs.status!.textContent,
+      'The passwords do not match',
+    )
+    fields.password.value = fields.confirm.value = 'short'
+    invite.submit()
+    await settle()
+    assert.match(invite.outputs.status!.textContent!, /at least 8 characters/)
+    assert.equal(calls.length, 1, 'nothing sent but the lookup')
+    fields.password.value = fields.confirm.value = 'a-long-enough-passphrase'
+    invite.submit()
+    await settle()
+    assert.equal(
+      invite.outputs.status!.textContent,
+      'This invitation link is not valid or has expired',
+    )
+    assert.deepEqual(visits, [])
+
+    const refused = form('invite', fields)
+    Object.assign(refused.dataset, { lookup: '/auth/invite/lookup' })
+    page(
+      [refused],
+      {
+        'POST /auth/invite/lookup': {
+          status: 404,
+          body: { error: 'This invitation link is not valid or has expired' },
+        },
+      },
+      'proof',
+      'y'.repeat(43),
+    )
+    await settle()
+    assert.equal(
+      refused.outputs.status!.textContent,
+      'This invitation link is not valid or has expired',
+    )
+    assert.equal(refused.outputs.status!.hidden, false)
+    const empty = form('invite', fields)
+    const none = page([empty], {})
+    await settle()
+    assert.equal(none.calls.length, 0)
+    assert.deepEqual(none.forgotten, [], 'no fragment, nothing to forget')
+    assert.match(empty.outputs.status!.textContent!, /incomplete/)
+  })
+
   it('signs in with the client hash of the account’s parameters, never the password', async () => {
     const signIn = form('sign-in', {
       username: { value: 'paul' },
@@ -325,6 +462,8 @@ describe('Master page script', () => {
         fetch: async () => new Response('{}'),
         hash: async () => ({ error: 'unused' }),
         assign: () => undefined,
+        fragment: () => '',
+        forgetFragment: () => undefined,
         copy: async (text) => {
           if (text === 'refused') throw new Error('No clipboard')
           copied.push(text)

@@ -211,6 +211,7 @@ describe('Cloud accounts', function () {
         name: 'DigitalOcean',
         provider: 'digitalocean',
         key: { set: true },
+        adminKeyed: true,
       },
     ])
     assert(!JSON.stringify(shown).includes(DO_KEY))
@@ -350,6 +351,7 @@ describe('Cloud accounts', function () {
       name: 'DigitalOcean',
       provider: 'digitalocean',
       key: { set: true },
+      adminKeyed: true,
     })
     const mac = await c.api(
       'POST',

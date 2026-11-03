@@ -257,7 +257,7 @@ export class MasterAuth {
       .run(digest(secret))
   }
 
-  /** Sessions past their expiry. */
+  /** Sessions and invitation links past their expiry. */
   prune(): void {
     this.db
       .prepare('DELETE FROM master_sessions WHERE expires_at<=?')
@@ -267,6 +267,9 @@ export class MasterAuth {
         'DELETE FROM sign_in_failures WHERE first_at<=? AND locked_until<=?',
       )
       .run(this.master.now() - LOCKOUT.windowMs, this.master.now())
+    this.db
+      .prepare('DELETE FROM person_invitations WHERE expires_at<=?')
+      .run(this.master.now())
   }
 }
 

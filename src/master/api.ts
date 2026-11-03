@@ -23,7 +23,7 @@ import {
   type NodeAssignment,
   type NodeRegistry,
 } from './nodes.js'
-import { allow } from './permissions.js'
+import { allow, can } from './permissions.js'
 import { asRole, Forbidden, type Actor } from './roles.js'
 import { methodsOf } from './hostSettings.js'
 import { Settings, UnknownArea } from './settings.js'
@@ -396,10 +396,12 @@ export function masterApi(context: ApiContext): Router {
       // A host takes only a name, so a worker's fields pair only a worker.
       const workerOnly = setsWorkerFields(assignment)
       try {
+        // Only an administrator pairs a host: a manager's pairing must be a worker's.
+        const hosts = can(actorOf(res), 'hosts.change')
         const node = await context.registry.add(
           body.address,
           body.key,
-          workerOnly ? 'worker' : undefined,
+          workerOnly || !hosts ? 'worker' : undefined,
         )
         res.status(201)
         // A dedicated node is paired with its labels, so it never carries `setup`.
@@ -407,8 +409,11 @@ export function masterApi(context: ApiContext): Router {
           ? node
           : await context.registry.assign(node.fingerprint, assignment)
       } catch (error) {
-        if (error instanceof Error && error.message === 'Wrong role')
+        if (error instanceof Error && error.message === 'Wrong role') {
+          if (!can(actorOf(res), 'hosts.change'))
+            throw new Forbidden('Only an administrator pairs a host')
           throw new Error('A host takes only a name')
+        }
         if (
           error instanceof Error &&
           error.message === 'This node is already paired'
@@ -436,8 +441,9 @@ export function masterApi(context: ApiContext): Router {
     json((req, res) => {
       allow(actorOf(res), 'nodes.change')
       const fingerprint = String(req.params.fingerprint)
-      if (context.registry.get(fingerprint) == null)
-        throw new NotFound('No such node')
+      const node = context.registry.get(fingerprint)
+      if (node == null) throw new NotFound('No such node')
+      if (node.role === 'host') allow(actorOf(res), 'hosts.change')
       context.registry.remove(fingerprint)
       return null
     }),

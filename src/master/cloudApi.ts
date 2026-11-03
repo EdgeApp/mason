@@ -58,6 +58,15 @@ export function cloudApi(master: Master): Router {
       return account
     }),
   )
+  router.put(
+    '/api/v2/cloud/accounts/:id/key',
+    json(
+      async (req, res) =>
+        await master.cloudAccounts
+          .replaceKey(actorOf(res), String(req.params.id), req.body)
+          .catch(missing),
+    ),
+  )
   router.post(
     '/api/v2/cloud/accounts/:id/check',
     json(

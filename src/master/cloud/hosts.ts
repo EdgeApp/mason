@@ -484,9 +484,17 @@ export class CloudHosts {
       throw new Error(`No cloud account named ${input.account}`)
     if (account.provider !== 'digitalocean')
       throw new Error(`Account ${input.account} is not a DigitalOcean account`)
-    if (this.list().length > 0)
-      throw new Error(`This master already has a host: ${this.list()[0]!.name}`)
-    this.nameFree(input.name)
+    // The droplet is whoever holds the account's: a key a manager entered could be theirs.
+    if (account.adminKeyed !== true) throw new AccountNotVouched(input.account)
+    const vouched = account.key
+    const free = (): void => {
+      if (this.list().length > 0)
+        throw new Error(
+          `This master already has a host: ${this.list()[0]!.name}`,
+        )
+      this.nameFree(input.name)
+    }
+    free()
     if (this.options.github() == null)
       throw new Error(
         'A cloud host installs the master’s release from GitHub, and this master has none',
@@ -496,6 +504,13 @@ export class CloudHosts {
       if (!domains.includes(input.dns.domain))
         throw new Error(`The account's DNS holds no domain ${input.dns.domain}`)
     }
+    // No await from here to the insert: the account is checked again, as
+    // its key may have changed during the lookup, and from the insert on
+    // it holds the host, so only an administrator changes its key.
+    const current = this.options.account(input.account)
+    if (current?.adminKeyed !== true || current.key !== vouched)
+      throw new AccountNotVouched(input.account)
+    free()
     const now = this.now()
     this.db
       .prepare("DELETE FROM cloud_hosts WHERE name=? AND state='removed'")
@@ -629,6 +644,18 @@ export class CloudHosts {
       this.update(name, {
         state: 'error',
         error: `Its cloud account ${row.account} is gone`,
+      })
+      return this.get(name, role)!
+    }
+    // A host's account must still hold a key an administrator entered:
+    // every droplet, firewall, DNS record and Space below uses it.
+    if (
+      role === 'host' &&
+      this.options.account(row.account)?.adminKeyed !== true
+    ) {
+      this.update(name, {
+        state: 'error',
+        error: new AccountNotVouched(row.account).message,
       })
       return this.get(name, role)!
     }
@@ -1014,10 +1041,17 @@ export class CloudHosts {
   }
 
   /**
-   * Gives a host a new DigitalOcean Space for its builds: an administrator's
-   * choice, so its storage switches to the Space once it exists.
+   * Gives a host a new DigitalOcean Space for its builds; its storage
+   * switches to the Space once it exists. With `reconcile` (an
+   * administrator's request) it is made at once; otherwise the next check
+   * of the host, the master's timer or an administrator's reconcile,
+   * makes it.
    */
-  async setSpace(name: string, value: unknown): Promise<CloudHostRow> {
+  async setSpace(
+    name: string,
+    value: unknown,
+    reconcile = true,
+  ): Promise<CloudHostRow> {
     const row = this.get(name)
     if (row == null) throw new MissingHost(name)
     const space = asSpaceInput(value)
@@ -1030,7 +1064,7 @@ export class CloudHosts {
         ? {}
         : { space_owned: 0, space_key_id: null, space_secret: null }),
     })
-    return await this.reconcile(name)
+    return reconcile ? await this.reconcile(name) : this.get(name)!
   }
 
   /**
@@ -1082,6 +1116,15 @@ export class CloudHosts {
 }
 
 class HostError extends Error {}
+
+/** A host refused in an account whose key no administrator entered. */
+export class AccountNotVouched extends Error {
+  constructor(readonly account: string) {
+    super(
+      `An administrator must re-enter the key of account ${account} before a host is made in it`,
+    )
+  }
+}
 
 const notBack = (version: string): string =>
   `It did not come back on ${version}`

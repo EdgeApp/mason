@@ -933,8 +933,13 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     assert.match(nodes.text, /Monthly budget: \$200/)
     assert.match(nodes.text, /<span class="mono">worker<\/span>/)
     const settings = await request(c.master, 'GET', '/settings', manager)
+    // Where invitation links open is an administrator's to change.
+    assert.doesNotMatch(settings.text, /data-path="\/api\/v2\/settings\/host"/)
+    assert.match(settings.text, /only an administrator changes it/)
+    assert.match(settings.text, /serves from its cache for \d+ hours/)
+    const owner = await request(c.master, 'GET', '/settings', signIn('admin'))
     assert.match(
-      settings.text,
+      owner.text,
       /data-path="\/api\/v2\/settings\/host" data-method="PUT"/,
     )
     assert.match(settings.text, /data-path="\/api\/v2\/apple\/session"/)

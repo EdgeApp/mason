@@ -237,6 +237,7 @@ describe('Host storage on DigitalOcean Spaces', function () {
       },
       budget: { monthly: 200 },
       canChange: true,
+      canChangeHosts: true,
     })
     assert.match(
       html,
@@ -261,6 +262,7 @@ describe('Host storage on DigitalOcean Spaces', function () {
         host: 'https://h',
         budget: { monthly: 1 },
         canChange: true,
+        canChangeHosts: true,
       }),
       /<tr data-location="disk"><td>Host’s disk<\/td><td><span class="icon"[^>]*>[^<]*<\/span> New builds go here<\/td>/,
     )
@@ -341,6 +343,37 @@ describe('Host storage on DigitalOcean Spaces', function () {
     })
     assert.equal(back.json.state, 'ready', back.text)
     assert.equal(storage().s3.bucket, 'mason-e2e')
+  })
+
+  it('M2.14 a manager’s Space is stored and made by the next check of the host, never by a reconcile the manager starts', async () => {
+    const manager = c.master.master!.keys.create(localOperator, {
+      role: 'manager',
+      name: 'space manager',
+    }).token
+    const stored = await c.api(
+      'POST',
+      '/api/v2/cloud/hosts/e2e/space',
+      { bucket: 'later-space', region: 'sfo3' },
+      manager,
+    )
+    assert.equal(stored.status, 200, stored.text)
+    assert.equal(stored.json.space_bucket, 'later-space')
+    assert.equal(row('e2e').space_pending, 1)
+    assert(!spaces.buckets.has('later-space'), 'nothing made yet')
+    assert.equal(
+      (await c.api('POST', '/api/v2/cloud/hosts/e2e/reconcile', {}, manager))
+        .status,
+      403,
+    )
+    const checked = await c.api('POST', '/api/v2/cloud/hosts/e2e/reconcile', {})
+    assert.equal(checked.json.state, 'ready', checked.text)
+    assert(spaces.buckets.has('later-space'), 'the next check made it')
+    // Back to its own Space, as the next test expects.
+    const back = await c.api('POST', '/api/v2/cloud/hosts/e2e/space', {
+      bucket: 'mason-e2e',
+      region: 'sfo3',
+    })
+    assert.equal(back.json.state, 'ready', back.text)
   })
 
   it('U6.7 remove keeps the Space and its key as a storage location by default; asked, it empties and deletes a Space it made', async () => {
@@ -612,6 +645,7 @@ describe('Host storage on DigitalOcean Spaces', function () {
       ],
       budget: { monthly: 1 },
       canChange: true,
+      canChangeHosts: true,
     })
     const card = html.slice(html.indexOf('id="storage"'))
     assert.match(
