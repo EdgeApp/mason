@@ -95,6 +95,7 @@ export interface NodeOptions {
     | 'appleEndpoints'
     | 'appleFetch'
     | 'appleSleep'
+    | 'providerFetch'
     | 'cloud'
     | 'cloudAccounts'
     | 'cloudHosts'

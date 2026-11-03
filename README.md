@@ -159,6 +159,20 @@ restarts it. No SSH is involved. The Nodes page shows the host as
 A host installed before this has no such unit: run `sudo mason update` on it
 once, or recreate it.
 
+## Signing in
+
+People sign in to the master's pages, and to the host's, with a username and
+password, or with a sign-in provider such as Google (Settings → **Sign-in**).
+The host offers the enabled providers at its own address. The master offers
+them once its public address is set in the same card (the `master` setting,
+`{"origin": "https://mason-admin.example.com:9300"}`); register both callback
+URLs the card shows with the provider. A master on an internal network needs
+a name in a public domain that resolves to its private address, and a
+certificate the browsers trust; only the browser visits the provider's sign-in
+pages and the callback, and the master calls the provider's token endpoint.
+A provider signs someone in when it confirms an email address that a person
+on the People page has.
+
 ## Projects
 
 A project is a GitHub repository with a Masonfile, the app IDs it owns, its

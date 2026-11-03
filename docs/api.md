@@ -128,6 +128,32 @@ use API keys instead.
 Repeated wrong passwords lock sign-in: 5 failures for an account or 10 from
 one address within 15 minutes lock it for 15 minutes (429 with `retryAt`).
 
+Once the `master` setting names the master's public origin, its sign-in page
+also offers each enabled [sign-in method](#sign-in-methods). These are
+pages, not API routes, and are limited to 120 requests a minute per address:
+
+- `GET /auth/start/:id?return=/path` starts the provider's authorization
+  code flow with PKCE, a state and (OpenID Connect) a nonce, kept for ten
+  minutes and bound to the browser by the cookie `__Host-mason-master-oauth`
+  (HttpOnly, Secure, SameSite=Lax). A browser that opened the master at
+  another address is first sent to the same path at the master's origin; one
+  already signed in is sent home.
+- `GET /auth/callback/:id` uses that state once, has the master exchange the
+  code with the provider, and signs in the enabled person whose email, or
+  whose address for that method, is the verified email the provider
+  asserts, ignoring case. It sets the session cookie and answers a page that
+  moves on to the return path from the master's own origin, since a
+  SameSite=Strict cookie is not sent on the provider's redirect. A provider
+  that does not assert a verified email, an address nobody has, or a
+  disabled person is refused (403, with the reason). A method address that
+  is a person's for that method wins over another person's email. An
+  unknown or disabled method, at either route, and an expired, replayed or
+  foreign state are 400. Each such sign-in is audited as
+  `session.provider` with the method's ID.
+
+Without the `master` setting these pages answer 404 and the master offers
+only username and password.
+
 ### Requests through the host
 
 The host forwards `/api/jobs…`, `/api/queue…` and `/api/v2/…` (`GET`,
@@ -162,7 +188,7 @@ below it:
 
 | Role | In short |
 | --- | --- |
-| `admin` | Everything, including people and the backup key. |
+| `admin` | Everything, including people, sign-in methods and the backup key. |
 | `manager` | Configures Mason: projects, secrets, settings, nodes, keys, Apple, backups, groups. |
 | `developer` | Reads projects and runs, requests, cancels, restarts and approves runs, makes keys up to its own role. |
 | `tester` | Sees its groups' published builds on the host. Through this API it can read its own person record, change its own password and sign out. |
@@ -185,6 +211,7 @@ lowest role each permission needs (`src/master/permissions.ts`):
 | `secrets.read` | manager | | `groups.change` | manager |
 | `secrets.change` | manager | | `people.read` | manager |
 | `buildNumbers.seed` | manager | | `people.change` | admin |
+| | | | `signIn.change` | admin |
 | | | | `backups.key` | admin |
 
 `builds.read` and `devices.register` are checked on the host, not by the
@@ -1164,19 +1191,22 @@ send `{ "keep": true }` to keep the stored value.
 | --- | --- | --- |
 | `GET /api/v2/settings/:area` | An area's value. | `settings.read` |
 | `PUT /api/v2/settings/:area` | Replaces an area's value; answers it as `GET` does. | `settings.change` |
-| `PUT /api/v2/settings/signIn/methods/:id` | Adds or changes one sign-in method. | `settings.change` |
-| `DELETE /api/v2/settings/signIn/methods/:id` | Removes one sign-in method. | `settings.change` |
+| `PUT /api/v2/settings/signIn/methods/:id` | Adds or changes one sign-in method. | `signIn.change` |
+| `DELETE /api/v2/settings/signIn/methods/:id` | Removes one sign-in method. | `signIn.change` |
 | `PUT /api/v2/settings/nodeTypes/:type` | Adds or changes one node type. | `settings.change` |
 | `DELETE /api/v2/settings/nodeTypes/:type` | Removes one node type. | `settings.change` |
 | `PUT /api/v2/settings/cloud/budget` | Sets the cloud pools' monthly budget. | `settings.change` |
 
-An unknown area is 404. The areas:
+An unknown area is 404. Changing `signIn` or `master` also needs
+`signIn.change` (administrators): a sign-in method decides who signs in
+as whom, so a manager may not change it. The areas:
 
 | Area | Value |
 | --- | --- |
 | `host` | `{ "origin": "https://builds.example.test", "workerOrigin"?, "offlineGraceHours": 72 }`: the host's public HTTPS origin, an origin cloud machines reach it at, and hours (1–720) it serves without the master. |
+| `master` | `{ "origin": "https://mason-admin.example.test:9300" }`: the master's own public HTTPS origin, where sign-in providers return the browser to the master's pages. `{}` (or an empty `origin`) offers only username and password on the master. It stays on the master. |
 | `github` | `{ "kind": "token", "token" }`, `{ "kind": "app", "appId", "installationId", "privateKey" }`, or `{ "kind": "ssh" }` (the master makes a key; send `"privateKey": { "keep": true }` to keep it). A token or App is checked with GitHub on save. |
-| `signIn` | `{ "methods": [ … ] }`: OIDC or OAuth 2 providers the host offers (below). |
+| `signIn` | `{ "methods": [ … ] }`: OIDC or OAuth 2 providers the host offers, and the master too once `master` is set (below). |
 | `storage` | `{ "driver": "disk" }`, or `{ "driver": "s3", "s3": { "endpoint", "bucket", "region", "accessKeyId", "secretAccessKey" } }`. The [Storage](#10-storage) routes are the usual way to change it. |
 | `backup` | Served by the [Backups](#11-backups) routes. |
 | `nodeTypes` | `{ "<type>": { "software", "settings", "diskThresholdGb", "androidLicensesAccepted" } }` (below). |
@@ -1210,6 +1240,25 @@ fields are refused.
 
 `DELETE` removes the method; 404 when there is none. Both answer the
 `signIn` area, client secrets shown as `{ "set": true }`.
+
+Each method is registered with its provider once per place it is offered,
+with these redirect (callback) URLs, which the Settings page's Sign-in card
+lists for each method:
+
+- the host: `<host origin>/auth/callback/<id>`, for example
+  `https://builds.example.test/auth/callback/google`;
+- the master, when the `master` setting is set:
+  `<master origin>/auth/callback/<id>`, for example
+  `https://mason-admin.example.test:9300/auth/callback/google`.
+
+Only the browser visits the provider and these URLs; the master makes the
+outbound token and user-info requests. So a master reachable only on an
+internal network can still offer a provider: give it a name in a public
+domain (Google refuses bare host names and IP addresses in redirect URIs)
+that resolves, for the people who use it, to its private address, and make
+sure their browsers trust its certificate (for example a certificate for
+that name, or the master's own one installed as trusted). The master must
+reach the provider's HTTPS endpoints.
 
 ### Node types
 

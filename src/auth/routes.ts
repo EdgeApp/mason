@@ -6,17 +6,12 @@ import express, {
   type RequestHandler,
 } from 'express'
 import { masterContentSecurityPolicy } from '../node/webApp.js'
-import { Store, digest } from '../store.js'
+import { Store } from '../store.js'
 import { asId, integer, object, text } from '../validation.js'
 import { escape } from '../view/html.js'
 import { page, shell } from '../view/shell.js'
-import {
-  Accounts,
-  randomToken,
-  sameSecret,
-  type Account,
-  type Session,
-} from './accounts.js'
+import { Accounts, sameSecret, type Account, type Session } from './accounts.js'
+import { beginSignIn, finishSignIn } from './flow.js'
 import { Providers } from './providers.js'
 import { asProviderId, type Identity } from './providerConfig.js'
 
@@ -266,34 +261,10 @@ export function authRoutes(
       if (context == null) throw new Error('Sign in again')
       csrf(req, store, context.session)
     }
-    const state = randomToken(),
-      verifier = randomToken(),
-      nonce = randomToken(),
-      browser = randomToken()
-    const target = await current().authorize(
-      id,
-      { state, verifier, nonce },
-      confirmed,
-    )
-    store.transaction(() => {
-      store.db
-        .prepare('DELETE FROM oauth_transactions WHERE expires_at<=?')
-        .run(store.now())
-      store.db
-        .prepare('INSERT INTO oauth_transactions VALUES(?,?,?,?,?,?,?,?,?)')
-        .run(
-          digest(state),
-          digest(browser),
-          id,
-          provider.issuer,
-          verifier,
-          nonce,
-          destination,
-          store.now() + 600000,
-          cookie(req, SESSION_COOKIE) == null
-            ? null
-            : digest(cookie(req, SESSION_COOKIE)!),
-        )
+    const { target, browser } = await beginSignIn(store, current(), id, {
+      destination,
+      previousSession: cookie(req, SESSION_COOKIE),
+      switchAccount: confirmed,
     })
     res.cookie(FLOW_COOKIE, browser, { ...cookieOptions, maxAge: 600000 })
     if (confirmed) {
@@ -314,54 +285,11 @@ export function authRoutes(
   })
   router.get('/auth/callback/:provider', async (req, res) => {
     const id = asProviderId(req.params.provider)
-    const provider = current().provider(id)
-    const state = text(128)(req.query.state)
-    const browser = cookie(req, FLOW_COOKIE)
-    if (browser == null) throw new Error('Missing browser transaction')
-    const transaction = store.transaction(() => {
-      const row = asObject({
-        hash: asString,
-        browser_hash: asString,
-        provider: asString,
-        issuer: asString,
-        verifier: asString,
-        nonce: asString,
-        return_path: asString,
-        expires_at: integer(),
-        previous_session: (value: unknown): string | undefined =>
-          value === null ? undefined : asString(value),
-      })(
-        store.db
-          .prepare(
-            'SELECT * FROM oauth_transactions WHERE hash=? AND expires_at>?',
-          )
-          .get(digest(state), store.now()),
-      )
-      if (
-        row.provider !== id ||
-        row.issuer !== provider.issuer ||
-        !sameSecret(row.browser_hash, digest(browser))
-      )
-        throw new Error('Wrong browser transaction')
-      const current = cookie(req, SESSION_COOKIE)
-      if (
-        row.previous_session !== (current == null ? undefined : digest(current))
-      )
-        throw new Error('Account changed during login')
-      store.db
-        .prepare('DELETE FROM oauth_transactions WHERE hash=?')
-        .run(row.hash)
-      return row
-    })
-    res.clearCookie(FLOW_COOKIE, cookieOptions)
-    const callback = new URL(current().redirectUri(id))
-    for (const [key, value] of new URL(req.originalUrl, store.config.origin)
-      .searchParams)
-      callback.searchParams.append(key, value)
-    const identity = await current().identity(id, callback, {
-      state,
-      verifier: transaction.verifier,
-      nonce: transaction.nonce,
+    const { identity, destination } = await finishSignIn(store, current(), id, {
+      query: new URL(req.originalUrl, store.config.origin).searchParams,
+      browser: cookie(req, FLOW_COOKIE),
+      session: cookie(req, SESSION_COOKIE),
+      claimed: () => res.clearCookie(FLOW_COOKIE, cookieOptions),
     })
     const login =
       options.login ??
@@ -374,7 +302,7 @@ export function authRoutes(
       ...cookieOptions,
       maxAge: result.session.expires_at - store.now(),
     })
-    res.redirect(303, returnPath(transaction.return_path))
+    res.redirect(303, returnPath(destination))
   })
   router.post('/auth/logout', (req, res) => {
     const context = sessionContext(req, accounts)

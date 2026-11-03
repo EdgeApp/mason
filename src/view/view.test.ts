@@ -1569,6 +1569,7 @@ describe('Settings page', () => {
   it('U6.3/U6.4/U6.5 sign-in methods, host, storage and budget as cards; no JSON or build numbers; errors inside the card', () => {
     const html = settingsView({
       ...base,
+      canChangeSignIn: true,
       host: { origin: 'https://builds.example.test', offlineGraceHours: 72 },
       storage: { driver: 'disk' },
       storageAccounts: [

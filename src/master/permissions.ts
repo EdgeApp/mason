@@ -38,6 +38,11 @@ export const policy = {
   'people.read': 'manager',
   /** Add and remove people and set their roles. */
   'people.change': 'admin',
+  /**
+   * Sign-in methods and the master's address: a method's verified email
+   * signs in as whoever has it, so changing them is changing who is admin.
+   */
+  'signIn.change': 'admin',
   /** The backup key is shown to administrators only. */
   'backups.key': 'admin',
 } as const satisfies Record<string, Role>

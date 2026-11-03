@@ -242,7 +242,7 @@ export function masterApi(context: ApiContext): Router {
   router.put(
     '/api/v2/settings/signIn/methods/:id',
     json(async (req, res) => {
-      allow(actorOf(res), 'settings.change')
+      allow(actorOf(res), 'signIn.change')
       const id = String(req.params.id)
       const stored = methodsOf(context.settings.value('signIn'))
       const others = keepSecrets(
@@ -271,7 +271,7 @@ export function masterApi(context: ApiContext): Router {
   router.delete(
     '/api/v2/settings/signIn/methods/:id',
     json(async (req, res) => {
-      allow(actorOf(res), 'settings.change')
+      allow(actorOf(res), 'signIn.change')
       const id = String(req.params.id)
       const stored = methodsOf(context.settings.value('signIn'))
       if (!stored.some((method) => method.id === id))

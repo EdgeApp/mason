@@ -1,5 +1,5 @@
 import type { MasterDatabase } from './database.js'
-import { allow } from './permissions.js'
+import { allow, type Action } from './permissions.js'
 import type { Actor } from './roles.js'
 import { publishedSettings } from './changes.js'
 
@@ -23,6 +23,8 @@ export interface SettingsArea {
   changed?(value: SettingValue): void
   /** What an administrator sees, for secrets nested below the top level. */
   redact?(value: SettingValue): SettingValue
+  /** A permission changing it needs besides `settings.change`. */
+  permission?: Action
 }
 
 export class UnknownArea extends Error {
@@ -74,6 +76,7 @@ export class Settings {
   async set(actor: Actor, name: string, input: unknown): Promise<SettingValue> {
     allow(actor, 'settings.change')
     const area = this.area(name)
+    if (area.permission != null) allow(actor, area.permission)
     const previous = this.value(name)
     const value = await area.validate(input, previous, {
       actor,

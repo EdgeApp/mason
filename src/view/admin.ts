@@ -884,11 +884,15 @@ export function settingsView(data: {
   storageAccounts?: PoolAccount[]
   /** Sign-in methods, without their client secrets. */
   signIn?: SignInMethodView[]
+  /** The master's own public origin, for sign-in on its pages. */
+  master?: { origin?: string }
   /** The cloud pools' monthly budget in dollars. */
   monthlyBudget?: number
   /** Node types: the software and settings every node of a type keeps. */
   nodeTypes?: Record<string, NodeTypeView>
   canChange: boolean
+  /** Whether the viewer may change sign-in methods and addresses (administrators). */
+  canChangeSignIn?: boolean
   canCreate: boolean
   canRevoke: boolean
 }): string {
@@ -1271,14 +1275,44 @@ function settingsCards(data: Parameters<typeof settingsView>[0]): string {
     heading: 'h2',
   })
   const methods = data.signIn ?? []
-  const signInCard = `<section class="panel" id="signIn"><h2>${icon('login')}Sign-in</h2><p>Ways people sign in besides a username and password: OpenID Connect or OAuth 2 providers such as Google or GitHub.</p>${
+  const masterOrigin = data.master?.origin
+  // The redirect URIs to register with a provider: one per place it is offered.
+  const callbacks = (id: string): string => {
+    const where = [
+      ...(host.origin == null ? [] : [['The host', host.origin]]),
+      ...(masterOrigin == null ? [] : [['The master', masterOrigin]]),
+    ]
+    return where.length === 0
+      ? '<p class="hint">Set the host or master address to see the callback URL to register.</p>'
+      : `<p>Callback URLs to register with the provider:</p>${where.map(([label, origin]) => `<p><small>${escape(label!)}</small></p>${command(`${origin!}/auth/callback/${id}`)}`).join('')}`
+  }
+  const signInEditor = data.canChangeSignIn === true
+  const masterForm = !signInEditor
+    ? `<p>Master address: ${masterOrigin == null ? 'not set' : `<span class="mono">${escape(masterOrigin)}</span>`}. Only an administrator changes sign-in.</p>`
+    : apiForm(
+        '/api/v2/settings/master',
+        field(
+          'master-origin',
+          'Master address',
+          input(
+            'master-origin',
+            'origin',
+            masterOrigin ?? '',
+            ' data-optional type="url" pattern="https://.*" placeholder="https://mason-admin.example.com:9300"',
+          ),
+          'The https address people open the master at. Providers send the browser back here, so it needs a public domain name, though it may resolve to a private address. Empty offers only username and password on the master.',
+        ),
+        `${icon('check')} Save`,
+        { method: 'PUT', fields: ['origin'], then: 'reload' },
+      )
+  const signInCard = `<section class="panel" id="signIn"><h2>${icon('login')}Sign-in</h2><p>Ways people sign in besides a username and password: OpenID Connect or OAuth 2 providers such as Google or GitHub. The host offers them; the master offers them too once its address is set.</p>${masterForm}${
     methods
       .map(
         (method) =>
-          `<section class="panel"><h3>${escape(method.name)} <small class="mono">${escape(method.id)} · ${method.type === 'oidc' ? 'OpenID Connect' : 'OAuth 2'}${method.enabled ? '' : ' · disabled'}</small></h3>${signInForm(method, method.type)}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/settings/signIn/methods/${encodeURIComponent(method.id)}`, `<p>People who sign in with ${escape(method.name)} then use another method.</p>`, `${icon('delete')} Remove ${escape(method.name)}`, { method: 'DELETE', then: 'reload', className: 'secondary' }), { kind: 'secondary' })}</section>`,
+          `<section class="panel"><h3>${escape(method.name)} <small class="mono">${escape(method.id)} · ${method.type === 'oidc' ? 'OpenID Connect' : 'OAuth 2'}${method.enabled ? '' : ' · disabled'}</small></h3>${callbacks(method.id)}${!signInEditor ? '' : `${signInForm(method, method.type)}${action(`${icon('delete')} Remove`, apiForm(`/api/v2/settings/signIn/methods/${encodeURIComponent(method.id)}`, `<p>People who sign in with ${escape(method.name)} then use another method.</p>`, `${icon('delete')} Remove ${escape(method.name)}`, { method: 'DELETE', then: 'reload', className: 'secondary' }), { kind: 'secondary' })}`}</section>`,
       )
       .join('') || '<p>None yet.</p>'
-  }${action(`${icon('add')} Add an OpenID Connect method`, signInForm(undefined, 'oidc'), { id: 'signin-add-oidc' })}${action(`${icon('add')} Add an OAuth 2 method`, signInForm(undefined, 'oauth2'), { id: 'signin-add-oauth2' })}</section>`
+  }${!signInEditor ? '' : `${action(`${icon('add')} Add an OpenID Connect method`, signInForm(undefined, 'oidc'), { id: 'signin-add-oidc' })}${action(`${icon('add')} Add an OAuth 2 method`, signInForm(undefined, 'oauth2'), { id: 'signin-add-oauth2' })}`}</section>`
   const budgetCard = `<section class="panel" id="cloud"><h2>${icon('cloud')}Cloud budget</h2><p>Pools are edited on the <a href="/nodes">Nodes</a> page and cloud accounts on the <a href="/cloud">Cloud</a> page.</p>${apiForm(
     '/api/v2/settings/cloud/budget',
     field(

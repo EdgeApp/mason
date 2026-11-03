@@ -14,6 +14,7 @@ import { storageApi } from './storageApi.js'
 import { appleApi } from '../apple/api.js'
 import { masterPages } from './pages.js'
 import { projectsApi } from './projectsApi.js'
+import { providerSignInRoutes } from './providerSignIn.js'
 import { wizardApi } from './wizard.js'
 import { runsApi } from './runsApi.js'
 import type { Master } from './runtime.js'
@@ -78,6 +79,7 @@ export function masterApp(context: MasterWebContext): express.Express {
       },
     }),
   )
+  app.use(providerSignInRoutes(master))
   masterPages(app, context, master)
   app.use((_req, res) => {
     res.status(404).send('Not found')

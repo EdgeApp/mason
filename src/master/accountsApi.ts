@@ -8,7 +8,10 @@ import { Forbidden } from './roles.js'
 import type { Master } from './runtime.js'
 import { clientAddress } from './forward.js'
 
-const cookieOptions = (expires: number): express.CookieOptions => ({
+/** The master session cookie: host-only, Strict, until the session expires. */
+export const sessionCookieOptions = (
+  expires: number,
+): express.CookieOptions => ({
   httpOnly: true,
   secure: true,
   sameSite: 'strict',
@@ -61,7 +64,7 @@ export function accountsApi(
     )
   }
   const signedIn = (res: Response, token: string, expires: number): void => {
-    res.cookie(MASTER_SESSION_COOKIE, token, cookieOptions(expires))
+    res.cookie(MASTER_SESSION_COOKIE, token, sessionCookieOptions(expires))
   }
 
   router.get(
