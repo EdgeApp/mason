@@ -44,7 +44,11 @@ export const masterArea: SettingsArea = {
   },
 }
 
-export type SignInMethod = ProviderConfig & { enabled: boolean }
+export type SignInMethod = ProviderConfig & {
+  enabled: boolean
+  /** A verified sign-in creates a tester who can install every app. */
+  admitTesters: boolean
+}
 
 export const methodsOf = (value: SettingValue | undefined): SignInMethod[] =>
   ((value?.methods ?? []) as SignInMethod[]).filter(
@@ -67,7 +71,7 @@ export const signInArea: SettingsArea = {
     for (const raw of (value.methods ?? []) as Array<Record<string, unknown>>) {
       if (raw == null || typeof raw !== 'object')
         throw new Error('A sign-in method is an object')
-      const { enabled, clientSecret, ...rest } = raw
+      const { enabled, clientSecret, admitTesters, ...rest } = raw
       let secret = clientSecret
       if (
         secret != null &&
@@ -82,10 +86,16 @@ export const signInArea: SettingsArea = {
       }
       if (enabled != null && typeof enabled !== 'boolean')
         throw new Error('enabled is true or false')
+      if (admitTesters != null && typeof admitTesters !== 'boolean')
+        throw new Error('admitTesters is true or false')
       const provider = asProvider({ ...rest, clientSecret: secret })
       if (methods.some((method) => method.id === provider.id))
         throw new Error(`Sign-in method ${provider.id} is listed twice`)
-      methods.push({ ...provider, enabled: enabled !== false })
+      methods.push({
+        ...provider,
+        enabled: enabled !== false,
+        admitTesters: admitTesters === true,
+      })
     }
     return { methods }
   },

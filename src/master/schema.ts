@@ -7,7 +7,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 31
+export const MASTER_SCHEMA = 32
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -779,6 +779,12 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       if (hosts.has(String(account.id))) account.adminKeyed = true
     db.prepare("UPDATE settings SET value=? WHERE area='cloudAccounts'").run(
       JSON.stringify(value),
+    )
+  },
+  // 32: a tester admitted by a sign-in method can install every app.
+  (db): void => {
+    db.exec(
+      'ALTER TABLE accounts ADD COLUMN open_admission INTEGER NOT NULL DEFAULT 0 CHECK(open_admission IN (0,1))',
     )
   },
 ]

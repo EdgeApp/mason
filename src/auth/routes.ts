@@ -131,7 +131,9 @@ export interface AuthOptions {
   login?: (
     identity: Identity,
     previousToken: string | undefined,
-  ) => { token: string; session: Session; account: Account }
+  ) =>
+    | { token: string; session: Session; account: Account }
+    | Promise<{ token: string; session: Session; account: Account }>
   /** Whether the People pages are served (not on a host: accounts are managed on the master). */
   people?: boolean
   /** Invitation links, checked and used by the master (a host). */
@@ -389,7 +391,7 @@ export function authRoutes(
         found: Identity,
         token: string | undefined,
       ): ReturnType<Accounts['login']> => accounts.login(found, token))
-    const result = login(identity, cookie(req, SESSION_COOKIE))
+    const result = await login(identity, cookie(req, SESSION_COOKIE))
     res.cookie(SESSION_COOKIE, result.token, {
       ...cookieOptions,
       maxAge: result.session.expires_at - store.now(),

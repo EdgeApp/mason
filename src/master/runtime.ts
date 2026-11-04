@@ -90,6 +90,7 @@ import {
   hostArea,
   hostProjection,
   masterArea,
+  methodsOf,
   signInArea,
   storageArea,
   type StorageSetting,
@@ -604,6 +605,26 @@ export class Master {
         parameters: (username): unknown => this.auth.parameters(username),
         verify: async (value, address): Promise<number> =>
           await this.auth.verify(value, address),
+      },
+      admit: (params): { accountId: number; account: unknown } => {
+        const body = (params ?? {}) as {
+          provider?: unknown
+          email?: unknown
+          name?: unknown
+        }
+        const provider = String(body.provider ?? '')
+        const method = methodsOf(this.settings.value('signIn')).find(
+          (entry) => entry.id === provider,
+        )
+        if (method == null || !method.enabled || method.admitTesters !== true)
+          throw new Error('This sign-in method does not admit new testers')
+        const accountId = this.people.admit(provider, {
+          email: String(body.email ?? ''),
+          name: String(body.name ?? ''),
+        })
+        const account = this.changes.projection('account', String(accountId))
+        if (account == null) throw new Error('The account was not stored')
+        return { accountId, account }
       },
       invitation: {
         lookup: (token): unknown => this.people.invitation(token),

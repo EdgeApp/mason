@@ -182,6 +182,57 @@ export class People {
     }
   }
 
+  /**
+   * The account a flagged sign-in method admits. An enabled account that
+   * already has this address is returned unchanged. A disabled one is refused.
+   */
+  admit(method: string, identity: { name: string; email: string }): number {
+    const provider = asMethod(method)
+    const email = asAddress(identity.email)
+    const name = identity.name.trim().slice(0, 120) || email
+    try {
+      return this.insertAdmitted(provider, email, name)
+    } catch (error) {
+      // Two sign-ins of a new address can insert together; the second finds the first.
+      const message = error instanceof Error ? error.message : ''
+      if (!message.includes('UNIQUE constraint failed')) throw error
+      return this.insertAdmitted(provider, email, name)
+    }
+  }
+
+  private insertAdmitted(provider: string, email: string, name: string): number {
+    return this.master.transaction(() => {
+      const existing = this.db
+        .prepare(
+          "SELECT a.id, a.disabled FROM account_addresses x JOIN accounts a ON a.id=x.account_id WHERE x.method IN (?, '*') AND lower(x.email)=lower(?) ORDER BY x.method='*' LIMIT 1",
+        )
+        .get(provider, email) as { id: number; disabled: number } | undefined
+      if (existing != null) {
+        if (existing.disabled === 1) throw new Error('This account is disabled')
+        return existing.id
+      }
+      const id = Number(
+        this.db
+          .prepare(
+            'INSERT INTO accounts(name,role,is_admin,is_tester,disabled,open_admission,created_at) VALUES(?,?,0,1,0,1,?)',
+          )
+          .run(name, 'tester', this.master.now()).lastInsertRowid,
+      )
+      this.db
+        .prepare(
+          'INSERT INTO account_addresses(account_id,method,email) VALUES(?,?,?)',
+        )
+        .run(id, provider, email)
+      this.master.audit(
+        { role: 'tester', label: 'sign-in' },
+        'person.admit',
+        String(id),
+      )
+      this.master.change('account', id)
+      return id
+    })
+  }
+
   /** Adds a person: a name, a role, and their sign-in addresses or a master password. */
   async create(actor: Actor, value: unknown): Promise<Person> {
     allow(actor, 'people.change')

@@ -75,7 +75,7 @@ const order = [
   'job',
 ]
 
-const HOST_SCHEMA = 7
+const HOST_SCHEMA = 8
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -124,6 +124,14 @@ function migrateHost(db: DatabaseSync): void {
   db.exec(`BEGIN IMMEDIATE;
     ${jobs.some((column) => column.name === 'build_number') ? '' : 'ALTER TABLE jobs ADD COLUMN build_number TEXT;'}
     INSERT INTO host_meta(key,value) VALUES('host_schema','7') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  // A tester admitted by a sign-in method can install every app.
+  // Replaying an older schema number leaves the column in place.
+  const accounts = db.prepare('PRAGMA table_info(accounts)').all()
+  if (current < 8)
+    db.exec(`BEGIN IMMEDIATE;
+    ${accounts.some((column) => column.name === 'open_admission') ? '' : 'ALTER TABLE accounts ADD COLUMN open_admission INTEGER NOT NULL DEFAULT 0 CHECK(open_admission IN (0,1));'}
+    INSERT INTO host_meta(key,value) VALUES('host_schema','8') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
 }
 
@@ -272,15 +280,41 @@ export class HostCache {
   signInMethods(): ProviderConfig[] {
     return (this.setting<{ methods?: SignInMethod[] }>('signIn')?.methods ?? [])
       .filter((method) => method.enabled)
-      .map(({ enabled: _enabled, ...provider }) => provider as ProviderConfig)
+      .map(
+        ({ enabled: _enabled, admitTesters: _admitTesters, ...provider }) =>
+          provider as ProviderConfig,
+      )
   }
 
-  /** Testers see the apps of their groups; developers, managers and admins see every app. */
+  /** Whether a verified sign-in through this method creates a tester. */
+  admitsTesters(id: string): boolean {
+    return (
+      this.setting<{ methods?: SignInMethod[] }>('signIn')?.methods ?? []
+    ).some(
+      (method) =>
+        method.id === id && method.enabled && method.admitTesters === true,
+    )
+  }
+
+  /** Writes an account the master just admitted, before the change log arrives. */
+  ensureAccount(value: Projected): void {
+    this.store.transaction(() => {
+      this.put('account', value)
+    })
+  }
+
+  /** Testers see the apps of their groups; an admitted tester, and developers and up, see every app. */
   scope(accountId: number): ReadonlySet<number> | 'all' {
     const row = this.db
-      .prepare('SELECT role FROM accounts WHERE id=?')
-      .get(accountId) as { role: string } | undefined
-    if (row != null && ROLES_SEEING_EVERY_APP.has(row.role)) return 'all'
+      .prepare('SELECT role, open_admission FROM accounts WHERE id=?')
+      .get(accountId) as
+      | { role: string; open_admission?: number }
+      | undefined
+    if (
+      row != null &&
+      (ROLES_SEEING_EVERY_APP.has(row.role) || row.open_admission === 1)
+    )
+      return 'all'
     return new Set(
       (
         this.db

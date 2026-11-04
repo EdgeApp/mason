@@ -33,6 +33,7 @@ import { search } from '../view/search.js'
 import { page, shell, type Viewer } from '../view/shell.js'
 import { escape, runName } from '../view/html.js'
 import { stylesheet } from '../view/stylesheet.js'
+import type { Projected } from '../master/changes.js'
 import type { HostRuntime } from './runtime.js'
 import { hostLogin } from './sessions.js'
 
@@ -601,7 +602,16 @@ export function hostApp(
   app.use(express.urlencoded({ extended: false, limit: '16kb' }))
   app.use(
     authRoutes(host.cache.store, () => host.providers(), host.accounts, {
-      login: hostLogin(host.cache, host.accounts),
+      login: hostLogin(host.cache, host.accounts, async (identity) => {
+        const current = host.options.link()
+        if (current == null || current.closed)
+          throw new LinkError('The master is unreachable', 'closed')
+        return (await current.request('auth.admit', {
+          provider: identity.provider,
+          email: identity.email,
+          name: identity.name,
+        })) as { account: Projected }
+      }),
       people: false,
       password: hostPassword(host),
       invitation: hostInvitation(host),

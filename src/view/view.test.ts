@@ -1674,11 +1674,11 @@ describe('Settings page', () => {
     )
     assert.match(
       signIn,
-      /data-path="\/api\/v2\/settings\/signIn\/methods\/google" data-method="PUT" data-fields="type,enabled,name,issuer,clientId,clientSecret,authentication,signingAlgorithm"/,
+      /data-path="\/api\/v2\/settings\/signIn\/methods\/google" data-method="PUT" data-fields="type,enabled,admitTesters,name,issuer,clientId,clientSecret,authentication,signingAlgorithm"/,
     )
     assert.match(
       signIn,
-      /data-path="\/api\/v2\/settings\/signIn\/methods\/gh" data-method="PUT" data-fields="type,enabled,name,issuer,clientId,clientSecret,authentication,authorizationEndpoint,tokenEndpoint,userinfoEndpoint,scopes,claims.subject,claims.name,claims.email,claims.emailVerified"/,
+      /data-path="\/api\/v2\/settings\/signIn\/methods\/gh" data-method="PUT" data-fields="type,enabled,admitTesters,name,issuer,clientId,clientSecret,authentication,authorizationEndpoint,tokenEndpoint,userinfoEndpoint,scopes,claims.subject,claims.name,claims.email,claims.emailVerified"/,
     )
     assert.match(signIn, /name="scopes" value="read:user" data-kind="list"/)
     assert.match(
