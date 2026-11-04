@@ -81,6 +81,8 @@ export class HostLinks {
         parameters: (username: unknown) => unknown
         verify: (value: unknown, address: string) => Promise<number>
       }
+      /** A flagged sign-in method admits a verified identity as a tester. */
+      admit?: (params: unknown) => { accountId: number; account: unknown }
       /** Invitation links opened on the host, checked and used by the master. */
       invitation?: {
         lookup: (token: unknown) => unknown
@@ -595,6 +597,17 @@ export class HostLinks {
               }),
               'not_allowed',
             )
+          }
+        },
+        /** Creates the tester a flagged sign-in method admits, or returns the account that address already has. */
+        'auth.admit': (params, link): { accountId: number; account: unknown } => {
+          this.host(link)
+          if (this.options.admit == null)
+            throw new LinkError('Sign-in admission is unavailable', 'failed')
+          try {
+            return this.options.admit(params)
+          } catch (error) {
+            throw new LinkError((error as Error).message, 'not_allowed')
           }
         },
         /** Whom an invitation link is for, for the host's invitation page. */

@@ -321,9 +321,16 @@ describe('Host cache schema', () => {
             .prepare("SELECT value FROM host_meta WHERE key='host_schema'")
             .get() as { value: string }
         ).value,
-        '7',
+        '8',
       )
-      // Schema 6: who requested each run, as the master names them; 7: the build number it reserved.
+      // Schema 6: who requested each run, as the master names them; 7: the build number it reserved; 8: open admission.
+      assert(
+        db
+          .prepare('PRAGMA table_info(accounts)')
+          .all()
+          .some((column) => column.name === 'open_admission'),
+        'open_admission',
+      )
       for (const name of ['requested_by', 'build_number'])
         assert(
           db
@@ -646,6 +653,90 @@ describe('Host cache, sign-in and offline serving', function () {
       () => runtime().cache.signInMethods().length === 2,
       2000,
       'both methods again',
+    )
+  })
+
+  it('admits a verified sign-in through a flagged method as a tester who can install every app', async () => {
+    const master = c.master.master!
+    const methods = env.configs
+      .filter((config) => config.id !== 'plain')
+      .map((config) => ({
+        ...config,
+        clientSecret: { keep: true },
+        enabled: true,
+        admitTesters: config.id === 'first',
+      }))
+    await master.settings.set(admin, 'signIn', { methods })
+    await c.until(
+      () => runtime().cache.admitsTesters('first'),
+      2000,
+      'admission on the host',
+    )
+    assert.equal(runtime().cache.admitsTesters('second'), false)
+    const unverified = await signIn(browser(), 'first', {
+      email: 'plain@example.com',
+      email_verified: false,
+    })
+    assert.equal(unverified.status, 400)
+    assert.match(await unverified.text(), /verified email/)
+    const fresh = browser()
+    assert.equal(
+      (await signIn(fresh, 'first', { email: 'New.Person@example.com' }))
+        .status,
+      303,
+    )
+    const page = await (await fresh.get('/')).text()
+    assert.match(page, /Edge Wallet/)
+    assert.match(page, /Zcash/)
+    const row = master.database.db
+      .prepare(
+        "SELECT a.role, a.open_admission, a.name FROM accounts a JOIN account_addresses x ON x.account_id=a.id WHERE lower(x.email)=lower(?)",
+      )
+      .get('new.person@example.com') as {
+      role: string
+      open_admission: number
+      name: string
+    }
+    assert.equal(row.role, 'tester')
+    assert.equal(row.open_admission, 1)
+    assert.equal(row.name, 'Alex Lee')
+    const again = browser()
+    assert.equal(
+      (await signIn(again, 'first', { email: 'new.person@example.com' }))
+        .status,
+      303,
+    )
+    assert.equal(
+      (
+        master.database.db
+          .prepare(
+            'SELECT COUNT(*) n FROM account_addresses WHERE lower(email)=lower(?)',
+          )
+          .get('new.person@example.com') as { n: number }
+      ).n,
+      1,
+    )
+    const refused = await signIn(browser(), 'second', {
+      email: 'other.person@example.com',
+    })
+    assert.equal(refused.status, 400)
+    assert.match(await refused.text(), /No Mason account/)
+    const gone = await signIn(browser(), 'first', { email: 'gone@example.com' })
+    assert.equal(gone.status, 400)
+    assert.match(await gone.text(), /disabled/)
+    await master.settings.set(admin, 'signIn', {
+      methods: env.configs
+        .filter((config) => config.id !== 'plain')
+        .map((config) => ({
+          ...config,
+          clientSecret: { keep: true },
+          enabled: true,
+        })),
+    })
+    await c.until(
+      () => runtime().cache.admitsTesters('first') === false,
+      2000,
+      'admission off again',
     )
   })
 
@@ -1511,6 +1602,12 @@ describe('Host cache, sign-in and offline serving', function () {
         methods: [{ ...env.configs[0]!, enabled: 'yes' }],
       }),
       /true or false/,
+    )
+    await assert.rejects(
+      settings.set(admin, 'signIn', {
+        methods: [{ ...env.configs[0]!, admitTesters: 'yes' }],
+      }),
+      /admitTesters is true or false/,
     )
     await settings.set(admin, 'host', {
       origin: ORIGIN,

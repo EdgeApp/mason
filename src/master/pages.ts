@@ -158,6 +158,10 @@ function appVisible(
   session: MasterSession,
 ): (appId: number) => boolean {
   if (session.role !== 'tester') return () => true
+  const admitted = master.database.db
+    .prepare('SELECT open_admission FROM accounts WHERE id=?')
+    .get(session.accountId) as { open_admission?: number } | undefined
+  if (admitted?.open_admission === 1) return () => true
   const allowed = new Set(
     (
       master.database.db

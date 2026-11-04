@@ -1228,6 +1228,13 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       (await request(c.master, 'GET', '/', signIn('tester'))).text,
       /Your apps/,
     )
+    c.master.master!.database.db
+      .prepare("UPDATE accounts SET open_admission=1 WHERE role='tester'")
+      .run()
+    assert.match(
+      (await request(c.master, 'GET', '/', signIn('tester'))).text,
+      /Your apps/,
+    )
   })
 
   it('U20.11 Groups lists the groups and opens a page for each; People no longer holds them', async () => {

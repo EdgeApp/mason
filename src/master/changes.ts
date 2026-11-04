@@ -133,7 +133,7 @@ export function entities(setting: SettingProjection): Record<string, Entity> {
       project: (db, id): Projected | undefined => {
         const row = one(
           db,
-          'SELECT id,name,email,is_admin,is_tester,disabled,permission_version,created_at,role FROM accounts WHERE id=?',
+          'SELECT id,name,email,is_admin,is_tester,disabled,permission_version,created_at,role,open_admission FROM accounts WHERE id=?',
           Number(id),
         )
         if (row == null) return undefined
@@ -286,6 +286,11 @@ export class Changes {
           .get() as { n: number }
       ).n,
     )
+  }
+
+  /** The projection of one entity, as a host would store it. */
+  projection(entity: string, key: string): Projected | undefined {
+    return this.project(entity, key)
   }
 
   private project(entity: string, key: string): Projected | undefined {

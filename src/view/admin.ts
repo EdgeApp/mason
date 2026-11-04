@@ -985,6 +985,7 @@ export interface SignInMethodView {
   issuer: string
   clientId: string
   enabled: boolean
+  admitTesters?: boolean
   authentication?: 'post' | 'basic'
   signingAlgorithm?: string
   authorizationEndpoint?: string
@@ -1040,6 +1041,16 @@ function signInForm(
       'Enabled',
       checkbox(`${p}-enabled`, 'enabled', method?.enabled ?? true),
       'Offered on the sign-in page. A disabled method stays configured.',
+    ),
+    field(
+      `${p}-admitTesters`,
+      'Admit as testers',
+      checkbox(
+        `${p}-admitTesters`,
+        'admitTesters',
+        method?.admitTesters === true,
+      ),
+      'A verified sign-in creates a tester account that can install every app.',
     ),
     field(
       `${p}-name`,
@@ -1201,6 +1212,7 @@ function signInForm(
     ...(method == null ? ['id', 'create'] : []),
     'type',
     'enabled',
+    'admitTesters',
     'name',
     'issuer',
     'clientId',
