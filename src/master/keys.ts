@@ -259,6 +259,7 @@ export class MasterKeys {
       keyId: key.id,
       label: `key:${key.id}`,
       scopes: { projects: key.projects, branches: key.branches },
+      ...(row?.creator == null ? {} : { creator: Number(row.creator) }),
     }
   }
 }

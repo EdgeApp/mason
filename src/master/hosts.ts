@@ -19,6 +19,9 @@ import {
 } from './artifacts.js'
 import { ruleFor } from './rules.js'
 
+/** The cluster has a host, and it is not connected now. */
+export class HostNotConnected extends Error {}
+
 /** The only writes a host makes to the master. */
 export const outboxKinds = ['device', 'prepare', 'artifact'] as const
 export type OutboxKind = (typeof outboxKinds)[number]
@@ -374,14 +377,14 @@ export class HostLinks {
     if (!this.options.registry.list().some((node) => node.role === 'host'))
       return undefined
     const host = this.connectedHost()
-    if (host == null) throw new Error('the host is not connected')
+    if (host == null) throw new HostNotConnected('the host is not connected')
     return (await host.link.request(method, params, timeoutMs)) as T
   }
 
   /** Opens a stream to the connected host, for a relay of a node's; with none connected it throws. */
   openHostStream(method: string, params: unknown): Stream {
     const host = this.connectedHost()
-    if (host == null) throw new Error('No host is connected')
+    if (host == null) throw new HostNotConnected('No host is connected')
     return host.link.openStream(method, params)
   }
 
@@ -600,7 +603,10 @@ export class HostLinks {
           }
         },
         /** Creates the tester a flagged sign-in method admits, or returns the account that address already has. */
-        'auth.admit': (params, link): { accountId: number; account: unknown } => {
+        'auth.admit': (
+          params,
+          link,
+        ): { accountId: number; account: unknown } => {
           this.host(link)
           if (this.options.admit == null)
             throw new LinkError('Sign-in admission is unavailable', 'failed')
