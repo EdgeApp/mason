@@ -326,6 +326,76 @@ export function signV4(
   }
 }
 
+/**
+ * A GET URL signed with AWS Signature V4 in its query string, valid for
+ * `expiresSeconds` from `now`: whoever holds it reads that one object, and
+ * the query's other parameters (`response-content-disposition`, say) are
+ * signed with it. Exported for the known-answer test.
+ */
+export function presignV4(
+  request: { method: string; url: URL },
+  credentials: {
+    accessKeyId: string
+    secretAccessKey: string
+    region: string
+    service: string
+  },
+  now: Date,
+  expiresSeconds: number,
+): string {
+  if (
+    !Number.isSafeInteger(expiresSeconds) ||
+    expiresSeconds < 1 ||
+    expiresSeconds > 604800
+  )
+    throw new Error('A signed URL lasts 1 second to 7 days')
+  const amzDate = now
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\.\d{3}/, '')
+  const date = amzDate.slice(0, 8)
+  const scope = `${date}/${credentials.region}/${credentials.service}/aws4_request`
+  const url = new URL(request.url.href)
+  url.searchParams.set('X-Amz-Algorithm', 'AWS4-HMAC-SHA256')
+  url.searchParams.set(
+    'X-Amz-Credential',
+    `${credentials.accessKeyId}/${scope}`,
+  )
+  url.searchParams.set('X-Amz-Date', amzDate)
+  url.searchParams.set('X-Amz-Expires', String(expiresSeconds))
+  url.searchParams.set('X-Amz-SignedHeaders', 'host')
+  const query = canonicalQuery(url)
+  const canonicalRequest = [
+    request.method.toUpperCase(),
+    canonicalUri(url),
+    query,
+    `host:${url.host}\n`,
+    'host',
+    'UNSIGNED-PAYLOAD',
+  ].join('\n')
+  const stringToSign = [
+    'AWS4-HMAC-SHA256',
+    amzDate,
+    scope,
+    sha256Hex(canonicalRequest),
+  ].join('\n')
+  const signingKey = hmac(
+    hmac(
+      hmac(
+        hmac(`AWS4${credentials.secretAccessKey}`, date),
+        credentials.region,
+      ),
+      credentials.service,
+    ),
+    'aws4_request',
+  )
+  const signature = createHmac('sha256', signingKey)
+    .update(stringToSign)
+    .digest('hex')
+  // The query is written as it was signed: sorted and RFC 3986-encoded.
+  return `${url.origin}${canonicalUri(url)}?${query}&X-Amz-Signature=${signature}`
+}
+
 const emptyHash = sha256Hex('')
 
 async function hashFile(file: string): Promise<string> {
@@ -441,6 +511,32 @@ export class S3Storage implements StorageDriver {
       await this.fail('DELETE', key, response)
     }
     await response.body?.cancel()
+  }
+
+  /**
+   * A URL that reads one object without credentials until it expires, with
+   * extra query parameters signed in (`response-content-disposition`).
+   */
+  presign(
+    key: string,
+    expiresSeconds: number,
+    parameters: Record<string, string> = {},
+  ): string {
+    validateKey(key)
+    const url = this.objectUrl(key)
+    for (const [name, value] of Object.entries(parameters))
+      url.searchParams.set(name, value)
+    return presignV4(
+      { method: 'GET', url },
+      {
+        accessKeyId: this.options.accessKeyId,
+        secretAccessKey: this.options.secretAccessKey,
+        region: this.options.region,
+        service: 's3',
+      },
+      this.now(),
+      expiresSeconds,
+    )
   }
 
   private objectUrl(key: string): URL {

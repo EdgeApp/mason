@@ -61,6 +61,8 @@ const tables: Record<
     },
   },
   setting: { table: 'host_settings', key: 'area' },
+  /** API key verifiers, for the builds API: digests, never tokens. */
+  key: { table: 'host_keys', key: 'id' },
 }
 
 /** Deleting in this order keeps foreign keys satisfied; applying uses the reverse. */
@@ -73,9 +75,10 @@ const order = [
   'device',
   'build',
   'job',
+  'key',
 ]
 
-const HOST_SCHEMA = 8
+const HOST_SCHEMA = 9
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -132,6 +135,17 @@ function migrateHost(db: DatabaseSync): void {
     db.exec(`BEGIN IMMEDIATE;
     ${accounts.some((column) => column.name === 'open_admission') ? '' : 'ALTER TABLE accounts ADD COLUMN open_admission INTEGER NOT NULL DEFAULT 0 CHECK(open_admission IN (0,1));'}
     INSERT INTO host_meta(key,value) VALUES('host_schema','8') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  // The API keys' verifiers, for the builds API the host serves itself. The
+  // revision goes back to 0, so the next sync is a snapshot that brings every
+  // live key the master has.
+  if (current < 9)
+    db.exec(`BEGIN IMMEDIATE;
+    CREATE TABLE IF NOT EXISTS host_keys(id TEXT PRIMARY KEY, hash TEXT NOT NULL, role TEXT NOT NULL,
+      projects TEXT NOT NULL, branches TEXT NOT NULL, format TEXT NOT NULL, creator INTEGER, expires_at INTEGER) STRICT;
+    INSERT INTO host_meta(key,value) VALUES('revision','0') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    INSERT INTO host_meta(key,value) VALUES('keys_synced','0') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    INSERT INTO host_meta(key,value) VALUES('host_schema','9') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
 }
 
@@ -257,6 +271,10 @@ export class HostCache {
   revision(): number {
     return Number(this.meta('revision') ?? 0)
   }
+  /** Whether a sync has brought the keys since this cache began keeping them (schema 9). */
+  keysSynced(): boolean {
+    return this.meta('keys_synced') !== '0'
+  }
   /** When the host last heard from its master, or undefined if never. */
   syncedAt(): number | undefined {
     const value = this.meta('synced_at')
@@ -306,15 +324,32 @@ export class HostCache {
   /** Testers see the apps of their groups; an admitted tester, and developers and up, see every app. */
   scope(accountId: number): ReadonlySet<number> | 'all' {
     const row = this.db
-      .prepare('SELECT role, open_admission FROM accounts WHERE id=?')
-      .get(accountId) as
-      | { role: string; open_admission?: number }
-      | undefined
-    if (
-      row != null &&
-      (ROLES_SEEING_EVERY_APP.has(row.role) || row.open_admission === 1)
-    )
-      return 'all'
+      .prepare('SELECT role FROM accounts WHERE id=?')
+      .get(accountId) as { role: string } | undefined
+    return this.appsFor(row?.role ?? 'tester', accountId)
+  }
+
+  /**
+   * The apps a role sees: every app for developers and up; else the apps of
+   * the account's groups (every app when it was admitted openly), and none
+   * without an account. The catalog and the builds API both decide by it.
+   */
+  appsFor(role: string, accountId?: number): ReadonlySet<number> | 'all' {
+    if (ROLES_SEEING_EVERY_APP.has(role)) return 'all'
+    if (accountId == null) return new Set()
+    return this.testerApps(accountId)
+  }
+
+  /**
+   * The apps an account's groups give a tester, or every app for one a
+   * sign-in method admitted, whatever role the account itself has: what a
+   * tester-role key sees of its creator's.
+   */
+  testerApps(accountId: number): ReadonlySet<number> | 'all' {
+    const row = this.db
+      .prepare('SELECT open_admission FROM accounts WHERE id=?')
+      .get(accountId) as { open_admission?: number } | undefined
+    if (row?.open_admission === 1) return 'all'
     return new Set(
       (
         this.db
@@ -438,6 +473,14 @@ export class HostCache {
       this.endStaleSessions()
       this.setMeta('revision', sync.revision)
       this.setMeta('synced_at', this.now())
+      // Only a sync from a master that sends keys brings them: a snapshot
+      // with its key entity, or a key change.
+      if (
+        sync.kind === 'snapshot'
+          ? sync.entities.key != null
+          : (sync.changes as Change[]).some((change) => change.entity === 'key')
+      )
+        this.setMeta('keys_synced', 1)
     })
   }
 }

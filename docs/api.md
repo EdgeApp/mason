@@ -5,12 +5,14 @@ The dashboard, the `mason api` command and scripts all use it. This document
 is the reference for every route under `/api/v2/`, for how callers
 authenticate, and, briefly, for the few routes outside `/api/v2/` that
 clients still use. The host forwards most of these routes to the master
-(see [Requests through the host](#requests-through-the-host)).
+(see [Requests through the host](#requests-through-the-host)); it answers
+the builds routes itself (see [Builds](#14-builds)).
 
 ## Conventions
 
 - Bodies are JSON (`Content-Type: application/json`), and so are answers,
-  except log downloads (`text/plain`). Live updates come over the `/live`
+  except log downloads (`text/plain`) and build downloads, which answer the
+  file or a redirect to it (section 14). Live updates come over the `/live`
   WebSocket (section 4). A route that has nothing to return answers `null`.
 - Times are milliseconds since the Unix epoch.
 - An error answers `{ "error": "<message>" }` with one of these statuses:
@@ -18,13 +20,15 @@ clients still use. The host forwards most of these routes to the master
   | Status | Meaning |
   | --- | --- |
   | 400 | The request is invalid: a field fails its check, or the action is refused for a reason the message gives. |
-  | 401 | No credential, or one that is unknown, revoked or expired. |
+  | 401 | No credential, or one that is unknown, revoked or expired (on the host, a key revoked while the master was away once the host has synced). |
   | 403 | The caller's role, a key's scopes or the CSRF check refuses it. |
   | 404 | No such route, project, run, node or other thing the path names. |
   | 409 | The change conflicts with what exists (a name taken, a project still running). |
   | 413 | The body is over the route's limit. |
   | 429 | Sign-in or setup is locked for a while; the answer has `retryAt`. |
   | 502 | A peer did not answer: a node during pairing, a backup push, a Space. |
+  | 503 | The host is not connected, or a host past its offline grace window. |
+  | 500 | The host failed to answer a builds route for a reason of its own. |
 
   Some areas map further errors; their sections say so.
 - Bodies are limited per area. The first limit that applies to a path is the
@@ -69,6 +73,9 @@ key is 401 even when a session cookie is also sent.
 A key is sent as `Authorization: Bearer mason_v1_<id>.<secret>`. Keys
 imported from the standalone builder are 64 hex digits and work the same way.
 An unknown, revoked or expired key answers 401 `An API key is required`.
+The host checks keys for the builds routes itself, against the digest of
+each live key the master sends it, so a key revoked while the master is
+away keeps working on the host until the host syncs again.
 
 Each key has a role, a name and optional scopes. It acts with its own role
 or its creator's current role, whichever is lower, and stops working (403
@@ -160,7 +167,10 @@ The host forwards `/api/jobs…`, `/api/queue…` and `/api/v2/…` (`GET`,
 `POST`, `PUT` and `DELETE`, bodies up to 512 KB) to the master over the
 master's link, where they meet the same routes and checks as direct
 requests. While the master is unreachable the host answers 503. `/api/apps`
-is not forwarded.
+is not forwarded, and neither is `GET /api/v2/builds…`: the host answers
+those itself, from its cache and storage, for API keys and for its own
+signed-in people, and keeps answering while the master is away (see
+[Builds](#14-builds)).
 
 - A forwarded request with an `Authorization` header is an API-key request;
   the master checks the key.
@@ -191,7 +201,7 @@ below it:
 | `admin` | Everything, including people, sign-in methods and the backup key. |
 | `manager` | Configures Mason: projects, secrets, settings, nodes, keys, Apple, backups, groups. |
 | `developer` | Reads projects and runs, requests, cancels, restarts and approves runs, makes keys up to its own role. |
-| `tester` | Sees its groups' published builds on the host. Through this API it can read its own person record, change its own password and sign out. |
+| `tester` | Sees its groups' published builds on the host, and reads them through the builds routes (section 14). Through the rest of this API it can read its own person record, change its own password and sign out. |
 
 Routes check a permission with `allow(actor, '<permission>')`, which also
 applies a key's scopes, or `allowRole`, which checks only the role. The
@@ -215,8 +225,9 @@ lowest role each permission needs (`src/master/permissions.ts`):
 | | | | `hosts.change` | admin |
 | | | | `backups.key` | admin |
 
-`builds.read` and `devices.register` are checked on the host, not by the
-routes here.
+`builds.read` is checked by the builds routes (section 14), on the master
+and on the host, and by the host's catalog; `devices.register` is checked
+on the host only.
 
 ## 2. Session and accounts
 
@@ -1458,7 +1469,118 @@ master.
 - A profile: `{ "team", "bundleId", "distribution", "name", "uuid",
   "expiresAt" }`.
 
-## 14. Routes outside `/api/v2/`
+## 14. Builds
+
+The published builds a caller may see, and their files. Every route needs
+`builds.read`, which every role has, from an API key or a browser session.
+
+| Method and path | What it does |
+| --- | --- |
+| `GET /api/v2/builds` | Builds, newest first. |
+| `GET /api/v2/builds/:id` | One build. |
+| `GET /api/v2/builds/:id/download` | The build's file, or a redirect to it. |
+
+**Where they are answered.** The host answers these routes itself, from its
+cache of the master's builds and from its storage, for API keys and for
+people signed in on the host; it does not forward them. It keeps answering
+while the master is unreachable, until the master has been away longer
+than the host's `offlineGraceHours` (default 72), when it answers 503
+`This Mason host has not reached its master for too long to serve builds`;
+before its first sync it answers 503 `This Mason host is waiting for its
+master`, as it does a key it does not hold when it was upgraded and its master has
+not sent it the keys since (a master older than the host sends none). The master answers the same routes, for keys and its own
+sessions, by relaying to the host over the link: the host decides what the
+caller sees and serves the file, and a download streams from the host
+through the master. With no host paired the master answers 503 `This
+cluster has no host`, and with the host not connected, 503 `The host is not
+connected`. Both answer the same builds for the same caller.
+
+**Who sees what.**
+
+- An `admin`, `manager` or `developer` sees every app's builds.
+- A `tester` sees the builds of its groups' apps, as the host's catalog
+  shows them, or of every app when a sign-in method admitted it. A
+  tester-role key sees its creator's groups' apps; one with no creator sees
+  none: a key made with `mason keys create`, or by another key through
+  `POST /api/v2/keys`.
+- A scoped key sees only builds whose app belongs to a project in its
+  `projects` and whose branch matches its `branches`. A `project` query, or
+  a build, outside them is 403 `This key does not cover that project or
+  branch`.
+
+A build of an app the caller does not see is 404 `No such build`, like an
+unknown one. Only ready, unexpired builds of enabled apps are listed.
+
+### GET /api/v2/builds
+
+Query, every field optional:
+
+| Field | Meaning |
+| --- | --- |
+| `project` | A project slug. |
+| `app` | An app ID (`app.example.one`). |
+| `branch` | A branch, exactly. |
+| `platform` | `ios`, `android`, `macos`, `windows` or `tvos`. |
+| `variant` | A variant name; empty (`variant=`) is the default variant, the file a stage published with none. |
+| `latest` | `1` keeps only the newest build of each app, branch, platform and variant. |
+| `limit` | 1–500, default 50, applied after the caller's apps and scopes. |
+
+A field that is invalid, or given twice, is 400 (`Invalid platform`).
+Answers a list of builds in this shape:
+
+```json
+{
+  "id": 41,
+  "app": "app.example.one",
+  "appName": "Example One",
+  "project": "phones",
+  "branch": "master",
+  "platform": "android",
+  "variant": "",
+  "version": "1.2.3",
+  "buildNumber": "42",
+  "commit": "9c1e5a7f3b2d4e6f8a0b1c2d3e4f5a6b7c8d9e0f",
+  "bundleId": "app.example.one",
+  "format": "apk",
+  "size": 18234112,
+  "digest": "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",
+  "publishedAt": 1793450000000,
+  "expiresAt": 1794659600000,
+  "run": "5f0c2b9e-8d1a-4c3e-9a57-2f6d1e0b7c44",
+  "download": "/api/v2/builds/41/download"
+}
+```
+
+`digest` is the file's SHA-256. `project` is `null` for an app no project
+owns, and `run` for a build no run published. A run's variants are separate
+builds with the same `run`.
+
+### GET /api/v2/builds/:id
+
+The build, in the shape above.
+
+### GET /api/v2/builds/:id/download
+
+- A build on the host's disk answers 200 with the file and
+  `Content-Type`, `Content-Disposition: attachment; filename="<app>-<version>-<buildNumber>[-<variant>].<format>"`,
+  `Content-Length`, `Repr-Digest: sha-256=:<base64 SHA-256>:` and
+  `ETag: "<hex SHA-256>"`.
+- A build stored in a Space answers 302 with a `Location` signed to read
+  the file straight from the Space for five minutes (which answers with the
+  same `Content-Disposition` and `Content-Type`), `Cache-Control: no-store`, `Repr-Digest` and
+  `ETag`. curl and browsers do not send the `Authorization` header on to
+  the Space's host.
+- `HEAD` answers the same headers without the file.
+- 404 `The build’s file is no longer available` when the stored file is
+  missing or its size is not the build's; 502 `The build’s storage is
+  unreachable` when the disk or Space cannot be read. A refusal is JSON,
+  through the master too.
+
+The host logs each download once its file is under way (`Build 41
+downloaded by key 830f19 through the master`, or `Build 41 redirected to its
+Space for …`); `HEAD` is not logged. Build reads are not audited.
+
+## 15. Routes outside `/api/v2/`
 
 ### The v1 job API
 
@@ -1533,7 +1655,7 @@ master is unreachable the host keeps the latest delivery per project and
 branch and answers 202 `{ "status": "queued" }`. See "Webhooks" in
 [docs/masonfile.md](masonfile.md#triggers).
 
-## 15. Examples
+## 16. Examples
 
 ```sh
 MASON=https://mason.example.test
@@ -1588,6 +1710,24 @@ curl -sS -X POST "$MASON/api/v2/projects/phones/secrets" \
   -H 'Content-Type: application/json' \
   --data-binary @secret.json
 ```
+
+List the newest build of each app on `master` for Android, from the host
+(`$HOST`) or the master, then download one and check its digest:
+
+```sh
+curl -sS -H "Authorization: Bearer $KEY" \
+  "$HOST/api/v2/builds?project=phones&branch=master&platform=android&latest=1"
+BUILD=41
+curl -sS -H "Authorization: Bearer $KEY" "$HOST/api/v2/builds/$BUILD" | jq -r .digest
+curl -sS -L -OJ -H "Authorization: Bearer $KEY" \
+  "$HOST/api/v2/builds/$BUILD/download"
+shasum -a 256 app.example.one-1.2.3-42.apk
+```
+
+`-L` follows a redirect to a Space; `-OJ` saves the file under the name in
+`Content-Disposition`. The build's `digest` is the SHA-256 the file must
+match; so are the first response's `ETag` and `Repr-Digest` (after a
+redirect, the Space's own `ETag` is not).
 
 List nodes:
 

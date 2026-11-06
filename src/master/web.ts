@@ -8,6 +8,7 @@ import {
 import { accountsApi } from './accountsApi.js'
 import { masterApi } from './api.js'
 import { backupApi } from './backupApi.js'
+import { buildsApi } from './buildsApi.js'
 import { cloudApi } from './cloudApi.js'
 import { cloudHostsApi } from './cloudHostsApi.js'
 import { storageApi } from './storageApi.js'
@@ -65,6 +66,8 @@ export function masterApp(context: MasterWebContext): express.Express {
   app.use(wizardApi(master))
   app.use(projectsApi(master))
   app.use(runsApi(master))
+  // Relayed to the host, which answers from its cache and storage.
+  app.use(buildsApi(master))
   app.use(
     masterApi({
       keys: master.keys,

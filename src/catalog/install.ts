@@ -148,7 +148,8 @@ export function byteRange(
   if (start >= size || end < start) throw new Error('Unsatisfiable range')
   return { start, end }
 }
-const mime: Record<Format, string> = {
+/** The Content-Type each package format is served with. */
+export const formatTypes: Record<Format, string> = {
   ipa: 'application/octet-stream',
   apk: 'application/vnd.android.package-archive',
   dmg: 'application/x-apple-diskimage',
@@ -267,7 +268,7 @@ export function installationRoutes(
     }
     const etag = `"${build.digest}"`
     res.set({
-      'Content-Type': mime[build.format],
+      'Content-Type': formatTypes[build.format],
       'Content-Disposition': `attachment; filename="build-${build.id}.${build.format}"`,
       'Accept-Ranges': 'bytes',
       ETag: etag,

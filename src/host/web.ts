@@ -557,6 +557,9 @@ export function hostApp(
   // stages upload and fetch artifacts by their tokens and grants.
   app.use(host.webhooks.routes())
   app.use(host.artifacts.routes(host.accounts))
+  // The builds API is answered here, from the cache and storage, so it keeps
+  // working while the master is away; the rest of /api/v2 is forwarded.
+  app.use(host.builds.routes(host.accounts))
   app.use(forwardRoutes(host))
   app.use((_req, res, next) => {
     if (host.cache.host() == null) {

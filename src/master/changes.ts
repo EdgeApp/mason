@@ -7,7 +7,8 @@ import { requesterName, shownLabel } from './requesters.js'
 /**
  * What the host's cache holds: each replicated entity, projected from the
  * master's tables at send time. Secrets, env, files, branch rules, password
- * hashes, node keys and channel keys are never part of a projection.
+ * hashes, node keys and channel keys are never part of a projection; API
+ * keys and channel keys travel only as their SHA-256 digests.
  */
 
 type Row = Record<string, unknown>
@@ -243,6 +244,22 @@ export function entities(setting: SettingProjection): Record<string, Entity> {
             ),
           },
         }
+      },
+    },
+    key: {
+      keys: (db): string[] =>
+        all(db, 'SELECT id FROM api_keys WHERE revoked=0').map((row) =>
+          String(row.id),
+        ),
+      // What the host needs to verify a key for the builds API: its digest
+      // (never the token, and not its name), role, scopes, creator and expiry.
+      project: (db, id): Projected | undefined => {
+        const row = one(
+          db,
+          'SELECT id,hash,role,projects,branches,format,creator,expires_at FROM api_keys WHERE id=? AND revoked=0',
+          id,
+        )
+        return row == null ? undefined : { row }
       },
     },
     setting: {

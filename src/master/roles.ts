@@ -24,6 +24,8 @@ export interface Actor {
   label: string
   /** Key scopes, when the actor is an API key. */
   scopes?: { projects: string[]; branches: string[] }
+  /** The account that made a key, when it has one: whose groups a tester-role key sees. */
+  creator?: number
 }
 
 /** The owner of the data directory, through the control socket. */

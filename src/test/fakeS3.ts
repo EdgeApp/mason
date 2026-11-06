@@ -6,7 +6,7 @@ import {
   type ServerResponse,
 } from 'node:http'
 import type { AddressInfo } from 'node:net'
-import { signV4 } from '../host/storage.js'
+import { presignV4, signV4 } from '../host/storage.js'
 
 /** Credentials and bucket the fake S3 server accepts. */
 export interface FakeS3Options {
@@ -109,6 +109,16 @@ export class FakeS3 {
     for await (const chunk of req) chunks.push(chunk as Buffer)
     const body = Buffer.concat(chunks)
 
+    const query = new URL(target, 'http://fake').searchParams
+    if (query.has('X-Amz-Algorithm')) {
+      if (!this.presigned(req, target, query)) {
+        this.error(res, 403, 'AccessDenied')
+        return
+      }
+      this.serve(req, res, target, body, query)
+      return
+    }
+
     const authorization = headerValue(req.headers.authorization) ?? ''
     const match = authPattern.exec(authorization)
     const amzDate = headerValue(req.headers['x-amz-date']) ?? ''
@@ -169,7 +179,72 @@ export class FakeS3 {
       this.error(res, 400, 'XAmzContentSHA256Mismatch')
       return
     }
+    this.serve(req, res, target, body, query)
+  }
 
+  /**
+   * Whether a query-signed request verifies: a GET, this access key and
+   * region, a signature `presignV4` would make, and not past its expiry.
+   */
+  private presigned(
+    req: IncomingMessage,
+    target: string,
+    query: URLSearchParams,
+  ): boolean {
+    const credential = /^([^/]+)\/(\d{8})\/([^/]+)\/s3\/aws4_request$/.exec(
+      query.get('X-Amz-Credential') ?? '',
+    )
+    const when = parseAmzDate(query.get('X-Amz-Date') ?? '')
+    const expires = Number(query.get('X-Amz-Expires'))
+    const signature = query.get('X-Amz-Signature') ?? ''
+    if (
+      req.method !== 'GET' ||
+      credential == null ||
+      when == null ||
+      credential[1] !== this.options.accessKeyId ||
+      credential[3] !== this.options.region ||
+      query.get('X-Amz-Algorithm') !== 'AWS4-HMAC-SHA256' ||
+      query.get('X-Amz-SignedHeaders') !== 'host' ||
+      !Number.isSafeInteger(expires) ||
+      Date.now() > when.getTime() + expires * 1000
+    )
+      return false
+    const unsigned = new URL(
+      target,
+      `http://${headerValue(req.headers.host) ?? ''}`,
+    )
+    for (const name of [
+      'X-Amz-Algorithm',
+      'X-Amz-Credential',
+      'X-Amz-Date',
+      'X-Amz-Expires',
+      'X-Amz-SignedHeaders',
+      'X-Amz-Signature',
+    ])
+      unsigned.searchParams.delete(name)
+    const expected =
+      new URL(
+        presignV4(
+          { method: 'GET', url: unsigned },
+          { ...this.options, service: 's3' },
+          when,
+          expires,
+        ),
+      ).searchParams.get('X-Amz-Signature') ?? ''
+    return (
+      expected.length === signature.length &&
+      timingSafeEqual(Buffer.from(expected), Buffer.from(signature))
+    )
+  }
+
+  private serve(
+    req: IncomingMessage,
+    res: ServerResponse,
+    target: string,
+    body: Buffer,
+    query: URLSearchParams,
+  ): void {
+    const method = req.method ?? ''
     const prefix = `/${this.options.bucket}/`
     const pathname = new URL(target, 'http://fake').pathname
     if (!pathname.startsWith(prefix) || pathname.length === prefix.length) {
@@ -207,8 +282,16 @@ export class FakeS3 {
           return
         }
         const range = headerValue(req.headers.range)
+        const disposition = query.get('response-content-disposition')
+        const type = query.get('response-content-type')
         if (range == null) {
-          res.writeHead(200, { 'content-length': object.length })
+          res.writeHead(200, {
+            'content-length': object.length,
+            ...(disposition == null
+              ? {}
+              : { 'content-disposition': disposition }),
+            ...(type == null ? {} : { 'content-type': type }),
+          })
           res.end(object)
           return
         }

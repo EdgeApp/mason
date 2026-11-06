@@ -7,7 +7,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 32
+export const MASTER_SCHEMA = 33
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -782,10 +782,26 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     )
   },
   // 32: a tester admitted by a sign-in method can install every app.
+  // Replaying an older schema number keeps the column in place.
   (db): void => {
-    db.exec(
-      'ALTER TABLE accounts ADD COLUMN open_admission INTEGER NOT NULL DEFAULT 0 CHECK(open_admission IN (0,1))',
+    const columns = db.prepare('PRAGMA table_info(accounts)').all()
+    if (!columns.some((column) => column.name === 'open_admission'))
+      db.exec(
+        'ALTER TABLE accounts ADD COLUMN open_admission INTEGER NOT NULL DEFAULT 0 CHECK(open_admission IN (0,1))',
+      )
+  },
+  // 33: the host verifies API keys for the builds API: every live key goes
+  // to it once, as a change, and later writes record their own. A last key
+  // change that names no key tells a host waiting for keys it has them all,
+  // even when there are none.
+  (db): void => {
+    const add = db.prepare(
+      "INSERT INTO change_log(entity,key,operation,at) SELECT 'key',id,'put',? FROM api_keys WHERE revoked=0 ORDER BY id",
     )
+    add.run(Date.now())
+    db.prepare(
+      "INSERT INTO change_log(entity,key,operation,at) VALUES('key','*','delete',?)",
+    ).run(Date.now())
   },
 ]
 
