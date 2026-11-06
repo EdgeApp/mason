@@ -324,15 +324,32 @@ export class HostCache {
   /** Testers see the apps of their groups; an admitted tester, and developers and up, see every app. */
   scope(accountId: number): ReadonlySet<number> | 'all' {
     const row = this.db
-      .prepare('SELECT role, open_admission FROM accounts WHERE id=?')
-      .get(accountId) as
-      | { role: string; open_admission?: number }
-      | undefined
-    if (
-      row != null &&
-      (ROLES_SEEING_EVERY_APP.has(row.role) || row.open_admission === 1)
-    )
-      return 'all'
+      .prepare('SELECT role FROM accounts WHERE id=?')
+      .get(accountId) as { role: string } | undefined
+    return this.appsFor(row?.role ?? 'tester', accountId)
+  }
+
+  /**
+   * The apps a role sees: every app for developers and up; else the apps of
+   * the account's groups (every app when it was admitted openly), and none
+   * without an account. The catalog and the builds API both decide by it.
+   */
+  appsFor(role: string, accountId?: number): ReadonlySet<number> | 'all' {
+    if (ROLES_SEEING_EVERY_APP.has(role)) return 'all'
+    if (accountId == null) return new Set()
+    return this.testerApps(accountId)
+  }
+
+  /**
+   * The apps an account's groups give a tester, or every app for one a
+   * sign-in method admitted, whatever role the account itself has: what a
+   * tester-role key sees of its creator's.
+   */
+  testerApps(accountId: number): ReadonlySet<number> | 'all' {
+    const row = this.db
+      .prepare('SELECT open_admission FROM accounts WHERE id=?')
+      .get(accountId) as { open_admission?: number } | undefined
+    if (row?.open_admission === 1) return 'all'
     return new Set(
       (
         this.db

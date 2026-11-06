@@ -19,6 +19,7 @@ import type { HostStatus } from '../master/clusterCheck.js'
 import { version } from '../version.js'
 import { Webhooks } from './webhooks.js'
 import { HostArtifacts, HostObjects } from './artifacts.js'
+import { HostBuilds } from './builds.js'
 import type { DeviceRelay } from '../devices/store.js'
 
 export interface HostOptions {
@@ -63,6 +64,8 @@ export class HostRuntime {
   readonly webhooks: Webhooks
   readonly objects: HostObjects
   readonly artifacts: HostArtifacts
+  /** The builds API the host serves itself, and relays for the master. */
+  readonly builds: HostBuilds
   private synced: Link | undefined
   private offset = 0
   private timer: NodeJS.Timeout | undefined
@@ -100,6 +103,13 @@ export class HostRuntime {
       link: (): Link | undefined => this.options.link(),
       online: (): boolean => this.online(),
       masterKey: (): KeyObject | undefined => this.options.masterKey?.(),
+      log: (line): void => this.options.log?.(line),
+    })
+    this.builds = new HostBuilds({
+      cache: this.cache,
+      objects: this.objects,
+      now: (): number => this.now(),
+      maintenance: (): boolean => this.maintenance(),
       log: (line): void => this.options.log?.(line),
     })
     this.webhooks = new Webhooks({
@@ -252,6 +262,8 @@ export class HostRuntime {
         'host.forgetStore': (params): { removed: number } => ({
           removed: this.objects.forget(asStore(params)),
         }),
+        /** A list or one build, for a caller the master authenticated. */
+        'builds.request': (params): unknown => this.builds.request(params),
         /** For `mason cluster check`: the cache revision applied, and what the outbox holds. */
         'host.status': (): HostStatus => ({
           revision: this.cache.revision(),
@@ -269,6 +281,10 @@ export class HostRuntime {
         /** A stage's publication, saved artifact or download, relayed by the master. */
         'artifacts.request': async (stream, params): Promise<void> => {
           await this.artifacts.linkRequest(params, stream)
+        },
+        /** A build's file, or its redirect, for a caller the master authenticated. */
+        'builds.download': async (stream, params): Promise<void> => {
+          await this.builds.stream(stream, params)
         },
         /** An Xcode a node downloaded first, relayed by the master into the host's storage. */
         'mirror.put': async (stream, params): Promise<void> => {

@@ -34,6 +34,24 @@ export function tokenLookup(
   return undefined
 }
 
+/**
+ * A key's role, no higher than its creator's current role. A key with no
+ * creator (the local operator's, an imported one, one a key made) keeps its
+ * role; one whose creator is disabled, removed or unknown is refused. The
+ * master and the host decide keys with this one rule.
+ */
+export function creatorLimitedRole(
+  role: Role,
+  creator: number | null | undefined,
+  owner: { role: string; disabled: unknown; removed_at?: unknown } | undefined,
+): Role {
+  if (creator == null) return role
+  if (owner == null || Number(owner.disabled) !== 0 || owner.removed_at != null)
+    throw new Forbidden('The key’s owner is disabled')
+  const limit = asRole(owner.role)
+  return rank(limit) < rank(role) ? limit : role
+}
+
 /** Whether a token's digest is the stored one, in fixed time for known and unknown keys alike. */
 export function digestMatches(
   given: string,
@@ -213,20 +231,29 @@ export class MasterKeys {
    * own role.
    */
   actor(key: MasterKey): Actor {
-    let role = key.role
-    const creator = this.db
+    const row = this.db
       .prepare(
-        'SELECT a.role,a.disabled,a.removed_at FROM api_keys k JOIN accounts a ON a.id=k.creator WHERE k.id=?',
+        'SELECT k.creator,a.role,a.disabled,a.removed_at FROM api_keys k LEFT JOIN accounts a ON a.id=k.creator WHERE k.id=?',
       )
       .get(key.id) as
-      | { role: string; disabled: number; removed_at: number | null }
+      | {
+          creator: number | null
+          role: string | null
+          disabled: number | null
+          removed_at: number | null
+        }
       | undefined
-    if (creator != null) {
-      if (Number(creator.disabled) !== 0 || creator.removed_at != null)
-        throw new Forbidden('The key’s owner is disabled')
-      const owner = asRole(creator.role)
-      if (rank(owner) < rank(role)) role = owner
-    }
+    const role = creatorLimitedRole(
+      key.role,
+      row?.creator,
+      row?.role == null
+        ? undefined
+        : {
+            role: row.role,
+            disabled: row.disabled,
+            removed_at: row.removed_at,
+          },
+    )
     return {
       role,
       keyId: key.id,
