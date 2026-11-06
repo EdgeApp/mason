@@ -17,6 +17,7 @@ import { after, before, describe, it } from 'mocha'
 import { FakeS3 } from '../test/fakeS3.js'
 import {
   DiskStorage,
+  presignV4,
   S3Storage,
   signV4,
   validateKey,
@@ -380,6 +381,102 @@ describe('Artifact storage', function () {
         headers['x-amz-content-sha256'],
         'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
       )
+    })
+
+    it('presignV4 reproduces the AWS presigned URL example', (): void => {
+      // AWS docs, "Authenticating Requests: Using Query Parameters", GET
+      // Object example: test.txt for 86400 seconds.
+      const url = new URL(
+        presignV4(
+          {
+            method: 'GET',
+            url: new URL('https://examplebucket.s3.amazonaws.com/test.txt'),
+          },
+          {
+            accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+            secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+            region: 'us-east-1',
+            service: 's3',
+          },
+          new Date('2013-05-24T00:00:00Z'),
+          86400,
+        ),
+      )
+      assert.equal(
+        url.searchParams.get('X-Amz-Signature'),
+        'aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404',
+      )
+      assert.equal(
+        url.searchParams.get('X-Amz-Credential'),
+        'AKIAIOSFODNN7EXAMPLE/20130524/us-east-1/s3/aws4_request',
+      )
+      assert.equal(url.pathname, '/test.txt')
+      for (const seconds of [0, 604801, 1.5])
+        assert.throws(
+          () =>
+            presignV4(
+              { method: 'GET', url: new URL('https://h/k') },
+              {
+                accessKeyId: 'a',
+                secretAccessKey: 's',
+                region: 'r',
+                service: 's3',
+              },
+              new Date(0),
+              seconds,
+            ),
+          /1 second to 7 days/,
+        )
+    })
+
+    it('a presigned URL reads the object with its disposition until it expires', async (): Promise<void> => {
+      const driver = client()
+      await driver.put('signed/app.apk', small)
+      const disposition = 'attachment; filename="app 1.2 (3).apk"'
+      const url = driver.presign('signed/app.apk', 300, {
+        'response-content-disposition': disposition,
+        'response-content-type': 'application/vnd.android.package-archive',
+      })
+      assert(url.includes('X-Amz-Signature='))
+      assert(!url.includes(secretAccessKey))
+      const response = await fetch(url)
+      assert.equal(response.status, 200)
+      assert.equal(response.headers.get('content-disposition'), disposition)
+      assert.equal(
+        response.headers.get('content-type'),
+        'application/vnd.android.package-archive',
+      )
+      assert(
+        Buffer.from(await response.arrayBuffer()).equals(readFileSync(small)),
+      )
+      // A changed key, a changed signature, or a wrong method is refused.
+      const other = url.replace('signed/app.apk', 'signed/other.apk')
+      assert.equal((await fetch(other)).status, 403)
+      const forged = url.replace(
+        /X-Amz-Signature=[0-9a-f]{4}/,
+        'X-Amz-Signature=0000',
+      )
+      assert.equal((await fetch(forged)).status, 403)
+      assert.equal((await fetch(url, { method: 'DELETE' })).status, 403)
+      // Signed long enough ago, it has expired.
+      const old = new S3Storage(
+        {
+          endpoint: fake.endpoint,
+          bucket,
+          region,
+          accessKeyId,
+          secretAccessKey,
+          pathStyle: true,
+          allowInsecure: true,
+        },
+        fetch,
+        (): Date => new Date(Date.now() - 301_000),
+      ).presign('signed/app.apk', 300)
+      const expired = await fetch(old)
+      assert.equal(expired.status, 403)
+      assert.match(await expired.text(), /AccessDenied/)
+      assert.throws(() => driver.presign('../x', 300), /Invalid storage key/)
+      await driver.delete('signed/app.apk')
     })
 
     it('U12.10 signV4 canonicalises the query string and encoded path', (): void => {

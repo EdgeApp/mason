@@ -191,6 +191,24 @@ export class HostObjects {
   ): Promise<{ stream: Readable; size: number } | undefined> {
     return await this.driverOf(key).get(key, range)
   }
+  /**
+   * A short-lived URL that reads the object straight from its Space, which
+   * answers with this Content-Disposition and Content-Type; undefined for an
+   * object on disk.
+   */
+  signedUrl(
+    key: string,
+    seconds: number,
+    answer: { disposition: string; contentType: string },
+  ): string | undefined {
+    const driver = this.driverOf(key)
+    return driver instanceof S3Storage
+      ? driver.presign(key, seconds, {
+          'response-content-disposition': answer.disposition,
+          'response-content-type': answer.contentType,
+        })
+      : undefined
+  }
   async delete(key: string): Promise<void> {
     await this.driverOf(key).delete(key)
     this.cache.db.prepare('DELETE FROM host_objects WHERE key=?').run(key)
