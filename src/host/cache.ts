@@ -61,6 +61,8 @@ const tables: Record<
     },
   },
   setting: { table: 'host_settings', key: 'area' },
+  /** API key verifiers, for the builds API: digests, never tokens. */
+  key: { table: 'host_keys', key: 'id' },
 }
 
 /** Deleting in this order keeps foreign keys satisfied; applying uses the reverse. */
@@ -73,9 +75,10 @@ const order = [
   'device',
   'build',
   'job',
+  'key',
 ]
 
-const HOST_SCHEMA = 8
+const HOST_SCHEMA = 9
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -132,6 +135,17 @@ function migrateHost(db: DatabaseSync): void {
     db.exec(`BEGIN IMMEDIATE;
     ${accounts.some((column) => column.name === 'open_admission') ? '' : 'ALTER TABLE accounts ADD COLUMN open_admission INTEGER NOT NULL DEFAULT 0 CHECK(open_admission IN (0,1));'}
     INSERT INTO host_meta(key,value) VALUES('host_schema','8') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  // The API keys' verifiers, for the builds API the host serves itself. The
+  // revision goes back to 0, so the next sync is a snapshot that brings every
+  // live key the master has.
+  if (current < 9)
+    db.exec(`BEGIN IMMEDIATE;
+    CREATE TABLE IF NOT EXISTS host_keys(id TEXT PRIMARY KEY, hash TEXT NOT NULL, role TEXT NOT NULL,
+      projects TEXT NOT NULL, branches TEXT NOT NULL, format TEXT NOT NULL, creator INTEGER, expires_at INTEGER) STRICT;
+    INSERT INTO host_meta(key,value) VALUES('revision','0') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    INSERT INTO host_meta(key,value) VALUES('keys_synced','0') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    INSERT INTO host_meta(key,value) VALUES('host_schema','9') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
 }
 
@@ -256,6 +270,10 @@ export class HostCache {
   /** The last master revision applied. */
   revision(): number {
     return Number(this.meta('revision') ?? 0)
+  }
+  /** Whether a sync has brought the keys since this cache began keeping them (schema 9). */
+  keysSynced(): boolean {
+    return this.meta('keys_synced') !== '0'
   }
   /** When the host last heard from its master, or undefined if never. */
   syncedAt(): number | undefined {
@@ -438,6 +456,14 @@ export class HostCache {
       this.endStaleSessions()
       this.setMeta('revision', sync.revision)
       this.setMeta('synced_at', this.now())
+      // Only a sync from a master that sends keys brings them: a snapshot
+      // with its key entity, or a key change.
+      if (
+        sync.kind === 'snapshot'
+          ? sync.entities.key != null
+          : (sync.changes as Change[]).some((change) => change.entity === 'key')
+      )
+        this.setMeta('keys_synced', 1)
     })
   }
 }

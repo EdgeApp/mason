@@ -305,7 +305,9 @@ describe('Host cache schema', () => {
     await first.stop()
     const old = new DatabaseSync(path.join(dir, 'host-cache.sqlite'))
     old.exec(`INSERT INTO api_keys(id,hash,name,apps,created_at,role) VALUES('k1','h1','upload','"all"',1,'upload');
-    UPDATE host_meta SET value='3' WHERE key='host_schema';`)
+    INSERT INTO host_keys(id,hash,role,projects,branches,format) VALUES('k2','${'2'.repeat(64)}','developer','[]','[]','v1');
+    UPDATE host_meta SET value='3' WHERE key='host_schema';
+    UPDATE host_meta SET value='41' WHERE key='revision';`)
     old.close()
     const again = new HostRuntime({ dir, link: (): undefined => undefined })
     try {
@@ -321,8 +323,34 @@ describe('Host cache schema', () => {
             .prepare("SELECT value FROM host_meta WHERE key='host_schema'")
             .get() as { value: string }
         ).value,
-        '8',
+        '9',
       )
+      // Schema 9: the key verifiers, kept on a replay, and a revision of 0,
+      // so the next sync is a snapshot that brings every key.
+      assert.equal(
+        (
+          db.prepare('SELECT COUNT(*) n FROM host_keys').get() as {
+            n: number
+          }
+        ).n,
+        1,
+      )
+      assert.equal(again.cache.revision(), 0)
+      // Until a sync brings the keys, an unknown key means "waiting".
+      assert.equal(again.cache.keysSynced(), false)
+      // A master that does not send keys yet leaves the host waiting for them.
+      again.cache.apply({ kind: 'snapshot', revision: 3, entities: {} })
+      again.cache.apply({ kind: 'changes', revision: 4, changes: [] })
+      assert.equal(again.cache.keysSynced(), false)
+      // An upgraded master's key change, even one naming no key, brings them.
+      again.cache.apply({
+        kind: 'changes',
+        revision: 5,
+        changes: [
+          { revision: 5, entity: 'key', key: '*', operation: 'delete' },
+        ],
+      })
+      assert.equal(again.cache.keysSynced(), true)
       // Schema 6: who requested each run, as the master names them; 7: the build number it reserved; 8: open admission.
       assert(
         db
@@ -496,27 +524,33 @@ describe('Host cache, sign-in and offline serving', function () {
     )
     assert(Date.now() - started < 1000)
     assert(host.status().sync!.syncedAt! >= started)
-    // Keys stay on the master: nothing on the host reads them.
+    // A key reaches the host as its digest, for the builds API; the token
+    // never leaves the master.
     const key = c.master.master!.keys.create(admin, {
       role: 'developer',
       name: 'ci',
     })
-    c.master.master!.projects.save(admin, 'edge', { name: 'Edge' })
-    const after = c.master.master!.changes.revision()
-    await c.until(
-      () => host.status().sync?.revision === after,
-      1000,
-      'the next change on the host',
+    const keyRow = (): Json =>
+      runtime()
+        .cache.db.prepare('SELECT * FROM host_keys WHERE id=?')
+        .get(key.id)
+    await c.until(() => keyRow(), 1000, 'the key on the host')
+    assert.equal(
+      keyRow().hash,
+      createHash('sha256').update(key.token).digest('hex'),
     )
     assert.equal(
       runtime().cache.db.prepare('SELECT COUNT(*) n FROM api_keys').get()!.n,
       0,
     )
-    assert(
-      !readFileSync(path.join(host.dir, 'host-cache.sqlite')).includes(
-        key.token,
-      ),
-    )
+    for (const file of ['host-cache.sqlite', 'host-cache.sqlite-wal'])
+      if (existsSync(path.join(host.dir, file)))
+        assert(
+          !readFileSync(path.join(host.dir, file)).includes(key.token),
+          `${file} holds the token`,
+        )
+    c.master.master!.keys.revoke(admin, key.id)
+    await c.until(() => keyRow() == null, 1000, 'the revocation on the host')
     assert.equal(
       (
         runtime()
@@ -690,7 +724,7 @@ describe('Host cache, sign-in and offline serving', function () {
     assert.match(page, /Zcash/)
     const row = master.database.db
       .prepare(
-        "SELECT a.role, a.open_admission, a.name FROM accounts a JOIN account_addresses x ON x.account_id=a.id WHERE lower(x.email)=lower(?)",
+        'SELECT a.role, a.open_admission, a.name FROM accounts a JOIN account_addresses x ON x.account_id=a.id WHERE lower(x.email)=lower(?)',
       )
       .get('new.person@example.com') as {
       role: string

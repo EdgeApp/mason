@@ -200,7 +200,11 @@ export class People {
     }
   }
 
-  private insertAdmitted(provider: string, email: string, name: string): number {
+  private insertAdmitted(
+    provider: string,
+    email: string,
+    name: string,
+  ): number {
     return this.master.transaction(() => {
       const existing = this.db
         .prepare(
@@ -372,9 +376,13 @@ export class People {
           'UPDATE accounts SET username=NULL,password=NULL,disabled=1,removed_at=?,permission_version=permission_version+1 WHERE id=?',
         )
         .run(this.master.now(), id)
+      const keys = this.db
+        .prepare('SELECT id FROM api_keys WHERE creator=? AND revoked=0')
+        .all(id)
       this.db
         .prepare('UPDATE api_keys SET revoked=1 WHERE creator=? AND revoked=0')
         .run(id)
+      for (const key of keys) this.master.change('key', String(key.id))
       this.master.audit(actor, 'person.remove', String(id))
       this.master.change('account', id)
       for (const group of groups)

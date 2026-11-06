@@ -24,7 +24,9 @@ import { createFirstAdmin } from '../setup/setup.js'
 import { withStoppedMaster } from '../setup/cli.js'
 import { MasterDatabase } from './database.js'
 import { importDeployment, ImportRefused } from './import.js'
-import { MasterKeys } from './keys.js'
+import { Changes } from './changes.js'
+import { digestMatches, keyDigest, MasterKeys, tokenLookup } from './keys.js'
+import { People } from './people.js'
 import {
   decoyParameters,
   passwordMatches,
@@ -453,10 +455,13 @@ describe('Master database, setup and import', function () {
         ['ios', '["ipa","zip"]'],
       ],
     )
-    // The app goes to the hosts again, with its channels.
+    // The app goes to the hosts again, with its channels (schema 33 adds
+    // its key change after).
     assert.deepEqual(
       db
-        .prepare('SELECT entity,key,operation FROM change_log')
+        .prepare(
+          "SELECT entity,key,operation FROM change_log WHERE entity<>'key'",
+        )
         .all()
         .map((row) => [row.entity, row.key, row.operation]),
       [['app', '1', 'put']],
@@ -581,6 +586,136 @@ describe('Master database, setup and import', function () {
     db.exec("UPDATE meta SET value='24' WHERE key='master_schema'")
     migrateMaster(db)
     db.close()
+  })
+
+  it('schema 33 queues every live API key for the host, and none revoked', () => {
+    const db = new DatabaseSync(path.join(root, 'key-changes.sqlite'))
+    migrateMaster(db)
+    const hash = (n: number): string => String(n).repeat(64)
+    db.exec(`INSERT INTO api_keys(id,hash,name,apps,created_at,role,revoked) VALUES
+      ('k1','${hash(1)}','live','"all"',0,'developer',0),
+      ('k2','${hash(2)}','revoked','"all"',0,'developer',1),
+      ('k3','${hash(3)}','also live','"all"',0,'tester',0);
+    DELETE FROM change_log;
+    UPDATE meta SET value='32' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.deepEqual(
+      db
+        .prepare(
+          "SELECT key,operation FROM change_log WHERE entity='key' ORDER BY key",
+        )
+        .all()
+        .map((row) => [row.key, row.operation]),
+      [
+        ['*', 'delete'],
+        ['k1', 'put'],
+        ['k3', 'put'],
+      ],
+    )
+    db.close()
+  })
+
+  it('U10.2 replicates each live key as its digest, role, scopes, creator and expiry, and a revocation as a delete', () => {
+    const db = new DatabaseSync(path.join(root, 'key-projection.sqlite'))
+    const database = new MasterDatabase(db)
+    const keys = new MasterKeys(database)
+    const changes = new Changes(database, (_area, value) => value)
+    db.exec(
+      "INSERT INTO accounts(id,name,email,role,created_at) VALUES(7,'Dev','dev@example.test','developer',0)",
+    )
+    const dev = { role: 'developer' as const, accountId: 7, label: 'account:7' }
+    // A first change, so the next ones read as changes, not a snapshot.
+    database.change('account', 7)
+    const start = changes.revision()
+    const made = keys.create(dev, {
+      role: 'tester',
+      name: 'Pull builds',
+      projects: ['phones'],
+      branches: ['release/*'],
+      expiresAt: Date.now() + 60_000,
+    })
+    const projected = changes.projection('key', made.id)!
+    assert.deepEqual(Object.keys(projected.row).sort(), [
+      'branches',
+      'creator',
+      'expires_at',
+      'format',
+      'hash',
+      'id',
+      'projects',
+      'role',
+    ])
+    assert.equal(projected.row.hash, keyDigest(made.token))
+    assert.equal(projected.row.creator, 7)
+    assert.equal(projected.row.role, 'tester')
+    assert.equal(projected.row.projects, '["phones"]')
+    const text = JSON.stringify(changes.snapshot())
+    assert(!text.includes(made.token), 'a snapshot carries a token')
+    assert(!text.includes('Pull builds'), 'a snapshot carries a key name')
+    const created = changes.since(start)
+    assert(created.kind === 'changes')
+    assert.deepEqual(
+      created.changes.map((change) => [
+        change.entity,
+        change.key,
+        change.operation,
+      ]),
+      [['key', made.id, 'put']],
+    )
+    // A revoked key projects to nothing: the host deletes it.
+    const before = changes.revision()
+    keys.revoke(localOperator, made.id)
+    assert.equal(changes.projection('key', made.id), undefined)
+    const revoked = changes.since(before)
+    assert(revoked.kind === 'changes')
+    assert.deepEqual(
+      revoked.changes.map((change) => [
+        change.entity,
+        change.key,
+        change.operation,
+      ]),
+      [['key', made.id, 'delete']],
+    )
+    // Removing a person revokes their keys, each as a change.
+    const second = keys.create(dev, { role: 'developer' })
+    const third = keys.create(dev, { role: 'tester' })
+    const removal = changes.revision()
+    new People(database).remove(localOperator, 7)
+    const removed = changes.since(removal)
+    assert(removed.kind === 'changes')
+    assert.deepEqual(
+      removed.changes
+        .filter((change) => change.entity === 'key')
+        .map((change) => [change.key, change.operation])
+        .sort(),
+      [
+        [second.id, 'delete'],
+        [third.id, 'delete'],
+      ].sort(),
+    )
+    assert.deepEqual(changes.entities.key!.keys(db), [])
+    db.close()
+  })
+
+  it('finds a key by its token: v1 by id, builder by digest, anything else nowhere', () => {
+    const v1 = `mason_v1_${'a'.repeat(32)}.${'B'.repeat(43)}`
+    assert.deepEqual(tokenLookup(v1), {
+      by: 'id',
+      id: 'a'.repeat(32),
+      digest: keyDigest(v1),
+    })
+    const builder = 'c'.repeat(64)
+    assert.deepEqual(tokenLookup(builder), {
+      by: 'hash',
+      digest: keyDigest(builder),
+    })
+    for (const token of [undefined, 42, '', 'mason_v1_short', 'C'.repeat(64)])
+      assert.equal(tokenLookup(token), undefined)
+    // A missing or malformed stored digest never matches, and still compares.
+    assert.equal(digestMatches(keyDigest(v1), keyDigest(v1)), true)
+    assert.equal(digestMatches(keyDigest(v1), keyDigest(builder)), false)
+    assert.equal(digestMatches(keyDigest(v1), undefined), false)
+    assert.equal(digestMatches(keyDigest(v1), 'not hex'), false)
   })
 
   it('U7.2 schema 24 labels every node, permanent cloud worker and pool setup, as each ran setup before', () => {
