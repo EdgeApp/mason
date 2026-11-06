@@ -782,10 +782,13 @@ const migrations: Array<(db: DatabaseSync) => void> = [
     )
   },
   // 32: a tester admitted by a sign-in method can install every app.
+  // Replaying an older schema number keeps the column in place.
   (db): void => {
-    db.exec(
-      'ALTER TABLE accounts ADD COLUMN open_admission INTEGER NOT NULL DEFAULT 0 CHECK(open_admission IN (0,1))',
-    )
+    const columns = db.prepare('PRAGMA table_info(accounts)').all()
+    if (!columns.some((column) => column.name === 'open_admission'))
+      db.exec(
+        'ALTER TABLE accounts ADD COLUMN open_admission INTEGER NOT NULL DEFAULT 0 CHECK(open_admission IN (0,1))',
+      )
   },
 ]
 
