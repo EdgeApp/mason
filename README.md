@@ -235,6 +235,24 @@ request-run. Apple signing, TestFlight and notarization use the master's App
 Store Connect key; a stage receives only the signing material it needs for its
 own duration.
 
+## Pulling builds
+
+Scripts download published builds with an API key, from the host or the
+master:
+
+```sh
+curl -sS -H "Authorization: Bearer $KEY" "$HOST/api/v2/builds?project=phones&latest=1"
+curl -sS -L -OJ -H "Authorization: Bearer $KEY" "$HOST/api/v2/builds/41/download"
+```
+
+The host answers from its own copy of the builds and its storage, so it
+keeps serving while the master is offline, up to the host's offline grace
+window; the master relays the same requests to the host. A download is the
+file with its SHA-256 in `ETag` and `Repr-Digest`, or a five-minute signed
+link when the build is stored in a Space. Developers and up see every app's
+builds, testers their groups' apps, and a scoped key only its projects. See
+[Builds](docs/api.md#14-builds) in docs/api.md.
+
 ## Migrating from the standalone server and builder
 
 The master imports the existing distribution and builder databases before
