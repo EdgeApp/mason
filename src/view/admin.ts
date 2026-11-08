@@ -1,4 +1,10 @@
-import { bytes, platformChip, statusDot } from './dashboard.js'
+import {
+  appGridRow,
+  bytes,
+  platformChip,
+  platformChips,
+  statusDot,
+} from './dashboard.js'
 import {
   ago,
   appCrumbs,
@@ -2130,14 +2136,21 @@ export function projectView(data: {
   /** False on the host, which has no Secrets tab. */
   secrets?: boolean
 }): string {
-  return `${head(data.viewer, data.name, data.repository, projectCrumbs(data.slug, data.name))}${projectTabs(data.slug, 'overview', data.secrets)}<section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
-    data.apps
-      .map(
-        (app) =>
-          `<li><span class="mono">${escape(app.bundleId)}</span> ${app.platforms.map(platformChip).join(' ')}${app.apple == null ? '' : ` <small>Apple team <span class="mono">${escape(app.apple.team)}</span></small>`}</li>`,
-      )
-      .join('') || '<li>None.</li>'
-  }</ul></section><section class="panel"><h2>${icon('fork_right')}Branch rules</h2><table class="list"><tbody>${
+  // The Platforms column starts at one edge whatever each app ID's length.
+  const apps =
+    data.apps.length === 0
+      ? '<p>None.</p>'
+      : `<div class="app-grid" role="table" aria-label="App IDs"><div class="app-grid-row app-grid-head" role="row"><span role="columnheader">App ID</span><span role="columnheader">Platforms</span><span role="columnheader">Apple team</span></div>${data.apps
+          .map((app) =>
+            appGridRow(appPath(data.slug, app.bundleId), app.bundleId, '', [
+              platformChips(app.platforms),
+              app.apple == null
+                ? ''
+                : `<span class="mono">${escape(app.apple.team)}</span>`,
+            ]),
+          )
+          .join('')}</div>`
+  return `${head(data.viewer, data.name, data.repository, projectCrumbs(data.slug, data.name))}${projectTabs(data.slug, 'overview', data.secrets)}<section class="panel"><h2>${icon('apps')}App IDs</h2>${apps}</section><section class="panel"><h2>${icon('fork_right')}Branch rules</h2><table class="list"><tbody>${
     data.rules
       .map(
         (rule) =>

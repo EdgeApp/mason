@@ -38,6 +38,25 @@ export function platformChip(platform: string): string {
   return `<span class="platform">${known == null ? '' : icon(platformIcons[known])}${escape(known == null ? platform : platformNames[known])}</span>`
 }
 
+/** An app ID's platforms as chips, left-justified and back to back. */
+export function platformChips(list: readonly string[]): string {
+  return `<span class="app-platforms">${list.map(platformChip).join('')}</span>`
+}
+
+/**
+ * One row of an `app-grid`, whose columns line up across its rows: the app
+ * ID, linking to its page over the whole row, with `under` below it, then
+ * `cells`. Links inside the cells sit above the row's link.
+ */
+export function appGridRow(
+  href: string,
+  appId: string,
+  under: string,
+  cells: readonly string[],
+): string {
+  return `<div class="app-grid-row" role="row"><div role="cell"><a class="row-link" href="${escape(href)}">${escape(appId)}</a>${under}</div>${cells.map((cell) => `<div role="cell">${cell}</div>`).join('')}</div>`
+}
+
 /** A run status as a dot and its word. */
 export function statusDot(status: string): string {
   return `<span class="dot ${escape(status)}" aria-hidden="true"></span>`

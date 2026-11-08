@@ -1023,4 +1023,73 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await h.close()
     }
   })
+
+  it('E10 the App IDs card starts every row’s platform chips at one left edge, back to back, and each row links to its app ID page', async () => {
+    const log = 'app-ids-card-alignment.log'
+    rmSync(path.join(artifacts!, log), { force: true })
+    // Each App IDs row: its link, the left edge of its Platforms cell and of
+    // each chip, and the gaps between adjacent chips, in CSS pixels.
+    const measure = `return JSON.stringify({ head: document.querySelector('.app-grid-head [role=columnheader]:nth-child(2)').getBoundingClientRect().left, rows: [...document.querySelectorAll('.app-grid-row:not(.app-grid-head)')].map((row) => { const link = row.querySelector('a.row-link'); const chips = [...row.querySelectorAll('.app-platforms .platform')].map((chip) => chip.getBoundingClientRect()); return { id: link.textContent, href: link.getAttribute('href'), cell: row.querySelector('.app-platforms').getBoundingClientRect().left, lefts: chips.map((box) => box.left), gaps: chips.slice(1).map((box, i) => box.left - chips[i].right) } }) })`
+    const b = await browser('mason-e10-paul', c.master, '1280x860')
+    try {
+      await masterSignIn(b, 'paul', PASSWORDS.paul!)
+      await b.visible('^Backups$|^Projects & apps$|^Install apps$')
+      await b.open('/projects/fixture')
+      await b.visible('App IDs')
+      await b.visible(`^${BETA.replaceAll('.', '\\.')}$`)
+      // maestro-d's evalBrowserScript answers with the script's return value as a string.
+      const reply = (await b.script(measure)) as { data?: unknown }
+      assert.equal(typeof reply.data, 'string', JSON.stringify(reply))
+      const measured = JSON.parse(reply.data as string) as {
+        head: number
+        rows: Array<{
+          id: string
+          href: string
+          cell: number
+          lefts: number[]
+          gaps: number[]
+        }>
+      }
+      writeFileSync(
+        path.join(artifacts!, log),
+        [
+          `$ device.command('evalBrowserScript', { script }) on ${origin(c.master)}/projects/fixture at 1280x860, where script is:`,
+          measure,
+          '',
+          `Platforms column header left: ${measured.head}px`,
+          ...measured.rows.map(
+            (row) =>
+              `${row.id} → ${row.href}\n  Platforms cell left: ${row.cell}px\n  chip lefts: ${row.lefts.map((left) => `${left}px`).join(', ')}\n  gaps between adjacent chips: ${row.gaps.length === 0 ? '(one chip)' : row.gaps.map((gap) => `${gap}px`).join(', ')}`,
+          ),
+          '',
+          `first chips' left edges: ${[...new Set(measured.rows.map((row) => row.lefts[0]))].join(', ')}px (${new Set(measured.rows.map((row) => row.lefts[0])).size === 1 ? 'one edge' : 'NOT ALIGNED'}); largest gap: ${Math.max(...measured.rows.flatMap((row) => row.gaps))}px`,
+          '',
+        ].join('\n'),
+      )
+      assert.deepEqual(
+        measured.rows.map((row) => [row.id, row.href, row.lefts.length]),
+        [
+          [ALPHA, `/projects/fixture/apps/${ALPHA}`, 2],
+          [BETA, `/projects/fixture/apps/${BETA}`, 1],
+        ],
+      )
+      // One left edge for the Platforms column, header included, whatever the app ID's length.
+      for (const row of measured.rows) {
+        assert.equal(row.cell, measured.head, row.id)
+        assert.equal(row.lefts[0], measured.head, row.id)
+        for (const gap of row.gaps) assert(gap >= 0 && gap <= 4, `${gap}px`)
+      }
+      await b.shot('app-ids-card-after.png')
+      // The row is its app ID page's link.
+      await b.tap(
+        `.app-grid a.row-link[href="/projects/fixture/apps/${ALPHA}"]`,
+      )
+      await b.visible('^Shared with|^Runs and builds$')
+      await b.script(
+        `if (location.pathname !== ${JSON.stringify(`/projects/fixture/apps/${ALPHA}`)}) throw new Error('The row opened ' + location.pathname)`,
+      )
+    } finally {
+      await b.close()
+    }
+  })
 })
