@@ -261,6 +261,7 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     tap: (css: string) => Promise<void>
     type: (css: string, text: string) => Promise<void>
     script: (script: string) => Promise<unknown>
+    command: (name: string, value?: unknown) => Promise<unknown>
     shot: (file: string) => Promise<void>
     close: () => Promise<void>
   }> => {
@@ -307,6 +308,8 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       },
       script: async (script): Promise<unknown> =>
         await device.command('evalBrowserScript', { script }),
+      command: async (command, value): Promise<unknown> =>
+        await device.command(command, value),
       shot: async (file): Promise<void> => {
         // Let fonts and layout settle before the capture.
         await new Promise((resolve) => setTimeout(resolve, 500))
@@ -1089,6 +1092,74 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await b.script(
         `if (location.pathname !== ${JSON.stringify(`/projects/fixture/apps/${ALPHA}`)}) throw new Error('The row opened ' + location.pathname)`,
       )
+    } finally {
+      await b.close()
+    }
+  })
+
+  it('E9 on Projects & apps the card’s header opens the project, alpha’s row its app ID page, and a build chip its run', async () => {
+    const alphaPage = `/projects/fixture/apps/${ALPHA}`
+    const b = await browser('mason-e9-paul', c.master, '1280x860')
+    /** Fails unless the page is at this path. */
+    const at = async (where: string): Promise<void> => {
+      await b.script(
+        `if (location.pathname !== ${JSON.stringify(where)}) throw new Error('The page is ' + location.pathname)`,
+      )
+    }
+    /**
+     * Clicks with the mouse at the middle of the element `css` names,
+     * after checking the link hit there is `href`: the click lands on what
+     * a person's would.
+     */
+    const click = async (css: string, href: string): Promise<void> => {
+      const reply = (await b.script(
+        `const target = document.querySelector(${JSON.stringify(css)}); target.scrollIntoView({ block: 'center' }); const box = target.getBoundingClientRect(); const x = Math.round(box.left + box.width / 2); const y = Math.round(box.top + box.height / 2); const hit = document.elementFromPoint(x, y)?.closest('a')?.getAttribute('href'); if (hit !== ${JSON.stringify(href)}) throw new Error('At ' + x + ',' + y + ' the link is ' + hit); return JSON.stringify({ x, y })`,
+      )) as { data?: unknown }
+      const point = JSON.parse(String(reply.data)) as { x: number; y: number }
+      await b.command('tapOnPoint', point)
+    }
+    const back = async (): Promise<void> => {
+      await b.script('history.back()')
+      await b.visible('their latest builds and runs')
+      await at('/projects')
+    }
+    try {
+      await masterSignIn(b, 'paul', PASSWORDS.paul!)
+      await b.visible('^Backups$|^Projects & apps$|^Install apps$')
+      await b.open('/projects')
+      await b.visible('their latest builds and runs')
+      await b.visible(`^${BETA.replaceAll('.', '\\.')}$`)
+      // Alpha's row: a chip per branch it built, newest first, each opening its run.
+      await b.script(
+        `const row = document.querySelector('#project-fixture a.row-link[href=${JSON.stringify(alphaPage)}]').closest('.app-grid-row'); const chips = [...row.querySelectorAll('.app-builds a.run-chip')].map((chip) => chip.getAttribute('href') + ' ' + chip.firstChild.textContent.trim()).join(); if (chips !== ${JSON.stringify(
+          [
+            `/runs/${runs['build-alpha@develop'].id} develop`,
+            `/runs/${runs['build-alpha@master'].id} master`,
+          ].join(),
+        )}) throw new Error('The chips are ' + chips)`,
+      )
+      await b.shot('projects-card-after.png')
+      // The header, away from its title: the project.
+      await click('#project-fixture header .meta', '/projects/fixture')
+      await b.visible('App IDs')
+      await at('/projects/fixture')
+      await back()
+      // Alpha's row, on its platform chips: its app ID page.
+      await click(
+        `#project-fixture .app-grid-row:has(a.row-link[href="${alphaPage}"]) .app-platforms`,
+        alphaPage,
+      )
+      await b.visible('^Runs and builds$')
+      await at(alphaPage)
+      await back()
+      // A build chip in alpha's row: its run.
+      const run = runs['build-alpha@master']
+      await click(
+        `#project-fixture .app-grid-row:has(a.row-link[href="${alphaPage}"]) a.run-chip[href="/runs/${run.id}"]`,
+        `/runs/${run.id}`,
+      )
+      await b.visible('History of master')
+      await at(`/runs/${run.id}`)
     } finally {
       await b.close()
     }

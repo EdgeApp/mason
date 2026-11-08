@@ -545,8 +545,15 @@ describe('Design system and views', () => {
       nodes: [],
       repositories: new Map(),
     })
+    // Each build names its run and the run's status.
     assert.deepEqual(withVariant.projects[0]!.apps[0]!.builds, [
-      { branch: 'main', buildNumber: '26102011', at: NOW - 29 * HOUR },
+      {
+        branch: 'main',
+        buildNumber: '26102011',
+        at: NOW - 29 * HOUR,
+        run: 'run-1',
+        status: 'succeeded',
+      },
     ])
     assert(!withVariant.builds.some((build) => build.id === 43))
     // A run that published only named variants shows as its first by name,
@@ -584,7 +591,13 @@ describe('Design system and views', () => {
       repositories: new Map(),
     })
     assert.deepEqual(onlyVariants.projects[0]!.apps[0]!.builds, [
-      { branch: 'main', buildNumber: '26102014', at: NOW - 30 * 60_000 },
+      {
+        branch: 'main',
+        buildNumber: '26102014',
+        at: NOW - 30 * 60_000,
+        run: 'run-2',
+        status: 'failed',
+      },
     ])
     assert.deepEqual(
       onlyVariants.builds
@@ -626,7 +639,13 @@ describe('Design system and views', () => {
       repositories: new Map(),
     })
     assert.deepEqual(mixedCase.projects[0]!.apps[0]!.builds, [
-      { branch: 'main', buildNumber: '26102016', at: NOW - 20 * 60_000 },
+      {
+        branch: 'main',
+        buildNumber: '26102016',
+        at: NOW - 20 * 60_000,
+        run: 'run-3',
+        status: 'running',
+      },
     ])
     db.prepare('DELETE FROM builds WHERE id IN (46,47)').run()
     // The running stage shows its progress against its usual duration; setup and approvals are not queue entries.
@@ -660,10 +679,10 @@ describe('Design system and views', () => {
     assert.match(html, /Webhook active/)
     assert.match(html, /buildbox/)
     assert.match(html, /role="progressbar"/)
-    // The card opens the project; only its run chips lead elsewhere, to their runs.
+    // The card's header opens the project; its run chips open their runs.
     assert.match(
       html,
-      /<h2><a class="card-link" href="\/projects\/phones">Phones<\/a><\/h2>/,
+      /<header>.*<h2><a class="card-link" href="\/projects\/phones">Phones<\/a><\/h2>.*<\/header>/,
     )
     assert.doesNotMatch(html, /meta-link|\/masonfile"|\?project=/)
     assert.match(html, /<a class="run-chip" href="\/runs\/run-\d+"/)
@@ -728,6 +747,239 @@ describe('Design system and views', () => {
     assert.equal(bytes(999), '999 B')
     assert.equal(bytes(2_500_000_000_000_000), '2500.0 TB')
     assert.match(platformChip('linux'), />linux</)
+  })
+
+  it('M11 a project card: the header opens the project, each app ID row its page, and each branch’s latest build its run, push branches first, six then +N more', () => {
+    const db = fixture()
+    // Six more app IDs: Phones has eight.
+    for (let n = 1; n <= 6; n++) {
+      db.prepare(
+        'INSERT INTO apps(id,slug,name,position,enabled) VALUES(?,?,?,?,1)',
+      ).run(10 + n, `app.example.extra${n}`, `Extra ${n}`, 10 + n)
+      db.prepare('INSERT INTO project_apps(app_id,project_id) VALUES(?,1)').run(
+        10 + n,
+      )
+    }
+    // Phone's latest build per branch: nine branches.
+    db.prepare("UPDATE builds SET run='run-1' WHERE id=2").run()
+    const build = db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(?,1,2,'android',?,?,'1.0',?,'app.example.phone','apk',?,1000,?,?,?,'ready','','pipeline','{}','',?)",
+    )
+    const branches: Array<[string, number, string | null]> = [
+      ['feature/login', 1, 'run-3'],
+      ['release/2', 2, 'run-2'],
+      ['topic/a', 3, 'gone'],
+      ['topic/b', 4, 'run-1'],
+      ['topic/c', 5, 'run-1'],
+      ['topic/d', 6, 'run-1'],
+      ['topic/e', 7, 'run-1'],
+      ['release/1', 10, null],
+    ]
+    for (const [index, [branch, hours, run]] of branches.entries())
+      build.run(
+        60 + index,
+        branch,
+        'e'.repeat(40),
+        `2610${60 + index}`,
+        `d${60 + index}`,
+        `f${60 + index}`,
+        NOW - hours * HOUR,
+        NOW + HOUR,
+        run,
+      )
+    const data = dashboardData({
+      db,
+      viewer: viewer('developer'),
+      now: NOW,
+      appVisible: () => true,
+      pinned: new Map([[1, ['main', 'release/*']]]),
+    })
+    const phones = data.projects.find((card) => card.slug === 'phones')!
+    const phone = phones.apps.find((app) => app.slug === 'app.example.phone')!
+    // The push branches first, in the trigger's order, then the newest.
+    assert.deepEqual(
+      phone.builds.map((entry) => [entry.branch, entry.run, entry.status]),
+      [
+        ['main', 'run-1', 'succeeded'],
+        ['release/2', 'run-2', 'failed'],
+        ['release/1', undefined, undefined],
+        ['feature/login', 'run-3', 'running'],
+        ['topic/a', 'gone', undefined],
+        ['topic/b', 'run-1', 'succeeded'],
+        ['topic/c', 'run-1', 'succeeded'],
+        ['topic/d', 'run-1', 'succeeded'],
+        ['topic/e', 'run-1', 'succeeded'],
+      ],
+    )
+    // Without push branches, newest first.
+    assert.deepEqual(
+      dashboardData({
+        db,
+        viewer: viewer('developer'),
+        now: NOW,
+        appVisible: () => true,
+      })
+        .projects[0]!.apps[0]!.builds.slice(0, 3)
+        .map((entry) => entry.branch),
+      ['feature/login', 'release/2', 'topic/a'],
+    )
+    const html = dashboardView(data, viewer('developer'), NOW)
+    const card = html.slice(
+      html.indexOf('<article class="project" id="project-phones">'),
+      html.indexOf('</article>') + '</article>'.length,
+    )
+    // The header holds the project's link and the run chips, and no app ID.
+    const header = card.slice(
+      card.indexOf('<header>'),
+      card.indexOf('</header>'),
+    )
+    assert.match(
+      header,
+      /<h2><a class="card-link" href="\/projects\/phones">Phones<\/a><\/h2>/,
+    )
+    assert.match(
+      header,
+      /<div class="runs" data-project-runs="phones"><a class="run-chip" href="\/runs\//,
+    )
+    assert.doesNotMatch(header, /app-grid|row-link/)
+    assert.equal([...card.matchAll(/class="card-link"/g)].length, 1)
+    // Every one of the eight rows opens its app ID's page.
+    const rows = [
+      ...card.matchAll(
+        /<div class="app-grid-row" role="row"><div role="cell"><a class="row-link" href="([^"]+)">([^<]+)<\/a><small>([^<]*)<\/small><\/div><div role="cell"><span class="app-platforms">/g,
+      ),
+    ].map((match) => [match[1], match[2], match[3]])
+    assert.match(
+      card,
+      /<h3>App IDs \(8\)<\/h3><div class="app-grid" role="table" aria-label="App IDs">/,
+    )
+    assert.deepEqual(rows, [
+      ['/projects/phones/apps/app.example.phone', 'app.example.phone', 'Phone'],
+      ['/projects/phones/apps/app.example.watch', 'app.example.watch', 'Watch'],
+      ...[1, 2, 3, 4, 5, 6].map((n) => [
+        `/projects/phones/apps/app.example.extra${n}`,
+        `app.example.extra${n}`,
+        `Extra ${n}`,
+      ]),
+    ])
+    // Phone's row: six branches' builds, each opening its run, then +3 more, opening its page.
+    const row = card.slice(
+      card.indexOf('href="/projects/phones/apps/app.example.phone"'),
+      card.indexOf('href="/projects/phones/apps/app.example.watch"'),
+    )
+    const chips = row.slice(row.indexOf('<span class="app-builds">'))
+    assert.deepEqual(
+      [
+        ...chips.matchAll(
+          /<(a|span) class="run-chip(?: more)?"(?: href="([^"]+)")?[^>]*>([^<]*)/g,
+        ),
+      ].map((match) => [match[1], match[2], match[3]!.trim()]),
+      [
+        ['a', '/runs/run-1', 'main'],
+        ['a', '/runs/run-2', 'release/2'],
+        ['span', undefined, 'release/1'],
+        ['a', '/runs/run-3', 'feature/login'],
+        ['a', '/runs/gone', 'topic/a'],
+        ['a', '/runs/run-1', 'topic/b'],
+        ['a', '/projects/phones/apps/app.example.phone', '+3 more'],
+      ],
+    )
+    // Branch, build number, the run's status dot and age; the page's socket keeps the status.
+    assert.match(
+      chips,
+      /<a class="run-chip" href="\/runs\/run-2" title="release\/2 261061 failed" data-run-id="run-2" data-status="failed">release\/2 <span>261061<\/span><span class="dot failed" aria-hidden="true"><\/span><small>2h ago<\/small><\/a>/,
+    )
+    assert.match(
+      chips,
+      /<span class="run-chip">release\/1 <span>261067<\/span><small>10h ago<\/small><\/span>/,
+    )
+    assert.match(
+      chips,
+      /data-run-id="gone" data-status="">topic\/a <span>261062<\/span><small>/,
+    )
+    assert.doesNotMatch(chips, /topic\/c|topic\/d|topic\/e/)
+    // Six or fewer: no +N more; none: No builds yet.
+    const watch = card.slice(
+      card.indexOf('href="/projects/phones/apps/app.example.watch"'),
+      card.indexOf('href="/projects/phones/apps/app.example.extra1"'),
+    )
+    assert.match(
+      watch,
+      /<span class="app-builds"><small>No builds yet<\/small><\/span>/,
+    )
+    db.prepare(
+      "DELETE FROM builds WHERE branch IN ('topic/c','topic/d','topic/e')",
+    ).run()
+    assert.doesNotMatch(
+      dashboardView(
+        dashboardData({
+          db,
+          viewer: viewer('developer'),
+          now: NOW,
+          appVisible: () => true,
+        }),
+        viewer('developer'),
+        NOW,
+      ),
+      /more<\/a>/,
+    )
+    // An app built on very many branches: the card reads only the newest
+    // hundred, and its +N still counts them all (review 1.harness-review.7).
+    const many = db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields) VALUES(?,1,2,'android',?,'c','1.0','1','app.example.phone','apk',?,1,?,?,?,'ready','','pipeline','{}')",
+    )
+    for (let n = 0; n < 110; n++)
+      many.run(
+        9000 + n,
+        `many/${n}`,
+        `dm${n}`,
+        `fm${n}`,
+        NOW - 10_000 + n,
+        NOW + 86_400_000,
+      )
+    const wide = dashboardData({
+      db,
+      viewer: viewer('developer'),
+      now: NOW,
+      appVisible: () => true,
+    })
+    const busy = wide.projects
+      .flatMap((project) => project.apps)
+      .find((app) => app.slug === 'app.example.phone')!
+    assert.equal(busy.builds.length, 100)
+    assert.ok(busy.branches > 110)
+    assert.match(
+      dashboardView(wide, viewer('developer'), NOW),
+      new RegExp(`\\+${busy.branches - 6} more</a>`),
+    )
+    // The header's link covers the header only; chips and rows sit above or beside it.
+    assert.match(stylesheet, /\.project header\{[^}]*position:relative\}/)
+    assert.match(
+      stylesheet,
+      /\.project \.card-link::after\{content:'';position:absolute;inset:0\}/,
+    )
+    assert.match(
+      stylesheet,
+      /\.project a\.run-chip\{position:relative;z-index:1\}/,
+    )
+    assert.match(
+      stylesheet,
+      /\.app-grid-row a:not\(\.row-link\)\{position:relative;z-index:1\}/,
+    )
+    // A project with no app IDs says so.
+    assert.match(
+      dashboardView(
+        dashboardData({
+          db: fixture(),
+          viewer: viewer('developer'),
+          now: NOW,
+          appVisible: (id) => id === 3,
+        }),
+        viewer('developer'),
+        NOW,
+      ),
+      /<h3>App IDs \(0\)<\/h3><p>No app IDs\.<\/p>/,
+    )
   })
 
   it('U17.5 search finds projects, app IDs, runs, commits and branches the viewer may see', () => {

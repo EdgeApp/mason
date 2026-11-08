@@ -37,23 +37,33 @@ export interface BuildNumberSequence {
 export const SCRIPT_PROJECT =
   'This project builds from a script; it has no Masonfile.'
 
+/**
+ * The branches (or patterns) the project's push trigger builds, which its
+ * pages list first: from the default branch's last setup, else any
+ * branch's; a trigger on every push builds its automatic rules' branches.
+ */
+export function pushBranches(
+  project: Project,
+  pushes: Pick<Pushes, 'cached' | 'latest'>,
+): string[] {
+  const push =
+    pushes.cached(project, project.defaultBranch) ?? pushes.latest(project)
+  return push?.build == null
+    ? []
+    : push.build === true
+      ? project.rules
+          .filter((rule) => rule.mode === 'automatic')
+          .map((rule) => rule.pattern)
+      : push.build
+}
+
 /** A project's details as the master knows them. */
 export function projectDetails(
   project: Project,
   buildNumbers: Pick<BuildNumbers, 'sequences'>,
   pushes: Pick<Pushes, 'cached' | 'latest'>,
 ): ProjectDetails {
-  // The branches the build's push trigger names, from the default branch's last setup, else any branch's.
-  const push =
-    pushes.cached(project, project.defaultBranch) ?? pushes.latest(project)
-  const pinned =
-    push?.build == null
-      ? []
-      : push.build === true
-        ? project.rules
-            .filter((rule) => rule.mode === 'automatic')
-            .map((rule) => rule.pattern)
-        : push.build
+  const pinned = pushBranches(project, pushes)
   return {
     repository: project.repository,
     defaultBranch: project.defaultBranch,

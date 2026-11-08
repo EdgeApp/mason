@@ -110,11 +110,12 @@ const components = `.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,
 .panel li .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
 .project{background:var(--color-panel);border:1px solid var(--color-border);border-radius:var(--radius-panel);margin-bottom:16px;overflow:hidden;position:relative}
 .project:hover{border-color:var(--color-border-strong)}
-/* The title's link covers the card; the run chips sit above it and open their runs. */
+/* The title's link covers the card's header; the run chips sit above it and open their runs. Each app ID row is its own link. */
 .project .card-link::after{content:'';position:absolute;inset:0}
-.project .card-link:focus-visible{outline:none}.project:has(.card-link:focus-visible){outline:2px solid var(--color-accent);outline-offset:2px}
+.project .card-link:focus-visible{outline:none}.project header:has(.card-link:focus-visible){outline:2px solid var(--color-accent);outline-offset:-2px}
 .project a.run-chip{position:relative;z-index:1}
-.project header{display:flex;align-items:flex-start;gap:12px;padding:16px;border-bottom:1px solid var(--color-border)}
+.project header{display:flex;align-items:flex-start;gap:12px;padding:16px;border-bottom:1px solid var(--color-border);position:relative}
+.project header:hover{background:var(--color-panel-low)}
 .project header > div{flex:1;min-width:0}
 .project header h2{margin:0;font-size:18px;overflow-wrap:anywhere}
 .project header h2 a{color:var(--color-text);text-decoration:none}
@@ -124,9 +125,6 @@ const components = `.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,
 .project .meta .mono{color:var(--color-text)}
 .project .apps{padding:8px 16px 16px}
 .project .apps h3{font:500 11px/14px var(--font-mono);text-transform:uppercase;letter-spacing:.06em;color:var(--color-text-muted);margin:8px 0}
-.app-row{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:10px 12px;border:1px solid var(--color-border);border-radius:var(--radius);margin-bottom:8px;background:var(--color-panel-low)}
-.app-row .mono{font-size:13px;color:var(--color-text);overflow-wrap:anywhere}
-.app-row .runs{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .run-chip{display:inline-flex;align-items:center;gap:6px;font:500 12px/16px var(--font-mono);border:1px solid var(--color-border);border-radius:var(--radius);padding:3px 8px;background:var(--color-panel);color:var(--color-text);text-decoration:none}
 /* App ID rows whose columns line up across rows: each row is a subgrid of the grid's columns, so the Platforms column starts at one edge whatever the app ID's length. The app ID's link covers its row; links in the cells sit above it. */
 .app-grid{display:grid;grid-template-columns:minmax(12rem,max-content) max-content 1fr;column-gap:16px}
@@ -141,6 +139,8 @@ const components = `.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,
 .app-grid-row a:not(.row-link){position:relative;z-index:1}
 .app-grid-row small{margin:2px 0 0}
 .app-platforms{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-start;align-items:center}
+.project .app-grid{row-gap:8px;column-gap:12px}.project .app-grid-row{padding:8px 10px;border:1px solid var(--color-border);border-radius:var(--radius);background:var(--color-panel-low)}.project .app-grid-row:hover{background:var(--color-panel-high);border-color:var(--color-border-strong)}
+.app-builds{display:flex;flex-wrap:wrap;gap:6px;align-items:center}.project .app-platforms{flex-direction:column;align-items:flex-start}.app-builds .run-chip{gap:4px;padding:2px 6px;font-size:11px;flex-wrap:wrap;max-width:100%;overflow-wrap:anywhere}.app-builds .run-chip small{margin:0;font-size:11px;white-space:nowrap;color:var(--color-text-muted)}.app-builds a.run-chip:hover{border-color:var(--color-border-strong)}.run-chip.more{color:var(--color-primary)}
 .dot{display:inline-block;width:8px;height:8px;border-radius:9999px;background:var(--color-cancelled);flex:none}
 .dot.succeeded{background:var(--color-success)}.dot.running{background:var(--color-running)}.dot.failed,.dot.timed_out{background:var(--color-failed)}.dot.unstable,.dot.waiting{background:var(--color-warning)}.dot.queued{background:var(--color-border-strong)}
 .state-failed{color:var(--color-error-text)}.state-succeeded{color:var(--color-success-text)}.state-running{color:var(--color-indigo)}
@@ -213,7 +213,7 @@ button.list-row{border-color:var(--color-border);min-height:0}
 
 /** Breakpoints: tablet collapses the rail to icons; on a phone it is a scrolling bar of labelled links above one column. */
 const responsive = `@media(max-width:${breakpoints.desktop - 1}px){.secret-editor{left:80px}.run-body{grid-template-columns:minmax(0,1fr)}.runs-columns{grid-template-columns:minmax(0,1fr)}.rail{flex-basis:64px;padding:12px 6px}.rail .label,.rail .section{display:none}.rail a{justify-content:center;padding:8px}.columns{grid-template-columns:minmax(0,1fr)}.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.topbar .status{display:none}}
-@media(max-width:${breakpoints.tablet - 1}px){.secret-editor{left:8px;right:8px;top:8px;bottom:8px}td.secret-actions{white-space:normal}.topbar{flex-wrap:wrap;height:auto;min-height:56px;padding:8px 12px;row-gap:8px}.topbar nav{order:3;flex:1 0 100%;flex-wrap:wrap}.layout{flex-direction:column;min-height:0}.rail{display:flex;flex-basis:auto;border-right:0;border-bottom:1px solid var(--color-border);overflow-x:auto;padding:4px 8px;gap:4px}.rail a{flex:none;gap:6px;padding:8px 10px}.rail .label{display:inline;white-space:nowrap}.rail a[aria-current=page]{box-shadow:inset 0 -3px 0 var(--color-accent)}main{padding:16px}.topbar{gap:8px;padding:0 12px}.topbar .search span:not(.icon),.topbar .search kbd,.brand .mono,.brand span{display:none}.topbar .search{flex:0 0 auto}.tiles{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.tile{padding:12px}.tile strong{font-size:20px}h1{font-size:26px;line-height:34px}.row,.app-row,.project header{flex-direction:column;align-items:flex-start}.app-row .runs{justify-content:flex-start}.app-grid{grid-template-columns:minmax(0,1fr);row-gap:4px}.app-grid-head{display:none}.app-card,.list-row{padding:14px}.platforms a{min-height:44px}}`
+@media(max-width:${breakpoints.tablet - 1}px){.secret-editor{left:8px;right:8px;top:8px;bottom:8px}td.secret-actions{white-space:normal}.topbar{flex-wrap:wrap;height:auto;min-height:56px;padding:8px 12px;row-gap:8px}.topbar nav{order:3;flex:1 0 100%;flex-wrap:wrap}.layout{flex-direction:column;min-height:0}.rail{display:flex;flex-basis:auto;border-right:0;border-bottom:1px solid var(--color-border);overflow-x:auto;padding:4px 8px;gap:4px}.rail a{flex:none;gap:6px;padding:8px 10px}.rail .label{display:inline;white-space:nowrap}.rail a[aria-current=page]{box-shadow:inset 0 -3px 0 var(--color-accent)}main{padding:16px}.topbar{gap:8px;padding:0 12px}.topbar .search span:not(.icon),.topbar .search kbd,.brand .mono,.brand span{display:none}.topbar .search{flex:0 0 auto}.tiles{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.tile{padding:12px}.tile strong{font-size:20px}h1{font-size:26px;line-height:34px}.row,.project header{flex-direction:column;align-items:flex-start}.app-grid{grid-template-columns:minmax(0,1fr);row-gap:4px}.app-grid-head{display:none}.app-card,.list-row{padding:14px}.platforms a{min-height:44px}}`
 
 /** The People page and Your account: compact rows edited in place, pills, and modals. */
 const people = `table.people [hidden],dialog.modal [hidden]{display:none}table.people td{vertical-align:middle;padding:6px 10px}table.people td.person-emails{vertical-align:top;min-width:15rem}ul.email-lines .email{white-space:nowrap}table.people select{min-height:32px;padding:4px 8px;width:auto}
