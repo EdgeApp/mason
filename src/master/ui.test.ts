@@ -376,13 +376,18 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.match(third.text, /Branches and triggers/)
     assert.match(third.text, /The project has a webhook secret/)
+    // Done opens the new project on Projects & apps, at /projects.
+    assert.match(
+      third.text,
+      /<a class="button" href="\/projects\?project=wizard">Done<\/a>/,
+    )
     assert.match(
       third.text,
       /<span class="mono">release<\/span> <small class="mono">\[\{&quot;request&quot;:true\}\]<\/small>/,
     )
     // The discovery run never shows among the project's runs.
     assert.doesNotMatch(
-      (await request(c.master, 'GET', '/', manager)).text,
+      (await request(c.master, 'GET', '/projects', manager)).text,
       /@discover/,
     )
     assert.equal(slugFor('git@github.com:Owner/My_App.git'), 'my-app')
@@ -962,6 +967,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
   it('U18.8 every master page shows each role only the controls it may use', async () => {
     const pages = [
       '/',
+      '/projects',
       '/nodes',
       '/settings',
       '/people',
@@ -970,11 +976,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       `/runs/${run}`,
     ]
     const expected: Record<string, number[]> = {
-      admin: [200, 200, 200, 200, 200, 200, 200],
-      manager: [200, 200, 200, 200, 200, 200, 200],
-      developer: [200, 403, 403, 403, 403, 403, 200],
-      // A tester's home sends them to Install apps.
-      tester: [303, 403, 403, 403, 403, 403, 403],
+      admin: [200, 200, 200, 200, 200, 200, 200, 200],
+      manager: [200, 200, 200, 200, 200, 200, 200, 200],
+      developer: [200, 200, 403, 403, 403, 403, 403, 200],
+      // Everyone's home is Install apps; to a tester projects do not exist.
+      tester: [200, 404, 403, 403, 403, 403, 403, 403],
     }
     for (const [role, statuses] of Object.entries(expected)) {
       const session = signIn(role)
@@ -983,14 +989,16 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
         got.push((await request(c.master, 'GET', route, session)).status)
       assert.deepEqual(got, statuses, role)
     }
-    const developer = (await request(c.master, 'GET', '/', signIn('developer')))
-      .text
+    const developer = (
+      await request(c.master, 'GET', '/projects', signIn('developer'))
+    ).text
     assert.doesNotMatch(
       developer,
       /href="\/(nodes|settings|people|groups|backups)"|Add project/,
     )
-    const manager = (await request(c.master, 'GET', '/', signIn('manager')))
-      .text
+    const manager = (
+      await request(c.master, 'GET', '/projects', signIn('manager'))
+    ).text
     assert.match(manager, /href="\/nodes"/)
     assert.match(manager, /Add project/)
     // Only administrators change people; the form asks for an email, which
@@ -1056,10 +1064,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       developerProject,
       /data-path="\/api\/v2\/projects\/wizard\/secrets"/,
     )
+    // To a tester projects do not exist.
     assert.equal(
       (await request(c.master, 'GET', '/projects/wizard', signIn('tester')))
         .status,
-      403,
+      404,
     )
     // The Secrets tab: names and configs for developers, controls and the audit for managers.
     const managerSecrets = await request(
@@ -1097,7 +1106,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
           signIn('tester'),
         )
       ).status,
-      403,
+      404,
     )
     assert.equal(
       (await request(c.master, 'GET', '/projects/nope/secrets', manager2))
@@ -1204,7 +1213,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
           signIn('tester'),
         )
       ).status,
-      403,
+      404,
     )
     assert.equal(
       (await request(c.master, 'GET', '/projects/nope/runs', manager2)).status,
@@ -1227,7 +1236,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     // A tester's home is Install apps (catalogRelay.test.ts follows it).
     assert.equal(
       (await request(c.master, 'GET', '/', signIn('tester'))).status,
-      303,
+      200,
     )
   })
 

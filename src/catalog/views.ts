@@ -98,6 +98,19 @@ export interface CatalogPage {
   refresh?: number
 }
 
+/**
+ * A catalog page's content in a node's shell: its platform switch, which
+ * the platform links swap without a reload, then the page.
+ */
+export function catalogBody(page: CatalogPage): string {
+  return `${page.platforms == null ? '' : `<nav class="catalog-nav" data-catalog-platforms aria-label="Build platform">${page.platforms}</nav>`}${page.body}`
+}
+
+/** The side-menu entry a catalog path belongs to: Devices, else Install apps. */
+export function catalogActive(path: string): string {
+  return path.startsWith('/devices') ? 'devices' : 'catalog'
+}
+
 /** The platform switch: only the platforms the apps shown have a channel for. */
 export function platformPill(
   path: string,
@@ -351,7 +364,7 @@ const deviceLabels: Record<string, string> = {
   error: 'Preparation needs attention',
 }
 
-/** Register Device: how to register, the person's devices, and every device for an administrator. */
+/** Devices: how to register, the person's devices, and every device for an administrator. */
 export function devicesView(
   data: DevicesData,
   viewer: CatalogViewer,
@@ -374,7 +387,7 @@ export function devicesView(
     )
     .join('')
   return {
-    title: 'Register Device',
+    title: 'Devices',
     body:
       content +
       (rows ? '<h2>Your devices</h2>' + rows : '') +

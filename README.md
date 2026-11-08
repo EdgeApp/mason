@@ -184,6 +184,24 @@ An administrator can instead set a person's username and password on the
 People page (**Set password**, or the Add form), and tell them; setting it
 ends the person's sessions.
 
+## The pages
+
+Every signed-in page on the master and the host has the same side menu,
+showing each person what their role reaches: **Install apps** and
+**Devices** for everyone; **Projects & apps** (`/projects`) and
+**Artifacts** for developers and up; and, on the master only, **Nodes**,
+**Cloud**, **People**, **Groups**, **Settings** and **Backups** for managers
+and administrators. Both nodes open on Install apps, developers too; to a
+tester `/projects` and everything under it do not exist (404). A master
+with no host yet opens on Projects & apps instead, and its Install apps and
+Devices say that installs come from a host. On a phone the side menu is a
+bar above the page. The top-right account icon opens **Your account**,
+which holds Sign out.
+
+The standalone distribution server (below) draws its pages the same way,
+with Install apps and Devices, **People** for its administrators, and a
+Your account page with Sign out; it has no search or notifications.
+
 ## Projects
 
 A project is a GitHub repository with a Masonfile, the app IDs it owns, its
@@ -491,11 +509,11 @@ stopping at 4 MiB.
 
 ### Registering iOS test devices
 
-The green **Register Device** button beside **Sign out** opens a temporary
-Profile Service download. On the master it is above Install apps; a
-registration started there returns to the master once the device is
-registered, and needs the master's public address (its `master` setting):
-without one, Register Device and iOS installs link to the host. In Safari on an iPhone or iPad, download the profile,
+**Devices** in the side menu offers a temporary Profile Service download
+(**Install Registration Profile**). On the master a registration started
+there returns to the master once the device is registered, and needs the
+master's public address (its `master` setting): without one, Devices and
+iOS installs link to the host. In Safari on an iPhone or iPad, download the profile,
 then open Settings → Profile Downloaded → Install. The device sends a signed
 UDID/model/OS response to Mason. The registration is saved to the signed-in
 tester's account. Model names default to `iPhone13 of mark@example` and can be

@@ -236,9 +236,10 @@ describe('Master sign-in, setup, people and permissions', function () {
       ).status,
       201,
     )
-    // The home page needs the session; the session ends at sign-out.
+    // The pages need the session; the session ends at sign-out.
     assert.equal((await request(c.master, 'GET', '/')).status, 303)
-    const home = await request(c.master, 'GET', '/', { cookie })
+    assert.equal((await request(c.master, 'GET', '/projects')).status, 303)
+    const home = await request(c.master, 'GET', '/projects', { cookie })
     assert.equal(home.status, 200)
     assert.match(
       home.text,
@@ -466,6 +467,50 @@ describe('Master sign-in, setup, people and permissions', function () {
       const home = await request(node, 'GET', '/', { cookie })
       assert.equal(home.status, 200)
       assert.match(home.text, /This master is not backed up/)
+      // A master with no host yet opens Projects & apps for developers and up.
+      assert.match(home.text, /<h1>Projects &amp; apps<\/h1>/)
+      assert.match(home.text, /<a href="\/projects" aria-current="page"/)
+      // Testers, and everyone's Install apps and Devices, hear installs come from a host.
+      const someone = async (role: Role): Promise<string> => {
+        const person = await node.master!.people.create(localOperator, {
+          name: `A ${role}`,
+          emails: [`${role}@lone.example.test`],
+          role,
+        })
+        return `__Host-mason-master=${node.master!.auth.start(person.id, '127.0.0.1').token}`
+      }
+      const tester = await someone('tester')
+      const developer = await someone('developer')
+      const NOTICE = /No host is linked yet — installs come from a host/
+      for (const [who, route, active] of [
+        [tester, '/', 'apps'],
+        [tester, '/apps', 'apps'],
+        [tester, '/devices', 'devices'],
+        [developer, '/apps', 'apps'],
+        [developer, `/apps/1`, 'apps'],
+        [developer, '/devices', 'devices'],
+      ] as const) {
+        const reply = await request(node, 'GET', route, { cookie: who })
+        assert.equal(reply.status, 200, route)
+        assert.match(reply.text, NOTICE, route)
+        assert.match(
+          reply.text,
+          new RegExp(`<a href="/${active}" aria-current="page"`),
+          route,
+        )
+      }
+      const lone = await request(node, 'GET', '/', { cookie: developer })
+      assert.match(lone.text, /<h1>Projects &amp; apps<\/h1>/)
+      assert.equal(
+        (await request(node, 'GET', '/projects', { cookie: tester })).status,
+        404,
+      )
+      // Nothing can be installed without a host.
+      assert.equal(
+        (await request(node, 'POST', '/builds/1/install', { cookie: tester }))
+          .status,
+        503,
+      )
       const backups = await request(node, 'GET', '/backups', { cookie })
       assert.match(backups.text, /data-mason="backup"/)
       assert.equal(

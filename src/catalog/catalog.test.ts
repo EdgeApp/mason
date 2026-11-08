@@ -157,6 +157,17 @@ describe('Mason protected catalog and installation', () => {
     assert(!builds.includes('build 2'))
     assert(builds.includes('abcdef012345') && builds.includes('UTC'))
     assert(builds.includes(`href="${route}?platform=android"`))
+    // Each page is in the shell, with the side menu (Install apps current)
+    // and the platform switch in its own nav, which the switch swaps.
+    for (const html of [home, list, builds]) {
+      assert.match(html, /<body class="with-rail">/)
+      assert.match(html, /<a href="\/apps" aria-current="page"/)
+      assert.match(
+        html,
+        /<main><h1>[^<]+<\/h1><nav class="catalog-nav" data-catalog-platforms aria-label="Build platform"><div class="platforms"/,
+      )
+      assert.doesNotMatch(html, /Register Device<\/a>|action="\/auth\/logout"/)
+    }
     assert.match(
       await (await request(route + '?platform=windows')).text(),
       /No Windows builds/,
@@ -707,7 +718,10 @@ describe('Mason protected catalog and installation', () => {
       })
       if (os === 'ios') {
         assert.equal(response.status, 200)
-        assert.match(await response.text(), /itms-services:/)
+        const installer = await response.text()
+        assert.match(installer, /itms-services:/)
+        // The installer page keeps the side menu.
+        assert.match(installer, /<a href="\/apps" aria-current="page"/)
       } else {
         assert.equal(response.status, 303)
         const url = response.headers.get('location')!

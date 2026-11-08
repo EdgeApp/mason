@@ -334,10 +334,13 @@ describe('Device registration, account ownership and iOS compatibility', () => {
     )
     assert.equal(devices.list(user.account.id)[0]!.name, 'My iPhone')
     const html = await (await request('/devices')).text()
+    // Devices is the side menu's entry; Sign out is on Your account.
     assert.match(
       html,
-      /Register Device<\/a><form method="post" action="\/auth\/logout"/,
+      /<a href="\/devices" aria-current="page" title="Devices">/,
     )
+    assert.match(html, /<h1>Devices<\/h1>/)
+    assert.doesNotMatch(html, /action="\/auth\/logout"/)
     assert.equal((await request('/devices/qr')).status, 200)
   })
   it('verifies embedded ad hoc profiles and prevents installation on excluded devices', async () => {

@@ -125,6 +125,13 @@ describe('Install apps and Devices on the master, through the host', function ()
   const setOrigin = async (origin: string): Promise<void> => {
     await c.master.master!.settings.set(admin, 'master', { origin })
   }
+  /** The side menu's links on a page, in order; the current one starred. */
+  const rail = (html: string): string[] =>
+    [
+      ...(/<nav class="rail"[^>]*>(.*?)<\/nav>/.exec(html)?.[1] ?? '').matchAll(
+        /<a href="([^"]+)"( aria-current="page")?/g,
+      ),
+    ].map((match) => match[1]! + (match[2] == null ? '' : '*'))
   const cards = (html: string): string[] =>
     [...html.matchAll(/<a class="app-card" href="([^"]+)"/g)].map(
       (match) => match[1]!,
@@ -243,6 +250,13 @@ describe('Install apps and Devices on the master, through the host', function ()
           role: 'tester',
         })
       ).id
+    people.dev = (
+      await master.people.create(admin, {
+        name: 'Dev Developer',
+        emails: ['dev@example.test'],
+        role: 'developer',
+      })
+    ).id
     master.people.createGroup(admin, {
       name: 'Testers',
       apps: [apps[ALPHA]!],
@@ -299,7 +313,10 @@ describe('Install apps and Devices on the master, through the host', function ()
           .get(people.nora!) &&
         host
           .host!.cache.db.prepare('SELECT 1 FROM builds WHERE id=?')
-          .get(builds.beta!),
+          .get(builds.beta!) &&
+        host
+          .host!.cache.db.prepare('SELECT 1 FROM accounts WHERE id=?')
+          .get(people.dev!),
       10_000,
       'the builds, devices and group on the host',
     )
@@ -308,11 +325,15 @@ describe('Install apps and Devices on the master, through the host', function ()
     await c?.close()
   })
 
-  it('sends a tester from the master’s home to Install apps, which lists what the host lists for them', async () => {
+  it('opens Install apps at a tester’s home on the master, which lists what the host lists for them', async () => {
     const tess = onMaster('tess')
-    const home = await request(c.master, '/', { cookie: tess.cookie })
-    assert.equal(home.status, 303)
-    assert.equal(home.headers.get('location'), '/apps')
+    const home = await request(c.master, '/?platform=android', {
+      cookie: tess.cookie,
+    })
+    assert.equal(home.status, 200)
+    assert.deepEqual(cards(home.text), [
+      `/apps/${apps[ALPHA]}?platform=android`,
+    ])
     const signedOut = await request(c.master, '/apps')
     assert.equal(signedOut.status, 303)
     assert.equal(signedOut.headers.get('location'), '/sign-in')
@@ -327,12 +348,13 @@ describe('Install apps and Devices on the master, through the host', function ()
     assert.deepEqual(cards(page.text), [
       `/apps/${apps[ALPHA]}?platform=android`,
     ])
-    // In the master's shell, with the platform switch and Register Device.
+    // In the master's shell, with the platform switch; Devices is in the side menu.
     assert.match(page.text, /href="\/account" aria-label="Your account"/)
     assert.match(
       page.text,
-      /<nav class="catalog-nav"[^>]*><div class="platforms"[^>]*>.*iOS.*Android.*<\/div><a class="button register-device" href="\/devices">Register Device<\/a><\/nav>/,
+      /<nav class="catalog-nav" data-catalog-platforms aria-label="Build platform"><div class="platforms"[^>]*>.*iOS.*Android.*<\/div><\/nav>/,
     )
+    assert.doesNotMatch(page.text, /Register Device</)
     // The relay session the host keeps for it never signs a browser in.
     const relay = host
       .host!.cache.db.prepare(
@@ -340,6 +362,119 @@ describe('Install apps and Devices on the master, through the host', function ()
       )
       .get(people.tess!) as Json
     assert.equal(relay.relayed, 1)
+  })
+
+  it('M7 keeps the side menu for a tester on both nodes, with only Install apps and Devices; to her /projects does not exist', async () => {
+    const device = `; ${DEVICE_COOKIE}=${devices.tess}`
+    const branch = `/apps/${apps[ALPHA]}/branches/${branchKey('master')}?platform=ios`
+    for (const [node, who] of [
+      [c.master, onMaster('tess')],
+      [host, onHost('tess')],
+    ] as const) {
+      const name = node === host ? 'host' : 'master'
+      for (const [route, menu] of [
+        ['/', ['/apps*', '/devices']],
+        ['/apps', ['/apps*', '/devices']],
+        [`/apps/${apps[ALPHA]}`, ['/apps*', '/devices']],
+        [branch, ['/apps*', '/devices']],
+        ['/devices', ['/apps', '/devices*']],
+      ] as const) {
+        const reply = await request(node, route, {
+          cookie: who.cookie + device,
+        })
+        assert.equal(reply.status, 200, `${name} ${route}`)
+        assert.deepEqual(rail(reply.text), menu, `${name} ${route}`)
+        assert.match(
+          reply.text,
+          /href="\/account" aria-label="Your account"/,
+          `${name} ${route}`,
+        )
+        assert.match(
+          reply.text,
+          new RegExp(
+            `<div class="section">${node === host ? 'Host' : 'Master'}</div>`,
+          ),
+        )
+      }
+      // The iOS installer page, after Install.
+      const installed = await request(node, `/builds/${builds.ipa}/install`, {
+        cookie: who.cookie + device,
+        form: { csrf: who.csrf },
+      })
+      assert.equal(installed.status, 200, `${name}: ${installed.text}`)
+      assert.match(installed.text, /<h1>Install app<\/h1>/)
+      assert.deepEqual(rail(installed.text), ['/apps*', '/devices'])
+      for (const route of [
+        '/projects',
+        '/projects/relay',
+        '/projects/relay/runs',
+        '/projects/relay/masonfile',
+      ]) {
+        const reply = await request(node, route, { cookie: who.cookie })
+        assert.equal(reply.status, 404, `${name} ${route}`)
+        assert.deepEqual(rail(reply.text), ['/apps*', '/devices'])
+      }
+    }
+    assert.equal(
+      (
+        await request(c.master, '/projects/new', {
+          cookie: onMaster('tess').cookie,
+        })
+      ).status,
+      404,
+    )
+  })
+
+  it('M7 lands developers on Projects & apps on the master and on Install apps on the host', async () => {
+    for (const [node, who] of [
+      [c.master, onMaster('dev')],
+      [host, onHost('dev')],
+    ] as const) {
+      const name = node === host ? 'host' : 'master'
+      const home = await request(node, '/', { cookie: who.cookie })
+      assert.equal(home.status, 200, name)
+      if (node === host) {
+        assert.match(home.text, /<h1>Apps<\/h1>/)
+        assert.deepEqual(
+          rail(home.text),
+          ['/apps*', '/projects', '/artifacts', '/devices'],
+          name,
+        )
+      } else {
+        assert.match(home.text, /<h1>Projects &amp; apps<\/h1>/)
+        assert.deepEqual(
+          rail(home.text),
+          ['/apps', '/projects*', '/artifacts', '/devices'],
+          name,
+        )
+      }
+      const projects = await request(node, '/projects?platform=android', {
+        cookie: who.cookie,
+      })
+      assert.equal(projects.status, 200, name)
+      assert.match(projects.text, /<h1>Projects &amp; apps<\/h1>/)
+      assert.deepEqual(rail(projects.text), [
+        '/apps',
+        '/projects*',
+        '/artifacts',
+        '/devices',
+      ])
+      // The filter chips stay on Projects & apps.
+      assert.match(projects.text, /href="\/projects\?platform=ios"/)
+      const project = await request(node, '/projects/relay', {
+        cookie: who.cookie,
+      })
+      assert.equal(project.status, 200, name)
+    }
+    // Signed out, /projects asks for a sign-in on both nodes.
+    assert.equal(
+      (await request(c.master, '/projects')).headers.get('location'),
+      '/sign-in',
+    )
+    assert.match(
+      (await request(host, '/projects')).headers.get('location')!,
+      /^\/auth\/login\?return=%2Fprojects/,
+    )
   })
 
   it('answers 404 for an app the person may not see, on the master as on the host', async () => {
@@ -778,7 +913,7 @@ describe('Install apps and Devices on the master, through the host', function ()
     assert.equal(qr.headers.get('content-type'), 'image/svg+xml; charset=utf-8')
   })
 
-  it('without a public master address, links iOS installs and Register Device to the host', async () => {
+  it('without a public master address, links iOS installs and registration to the host', async () => {
     await setOrigin('')
     try {
       const tess = onMaster('tess')
@@ -799,12 +934,6 @@ describe('Install apps and Devices on the master, through the host', function ()
         /go through the host until the master has a public address/,
       )
       assert.doesNotMatch(page.text, /itms-services/)
-      assert.match(
-        page.text,
-        new RegExp(
-          `<a class="button register-device" href="${url(host)}/devices">Register Device</a>`,
-        ),
-      )
       // An Android build still downloads from the master.
       const android = await request(
         c.master,

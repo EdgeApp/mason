@@ -116,7 +116,6 @@ function flowPage(
       title,
       body: `<h1>${escape(title)}</h1>${body}`,
       head,
-      phone: true,
     }),
   )
 }

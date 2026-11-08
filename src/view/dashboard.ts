@@ -392,7 +392,7 @@ function query(filter: DashboardFilter, change: DashboardFilter): string {
   if (merged.project != null) params.set('project', merged.project)
   if (merged.platform != null) params.set('platform', merged.platform)
   const text = params.toString()
-  return text === '' ? '/' : `/?${text}`
+  return text === '' ? '/projects' : `/projects?${text}`
 }
 
 /** A run's page. */
