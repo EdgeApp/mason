@@ -208,6 +208,45 @@ export function runsTable(
     .join('')}</tbody></table>`
 }
 
+/**
+ * Whether the run's own workflow (`workflow`, its `jobs.workflow`) has a
+ * stage, in `stages` or `post`, whose `publishes` holds the app ID bound to
+ * each `?` (bound twice): `graph` is the run's recorded graph as JSON.
+ */
+const publishesApp = (graph: string, workflow: string): string =>
+  `(${['stages', 'post']
+    .map(
+      (part) =>
+        `EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(${graph}) THEN ${graph} END,'$.workflows') w, json_each(w.value,'$.${part}') s, json_each(s.value,'$.publishes') pub WHERE json_extract(w.value,'$.name')=${workflow} AND pub.value=?)`,
+    )
+    .join(' OR ')})`
+
+/**
+ * The condition on `jobs j` that its run publishes an app ID, for the
+ * database at hand: the master keeps each graph once in `graphs`, named by
+ * `jobs.graph_key`; the host's copy keeps it on the run, `jobs.graph`.
+ */
+function publishing(
+  db: DatabaseSync,
+  project: string,
+  app: string,
+): { where: string; args: string[] } {
+  const keyed =
+    db
+      .prepare("SELECT 1 FROM pragma_table_info('jobs') WHERE name='graph_key'")
+      .get() != null
+  // On the master each of the project's graphs is read once, not once per run.
+  return keyed
+    ? {
+        where: ` AND j.graph_key IN (SELECT g.key FROM graphs g WHERE g.project_id=(SELECT id FROM projects WHERE slug=?) AND ${publishesApp('g.graph', 'g.workflow')})`,
+        args: [project, app, app],
+      }
+    : {
+        where: ` AND ${publishesApp('j.graph', 'j.workflow')}`,
+        args: [app, app],
+      }
+}
+
 /** A branch in the Runs and builds tab's list; `pinned` ones are those its push trigger builds. */
 export interface BranchItem {
   branch: string
@@ -234,7 +273,8 @@ export interface ProjectRunRow {
  * for the branches with runs it matches; then every other branch with runs,
  * most recently run first. The runs are the latest 50 of one branch or all,
  * each with its published version and the app build number it reserved,
- * else its published ones.
+ * else its published ones. With `app`, only the runs whose workflow
+ * publishes that app ID count, and only the branches that have one.
  */
 export function projectRunsData(
   source: ArtifactsSource & {
@@ -242,15 +282,19 @@ export function projectRunsData(
     reserved?: (run: string) => string | undefined
   },
   project: string,
-  options: { branch?: string; pinned: string[] },
+  options: { branch?: string; pinned: string[]; app?: string },
 ): { branches: BranchItem[]; runs: ProjectRunRow[] } {
   const { db } = source
+  const app =
+    options.app == null ? undefined : publishing(db, project, options.app)
+  const filter = app?.where ?? ''
+  const appArgs = app?.args ?? []
   const latest = (
     db
       .prepare(
-        "SELECT j.branch,MAX(j.created) AS at FROM jobs j JOIN projects p ON p.id=j.project_id WHERE p.slug=? AND j.workflow NOT LIKE '@%' GROUP BY j.branch ORDER BY at DESC,j.branch LIMIT 200",
+        `SELECT j.branch,MAX(j.created) AS at FROM jobs j JOIN projects p ON p.id=j.project_id WHERE p.slug=? AND j.workflow NOT LIKE '@%'${filter} GROUP BY j.branch ORDER BY at DESC,j.branch LIMIT 200`,
       )
-      .all(project) as Array<{ branch: string; at: number }>
+      .all(project, ...appArgs) as Array<{ branch: string; at: number }>
   ).map((row) => ({ branch: row.branch, at: Number(row.at) }))
   const branches: BranchItem[] = []
   const add = (branch: string, pinned: boolean, at?: number): void => {
@@ -258,21 +302,24 @@ export function projectRunsData(
     branches.push({ branch, pinned, ...(at == null ? {} : { at }) })
   }
   for (const pattern of options.pinned)
-    if (!isGlob(pattern))
-      add(pattern, true, latest.find((entry) => entry.branch === pattern)?.at)
-    else
+    if (!isGlob(pattern)) {
+      const at = latest.find((entry) => entry.branch === pattern)?.at
+      // An app ID's page lists only the branches that ran a workflow publishing it.
+      if (at != null || options.app == null) add(pattern, true, at)
+    } else
       for (const entry of latest)
         if (matches(pattern, entry.branch)) add(entry.branch, true, entry.at)
   for (const entry of latest) add(entry.branch, false, entry.at)
   const runs = (
     db
       .prepare(
-        `${runSelect} WHERE p.slug=? AND j.workflow NOT LIKE '@%' AND (? IS NULL OR j.branch=?) ORDER BY j.created DESC LIMIT 50`,
+        `${runSelect} WHERE p.slug=? AND j.workflow NOT LIKE '@%' AND (? IS NULL OR j.branch=?)${filter} ORDER BY j.created DESC LIMIT 50`,
       )
       .all(
         project,
         options.branch ?? null,
         options.branch ?? null,
+        ...appArgs,
       ) as unknown as RunRow[]
   ).map((run) => {
     const builds = runBuilds(source, run)

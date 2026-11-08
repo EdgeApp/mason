@@ -1707,6 +1707,32 @@ iOS rows and device registration link to the host's own pages instead, saying
 installs on iPhone and iPad go through the host until the master has a
 public address; other platforms still download from the master.
 
+### Project and app ID pages
+
+A project's pages are served on both nodes to developers and up, signed in
+with that node's session; the host draws them from the copy the master
+sends it, read only. To a tester they answer 404.
+
+| Method and path | What it shows |
+| --- | --- |
+| `GET /projects` | Projects & apps, with `?platform=` and `?project=`. |
+| `GET /projects/:slug` | The project's Overview: app IDs, branch rules, build numbers. |
+| `GET /projects/:slug/runs` | Runs and builds: its branches and the latest runs, `?branch=` for one. |
+| `GET /projects/:slug/masonfile` | The Masonfile at a run's commit, `?commit=`. |
+| `GET /projects/:slug/secrets` | Secrets (the master only). |
+| `GET /projects/:slug/apps/:appId` | An app ID's Runs and builds, `?branch=` for one branch. |
+| `GET /projects/:slug/apps/:appId/build-numbers` | An app ID's Build numbers. |
+
+An app ID's Runs and builds lists the runs whose own workflow has a stage,
+in `stages` or `post`, whose `publishes` holds the app ID, read from the
+graph the run recorded; its branch list holds only the branches with such
+a run, those the push trigger builds first. Its Build numbers shows the
+sequence the app ID takes its numbers from — one whose `apps` lists it,
+else its own key, else the default scheme (`N`, across branches) — and on
+the master, to a holder of `buildNumbers.seed`, a form preset to that
+sequence that posts `POST /api/v2/build-numbers/seed`. An app ID that is not
+the project's, or that is disabled, answers 404 under the project.
+
 ### The host's GitHub webhook
 
 `POST /api/webhooks/github/<project>` is served by the host, not the

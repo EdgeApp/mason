@@ -972,4 +972,56 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       `bytes */${build.size}`,
     )
   })
+
+  it('E8 an app ID’s page lists only its runs, and a number set on the master shows read-only on the host', async () => {
+    const page = `/projects/fixture/apps/${BETA}`
+    // Above every number alpha's shared sequence issued today: YYMMDD then 90.
+    const last = `${new Date().toISOString().slice(2, 10).replaceAll('-', '')}90`
+    const b = await browser('mason-e8-paul', c.master, '1280x860')
+    try {
+      await masterSignIn(b, 'paul', PASSWORDS.paul!)
+      await b.visible('^Backups$|^Projects & apps$|^Install apps$')
+      await b.open(page)
+      await b.visible(`^${BETA.replaceAll('.', '\\.')}$`)
+      await b.visible('^Runs and builds$')
+      // Only build-beta's runs, one per branch it ran on.
+      await b.script(
+        `const rows = [...document.querySelectorAll('table.runs tbody tr')].map((row) => row.querySelector('small').textContent); if (rows.length !== 2 || rows.some((text) => !text.includes('build-beta'))) throw new Error('The runs are ' + rows.join(' | '))`,
+      )
+      await b.script(
+        `const ids = [...document.querySelectorAll('table.runs tbody tr')].map((row) => row.dataset.runId).sort().join(); if (ids !== ${JSON.stringify([runs['build-beta@master'].id, runs['build-beta@develop'].id].sort().join())}) throw new Error('The runs are ' + ids)`,
+      )
+      await b.shot('app-id-runs.png')
+      await b.tap(`nav.tabs a[href="${page}/build-numbers"]`)
+      await b.visible('^Shared with: com\\.example\\.alpha$')
+      await b.type('#seed-last', last)
+      await b.shot('app-id-build-numbers.png')
+      await b.tap('form[data-path="/api/v2/build-numbers/seed"] button')
+      // The form reloads the page with the new number.
+      await b.visible(`^${last}$`)
+    } finally {
+      await b.close()
+    }
+    await c.until(
+      () =>
+        (
+          host
+            .host!.cache.db.prepare(
+              "SELECT details FROM projects WHERE slug='fixture'",
+            )
+            .get() as { details: string }
+        ).details.includes(`"${last}"`),
+      10_000,
+      'the new number on the host',
+    )
+    const h = await browser('mason-e8-dev', host, '1280x860')
+    try {
+      await hostSignIn(h, 'dev', PASSWORDS.dev!, `${page}/build-numbers`)
+      await h.visible('^Shared with: com\\.example\\.alpha$')
+      await h.visible(`^${last}$`)
+      await h.gone('Set where it stands')
+    } finally {
+      await h.close()
+    }
+  })
 })

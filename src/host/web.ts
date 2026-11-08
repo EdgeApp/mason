@@ -26,6 +26,8 @@ import {
 } from '../node/webApp.js'
 import {
   accountView,
+  appBuildNumbersView,
+  appMissingView,
   masonfileView,
   projectRunsView,
   projectView,
@@ -251,6 +253,24 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       details,
     }
   }
+  /** What a project's or an app ID's Runs and builds reads on the host. */
+  const runsSource = (
+    found: NonNullable<ReturnType<typeof hostViewer>>,
+    now: number,
+  ): Parameters<typeof projectRunsData>[0] => ({
+    db: host.cache.db,
+    viewer: found.viewer,
+    now,
+    appVisible: visible(found.accountId),
+    artifactBase: '',
+    // The app build number each run reserved, which the master replicates.
+    reserved: (run): string | undefined =>
+      (
+        host.cache.db
+          .prepare('SELECT build_number FROM jobs WHERE id=?')
+          .get(run) as { build_number: string | null } | undefined
+      )?.build_number ?? undefined,
+  })
   router.get('/projects/:slug', (req, res) => {
     const page = projectPage(req, res)
     if (page == null) return
@@ -278,19 +298,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
         : undefined
     const now = host.now()
     const { branches, runs } = projectRunsData(
-      {
-        db: host.cache.db,
-        viewer: page.found.viewer,
-        now,
-        appVisible: visible(page.found.accountId),
-        artifactBase: '',
-        reserved: (run): string | undefined =>
-          (
-            host.cache.db
-              .prepare('SELECT build_number FROM jobs WHERE id=?')
-              .get(run) as { build_number: string | null } | undefined
-          )?.build_number ?? undefined,
-      },
+      runsSource(page.found, now),
       page.project.slug,
       { ...(branch == null ? {} : { branch }), pinned: page.details.pinned },
     )
@@ -310,6 +318,105 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
         },
         now,
       ),
+      'dashboard',
+    )
+  })
+  /**
+   * An app ID page's project and app ID: the project's own, enabled app ID
+   * that the viewer may see; otherwise 404 under the project.
+   */
+  const appPage = (
+    req: express.Request,
+    res: express.Response,
+  ):
+    | (NonNullable<ReturnType<typeof projectPage>> & {
+        app: { id: number; bundleId: string; name: string; platforms: string[] }
+      })
+    | undefined => {
+    const page = projectPage(req, res)
+    if (page == null) return undefined
+    const row = host.cache.db
+      .prepare(
+        'SELECT a.id,a.slug,a.name FROM apps a JOIN project_apps pa ON pa.app_id=a.id WHERE pa.project_id=? AND a.slug=? AND a.enabled=1',
+      )
+      .get(page.project.id, String(req.params.appId)) as
+      | { id: number; slug: string; name: string }
+      | undefined
+    if (row == null || !visible(page.found.accountId)(row.id)) {
+      render(
+        res.status(404),
+        page.found.viewer,
+        'App ID unavailable',
+        appMissingView(page.found.viewer, page.project.slug, page.project.name),
+        'dashboard',
+      )
+      return undefined
+    }
+    return {
+      ...page,
+      app: {
+        id: row.id,
+        bundleId: row.slug,
+        name: row.name,
+        platforms:
+          page.details.apps.find((entry) => entry.bundleId === row.slug)
+            ?.platforms ?? [],
+      },
+    }
+  }
+  router.get('/projects/:slug/apps/:appId', (req, res) => {
+    const page = appPage(req, res)
+    if (page == null) return
+    const branch =
+      typeof req.query.branch === 'string' && req.query.branch !== ''
+        ? req.query.branch
+        : undefined
+    const now = host.now()
+    const { branches, runs } = projectRunsData(
+      runsSource(page.found, now),
+      page.project.slug,
+      {
+        ...(branch == null ? {} : { branch }),
+        pinned: page.details.pinned,
+        app: page.app.bundleId,
+      },
+    )
+    render(
+      res,
+      page.found.viewer,
+      `${page.app.bundleId} · Runs and builds`,
+      projectRunsView(
+        {
+          viewer: page.found.viewer,
+          slug: page.project.slug,
+          name: page.project.name,
+          ...(branch == null ? {} : { branch }),
+          branches,
+          runs,
+          app: page.app,
+        },
+        now,
+      ),
+      'dashboard',
+    )
+  })
+  router.get('/projects/:slug/apps/:appId/build-numbers', (req, res) => {
+    const page = appPage(req, res)
+    if (page == null) return
+    render(
+      res,
+      page.found.viewer,
+      `${page.app.bundleId} · Build numbers`,
+      appBuildNumbersView({
+        viewer: page.found.viewer,
+        slug: page.project.slug,
+        name: page.project.name,
+        app: page.app,
+        projectApps: page.details.apps.map((entry) => entry.bundleId),
+        buildNumbers: page.details.buildNumbers,
+        // The host keeps a read-only copy: sequences are set on the master.
+        canSeed: false,
+      }),
       'dashboard',
     )
   })

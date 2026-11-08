@@ -171,3 +171,38 @@ export function runsCrumbs(
         ]),
   ]
 }
+
+/** Where an app ID's pages are: `/projects/:slug/apps/:appId`, its Runs and builds. */
+export function appPath(slug: string, appId: string): string {
+  return `/projects/${encodeURIComponent(slug)}/apps/${encodeURIComponent(appId)}`
+}
+
+/**
+ * An app ID's pages, one level below its project: the app ID, then its tab
+ * (Runs and builds, which is the app ID's own page, or Build numbers), then
+ * the branch picked on Runs and builds.
+ */
+export function appCrumbs(
+  slug: string,
+  name: string,
+  appId: string,
+  tab: 'runs' | 'build-numbers',
+  branch?: string,
+): Crumb[] {
+  const base = appPath(slug, appId)
+  return [
+    ...projectCrumbs(slug, name),
+    { label: appId, href: base },
+    tab === 'runs'
+      ? { label: 'Runs and builds', href: base }
+      : { label: 'Build numbers', href: `${base}/build-numbers` },
+    ...(tab === 'runs' && branch != null
+      ? [
+          {
+            label: branch,
+            href: `${base}?branch=${encodeURIComponent(branch)}`,
+          },
+        ]
+      : []),
+  ]
+}

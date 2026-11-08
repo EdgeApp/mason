@@ -1,7 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import type { SearchResult } from '../browser/shell.js'
 import { runHref } from './dashboard.js'
-import { runName } from './html.js'
+import { appPath, runName } from './html.js'
 import { atLeast, type Viewer } from './shell.js'
 
 export interface SearchScope {
@@ -18,8 +18,9 @@ const like = (text: string): string => text.replace(/[\\%_]/g, (c) => '\\' + c)
 
 /**
  * ⌘K search: projects, app IDs, runs by number, commits by SHA prefix and
- * branches, within what the viewer may see. Testers find only the app IDs
- * they may install, each opening its Install apps page; projects, runs,
+ * branches, within what the viewer may see. An app ID opens its page in its
+ * project for developers and up, on either node; testers find only the app
+ * IDs they may install, each opening its Install apps page. Projects, runs,
  * commits and branches are for developers and up.
  */
 export function search(scope: SearchScope, text: string): SearchResult[] {
@@ -59,10 +60,7 @@ export function search(scope: SearchScope, text: string): SearchResult[] {
       kind: 'app',
       label: app.slug,
       detail: `${app.name} · ${app.project}`,
-      href:
-        viewer.node === 'host' || !developer
-          ? `/apps/${app.id}`
-          : `/projects/${encodeURIComponent(app.project)}`,
+      href: developer ? appPath(app.project, app.slug) : `/apps/${app.id}`,
     })
   if (!developer) return out.slice(0, LIMIT)
   const number = /^(?:#|run\s*)?(\d{1,9})$/i.exec(query)?.[1]

@@ -9,6 +9,8 @@ import {
 } from '../node/webApp.js'
 import { escape } from '../view/html.js'
 import {
+  appBuildNumbersView,
+  appMissingView,
   groupsView,
   groupView,
   head,
@@ -1160,6 +1162,120 @@ export function masterPages(
         },
         now,
       ),
+      current,
+      200,
+      'dashboard',
+    )
+  })
+  /**
+   * The app ID an app ID page is about, with its project: the project's own
+   * app ID, enabled, that the viewer may see; otherwise the page answers 404
+   * under the project, and this returns nothing.
+   */
+  const appFor = (
+    req: express.Request,
+    res: express.Response,
+    title: string,
+  ):
+    | (NonNullable<ReturnType<typeof projectFor>> & {
+        details: ReturnType<typeof projectDetails>
+        app: { id: number; bundleId: string; name: string; platforms: string[] }
+      })
+    | undefined => {
+    const found = projectFor(req, res, title)
+    if (found == null) return undefined
+    const { current, project } = found
+    const bundleId = String(req.params.appId)
+    const app = project.apps.find((entry) => entry.bundleId === bundleId)
+    const enabled =
+      app != null &&
+      master.database.db
+        .prepare('SELECT 1 FROM apps WHERE id=? AND enabled=1')
+        .get(app.id) != null
+    if (app == null || !enabled || !appVisible(master, current)(app.id)) {
+      send(
+        res,
+        title,
+        appMissingView(viewerOf(current), project.slug, project.name),
+        current,
+        404,
+        'dashboard',
+      )
+      return undefined
+    }
+    return {
+      ...found,
+      details: projectDetails(project, master.buildNumbers, master.pushes),
+      app: {
+        id: app.id,
+        bundleId: app.bundleId,
+        name: app.name,
+        platforms: app.platforms,
+      },
+    }
+  }
+  app.get('/projects/:slug/apps/:appId', (req, res) => {
+    const found = appFor(req, res, 'Runs and builds')
+    if (found == null) return
+    const { current, project, details } = found
+    const branch =
+      typeof req.query.branch === 'string' && req.query.branch !== ''
+        ? req.query.branch
+        : undefined
+    const now = master.database.now()
+    const { branches, runs } = projectRunsData(
+      {
+        db: master.database.db,
+        viewer: viewerOf(current),
+        now,
+        appVisible: appVisible(master, current),
+        artifactBase: '',
+        reserved: (run): string | undefined =>
+          reservedBuildNumber(master.database.db, run),
+      },
+      project.slug,
+      {
+        ...(branch == null ? {} : { branch }),
+        pinned: details.pinned,
+        app: found.app.bundleId,
+      },
+    )
+    send(
+      res,
+      `${found.app.bundleId} · Runs and builds`,
+      projectRunsView(
+        {
+          viewer: viewerOf(current),
+          slug: project.slug,
+          name: project.name,
+          ...(branch == null ? {} : { branch }),
+          branches,
+          runs,
+          app: found.app,
+        },
+        now,
+      ),
+      current,
+      200,
+      'dashboard',
+    )
+  })
+  app.get('/projects/:slug/apps/:appId/build-numbers', (req, res) => {
+    const found = appFor(req, res, 'Build numbers')
+    if (found == null) return
+    const { current, actor, project, details } = found
+    send(
+      res,
+      `${found.app.bundleId} · Build numbers`,
+      appBuildNumbersView({
+        viewer: viewerOf(current),
+        slug: project.slug,
+        name: project.name,
+        app: found.app,
+        projectApps: details.apps.map((entry) => entry.bundleId),
+        buildNumbers: details.buildNumbers,
+        canSeed: can(actor, 'buildNumbers.seed'),
+      }),
       current,
       200,
       'dashboard',
