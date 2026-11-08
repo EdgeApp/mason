@@ -273,7 +273,11 @@ export class HostRuntime {
           this.apply(sync, true)
           this.synced = link
           await this.outbox.flush(link)
+          // A link that arrived while a flush ran still needs its own sync,
+          // before the webhooks that waited go out over it.
+          if (this.replaced(link)) continue
           await this.webhooks.flush()
+          if (this.replaced(link)) continue
           return
         } catch (error) {
           if (this.stopped) return

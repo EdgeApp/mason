@@ -272,4 +272,100 @@ describe('Host opening sync', () => {
       await host.stop()
     }
   })
+
+  it('syncs a link that replaces the one whose flush is running', async () => {
+    let release: ((error: Error) => void) | undefined
+    const first = {
+      closed: false,
+      request: async (method: string): Promise<unknown> => {
+        if (method === 'host.sync')
+          return { kind: 'changes', revision: 3, changes: [] }
+        return await new Promise((_resolve, reject) => {
+          release = reject
+        })
+      },
+    }
+    const asked: string[] = []
+    const second = {
+      closed: false,
+      request: async (method: string): Promise<unknown> => {
+        asked.push(method)
+        if (method === 'host.sync')
+          return { kind: 'changes', revision: 7, changes: [] }
+        return { receipt: 'r1' }
+      },
+    }
+    let current = first as unknown as Link
+    const host = new HostRuntime({
+      dir: root(),
+      link: (): Link => current,
+      syncRetryMs: (): number => 60_000,
+    })
+    try {
+      host.outbox.enqueue('device', { udid: 'u1' })
+      const pending = host.connected()
+      await until(() => release != null, 'the outbox was not flushed')
+      current = second as unknown as Link
+      first.closed = true
+      const again = host.connected()
+      release!(new LinkError('Link closed', 'closed'))
+      await Promise.all([pending, again])
+      assert.deepEqual(asked, ['host.sync', 'outbox.deliver'])
+      assert.equal(host.online(), true)
+      assert.equal(host.cache.revision(), 7)
+      assert.deepEqual(host.outbox.pending(), [])
+    } finally {
+      await host.stop()
+    }
+  })
+
+  it('syncs a link that replaces the one forwarding webhooks', async () => {
+    let release: ((error: Error) => void) | undefined
+    const first = {
+      closed: false,
+      request: async (method: string): Promise<unknown> => {
+        if (method === 'host.sync')
+          return { kind: 'changes', revision: 3, changes: [] }
+        return await new Promise((_resolve, reject) => {
+          release = reject
+        })
+      },
+    }
+    const asked: string[] = []
+    const second = {
+      closed: false,
+      request: async (method: string): Promise<unknown> => {
+        asked.push(method)
+        if (method === 'host.sync')
+          return { kind: 'changes', revision: 7, changes: [] }
+        return { status: 'accepted' }
+      },
+    }
+    let current = first as unknown as Link
+    const host = new HostRuntime({
+      dir: root(),
+      link: (): Link => current,
+      syncRetryMs: (): number => 60_000,
+    })
+    try {
+      host.cache.db
+        .prepare(
+          'INSERT INTO host_webhooks(project,branch,event,signature,body,received_at) VALUES(?,?,?,?,?,?)',
+        )
+        .run('app', 'master', 'push', 'sha256=0', Buffer.from('{}'), 1)
+      const pending = host.connected()
+      await until(() => release != null, 'the webhooks were not forwarded')
+      current = second as unknown as Link
+      first.closed = true
+      const again = host.connected()
+      release!(new LinkError('Link closed', 'closed'))
+      await Promise.all([pending, again])
+      assert.deepEqual(asked, ['host.sync', 'webhook.github'])
+      assert.equal(host.online(), true)
+      assert.equal(host.cache.revision(), 7)
+      assert.deepEqual(host.webhooks.queued(), [])
+    } finally {
+      await host.stop()
+    }
+  })
 })
