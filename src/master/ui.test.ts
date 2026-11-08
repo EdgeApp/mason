@@ -17,6 +17,7 @@ import { MASTER_SESSION_COOKIE } from './auth.js'
 import { localOperator } from './roles.js'
 import { declaredApps, slugFor } from './wizard.js'
 import { seedSecret } from '../test/secrets.js'
+import { crumbTrail } from '../test/crumbs.js'
 
 // Rows and replies are read field by field.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -989,6 +990,23 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
         got.push((await request(c.master, 'GET', route, session)).status)
       assert.deepEqual(got, statuses, role)
     }
+    // Backups is top-level, as the side menu has it; the run page goes
+    // through its project's Runs and builds and its branch.
+    const admin = signIn('admin')
+    assert.deepEqual(
+      crumbTrail((await request(c.master, 'GET', '/backups', admin)).text),
+      ['Mason Master /', 'Backups /backups *'],
+    )
+    const runTrail = crumbTrail(
+      (await request(c.master, 'GET', `/runs/${run}`, admin)).text,
+    )
+    assert.deepEqual(runTrail.slice(0, 4), [
+      'Mason Master /',
+      'Projects /projects',
+      'wizard /projects/wizard',
+      'Runs and builds /projects/wizard/runs',
+    ])
+    assert.match(runTrail.at(-1)!, new RegExp(`^Run \\d+ /runs/${run} \\*$`))
     const developer = (
       await request(c.master, 'GET', '/projects', signIn('developer'))
     ).text
@@ -1190,6 +1208,22 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
         )
       ).text,
       /<td class="mono">26110201<\/td>/,
+    )
+    assert.deepEqual(
+      crumbTrail(
+        (
+          await request(
+            c.master,
+            'GET',
+            '/projects/wizard/runs?branch=release%2F1',
+            signIn('developer'),
+          )
+        ).text,
+      ).slice(-2),
+      [
+        'Runs and builds /projects/wizard/runs',
+        'release/1 /projects/wizard/runs?branch=release%2F1 *',
+      ],
     )
     db.prepare("DELETE FROM jobs WHERE id IN ('m2-a','m2-b')").run()
     db.prepare('DELETE FROM push_triggers WHERE project_id=?').run(project.id)

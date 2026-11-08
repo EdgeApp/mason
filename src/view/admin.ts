@@ -1,5 +1,14 @@
 import { bytes, platformChip, statusDot } from './dashboard.js'
-import { ago, escape, localTime } from './html.js'
+import {
+  ago,
+  breadcrumbs,
+  escape,
+  localTime,
+  projectCrumbs,
+  runsCrumbs,
+  type Crumb,
+} from './html.js'
+import type { ViewerNode } from './shell.js'
 import {
   projectRunsTable,
   type BranchItem,
@@ -70,8 +79,22 @@ export function apiForm(
   return `<form data-mason="api" data-path="${escape(path)}"${options.method == null ? '' : ` data-method="${options.method}"`} data-fields="${escape((options.fields ?? []).join(','))}"${options.json == null ? '' : ` data-json="${escape(options.json)}"`}${options.then == null ? '' : ` data-then="${escape(options.then)}"`}>${body}<button${options.className == null ? '' : ` class="${options.className}"`}>${button}</button>${statusLine}</form>`
 }
 
-function head(title: string, intro: string, crumbs: string[] = []): string {
-  return `<div class="page-head"><div><div class="breadcrumbs">${['Mason', 'Master', ...crumbs].map((part) => `<span>${escape(part)}</span>`).join('<span>/</span>')}</div><h1>${escape(title)}</h1><p>${escape(intro)}</p></div></div>`
+/** Who a page is drawn for, as far as its breadcrumbs care: the node it is on. */
+export interface CrumbViewer {
+  node: ViewerNode
+}
+
+/** The master's own pages, which no other node serves. */
+const MASTER: CrumbViewer = { node: 'master' }
+
+/** A page's heading: its breadcrumbs, title and one line about it. */
+export function head(
+  viewer: CrumbViewer,
+  title: string,
+  intro: string,
+  crumbs: Crumb[],
+): string {
+  return `<div class="page-head"><div>${breadcrumbs(viewer, crumbs)}<h1>${escape(title)}</h1><p>${escape(intro)}</p></div></div>`
 }
 
 export interface NodeRow {
@@ -800,7 +823,7 @@ export function nodesView(data: {
           )
           .join('')
   const poolsPanel = `<section class="panel" id="pools"><h2>${icon('cloud')}Cloud pools</h2><p>Machines made on demand for a node type, reused like your own computers and retired when idle. Monthly budget: $${data.budget.monthly}.</p>${data.budget.notice == null ? '' : `<p class="notice">${escape(data.budget.notice)}</p>`}${pools || '<p>None yet.</p>'}${addPool}</section>`
-  return `${head('Nodes', 'Workers and the host, their software, and what each still needs from a person.', ['Nodes'])}${rows || '<p class="empty-state">No nodes are paired.</p>'}<div class="columns"><div>${hostPanel}${add}${poolsPanel}</div><aside><section class="panel"><h2>${icon('tune')}Node types</h2><ul class="plain">${types || '<li>None yet.</li>'}</ul><p><a href="/settings#nodeTypes">Edit in Settings</a></p></section></aside></div>`
+  return `${head(MASTER, 'Nodes', 'Workers and the host, their software, and what each still needs from a person.', [{ label: 'Nodes', href: '/nodes' }])}${rows || '<p class="empty-state">No nodes are paired.</p>'}<div class="columns"><div>${hostPanel}${add}${poolsPanel}</div><aside><section class="panel"><h2>${icon('tune')}Node types</h2><ul class="plain">${types || '<li>None yet.</li>'}</ul><p><a href="/settings#nodeTypes">Edit in Settings</a></p></section></aside></div>`
 }
 
 /** Settings: every area the master keeps, edited as JSON with secrets write-only, plus the Apple ID session. */
@@ -974,7 +997,7 @@ export function settingsView(data: {
       .join('') || '<tr><td colspan="6">No keys.</td></tr>'
   }</tbody></table></section>`
   const cards = data.canChange ? settingsCards(data) : ''
-  return `${head('Settings', 'How this master signs people in, reaches GitHub and Apple, keeps its backups and runs its nodes.', ['Settings'])}<p><a href="/people">People</a> · <a href="/groups">Groups</a> · <a href="/backups">Backups</a> · <a href="/nodes">Nodes</a></p>${apple}${keys}${cards}`
+  return `${head(MASTER, 'Settings', 'How this master signs people in, reaches GitHub and Apple, keeps its backups and runs its nodes.', [{ label: 'Settings', href: '/settings' }])}<p><a href="/people">People</a> · <a href="/groups">Groups</a> · <a href="/backups">Backups</a> · <a href="/nodes">Nodes</a></p>${apple}${keys}${cards}`
 }
 
 /** A sign-in method as Settings shows it: every field but the client secret. */
@@ -1644,7 +1667,7 @@ export function peopleView(data: {
   const add = data.canChange
     ? `<section class="panel"><h2>${icon('add')}Add a person</h2><form data-mason="person-add"><label for="person-name">Name</label><input id="person-name" name="name" required><label for="person-role">Role</label><select id="person-role" name="role">${roles.map((role) => `<option${role === 'tester' ? ' selected' : ''}>${role}</option>`).join('')}</select><label for="person-email">Email addresses</label><div class="email-fields" data-email-fields><input id="person-email" name="email" type="email" aria-label="Email address"></div><button type="button" class="pill" data-add-email-field>Add</button><p>They sign in with any enabled sign-in method that confirms one of these addresses, or with an address or their username and a password you set here or they choose from an invitation link. Give them an email, a username, or both.</p>${usernameField('person-new', undefined, false)}${passwordFields('person-new', false)}${field('person-invite', 'Make an invitation link', '<input id="person-invite" name="invite" type="checkbox">', 'A link, valid for a week, where they choose a password. Mason sends no email: copy it to them.')}${linkBox}<button>${icon('add')} Add</button>${statusLine}</form></section>`
     : ''
-  return `${head('People', 'Who signs in, with which email addresses, and what their role lets them do.', ['Settings', 'People'])}<table class="list people"><thead><tr><th>Full name</th><th>Username</th><th>Email addresses</th><th>Role</th><th>Invite</th><th>Password</th><th><span class="sr-only">Remove or save</span></th></tr></thead><tbody>${people || '<tr><td colspan="7">Nobody yet.</td></tr>'}</tbody></table>${personDialogs}${add}`
+  return `${head(MASTER, 'People', 'Who signs in, with which email addresses, and what their role lets them do.', [{ label: 'People', href: '/people' }])}<table class="list people"><thead><tr><th>Full name</th><th>Username</th><th>Email addresses</th><th>Role</th><th>Invite</th><th>Password</th><th><span class="sr-only">Remove or save</span></th></tr></thead><tbody>${people || '<tr><td colspan="7">Nobody yet.</td></tr>'}</tbody></table>${personDialogs}${add}`
 }
 
 /**
@@ -1654,6 +1677,8 @@ export function peopleView(data: {
  * the host cannot reach the master the page is read-only.
  */
 export function accountView(data: {
+  /** The node the page is on, which its breadcrumbs start from. */
+  viewer: CrumbViewer
   person: PersonRow
   /** The sign-out control, which differs between the host and the master. */
   signOut: string
@@ -1678,7 +1703,7 @@ export function accountView(data: {
           'Your password',
           `<form data-mason="person-password" data-path="/api/v2/people/${person.id}" data-return="/account"><p>You sign in with it and your username or a confirmed email, on the host and the master. Your other sessions end, and you sign in again.</p>${passwordFields('own', true)}<button>${icon('key')} Set password</button>${statusLine}</form>`,
         )
-  return `${head('Your account', 'Your name and email addresses, and how you sign in.', ['Your account'])}${notice}<section class="panel account" data-person="${person.id}" data-edit="${edit}" data-original="${escape(
+  return `${head(data.viewer, 'Your account', 'Your name and email addresses, and how you sign in.', [{ label: 'Your account', href: '/account' }])}${notice}<section class="panel account" data-person="${person.id}" data-edit="${edit}" data-original="${escape(
     JSON.stringify({
       name: person.name,
       username: person.username ?? '',
@@ -1709,9 +1734,19 @@ export function wizardView(data: {
 }): string {
   const steps = ['Repository', 'Apps', 'Branches and triggers']
   const step = data.slug == null ? 1 : data.owned.length === 0 ? 2 : 3
+  const newProject: Crumb[] = [
+    { label: 'Projects', href: '/projects' },
+    {
+      label: 'New',
+      href:
+        data.slug == null
+          ? '/projects/new'
+          : `/projects/new?slug=${encodeURIComponent(data.slug)}`,
+    },
+  ]
   const progress = `<ol class="chips wizard-steps">${steps.map((name, index) => `<li class="chip"${index + 1 === step ? ' aria-current="true"' : ''}>${index + 1}. ${escape(name)}</li>`).join('')}</ol>`
   if (data.slug == null)
-    return `${head('Add a project', 'A GitHub repository with a Masonfile.', ['Projects', 'New'])}${progress}<section class="panel">${apiForm('/api/v2/projects/check', '<label for="repository">GitHub repository</label><input id="repository" name="repository" placeholder="git@github.com:owner/repo.git" required>', `${icon('search')} Check with the master's GitHub credentials`, { fields: ['repository'], then: 'wizard' })}</section>`
+    return `${head(MASTER, 'Add a project', 'A GitHub repository with a Masonfile.', newProject)}${progress}<section class="panel">${apiForm('/api/v2/projects/check', '<label for="repository">GitHub repository</label><input id="repository" name="repository" placeholder="git@github.com:owner/repo.git" required>', `${icon('search')} Check with the master's GitHub credentials`, { fields: ['repository'], then: 'wizard' })}</section>`
   const discovery = data.discovery
   const apps =
     discovery == null
@@ -1759,11 +1794,13 @@ export function wizardView(data: {
           `${icon('check')} Save rules`,
           { fields: ['rules'], then: 'reload' },
         )}<h3>Webhook</h3><p>${data.webhook ? 'The project has a webhook secret.' : 'No webhook yet.'}</p>${apiForm(`/api/v2/projects/${data.slug}/webhook`, '', `${icon('link')} Create the GitHub webhook`, { then: 'reload', className: 'secondary' })}<h3>Triggers (from the Masonfile, read only)</h3><ul class="plain">${triggers || '<li>Read the Masonfile first.</li>'}</ul><p><a class="button" href="/projects?project=${encodeURIComponent(data.slug)}">Done</a></p></section>`
-  return `${head('Add a project', data.repository ?? '', ['Projects', data.slug])}${progress}<section class="panel"><h2>${icon('apps')}Apps</h2>${apps}</section>${branches}`
+  return `${head(MASTER, 'Add a project', data.repository ?? '', newProject)}${progress}<section class="panel"><h2>${icon('apps')}Apps</h2>${apps}</section>${branches}`
 }
 
 /** A project's Masonfile at a commit, read only. */
 export function masonfileView(data: {
+  /** The node the page is on, which its breadcrumbs start from. */
+  viewer: CrumbViewer
   slug: string
   name: string
   commits: Array<{ sha: string; branch: string }>
@@ -1775,7 +1812,7 @@ export function masonfileView(data: {
   secrets?: boolean
 }): string {
   const lines = (data.text ?? '').split('\n')
-  return `${head(`${data.name} · Masonfile`, 'The Masonfile is the project’s configuration; it changes with the code.', [data.name, 'Masonfile'])}${projectTabs(data.slug, 'masonfile', data.secrets)}<form method="get" class="actions"><label for="commit" class="sr-only">Commit</label><select id="commit" name="commit">${data.commits.map((entry) => `<option value="${escape(entry.sha)}"${entry.sha === data.commit ? ' selected' : ''}>${escape(entry.sha.slice(0, 12))} · ${escape(entry.branch)}</option>`).join('')}</select><button class="secondary">Show</button></form>${
+  return `${head(data.viewer, `${data.name} · Masonfile`, 'The Masonfile is the project’s configuration; it changes with the code.', [...projectCrumbs(data.slug, data.name), { label: 'Masonfile', href: `/projects/${encodeURIComponent(data.slug)}/masonfile` }])}${projectTabs(data.slug, 'masonfile', data.secrets)}<form method="get" class="actions"><label for="commit" class="sr-only">Commit</label><select id="commit" name="commit">${data.commits.map((entry) => `<option value="${escape(entry.sha)}"${entry.sha === data.commit ? ' selected' : ''}>${escape(entry.sha.slice(0, 12))} · ${escape(entry.branch)}</option>`).join('')}</select><button class="secondary">Show</button></form>${
     data.error != null
       ? `<p class="empty-state">${escape(data.error)}</p>`
       : data.text == null
@@ -1923,7 +1960,7 @@ export function secretsView(data: {
   const editor = manage
     ? `<div class="secret-editor" data-secret-editor hidden role="dialog" aria-modal="true" aria-labelledby="secret-editor-title"><div class="secret-editor-head"><h2 id="secret-editor-title" class="mono" data-secret-editor-title></h2><span class="pill" data-secret-editor-configs></span><span class="spacer"></span><button type="button" data-secret-editor-save>Save</button><button type="button" class="secondary" data-secret-editor-cancel>Cancel</button></div><textarea class="mono" data-secret-editor-text spellcheck="false" aria-labelledby="secret-editor-title"></textarea><output data-secret-editor-output></output></div>`
     : ''
-  return `${head(`${data.name} · Secrets`, 'Values and files the project’s stages may read, each limited to build configs.', [data.name, 'Secrets'])}${projectTabs(data.slug, 'secrets')}<section class="panel"${manage ? ` data-secrets="/api/v2/projects/${escape(encodeURIComponent(data.slug))}/secrets"` : ''}>${notice}${buttons}${help}${addValue}${addFile}${table}</section>${audit}${editor}`
+  return `${head(MASTER, `${data.name} · Secrets`, 'Values and files the project’s stages may read, each limited to build configs.', [...projectCrumbs(data.slug, data.name), { label: 'Secrets', href: `/projects/${encodeURIComponent(data.slug)}/secrets` }])}${projectTabs(data.slug, 'secrets')}<section class="panel"${manage ? ` data-secrets="/api/v2/projects/${escape(encodeURIComponent(data.slug))}/secrets"` : ''}>${notice}${buttons}${help}${addValue}${addFile}${table}</section>${audit}${editor}`
 }
 
 /** A project's build-number sequences, and where a manager sets one's last number. */
@@ -1977,6 +2014,8 @@ function buildNumbersPanel(data: {
  */
 export function projectRunsView(
   data: {
+    /** The node the page is on, which its breadcrumbs start from. */
+    viewer: CrumbViewer
     slug: string
     name: string
     branch?: string
@@ -2011,11 +2050,13 @@ export function projectRunsView(
       ? '<li class="divider" role="separator"></li>'
       : ''
   }${others.map(branch).join('')}</ul></nav>`
-  return `${head(`${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch.' : `The latest runs on ${data.branch}.`, [data.name, 'Runs and builds'])}${projectTabs(data.slug, 'runs', data.secrets)}<div class="runs-columns">${list}<section class="panel"><h2>${data.branch == null ? 'All branches' : `<span class="mono">${escape(data.branch)}</span>`}</h2>${projectRunsTable(data.runs, now, data.branch == null)}</section></div>`
+  return `${head(data.viewer, `${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch.' : `The latest runs on ${data.branch}.`, runsCrumbs(data.slug, data.name, data.branch))}${projectTabs(data.slug, 'runs', data.secrets)}<div class="runs-columns">${list}<section class="panel"><h2>${data.branch == null ? 'All branches' : `<span class="mono">${escape(data.branch)}</span>`}</h2>${projectRunsTable(data.runs, now, data.branch == null)}</section></div>`
 }
 
 /** A project on the master: repository, app IDs, branch rules, build numbers, and its tabs. */
 export function projectView(data: {
+  /** The node the page is on, which its breadcrumbs start from. */
+  viewer: CrumbViewer
   slug: string
   name: string
   repository: string
@@ -2039,7 +2080,7 @@ export function projectView(data: {
   /** False on the host, which has no Secrets tab. */
   secrets?: boolean
 }): string {
-  return `${head(data.name, data.repository, ['Projects', data.slug])}${projectTabs(data.slug, 'overview', data.secrets)}<section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
+  return `${head(data.viewer, data.name, data.repository, projectCrumbs(data.slug, data.name))}${projectTabs(data.slug, 'overview', data.secrets)}<section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
     data.apps
       .map(
         (app) =>
@@ -2128,7 +2169,7 @@ export function cloudView(data: {
         { fields: ['provider', 'name', 'key'] },
       )}</section>`
     : ''
-  return `${head('Cloud', 'The provider accounts cloud pools and hosts are made in.', ['Cloud'])}${accounts || '<p class="empty-state">No cloud accounts yet.</p>'}${add}`
+  return `${head(MASTER, 'Cloud', 'The provider accounts cloud pools and hosts are made in.', [{ label: 'Cloud', href: '/cloud' }])}${accounts || '<p class="empty-state">No cloud accounts yet.</p>'}${add}`
 }
 
 /** Groups: one row per group, each opening its page, and a name field that adds one. */
@@ -2154,7 +2195,7 @@ export function groupsView(data: {
         { fields: ['name'], then: 'group' },
       )}</section>`
     : ''
-  return `${head('Groups', 'The apps each group’s members see in their catalog.', ['Groups'])}<div class="group-list">${rows || '<p class="empty-state">No groups.</p>'}</div>${add}`
+  return `${head(MASTER, 'Groups', 'The apps each group’s members see in their catalog.', [{ label: 'Groups', href: '/groups' }])}<div class="group-list">${rows || '<p class="empty-state">No groups.</p>'}</div>${add}`
 }
 
 /**
@@ -2170,10 +2211,15 @@ export function groupView(data: {
 }): string {
   const { group } = data
   const name = escape(group.name)
-  const crumbs = ['Mason', 'Master', 'Groups']
-    .map((part) => `<span>${escape(part)}</span>`)
-    .join('<span>/</span>')
-  const top = `<div class="page-head"><div><div class="breadcrumbs">${crumbs}<span>/</span><span data-group-title>${name}</span></div><h1 data-group-title>${name}</h1><p>Its members see its apps in their catalog.</p></div></div>`
+  const crumbs = breadcrumbs(MASTER, [
+    { label: 'Groups', href: '/groups' },
+    {
+      label: group.name,
+      href: `/groups/${group.id}`,
+      data: { 'group-title': '' },
+    },
+  ])
+  const top = `<div class="page-head"><div>${crumbs}<h1 data-group-title>${name}</h1><p>Its members see its apps in their catalog.</p></div></div>`
   const label = `<span><small>Name</small><strong data-group-name-text>${name}</strong></span>`
   const nameRow = data.canChange
     ? `<div class="group-name" data-group-name><button type="button" class="list-row" data-group-rename>${label}${icon('edit')}</button><input name="name" maxlength="120" value="${name}" aria-label="Group name" autocomplete="off" data-group-name-input hidden><p class="notice" role="alert" data-group-name-error hidden></p></div>`

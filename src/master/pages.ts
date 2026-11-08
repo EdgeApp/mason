@@ -11,6 +11,7 @@ import { escape } from '../view/html.js'
 import {
   groupsView,
   groupView,
+  head,
   masonfileView,
   nodesView,
   accountView,
@@ -235,7 +236,7 @@ function backupsPage(master: Master, session: MasterSession): string {
             : '<p>You confirmed you stored this key.</p>'
         }</section>`
       : ''
-  return `<section class="card"><p>Every hour the master encrypts a snapshot of its database and pushes it to a git repository. Add the deploy key below to that repository with write access.</p>${state}<form data-mason="backup"><label for="repository">Repository</label><input id="repository" name="repository" value="${escape(value.repository ?? '')}" placeholder="git@github.com:owner/mason-backup.git" required><label for="branch">Branch</label><input id="branch" name="branch" value="${escape(value.branch ?? 'master')}" required><p><button>Save</button></p><p>Deploy key</p><pre data-field="deployKey"${value.deployKey == null ? ' hidden' : ''}>${escape(value.deployKey?.publicKey ?? '')}</pre><pre data-field="backupKey" hidden></pre>${status}</form><p><a href="/?later=backups">Skip for now</a></p></section>${key}`
+  return `${head(viewerOf(session), 'Backups', 'Encrypted copies of this master, kept in a git repository.', [{ label: 'Backups', href: '/backups' }])}<section class="card"><p>Every hour the master encrypts a snapshot of its database and pushes it to a git repository. Add the deploy key below to that repository with write access.</p>${state}<form data-mason="backup"><label for="repository">Repository</label><input id="repository" name="repository" value="${escape(value.repository ?? '')}" placeholder="git@github.com:owner/mason-backup.git" required><label for="branch">Branch</label><input id="branch" name="branch" value="${escape(value.branch ?? 'master')}" required><p><button>Save</button></p><p>Deploy key</p><pre data-field="deployKey"${value.deployKey == null ? ' hidden' : ''}>${escape(value.deployKey?.publicKey ?? '')}</pre><pre data-field="backupKey" hidden></pre>${status}</form><p><a href="/?later=backups">Skip for now</a></p></section>${key}`
 }
 
 /** Set by "Skip for now": the dashboard stops sending an administrator to Backups for this browser session. */
@@ -538,6 +539,7 @@ export function masterPages(
               ).includes(current.role)),
         },
         base: '',
+        viewer: viewerOf(current),
       }),
       current,
       200,
@@ -924,6 +926,7 @@ export function masterPages(
       res,
       'Your account',
       accountView({
+        viewer: viewerOf(current),
         person: personRow(master.people.get(actor, actor.accountId!)),
         signOut: viewerOf(current).signOut,
         editable: true,
@@ -1105,6 +1108,7 @@ export function masterPages(
       res,
       project.name,
       projectView({
+        viewer: viewerOf(current),
         slug: project.slug,
         name: project.name,
         ...projectDetails(project, master.buildNumbers, master.pushes),
@@ -1147,6 +1151,7 @@ export function masterPages(
       `${project.name} · Runs and builds`,
       projectRunsView(
         {
+          viewer: viewerOf(current),
           slug: project.slug,
           name: project.name,
           ...(branch == null ? {} : { branch }),
@@ -1243,6 +1248,7 @@ export function masterPages(
         res,
         `${project.name} · Masonfile`,
         masonfileView({
+          viewer: viewerOf(current),
           slug,
           name: project.name,
           commits,

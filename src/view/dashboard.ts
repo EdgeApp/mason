@@ -1,5 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { ago, duration, escape, runName } from './html.js'
+import { ago, breadcrumbs, duration, escape, runName } from './html.js'
 import { icon, type IconName } from './icons.js'
 import type { Viewer } from './shell.js'
 
@@ -490,7 +490,7 @@ export function dashboardView(
         `<li><div><span class="mono">${escape(build.app)} ${escape(build.version)} (${escape(build.buildNumber)})</span><small>${platformChip(build.platform)} <span class="mono">${escape(build.branch)}</span> · ${escape(bytes(build.size))} · ${escape(ago(build.at, now))}</small></div></li>`,
     )
     .join('')
-  return `<div class="page-head"><div><div class="breadcrumbs"><span>Mason</span><span>/</span><span>${viewer.node === 'master' ? 'Master' : 'Builds'}</span></div><h1>Projects &amp; apps</h1><p>Every project's app IDs, their latest builds and runs.</p></div>${viewer.node === 'master' && (viewer.role === 'admin' || viewer.role === 'manager') ? `<a class="button" href="/projects/new">${icon('add')} Add project</a>` : ''}</div><div class="tiles">${tile('folder', 'Projects', String(data.tiles.projects))}${tile('apps', 'App IDs', String(data.tiles.apps))}${tile('speed', 'Success rate', rate, data.tiles.finished === 0 ? 'No finished runs in 30 days' : `${data.tiles.finished} runs in 30 days`)}${tile('storage', 'Artifact storage', bytes(data.tiles.storage))}</div><nav class="chips" aria-label="Platforms">${chips}</nav><div class="columns"><div>${
+  return `<div class="page-head"><div>${breadcrumbs(viewer, [{ label: 'Projects', href: '/projects' }])}<h1>Projects &amp; apps</h1><p>Every project's app IDs, their latest builds and runs.</p></div>${viewer.node === 'master' && (viewer.role === 'admin' || viewer.role === 'manager') ? `<a class="button" href="/projects/new">${icon('add')} Add project</a>` : ''}</div><div class="tiles">${tile('folder', 'Projects', String(data.tiles.projects))}${tile('apps', 'App IDs', String(data.tiles.apps))}${tile('speed', 'Success rate', rate, data.tiles.finished === 0 ? 'No finished runs in 30 days' : `${data.tiles.finished} runs in 30 days`)}${tile('storage', 'Artifact storage', bytes(data.tiles.storage))}</div><nav class="chips" aria-label="Platforms">${chips}</nav><div class="columns"><div>${
     data.projects.map((card) => projectCard(card, now)).join('') ||
     '<p class="empty-state">No projects match.</p>'
   }</div><aside><section class="panel" data-queue><h2>${icon('hourglass_top')}Queue</h2><ul>${queueItems(data.queue)}</ul></section>${nodes}<section class="panel"><h2>${icon('deployed_code')}Recent builds</h2><ul>${builds || '<li>No builds yet.</li>'}</ul></section></aside></div>`

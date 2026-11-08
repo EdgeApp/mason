@@ -14,6 +14,7 @@ import { Providers } from './providers.js'
 import { fixture } from './providers.test.js'
 import type { Request, Response as ExpressResponse } from 'express'
 import { authLimiter, csrf, returnPath, SESSION_COOKIE } from './routes.js'
+import { crumbTrail } from '../test/crumbs.js'
 
 class Browser {
   readonly cookies = new Map<string, string>()
@@ -334,7 +335,12 @@ describe('Mason login routes and administrator controls', () => {
     const csrf = context().session.csrf
     const people = await browser.get('/people')
     assert.equal(people.status, 200)
-    assert.match(await people.text(), /Preapprove a tester/)
+    const peopleHtml = await people.text()
+    assert.match(peopleHtml, /Preapprove a tester/)
+    assert.deepEqual(crumbTrail(peopleHtml), [
+      'Mason Host /',
+      'People /people *',
+    ])
     assert.equal(
       (
         await browser.post('/people/invitations', {
@@ -468,6 +474,11 @@ describe('Mason login routes and administrator controls', () => {
     assert.equal(account.status, 200)
     const mine = await account.text()
     assert.match(mine, /<h1>Your account<\/h1>/)
+    // The standalone server's own pages start from Mason Host.
+    assert.deepEqual(crumbTrail(mine), [
+      'Mason Host /',
+      'Your account /account *',
+    ])
     assert.match(mine, /Administrator/)
     assert.match(mine, /href="\/account" aria-label="Your account"/)
     assert.match(

@@ -19,6 +19,7 @@ import { pinnedFetch } from '../node/pinnedFetch.js'
 import type { RunningNode } from '../node/serve.js'
 import { digest, insertBuild } from '../store.js'
 import { cluster, type Cluster } from '../test/cluster.js'
+import { crumbTrail } from '../test/crumbs.js'
 import { MASTER_SESSION_COOKIE } from './auth.js'
 import { localOperator } from './roles.js'
 
@@ -372,18 +373,36 @@ describe('Install apps and Devices on the master, through the host', function ()
       [host, onHost('tess')],
     ] as const) {
       const name = node === host ? 'host' : 'master'
-      for (const [route, menu] of [
-        ['/', ['/apps*', '/devices']],
-        ['/apps', ['/apps*', '/devices']],
-        [`/apps/${apps[ALPHA]}`, ['/apps*', '/devices']],
-        [branch, ['/apps*', '/devices']],
-        ['/devices', ['/apps', '/devices*']],
+      // The breadcrumbs start from the node; the platform is left out here.
+      const root = node === host ? 'Mason Host /' : 'Mason Master /'
+      const app = `/apps/${apps[ALPHA]}`
+      for (const [route, menu, crumbs] of [
+        ['/', ['/apps*', '/devices'], ['Install apps /apps *']],
+        ['/apps', ['/apps*', '/devices'], ['Install apps /apps *']],
+        [app, ['/apps*', '/devices'], ['Install apps /apps', `Alpha ${app} *`]],
+        [
+          branch,
+          ['/apps*', '/devices'],
+          [
+            'Install apps /apps',
+            `Alpha ${app}`,
+            `master ${app}/branches/${branchKey('master')} *`,
+          ],
+        ],
+        ['/devices', ['/apps', '/devices*'], ['Devices /devices *']],
       ] as const) {
         const reply = await request(node, route, {
           cookie: who.cookie + device,
         })
         assert.equal(reply.status, 200, `${name} ${route}`)
         assert.deepEqual(rail(reply.text), menu, `${name} ${route}`)
+        assert.deepEqual(
+          crumbTrail(reply.text).map((crumb) =>
+            crumb.replace(/\?platform=[a-z]+/, ''),
+          ),
+          [root, ...crumbs],
+          `${name} ${route}`,
+        )
         assert.match(
           reply.text,
           /href="\/account" aria-label="Your account"/,
@@ -444,6 +463,10 @@ describe('Install apps and Devices on the master, through the host', function ()
       })
       assert.equal(projects.status, 200, name)
       assert.match(projects.text, /<h1>Projects &amp; apps<\/h1>/)
+      assert.deepEqual(crumbTrail(projects.text), [
+        node === host ? 'Mason Host /' : 'Mason Master /',
+        'Projects /projects *',
+      ])
       assert.deepEqual(rail(projects.text), [
         '/apps',
         '/projects*',

@@ -688,6 +688,89 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     }
   })
 
+  it('E2 the run page’s breadcrumbs are pills from Mason Master down to the run, and each one opens its level', async () => {
+    const latest = runs['build-beta@develop']
+    const b = await browser('mason-e2-paul', c.master, '1280x860')
+    /** Fails unless the page is at this path and query. */
+    const at = async (where: string): Promise<void> => {
+      await b.script(
+        `if (location.pathname + location.search !== ${JSON.stringify(where)}) throw new Error('The page is ' + location.pathname + location.search)`,
+      )
+    }
+    /** Fails unless the breadcrumbs are these pills, each a link, the last one current. */
+    const trail = async (expected: string[]): Promise<void> => {
+      await b.script(
+        `const pills = [...document.querySelectorAll('nav.breadcrumbs[aria-label="Breadcrumb"] a.crumb')]; const got = pills.map((a) => a.textContent + (a.getAttribute('aria-current') === 'page' ? '*' : '')).join(' › '); if (got !== ${JSON.stringify(expected.join(' › '))}) throw new Error('The breadcrumbs are ' + got); if (pills.some((a) => !a.getAttribute('href'))) throw new Error('A pill is not a link')`,
+      )
+    }
+    /** Taps the breadcrumb pill that links here. */
+    const pill = async (href: string): Promise<void> => {
+      await b.tap(`nav.breadcrumbs a.crumb[href="${href}"]`)
+    }
+    try {
+      await masterSignIn(b, 'paul', PASSWORDS.paul!)
+      await b.visible('^Backups$|^Projects & apps$|^Install apps$')
+      // Runs and builds, then develop, then its latest run.
+      await b.open('/projects/fixture/runs')
+      await b.visible('The latest runs on every branch.')
+      await b.tap(
+        'nav.branch-list a[href="/projects/fixture/runs?branch=develop"]',
+      )
+      await b.visible('The latest runs on develop.')
+      await trail([
+        'Mason Master',
+        'Projects',
+        'Fixture',
+        'Runs and builds',
+        'develop*',
+      ])
+      await b.tap('table.runs tbody tr:first-child a')
+      await b.visible(`History of develop`)
+      await at(`/runs/${latest.id}`)
+      const run = `Run ${latest.number}`
+      const levels = [
+        'Mason Master',
+        'Projects',
+        'Fixture',
+        'Runs and builds',
+        'develop',
+        run,
+      ]
+      await trail([...levels.slice(0, -1), `${run}*`])
+      await b.shot('breadcrumb-run-after.png')
+      // From the right back to the first: each pill opens its level.
+      await pill(`/runs/${latest.id}`)
+      await b.visible('History of develop')
+      await at(`/runs/${latest.id}`)
+      await pill('/projects/fixture/runs?branch=develop')
+      await b.visible('The latest runs on develop.')
+      await at('/projects/fixture/runs?branch=develop')
+      await trail([...levels.slice(0, 4), 'develop*'])
+      await pill('/projects/fixture/runs')
+      await b.visible('The latest runs on every branch.')
+      await at('/projects/fixture/runs')
+      await trail([...levels.slice(0, 3), 'Runs and builds*'])
+      await pill('/projects/fixture')
+      await b.visible('App IDs')
+      await at('/projects/fixture')
+      await trail([...levels.slice(0, 2), 'Fixture*'])
+      await pill('/projects')
+      await b.visible('their latest builds and runs')
+      await at('/projects')
+      await trail(['Mason Master', 'Projects*'])
+      // The first opens the master's home: Install apps.
+      await pill('/')
+      await b.visible('Choose an app to browse recent builds')
+      // The catalog's script adds the platform it shows to the address.
+      await b.script(
+        "if (location.pathname !== '/') throw new Error('The page is ' + location.pathname)",
+      )
+      await trail(['Mason Master', 'Install apps*'])
+    } finally {
+      await b.close()
+    }
+  })
+
   it('E7 a tester installs Alpha’s Android build and reads her devices on the master, through the host', async () => {
     const master = c.master.master!
     const db = master.database.db

@@ -1,6 +1,7 @@
 import type { Device } from '../devices/store.js'
 import type { Platform } from '../validation.js'
-import { escape } from '../view/html.js'
+import { breadcrumbs, escape, type Crumb } from '../view/html.js'
+import type { ViewerNode } from '../view/shell.js'
 import { iosInstallUrl } from './install.js'
 import { branchKey, labels } from './platform.js'
 
@@ -74,6 +75,8 @@ export type CompleteData =
 
 /** Who the catalog pages are for, and where installs happen. */
 export interface CatalogViewer {
+  /** The node the pages are on, which their breadcrumbs start from. */
+  node: ViewerNode
   /** The session's form proof. */
   csrf: string
   /** The origin grants' manifests are served on. */
@@ -96,15 +99,33 @@ export interface CatalogPage {
   interactive?: boolean
   /** Seconds after which the page reloads itself. */
   refresh?: number
+  /** Where the page is, below the node: Install apps › app › branch, or Devices. */
+  crumbs?: Crumb[]
 }
 
 /**
- * A catalog page's content in a node's shell: its platform switch, which
- * the platform links swap without a reload, then the page.
+ * A catalog page's content in a node's shell: its breadcrumbs and title,
+ * its platform switch, which the platform links swap without a reload,
+ * then the page.
  */
-export function catalogBody(page: CatalogPage): string {
-  return `${page.platforms == null ? '' : `<nav class="catalog-nav" data-catalog-platforms aria-label="Build platform">${page.platforms}</nav>`}${page.body}`
+export function catalogBody(
+  page: CatalogPage,
+  viewer: { node: ViewerNode },
+): string {
+  return `<div class="page-head"><div>${page.crumbs == null ? '' : breadcrumbs(viewer, page.crumbs)}<h1>${escape(page.title)}</h1></div></div>${page.platforms == null ? '' : `<nav class="catalog-nav" data-catalog-platforms aria-label="Build platform">${page.platforms}</nav>`}${page.body}`
 }
+
+/** Install apps, with the platform the viewer chose. */
+const installApps = (query: string): Crumb => ({
+  label: 'Install apps',
+  href: `/apps${query}`,
+})
+
+/** Install apps › the app. */
+const appCrumbs = (app: CatalogApp, query: string): Crumb[] => [
+  installApps(query),
+  { label: app.name, href: `/apps/${app.id}${query}` },
+]
 
 /** The side-menu entry a catalog path belongs to: Devices, else Install apps. */
 export function catalogActive(path: string): string {
@@ -179,6 +200,7 @@ export function catalogView(
     .join('')
   return {
     title: 'Apps',
+    crumbs: [installApps(query)],
     body: `<p class="intro">Choose an app to browse recent builds.</p><div class="app-list">${cards || '<p>No apps have been configured yet.</p>'}</div>`,
     platforms: platformPill(path, chosen, data.platforms),
     interactive: true,
@@ -208,7 +230,8 @@ export function appView(
     .join('')
   return {
     title: data.app.name,
-    body: `<p class="breadcrumbs"><a href="/${query}">Apps</a></p><p class="intro">Branches · ${labels[chosen]}</p><div class="build-list">${
+    crumbs: appCrumbs(data.app, query),
+    body: `<p class="intro">Branches · ${labels[chosen]}</p><div class="build-list">${
       rows === ''
         ? '<section class="card"><p>No retained builds yet.</p></section>'
         : data.latest[chosen] != null
@@ -311,7 +334,14 @@ export function branchView(
   const ios = chosen === 'ios' && data.builds.length > 0
   return {
     title: data.branch,
-    body: `<p class="breadcrumbs"><a href="/${query}">Apps</a><span>/</span><a href="${appPath}${query}">${escape(data.app.name)}</a></p><p class="intro">${labels[chosen]} builds · newest first${ios ? (viewer.hostPages == null ? '<br>Installation links last up to one hour. Refresh this page if a link expires.' : `<br>${HOST_INSTALLS}`) : ''}</p><div class="build-list">${rows || `<section class="card"><h2>No ${labels[chosen]} builds</h2><p>This branch has no retained builds for the selected platform. Choose another platform or publish a new build.</p></section>`}</div>`,
+    crumbs: [
+      ...appCrumbs(data.app, query),
+      {
+        label: data.branch,
+        href: `${appPath}/branches/${branchKey(data.branch)}${query}`,
+      },
+    ],
+    body: `<p class="intro">${labels[chosen]} builds · newest first${ios ? (viewer.hostPages == null ? '<br>Installation links last up to one hour. Refresh this page if a link expires.' : `<br>${HOST_INSTALLS}`) : ''}</p><div class="build-list">${rows || `<section class="card"><h2>No ${labels[chosen]} builds</h2><p>This branch has no retained builds for the selected platform. Choose another platform or publish a new build.</p></section>`}</div>`,
     platforms: platformPill(path, chosen, data.platforms),
     interactive: true,
   }
@@ -388,6 +418,7 @@ export function devicesView(
     .join('')
   return {
     title: 'Devices',
+    crumbs: [{ label: 'Devices', href: '/devices' }],
     body:
       content +
       (rows ? '<h2>Your devices</h2>' + rows : '') +

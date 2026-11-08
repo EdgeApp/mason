@@ -9,7 +9,7 @@ import express, {
 import { masterContentSecurityPolicy } from '../node/webApp.js'
 import { Store } from '../store.js'
 import { asId, integer, object, text } from '../validation.js'
-import { escape } from '../view/html.js'
+import { breadcrumbs, escape, type Crumb } from '../view/html.js'
 import { page, shell, type FramedPage, type Viewer } from '../view/shell.js'
 import { Accounts, sameSecret, type Account, type Session } from './accounts.js'
 import { beginSignIn, finishSignIn } from './flow.js'
@@ -205,10 +205,12 @@ export function authRoutes(
     title: string,
     body: string,
     active?: string,
+    /** Its breadcrumbs: the standalone server's own pages (a host serves neither). */
+    crumbs?: Crumb[],
   ): string =>
     frame(req, {
       title,
-      body: `<h1>${escape(title)}</h1>${body}`,
+      body: `${crumbs == null ? `<h1>${escape(title)}</h1>` : `<div class="page-head"><div>${breadcrumbs({ node: 'standalone' }, crumbs)}<h1>${escape(title)}</h1></div></div>`}${body}`,
       ...(active == null ? {} : { active }),
     })
   const current = (): Providers =>
@@ -468,6 +470,7 @@ export function authRoutes(
           'Your account',
           `<section class="card account"><dl class="account-fields"><dt>Full name</dt><dd>${escape(context.account.name)}</dd><dt>Email</dt><dd>${escape(context.account.email ?? 'No email provided')}</dd><dt>Access</dt><dd>${context.account.is_admin ? 'Administrator' : context.account.is_tester ? 'Tester' : 'Waiting for access'}</dd></dl>${signOutForm(context.session)}</section>`,
           'account',
+          [{ label: 'Your account', href: '/account' }],
         ),
       )
     })
@@ -523,6 +526,7 @@ export function authRoutes(
         'People',
         `<section class="card"><h2>Preapprove a tester</h2><p>They can sign in for the first time using a verified email address from the selected provider. This does not send an email.</p><form method="post" action="/people/invitations">${hidden(context.session)}<label for="provider">Sign-in provider</label><select id="provider" name="provider">${choices}</select><label for="email">Email address</label><input id="email" name="email" type="email" required><label for="days">Expires in days</label><input id="days" name="days" type="number" min="1" max="365" value="30" required><p><button>Preapprove tester</button></p></form></section><section class="card"><h2>Accounts</h2>${rows}</section><section class="card"><h2>Preapprovals</h2>${invites || '<p>No preapprovals yet.</p>'}</section>`,
         'people',
+        [{ label: 'People', href: '/people' }],
       ),
     )
   })

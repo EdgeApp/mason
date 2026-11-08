@@ -5,6 +5,7 @@ import { describe, it } from 'mocha'
 import { MasterDatabase } from '../master/database.js'
 import {
   action,
+  cloudView,
   field,
   groupsView,
   groupView,
@@ -17,15 +18,30 @@ import {
   projectView,
   secretsView,
   settingsView,
+  wizardView,
 } from './admin.js'
-import { artifactsView, projectRunsData } from './artifacts.js'
+import {
+  artifactsView,
+  projectRunsData,
+  projectRunsTable,
+} from './artifacts.js'
 import {
   bytes,
   dashboardData,
   dashboardView,
   platformChip,
 } from './dashboard.js'
-import { ago, duration, escape, localTime, since, stamp, time } from './html.js'
+import {
+  ago,
+  breadcrumbs,
+  duration,
+  escape,
+  localTime,
+  since,
+  stamp,
+  time,
+} from './html.js'
+import { crumbTrail } from '../test/crumbs.js'
 import { icon, icons } from './icons.js'
 import {
   approvalNotifications,
@@ -628,6 +644,10 @@ describe('Design system and views', () => {
     assert.equal(data.builds[0]!.app, 'Phone')
     const html = dashboardView(data, viewer('developer'), NOW)
     assert.match(html, /Projects &amp; apps/)
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Master /',
+      'Projects /projects *',
+    ])
     assert.match(html, /50\.0%/)
     assert.match(html, /11\.5 MB/)
     assert.match(
@@ -665,6 +685,10 @@ describe('Design system and views', () => {
     assert.doesNotMatch(
       dashboardView(mac, viewer('developer', 'host'), NOW),
       /Worker nodes/,
+    )
+    assert.deepEqual(
+      crumbTrail(dashboardView(mac, viewer('developer', 'host'), NOW)),
+      ['Mason Host /', 'Projects /projects *'],
     )
     const one = dashboardData(
       { db, viewer: viewer('developer'), now: NOW, appVisible: all },
@@ -866,6 +890,13 @@ describe('Design system and views', () => {
     assert.match(run, /Phone 1\.0 \(26102013\) arm64-v8a</)
     assert.doesNotMatch(run, /26102014/)
     assert.match(run, /<h1>Run 1<\/h1>/)
+    // Artifacts › the project › the run, on the host.
+    assert.deepEqual(crumbTrail(run), [
+      'Mason Host /',
+      'Artifacts /artifacts',
+      'Phones /artifacts?project=phones',
+      'Run 1 /artifacts?run=run-1 *',
+    ])
     assert.match(run, /Version 1\.0 \(11\)/)
     assert.match(run, /12 passed/)
     assert.match(run, /href="\/runs\/run-1\/artifacts\/report\/view"/)
@@ -877,7 +908,25 @@ describe('Design system and views', () => {
     assert.match(running, /<li>None\.<\/li>/)
     assert.match(artifactsView(source, { run: 'none' }), /Run unavailable/)
     const list = artifactsView(source, { project: 'phones', branch: 'main' })
-    assert.match(list, /phones · main/)
+    assert.deepEqual(crumbTrail(list), [
+      'Mason Host /',
+      'Artifacts /artifacts',
+      'Phones /artifacts?project=phones',
+      'main /artifacts?project=phones&amp;branch=main *',
+    ])
+    assert.deepEqual(crumbTrail(artifactsView(source, {})), [
+      'Mason Host /',
+      'Artifacts /artifacts *',
+    ])
+    // A project it does not know keeps its slug; a branch alone narrows every project.
+    assert.deepEqual(
+      crumbTrail(artifactsView(source, { project: 'nothing' })).slice(2),
+      ['nothing /artifacts?project=nothing *'],
+    )
+    assert.deepEqual(
+      crumbTrail(artifactsView(source, { branch: 'feature/login' })).slice(2),
+      ['feature/login /artifacts?branch=feature%2Flogin *'],
+    )
     assert.match(list, /2 · 1\.5 MB/)
     assert.match(list, /<td class="mono">26102011, 26102013 · 3 files<\/td>/)
     // Each row names its run and status, for the page's socket to keep current.
@@ -940,9 +989,16 @@ describe('Design system and views', () => {
       ],
     )
     const html = projectRunsView(
-      { slug: 'phones', name: 'Phones', ...all },
+      { viewer: viewer('developer'), slug: 'phones', name: 'Phones', ...all },
       NOW,
     )
+    // All branches: Runs and builds is the current pill.
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Master /',
+      'Projects /projects',
+      'Phones /projects/phones',
+      'Runs and builds /projects/phones/runs *',
+    ])
     // All branches first and current, then the pinned branches, a divider, the rest.
     assert.match(
       html,
@@ -972,8 +1028,32 @@ describe('Design system and views', () => {
       ['feature/login', 'main', 'old/branch'],
     )
     const selected = projectRunsView(
-      { slug: 'phones', name: 'Phones', branch: 'main', ...main },
+      {
+        viewer: viewer('developer', 'host'),
+        slug: 'phones',
+        name: 'Phones',
+        branch: 'main',
+        ...main,
+      },
       NOW,
+    )
+    // A branch picked: its pill is current, and Runs and builds returns to All branches.
+    assert.deepEqual(crumbTrail(selected), [
+      'Mason Host /',
+      'Projects /projects',
+      'Phones /projects/phones',
+      'Runs and builds /projects/phones/runs',
+      'main /projects/phones/runs?branch=main *',
+    ])
+    // The layout is the same: the branches on the left, then that branch's runs table.
+    assert(
+      selected.includes(
+        `<section class="panel"><h2><span class="mono">main</span></h2>${projectRunsTable(main.runs, NOW, false)}</section></div>`,
+      ),
+    )
+    assert.match(
+      selected,
+      /<div class="runs-columns"><nav class="panel branch-list" aria-label="Branches">/,
     )
     assert.match(selected, /The latest runs on main/)
     assert.match(
@@ -1065,6 +1145,7 @@ describe('Nodes page', () => {
       cloudHosts: [cloudHost],
     })
     assert.match(manager, /Store builds in a new DigitalOcean Space/)
+    assert.deepEqual(crumbTrail(manager), ['Mason Master /', 'Nodes /nodes *'])
     assert.doesNotMatch(manager, /cloud\/hosts\/h\/reconcile|Remove host/)
     const empty = nodesView({
       ...base,
@@ -1595,6 +1676,10 @@ describe('Settings page', () => {
         },
       ],
     })
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Master /',
+      'Settings /settings *',
+    ])
     const card = html.slice(html.indexOf('id="keys"'))
     assert.match(
       card,
@@ -1949,6 +2034,7 @@ describe('Project tabs and the Secrets tab', () => {
       ],
     )
     const overview = projectView({
+      viewer: viewer('developer'),
       slug: 'app',
       name: 'App',
       repository: 'https://github.com/a/app',
@@ -1965,12 +2051,35 @@ describe('Project tabs and the Secrets tab', () => {
       /href="\/projects\/app" aria-current="page">Overview/,
     )
     assert.doesNotMatch(overview, /data-secrets|Save secrets/)
+    assert.deepEqual(crumbTrail(overview), [
+      'Mason Master /',
+      'Projects /projects',
+      'App /projects/app *',
+    ])
+    const masonfile = masonfileView({
+      viewer: viewer('developer', 'host'),
+      slug: 'app',
+      name: 'App',
+      commits: [],
+    })
     assert.match(
-      masonfileView({ slug: 'app', name: 'App', commits: [] }),
+      masonfile,
       /href="\/projects\/app\/masonfile" aria-current="page">Masonfile/,
     )
+    assert.deepEqual(crumbTrail(masonfile), [
+      'Mason Host /',
+      'Projects /projects',
+      'App /projects/app',
+      'Masonfile /projects/app/masonfile *',
+    ])
     const runs = projectRunsView(
-      { slug: 'app', name: 'App', branches: [], runs: [] },
+      {
+        viewer: viewer('developer'),
+        slug: 'app',
+        name: 'App',
+        branches: [],
+        runs: [],
+      },
       NOW,
     )
     assert.match(
@@ -2000,6 +2109,12 @@ describe('Project tabs and the Secrets tab', () => {
         },
       ],
     })
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Master /',
+      'Projects /projects',
+      'App /projects/app',
+      'Secrets /projects/app/secrets *',
+    ])
     assert.match(
       html,
       /data-secret-add="value"><span[^>]*>[^<]*<\/span>Add secret value/,
@@ -2180,6 +2295,8 @@ describe('People and groups pages', () => {
       now: Date.UTC(2026, 10, 8),
     })
     assert.match(admin, /<h1>People<\/h1>/)
+    // People is top-level, as the side menu has it, not under Settings.
+    assert.deepEqual(crumbTrail(admin), ['Mason Master /', 'People /people *'])
     assert.deepEqual(
       [...admin.matchAll(/<th>([^<]*)<\/th>/g)].map((match) => match[1]),
       [
@@ -2287,11 +2404,16 @@ describe('People and groups pages', () => {
       ],
     }
     const html = accountView({
+      viewer: viewer('tester', 'host'),
       person,
       signOut: '<form data-mason="sign-out"><button>Sign out</button></form>',
       editable: true,
     })
     assert.match(html, /<h1>Your account<\/h1>/)
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Host /',
+      'Your account /account *',
+    ])
     assert.match(
       html,
       /<section class="panel account" data-person="5" data-edit="self"/,
@@ -2322,11 +2444,13 @@ describe('People and groups pages', () => {
     )
     assert.match(html, /data-confirm-dialog/)
     const offline = accountView({
+      viewer: viewer('tester'),
       person: { ...person, password: false },
       signOut: '',
       editable: false,
     })
     assert.match(offline, /cannot reach the master/)
+    assert.deepEqual(crumbTrail(offline)[0], 'Mason Master /')
     assert.match(offline, /data-edit="none"/)
     assert.doesNotMatch(offline, /data-row-action|data-add-email|data-open=/)
   })
@@ -2344,6 +2468,73 @@ describe('People and groups pages', () => {
     assert.doesNotMatch(html, /<details class="account"/)
   })
 
+  it('M8 draws every trail as pill links from Mason Master or Mason Host, the last one current', () => {
+    // The first pill names the node and opens its home; a host and a standalone server are both Mason Host.
+    for (const [node, first] of [
+      ['master', 'Mason Master'],
+      ['host', 'Mason Host'],
+      ['standalone', 'Mason Host'],
+    ] as const)
+      assert.deepEqual(crumbTrail(breadcrumbs({ node }, [])), [`${first} / *`])
+    const html = breadcrumbs({ node: 'master' }, [
+      { label: 'A <b> & "c"', href: '/x?a=1&b=<2>' },
+      { label: 'Last', href: '/y', data: { 'group-title': 'z"' } },
+    ])
+    assert.equal(
+      html,
+      '<nav class="breadcrumbs" aria-label="Breadcrumb"><ol><li><a class="crumb" href="/">Mason Master</a></li><li><span class="crumb-sep" aria-hidden="true">›</span><a class="crumb" href="/x?a=1&amp;b=&lt;2&gt;">A &lt;b&gt; &amp; &quot;c&quot;</a></li><li><span class="crumb-sep" aria-hidden="true">›</span><a class="crumb" href="/y" aria-current="page" data-group-title="z&quot;">Last</a></li></ol></nav>',
+    )
+    assert.equal(html.match(/aria-current/g)!.length, 1)
+    // The master's own pages, as the side menu lists them.
+    assert.deepEqual(
+      crumbTrail(cloudView({ accounts: [], canChange: true, now: NOW })),
+      ['Mason Master /', 'Cloud /cloud *'],
+    )
+    assert.deepEqual(
+      crumbTrail(wizardView({ owned: [], rules: [], webhook: false })),
+      ['Mason Master /', 'Projects /projects', 'New /projects/new *'],
+    )
+    assert.deepEqual(
+      crumbTrail(
+        wizardView({
+          slug: 'my app',
+          repository: 'git@github.com:a/app.git',
+          owned: [],
+          rules: [],
+          webhook: false,
+        }),
+      ),
+      [
+        'Mason Master /',
+        'Projects /projects',
+        'New /projects/new?slug=my%20app *',
+      ],
+    )
+    // Labels are escaped; so are the project's own pages' hrefs.
+    assert.deepEqual(
+      crumbTrail(
+        projectView({
+          viewer: viewer('developer', 'host'),
+          slug: 'a&b',
+          name: '<Odd> & "Co"',
+          repository: '',
+          defaultBranch: 'master',
+          format: 'pipeline',
+          apps: [],
+          rules: [],
+          webhook: false,
+          buildNumbers: [],
+          canSeed: false,
+        }),
+      ),
+      [
+        'Mason Host /',
+        'Projects /projects',
+        '&lt;Odd&gt; &amp; &quot;Co&quot; /projects/a%26b *',
+      ],
+    )
+  })
+
   it('U20.2 the Groups list links one row per group and adds a group by name', () => {
     const html = groupsView({
       groups: [
@@ -2353,6 +2544,7 @@ describe('People and groups pages', () => {
       canChange: true,
     })
     assert.match(html, /<h1>Groups<\/h1>/)
+    assert.deepEqual(crumbTrail(html), ['Mason Master /', 'Groups /groups *'])
     assert.deepEqual(
       [
         ...html.matchAll(
@@ -2387,9 +2579,15 @@ describe('People and groups pages', () => {
       canChange: true,
     })
     assert.match(html, /<h1 data-group-title>Beta &quot;crew&quot;<\/h1>/)
+    // Groups › the group, its pill renamed with the title.
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Master /',
+      'Groups /groups',
+      'Beta &quot;crew&quot; /groups/5 *',
+    ])
     assert.match(
       html,
-      /<span>Groups<\/span><span>\/<\/span><span data-group-title>Beta &quot;crew&quot;<\/span>/,
+      /<a class="crumb" href="\/groups\/5" aria-current="page" data-group-title="">Beta &quot;crew&quot;<\/a>/,
     )
     assert.match(html, /<div class="group-page" data-group="5">/)
     // The name row comes first, as a button, with its hidden field.
