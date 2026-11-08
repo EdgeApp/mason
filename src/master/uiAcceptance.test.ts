@@ -518,6 +518,20 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await h.tap('section.account [data-row-action]')
       await h.visible('Email added: tess.self@example.test')
       await h.tap('[data-confirm-accept]')
+      // The page reloads as soon as the master accepts; the host's copy
+      // follows over the change feed, so the page is read once that is in.
+      await c.until(
+        () =>
+          host
+            .host!.cache.db.prepare(
+              "SELECT 1 FROM accounts a JOIN account_emails e ON e.account_id=a.id WHERE a.id=? AND a.name='Tess Self' AND e.email='tess.self@example.test'",
+            )
+            .get(people.tess!),
+        10_000,
+        'her change on the host',
+      )
+      // Its own reload may still be landing: the page is opened once more.
+      await h.open('/account').catch(async () => await h.open('/account'))
       await h.visible('unconfirmed')
       await h.visible('Tess Self')
       await h.shot('account-page-host.png')
@@ -575,6 +589,102 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       })
     } finally {
       await h.close()
+    }
+  })
+
+  it('E3 a tester keeps the side menu, with only Install apps and Devices, on every page of both nodes, at phone width and on a desktop; a developer lands on Install apps', async () => {
+    const db = c.master.master!.database.db
+    const alpha = Number(
+      db.prepare('SELECT id FROM apps WHERE slug=?').get(ALPHA)!.id,
+    )
+    /** Fails unless the side menu holds exactly these links, the current one starred. */
+    const menu = async (b: Browser, expected: string[]): Promise<void> => {
+      await b.script(
+        `const rail = [...document.querySelectorAll('nav.rail a')].map((a) => a.getAttribute('href') + (a.getAttribute('aria-current') === 'page' ? '*' : '')).join(); if (rail !== ${JSON.stringify(expected.join())}) throw new Error('The side menu is ' + rail + ' on ' + location.pathname)`,
+      )
+    }
+    /** Fails unless the page's heading is this. */
+    const heading = async (b: Browser, text: string): Promise<void> => {
+      await b.script(
+        `const h1 = document.querySelector('main h1')?.textContent; if (h1 !== ${JSON.stringify(text)}) throw new Error('The heading is ' + h1 + ' on ' + location.pathname)`,
+      )
+    }
+    /** Her pages on one node: `/`, an app, its branch's install page, Devices, Your account, then `/projects`. */
+    const walk = async (
+      b: Browser,
+      node: 'host' | 'master',
+      phone: boolean,
+    ): Promise<void> => {
+      await b.visible('Choose an app to browse recent builds')
+      await heading(b, 'Apps')
+      await menu(b, ['/apps*', '/devices'])
+      if (node === 'master' && !phone)
+        await b.shot('master-home-tester-after.png')
+      await b.open('/apps')
+      await b.visible('Choose an app to browse recent builds')
+      await menu(b, ['/apps*', '/devices'])
+      if (node === 'host' && phone)
+        await b.shot('host-tester-install-after.png')
+      await b.tap(`a.app-card[href^="/apps/${alpha}?"]`)
+      await b.visible('^Branches · ')
+      await b.tap('a[data-platform="android"]')
+      await b.visible('^Branches · Android$')
+      await menu(b, ['/apps*', '/devices'])
+      await b.tap('a.list-row[href*="/branches/"]')
+      await b.visible('^Android builds · newest first$')
+      await b.visible('^Install')
+      await menu(b, ['/apps*', '/devices'])
+      await b.tap('nav.rail a[href="/devices"]')
+      await b.visible(
+        'Android and desktop apps can be downloaded without iOS device registration|Device registration is being configured',
+      )
+      await heading(b, 'Devices')
+      await menu(b, ['/apps', '/devices*'])
+      if (node === 'host' && phone)
+        await b.shot('host-tester-devices-after.png')
+      // The account icon opens Your account on both nodes.
+      await b.tap('a[aria-label="Your account"]')
+      await b.visible('^Your account$')
+      await b.script(
+        "if (location.pathname !== '/account') throw new Error('The account icon opened ' + location.pathname)",
+      )
+      await menu(b, ['/apps', '/devices'])
+      // To her, projects do not exist.
+      await b.open('/projects')
+      await b.visible('There is no such page')
+      await heading(b, 'Not found')
+      await menu(b, ['/apps*', '/devices'])
+    }
+    for (const size of ['390x844', '1280x860']) {
+      const phone = size === '390x844'
+      const h = await browser(`mason-e3-tess-host-${size}`, host, size)
+      try {
+        await hostSignIn(h, 'tess', PASSWORDS.tess!, '/')
+        await walk(h, 'host', phone)
+      } finally {
+        await h.close()
+      }
+      const m = await browser(`mason-e3-tess-master-${size}`, c.master, size)
+      try {
+        await masterSignIn(m, 'tess', PASSWORDS.tess!)
+        await walk(m, 'master', phone)
+      } finally {
+        await m.close()
+      }
+    }
+    // A developer's home on the master is Install apps; Projects & apps is one tap away.
+    const d = await browser('mason-e3-dev-master', c.master, '1280x860')
+    try {
+      await masterSignIn(d, 'dev', PASSWORDS.dev!)
+      await d.visible('Choose an app to browse recent builds')
+      await heading(d, 'Apps')
+      await menu(d, ['/apps*', '/projects', '/artifacts', '/devices'])
+      await d.shot('master-home-developer-after.png')
+      await d.tap('nav.rail a[href="/projects"]')
+      await d.visible('their latest builds and runs')
+      await menu(d, ['/apps', '/projects*', '/artifacts', '/devices'])
+    } finally {
+      await d.close()
     }
   })
 

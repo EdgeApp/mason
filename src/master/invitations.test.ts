@@ -379,7 +379,7 @@ describe('Invitation links', function () {
     assert(b.cookies.has('__Host-mason-session'))
     const home = await b.send('GET', '/')
     assert.equal(home.status, 200)
-    assert.match(home.text, /Sign out/)
+    assert.match(home.text, /aria-label="Your account"/)
     assert.equal(master().people.get(admin, made.json.id).username, 'hilda')
     const reused = await onHost().send('POST', '/auth/invite', {
       token,

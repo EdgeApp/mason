@@ -58,7 +58,7 @@ const TOKEN = 'stage-token-fixture'
 
 const viewer = (
   role: ViewerRole,
-  node: 'master' | 'host' = 'master',
+  node: 'master' | 'host' | 'standalone' = 'master',
 ): Viewer => ({
   name: `${role} person`,
   role,
@@ -339,15 +339,24 @@ describe('Design system and views', () => {
     const keys = (who: Viewer): string[] =>
       railItems(who).map((item) => item.key)
     assert.deepEqual(keys(viewer('admin', 'host')), [
-      'dashboard',
       'catalog',
+      'dashboard',
       'artifacts',
       'devices',
     ])
     assert.deepEqual(keys(viewer('tester', 'host')), ['catalog', 'devices'])
-    assert.deepEqual(keys(viewer('admin')), [
+    assert.deepEqual(keys(viewer('tester')), ['catalog', 'devices'])
+    assert.deepEqual(keys(viewer('developer', 'host')), [
+      'catalog',
       'dashboard',
       'artifacts',
+      'devices',
+    ])
+    assert.deepEqual(keys(viewer('admin')), [
+      'catalog',
+      'dashboard',
+      'artifacts',
+      'devices',
       'nodes',
       'cloud',
       'people',
@@ -355,6 +364,25 @@ describe('Design system and views', () => {
       'settings',
       'backups',
     ])
+    // The standalone server: Install apps and Devices, and People for its administrators.
+    assert.deepEqual(keys(viewer('tester', 'standalone')), [
+      'catalog',
+      'devices',
+    ])
+    assert.deepEqual(keys(viewer('admin', 'standalone')), [
+      'catalog',
+      'devices',
+      'people',
+    ])
+    assert.deepEqual(
+      railItems(viewer('admin'))
+        .filter((item) => ['catalog', 'dashboard'].includes(item.key))
+        .map((item) => [item.href, item.label]),
+      [
+        ['/apps', 'Install apps'],
+        ['/projects', 'Projects & apps'],
+      ],
+    )
     assert.deepEqual(
       railItems(viewer('manager'))
         .filter((item) => ['people', 'groups'].includes(item.key))
@@ -364,7 +392,12 @@ describe('Design system and views', () => {
         ['/groups', 'group'],
       ],
     )
-    assert.deepEqual(keys(viewer('developer')), ['dashboard', 'artifacts'])
+    assert.deepEqual(keys(viewer('developer')), [
+      'catalog',
+      'dashboard',
+      'artifacts',
+      'devices',
+    ])
     assert(atLeast(viewer('manager'), 'developer'))
     assert(!atLeast(viewer('developer'), 'manager'))
     const host = shell({
@@ -378,24 +411,48 @@ describe('Design system and views', () => {
       /\/backups|\/cloud|\/people|\/groups|\/settings|data-mason="/,
     )
     assert.match(host, /<a href="\/artifacts" aria-current="page"/)
-    // Testers' pages are phone-first, without the rail.
+    assert.match(host, /<div class="section">Host<\/div>/)
+    // Testers keep the side menu too, with only Install apps and Devices.
     const tester = shell({
       title: 'Apps',
       body: '',
       viewer: viewer('tester', 'host'),
+      active: 'catalog',
     })
-    assert.match(tester, /<body class="phone">/)
-    assert.doesNotMatch(tester, /class="rail"/)
-    const legacy = page(
-      'Sign in',
-      '<p>hi</p>',
-      '<a href="/devices">Devices</a>',
-      true,
+    assert.match(tester, /<body class="with-rail">/)
+    assert.match(tester, /<a href="\/apps" aria-current="page"/)
+    assert.deepEqual(
+      [...tester.matchAll(/<nav class="rail".*?<\/nav>/g)].map((nav) =>
+        [...nav[0].matchAll(/href="([^"]+)"/g)].map((m) => m[1]),
+      ),
+      [['/apps', '/devices']],
     )
+    assert.match(tester, /search-dialog/)
+    assert.match(tester, /\/assets\/shell\.js/)
+    // The standalone server serves neither search nor notifications.
+    const standalone = shell({
+      title: 'People',
+      body: '',
+      viewer: viewer('admin', 'standalone'),
+      active: 'people',
+      scripts: ['/assets/catalog.js'],
+    })
+    assert.match(standalone, /<div class="section">Host<\/div>/)
+    assert.match(standalone, /<a href="\/people" aria-current="page"/)
+    assert.match(standalone, /href="\/account" aria-label="Your account"/)
+    assert.match(standalone, /src="\/assets\/catalog\.js"/)
+    assert.doesNotMatch(
+      standalone,
+      /search-dialog|shell\.js|data-search|class="notifications"/,
+    )
+    // Signed-out pages have no side menu.
+    const legacy = page('Sign in', '<p>hi</p>')
+    assert.match(legacy, /<body class="phone">/)
     assert.match(legacy, /<h1>Sign in<\/h1><p>hi<\/p>/)
-    assert.match(legacy, /<nav><a href="\/devices">Devices<\/a><\/nav>/)
-    assert.match(legacy, /src="\/assets\/catalog\.js"/)
-    assert.doesNotMatch(legacy, /search-dialog|shell\.js/)
+    assert.doesNotMatch(
+      legacy,
+      /class="rail"|search-dialog|shell\.js|aria-label="Your account"/,
+    )
     const master = shell({
       title: 'M',
       body: '',
@@ -575,9 +632,10 @@ describe('Design system and views', () => {
     assert.match(html, /11\.5 MB/)
     assert.match(
       html,
-      /<a class="chip" href="\/" aria-current="true">All \(3\)<\/a>/,
+      /<a class="chip" href="\/projects" aria-current="true">All \(3\)<\/a>/,
     )
-    assert.match(html, /href="\/\?platform=macos">macOS \(1\)/)
+    // The filter chips stay on Projects & apps, now at /projects.
+    assert.match(html, /href="\/projects\?platform=macos">macOS \(1\)/)
     assert.doesNotMatch(html, /Windows \(/)
     assert.match(html, /Webhook active/)
     assert.match(html, /buildbox/)

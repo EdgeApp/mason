@@ -15,8 +15,12 @@ function browser(
     install?: boolean
     chosen?: string
     historyBlocked?: boolean
+    /** Whether the platform switch sits outside main, as a node may draw it. */
+    navOutside?: boolean
   } = {},
 ): {
+  replaced: string[]
+  queried: string[]
   events: Map<string, (event: Record<string, unknown>) => void>
   target: (href: string) => object
   location: URL
@@ -51,13 +55,23 @@ function browser(
     url: url.href,
     text: async (): Promise<string> => '<html></html>',
   })
+  const replaced: string[] = [],
+    queried: string[] = []
   class Element {
     readonly dataset = { platform: options.chosen ?? 'ios' }
-    constructor(readonly href: string) {}
+    constructor(
+      readonly href: string,
+      readonly selector = '',
+    ) {}
+    get isConnected(): boolean {
+      return options.navOutside === true
+    }
     closest(): Element | null {
       return this.href === '' ? null : this
     }
-    replaceWith(): void {}
+    replaceWith(next: Element): void {
+      replaced.push(`${this.selector} <- ${next.selector}`)
+    }
   }
   const document = {
     title: 'Before',
@@ -80,7 +94,7 @@ function browser(
         ? options.install
           ? new Element('itms-services://?action=download-manifest')
           : null
-        : new Element(''),
+        : new Element('', selector),
   }
   const history = {
     replaceState: (
@@ -133,8 +147,10 @@ function browser(
       parseFromString(): object {
         return {
           title: 'After',
-          querySelector: (): Element | null =>
-            broken ? null : new Element(''),
+          querySelector: (selector: string): Element | null => {
+            queried.push(selector)
+            return broken ? null : new Element('', `new ${selector}`)
+          },
         }
       }
     },
@@ -146,6 +162,8 @@ function browser(
     { filename: file },
   )
   return {
+    replaced,
+    queried,
     events,
     target: (href): object => new Element(href),
     location,
@@ -181,6 +199,28 @@ function click(
   })
 }
 describe('Browser platform navigation', () => {
+  it('swaps the catalog’s platform switch and main, and keeps the side menu', async () => {
+    const env = browser()
+    click(env, 'https://builds.example.test/apps/1?platform=android')
+    await settle()
+    // The fetched page's main replaces the shown one; the switch inside it comes along.
+    assert.deepEqual(env.queried, ['main', 'nav[data-catalog-platforms]'])
+    assert.deepEqual(env.replaced, ['main <- new main'])
+    // A switch drawn outside main is swapped on its own; no other nav is.
+    const outside = browser({ navOutside: true })
+    click(outside, 'https://builds.example.test/apps/1?platform=android')
+    await settle()
+    assert.deepEqual(outside.replaced, [
+      'main <- new main',
+      'nav[data-catalog-platforms] <- new nav[data-catalog-platforms]',
+    ])
+    // Install apps itself, at /apps, switches platforms in place too.
+    const list = browser({ url: 'https://builds.example.test/apps' })
+    click(list, 'https://builds.example.test/apps?platform=android')
+    await settle()
+    assert.equal(list.location.search, '?platform=android')
+    assert.equal(list.visits.length, 0)
+  })
   it('bounds scroll history writes and survives browser history quotas', async () => {
     const env = browser()
     for (let i = 0; i < 1000; ++i) {

@@ -58,6 +58,7 @@ import { clientAddress } from './forward.js'
 import { ProjectNotFound } from './projects.js'
 import type { ProviderSignIn } from './providerSignIn.js'
 import { masterCatalogPages } from './catalogPages.js'
+import { noHost } from './buildsApi.js'
 
 /** A person as the People page and Your account draw them. */
 function personRow(person: Person): PersonRow {
@@ -280,51 +281,13 @@ export function masterPages(
   const hashing = (res: express.Response): void => {
     res.set('Content-Security-Policy', masterContentSecurityPolicy)
   }
-  app.get('/', (req, res) => {
-    if (!master.configured()) {
-      hashing(res)
-      send(res, 'Set up this master', setupPage)
-      return
-    }
-    const current = session(req)
-    if (current == null) {
-      res.redirect(303, '/sign-in')
-      return
-    }
-    // An administrator who has not confirmed the backup key is sent to the
-    // Backups page once per browser session; after that, or after "Skip for
-    // now", the dashboard opens and the banner on every page reminds them.
-    const later = (): void => {
-      res.cookie(BACKUP_LATER_COOKIE, '1', {
-        httpOnly: true,
-        sameSite: 'lax',
-        path: '/',
-        secure: req.secure,
-      })
-    }
-    if (req.query.later === 'backups') {
-      later()
-      res.redirect(303, '/')
-      return
-    }
-    if (
-      can(sessionActor(current), 'backups.key') &&
-      master.backups.needsConfirmation(current.accountId) &&
-      // The session-token reader takes only tokens; this cookie holds a flag.
-      !new RegExp(`(?:^|;\\s*)${BACKUP_LATER_COOKIE}=1(?:;|$)`).test(
-        req.headers.cookie ?? '',
-      )
-    ) {
-      later()
-      res.redirect(303, '/backups')
-      return
-    }
+  /** Projects & apps: every project's app IDs, builds and runs. */
+  const projects = (
+    req: express.Request,
+    res: express.Response,
+    current: MasterSession,
+  ): void => {
     const now = master.database.now()
-    // A tester's home is Install apps.
-    if (current.role === 'tester') {
-      res.redirect(303, '/apps')
-      return
-    }
     const platform =
       typeof req.query.platform === 'string' ? req.query.platform : undefined
     const project =
@@ -363,6 +326,77 @@ export function masterPages(
       200,
       'dashboard',
     )
+  }
+  app.get('/', (req, res, next) => {
+    if (!master.configured()) {
+      hashing(res)
+      send(res, 'Set up this master', setupPage)
+      return
+    }
+    const current = session(req)
+    if (current == null) {
+      res.redirect(303, '/sign-in')
+      return
+    }
+    // An administrator who has not confirmed the backup key is sent to the
+    // Backups page once per browser session; after that, or after "Skip for
+    // now", the dashboard opens and the banner on every page reminds them.
+    const later = (): void => {
+      res.cookie(BACKUP_LATER_COOKIE, '1', {
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+        secure: req.secure,
+      })
+    }
+    if (req.query.later === 'backups') {
+      later()
+      res.redirect(303, '/')
+      return
+    }
+    if (
+      can(sessionActor(current), 'backups.key') &&
+      master.backups.needsConfirmation(current.accountId) &&
+      // The session-token reader takes only tokens; this cookie holds a flag.
+      !new RegExp(`(?:^|;\\s*)${BACKUP_LATER_COOKIE}=1(?:;|$)`).test(
+        req.headers.cookie ?? '',
+      )
+    ) {
+      later()
+      res.redirect(303, '/backups')
+      return
+    }
+    // Everyone's home is Install apps, from the host; a master with no host
+    // yet opens Projects & apps for developers and up instead.
+    if (noHost(master) != null && current.role !== 'tester') {
+      projects(req, res, current)
+      return
+    }
+    next()
+  })
+  // Projects are for developers and up: to a tester they do not exist.
+  app.use('/projects', (req, res, next) => {
+    const current = session(req)
+    if (current?.role !== 'tester') {
+      next()
+      return
+    }
+    send(
+      res,
+      'Not found',
+      '<p class="empty-state">There is no such page.</p>',
+      current,
+      404,
+      'catalog',
+    )
+  })
+  app.get('/projects', (req, res) => {
+    const current = session(req)
+    if (current == null) {
+      res.redirect(303, master.configured() ? '/sign-in' : '/')
+      return
+    }
+    projects(req, res, current)
   })
   app.get('/artifacts', (req, res) => {
     const current = session(req)

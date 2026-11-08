@@ -6,11 +6,16 @@ import {
 } from 'express'
 import QRCode from 'qrcode'
 import { Accounts } from '../auth/accounts.js'
-import { csrf, navigation, sessionContext } from '../auth/routes.js'
+import {
+  csrf,
+  sessionContext,
+  standaloneFrame,
+  type Frame,
+} from '../auth/routes.js'
 import { DEVICE_COOKIE, Devices, type DeviceRelay } from '../devices/store.js'
 import { Store } from '../store.js'
 import { asId, type Platform } from '../validation.js'
-import { page } from '../view/shell.js'
+import { escape } from '../view/html.js'
 import type { FileRequest } from './install.js'
 import { platform } from './platform.js'
 import {
@@ -23,6 +28,8 @@ import {
   appUnavailableView,
   appView,
   branchView,
+  catalogActive,
+  catalogBody,
   catalogView,
   completeView,
   devicesView,
@@ -190,7 +197,13 @@ export function catalogPages(options: CatalogPagesOptions): {
           ),
         )
       } catch (error) {
-        if (!(error instanceof CatalogRefused)) throw error
+        // Waiting for access, or an app the person may not see; anything
+        // else (a host still waiting for its master) is refused as it came.
+        if (
+          !(error instanceof CatalogRefused) ||
+          (error.status !== 403 && error.status !== 404)
+        )
+          throw error
         caller.render(
           res,
           error.status === 403
@@ -375,17 +388,26 @@ export function catalogPages(options: CatalogPagesOptions): {
   return { catalog, installs, devices }
 }
 
+/** How the store pages are drawn and where device registrations go. */
+export interface StorePagesOptions {
+  /** A host's relay of new devices to the master. */
+  relay?: DeviceRelay
+  /** The node's shell; the standalone server's by default. */
+  frame?: Frame
+}
+
 /** The catalog pages over a distribution store: a standalone server's, or a host's cache. */
 function storePages(
   store: Store,
   accounts: Accounts,
-  relay?: DeviceRelay,
+  options: StorePagesOptions = {},
 ): ReturnType<typeof catalogPages> {
+  const relay = options.relay
+  const frame = options.frame ?? standaloneFrame(accounts)
   return catalogPages({
     caller(req) {
       const context = sessionContext(req, accounts)
       if (context == null) return undefined
-      const nav = navigation(context.session, context.account)
       return {
         accountId: context.account.id,
         source: new StoreCatalogSource(store, {
@@ -400,23 +422,25 @@ function storePages(
         registration: store.config.devices != null,
         render(res, view): void {
           if (view.refresh != null) res.set('Refresh', String(view.refresh))
-          res
-            .status(view.status ?? 200)
-            .send(
-              page(
-                view.title,
-                view.body,
-                (view.platforms ?? '') + nav,
-                view.interactive === true,
-              ),
-            )
+          res.status(view.status ?? 200).send(
+            frame(req, {
+              title: view.title,
+              body: `<h1>${escape(view.title)}</h1>${catalogBody(view)}`,
+              active: catalogActive(req.path),
+              ...(view.interactive === true
+                ? { scripts: ['/assets/catalog.js'] }
+                : {}),
+            }),
+          )
         },
       }
     },
     signIn: (req) =>
       '/auth/login?return=' + encodeURIComponent(req.originalUrl),
-    refuse(res, status, message) {
-      res.status(status).send(message)
+    refuse(res, status, message, caller) {
+      // Someone signed in keeps the side menu.
+      if (caller == null) res.status(status).send(message)
+      else caller.render(res, { title: message, body: '', status })
     },
     files: () => new StoreCatalogSource(store),
     qr: () => store.config.origin + '/devices',
@@ -427,23 +451,25 @@ function storePages(
 export function catalogRoutes(
   store: Store,
   accounts = new Accounts(store),
+  frame?: Frame,
 ): Router {
-  return storePages(store, accounts).catalog
+  return storePages(store, accounts, frame == null ? {} : { frame }).catalog
 }
 
 /** Install and a grant's manifest and package, on a standalone server or a host. */
 export function installationRoutes(
   store: Store,
   accounts = new Accounts(store),
+  frame?: Frame,
 ): Router {
-  return storePages(store, accounts).installs
+  return storePages(store, accounts, frame == null ? {} : { frame }).installs
 }
 
 /** Devices, registration and Prepare for this device, on a standalone server or a host. */
 export function deviceRoutes(
   store: Store,
   accounts = new Accounts(store),
-  relay?: DeviceRelay,
+  options: StorePagesOptions = {},
 ): Router {
-  return storePages(store, accounts, relay).devices
+  return storePages(store, accounts, options).devices
 }

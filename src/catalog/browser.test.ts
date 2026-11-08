@@ -135,8 +135,7 @@ describe('Mason real browser acceptance', () => {
               path.join(artifacts, 'mason-browser-failure.png'),
               await device.screenshot(),
             )
-            if (!/navigated|execution context/i.test(String(error)))
-              throw error
+            if (!/navigated|execution context/i.test(String(error))) throw error
             await device.command('assertVisible', { text, timeout: 15000 })
           }
         }
@@ -213,8 +212,13 @@ describe('Mason real browser acceptance', () => {
         await tap('a[href^="/auth/start/first"]')
         await visible('^Apps$')
         await screenshot('mason-catalog.png')
-        await tap('a[href="/people"]')
-        await visible('^People$')
+        // The administrator's side menu: Install apps, Devices and People.
+        await check(
+          "[...document.querySelectorAll('nav.rail a')].map((a) => a.getAttribute('href')).join() === '/apps,/devices,/people'",
+        )
+        await tap('nav.rail a[href="/people"]')
+        await visible('Preapprove a tester')
+        await check("location.pathname === '/people'")
         await tap('#email')
         await device.command('inputText', { text: 'jordan@example.test' })
         await device.command('evalBrowserScript', {
@@ -232,16 +236,23 @@ describe('Mason real browser acceptance', () => {
         await visible('^feature/new$')
         await screenshot('mason-builds.png')
         await device.command('evalBrowserScript', {
-          script: 'window.scrollTo(0,300)',
+          script:
+            'window.scrollTo(0,300); window.masonScrolled = window.scrollY',
         })
+        await check('window.masonScrolled > 100')
         await tap('a[data-platform="android"]')
         await visible('Android builds · newest first')
-        await check('Math.abs(window.scrollY - 300) < 3')
+        // The same document (no reload), at the same position.
+        await check('Math.abs(window.scrollY - window.masonScrolled) < 3')
         await check(
           "location.pathname.endsWith('/branches/ZmVhdHVyZS9uZXc') && location.search === '?platform=android'",
         )
         await check(
           "document.querySelector('a[data-platform=android]').getAttribute('aria-current') === 'true'",
+        )
+        // The switch replaced the catalog's own nav; the side menu stayed.
+        await check(
+          "document.querySelectorAll('nav[data-catalog-platforms]').length === 1 && document.querySelector('nav.rail a[href=\"/people\"]') != null && document.querySelector('nav.rail a[href=\"/apps\"]').getAttribute('aria-current') === 'page'",
         )
         await device.command('back')
         await visible('iOS builds · newest first')
@@ -257,7 +268,10 @@ describe('Mason real browser acceptance', () => {
         await open(`/apps/${appId}/branches/ZW1wdHk?platform=ios`)
         await visible('^No iOS builds$')
         await screenshot('mason-empty.png')
+        // Sign out is on Your account, behind the account link.
         await open('/')
+        await tap('a[aria-label="Your account"]')
+        await visible('^Your account$')
         await tap('form[action="/auth/logout"] button')
         await visible('^Sign in$')
         await tap('a[href^="/auth/start/plain"]')
@@ -270,7 +284,7 @@ describe('Mason real browser acceptance', () => {
         await open('/')
         await visible('^Sign in$')
         console.log(
-          'Browser PASS: pending, operator admin, People preapproval, four platforms/history/empty states, first-login claim and revocation',
+          'Browser PASS: pending, operator admin, People through the side menu, preapproval, four platforms/history/empty states with the side menu kept, sign-out from Your account, first-login claim and revocation',
         )
       } finally {
         await daemon.shutdown({ wait: 15000 })

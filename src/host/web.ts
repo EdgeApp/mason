@@ -6,6 +6,7 @@ import {
   SESSION_COOKIE,
   sessionContext,
   type AuthOptions,
+  type Frame,
 } from '../auth/routes.js'
 import { LinkError, type Link } from '../link/link.js'
 import type { Session } from '../auth/accounts.js'
@@ -43,7 +44,7 @@ import {
 } from '../view/notifications.js'
 import { graphFromJson, runData, runTitle, runView } from '../view/run.js'
 import { search } from '../view/search.js'
-import { page, shell, type Viewer } from '../view/shell.js'
+import { page, shell, type FramedPage, type Viewer } from '../view/shell.js'
 import { escape } from '../view/html.js'
 import { stylesheet } from '../view/stylesheet.js'
 import type { Projected } from '../master/changes.js'
@@ -96,7 +97,54 @@ function hostViewer(
   }
 }
 
-/** The dashboard, artifacts and search for developers and up; testers keep the catalog. */
+/**
+ * A page in the host's shell: the side menu, search, the approvals that
+ * wait for the viewer, and the test banner.
+ */
+function hostShell(
+  host: HostRuntime,
+  context: WebAppContext,
+  viewer: Viewer | undefined,
+  framed: FramedPage,
+): string {
+  return shell({
+    title: framed.title,
+    body: framed.body,
+    ...(viewer == null ? {} : { viewer }),
+    ...(framed.active == null ? {} : { active: framed.active }),
+    ...(framed.scripts == null ? {} : { scripts: framed.scripts }),
+    ...(framed.head == null ? {} : { head: framed.head }),
+    banners: testBanner(context),
+    notifications:
+      viewer == null
+        ? []
+        : notificationsFor(
+            viewer,
+            approvalNotifications(host.cache.db, viewer, (job, stage) => {
+              const row = host.cache.db
+                .prepare('SELECT workflow,graph FROM jobs WHERE id=?')
+                .get(job) as
+                | { workflow: string; graph: string | null }
+                | undefined
+              return row == null
+                ? undefined
+                : approvalRolesFromGraph(row.graph, row.workflow, stage)
+            }),
+          ),
+  })
+}
+
+/** The host's shell for the person a request is from: the catalog, device and sign-in pages. */
+function hostFrame(host: HostRuntime, context: WebAppContext): Frame {
+  return (req, framed) =>
+    hostShell(host, context, hostViewer(host, req)?.viewer, framed)
+}
+
+/**
+ * Projects & apps, the project pages, Artifacts, runs and search for
+ * developers and up, and Your account for everyone; `/` and the rest of
+ * Install apps are the catalog's.
+ */
 function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
   const router = express.Router()
   const visible =
@@ -113,32 +161,39 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
     scripts: string[] = [],
   ): void => {
     res.send(
-      shell({
+      hostShell(host, context, viewer, {
         title,
         body,
-        viewer,
         active,
         scripts: ['/assets/run.js', ...scripts],
         ...(csrf == null
           ? {}
           : { head: `<meta name="mason-csrf" content="${escape(csrf)}">` }),
-        banners: testBanner(context),
-        notifications: notificationsFor(
-          viewer,
-          approvalNotifications(host.cache.db, viewer, (job, stage) => {
-            const row = host.cache.db
-              .prepare('SELECT workflow,graph FROM jobs WHERE id=?')
-              .get(job) as
-              | { workflow: string; graph: string | null }
-              | undefined
-            return row == null
-              ? undefined
-              : approvalRolesFromGraph(row.graph, row.workflow, stage)
-          }),
-        ),
       }),
     )
   }
+  /** Sends someone not signed in to sign in, and back. */
+  const signIn = (req: express.Request, res: express.Response): void => {
+    res.redirect(
+      303,
+      '/auth/login?return=' + encodeURIComponent(req.originalUrl),
+    )
+  }
+  // Projects are for developers and up: to a tester they do not exist.
+  router.use('/projects', (req, res, next) => {
+    const found = hostViewer(host, req)
+    if (found?.viewer.role !== 'tester') {
+      next()
+      return
+    }
+    render(
+      res.status(404),
+      found.viewer,
+      'Not found',
+      '<h1>Not found</h1><p class="empty-state">There is no such page.</p>',
+      'catalog',
+    )
+  })
   /**
    * A project's pages on the host: the master's views over the copy the
    * master sends, read-only, for developers and up and only for a project
@@ -156,10 +211,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
     | undefined => {
     const found = hostViewer(host, req)
     if (found == null) {
-      res.redirect(
-        303,
-        '/auth/login?return=' + encodeURIComponent(req.originalUrl),
-      )
+      signIn(req, res)
       return undefined
     }
     const db = host.cache.db
@@ -311,10 +363,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
   router.get('/account', (req, res) => {
     const found = hostViewer(host, req)
     if (found == null) {
-      res.redirect(
-        303,
-        '/auth/login?return=' + encodeURIComponent(req.originalUrl),
-      )
+      signIn(req, res)
       return
     }
     const db = host.cache.db
@@ -363,10 +412,10 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       ['/assets/master.js', '/assets/people.js'],
     )
   })
-  router.get('/', (req, res, next) => {
+  router.get('/projects', (req, res) => {
     const found = hostViewer(host, req)
-    if (found == null || found.viewer.role === 'tester') {
-      next()
+    if (found == null) {
+      signIn(req, res)
       return
     }
     const now = host.now()
@@ -400,16 +449,17 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
   router.get('/artifacts', (req, res) => {
     const found = hostViewer(host, req)
     if (found == null) {
-      res.redirect(
-        303,
-        '/auth/login?return=' + encodeURIComponent(req.originalUrl),
-      )
+      signIn(req, res)
       return
     }
     if (found.viewer.role === 'tester') {
-      res
-        .status(403)
-        .send(page('Artifacts', '<p>Artifacts are for developers and up.</p>'))
+      render(
+        res.status(403),
+        found.viewer,
+        'Artifacts',
+        '<h1>Artifacts</h1><p>Artifacts are for developers and up.</p>',
+        'catalog',
+      )
       return
     }
     const filter = (name: string): string | undefined =>
@@ -455,16 +505,17 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
   router.get('/runs/:id', (req, res) => {
     const found = hostViewer(host, req)
     if (found == null) {
-      res.redirect(
-        303,
-        '/auth/login?return=' + encodeURIComponent(req.originalUrl),
-      )
+      signIn(req, res)
       return
     }
     if (found.viewer.role === 'tester') {
-      res
-        .status(403)
-        .send(page('Run', '<p>Runs are for developers and up.</p>'))
+      render(
+        res.status(403),
+        found.viewer,
+        'Run',
+        '<h1>Run</h1><p>Runs are for developers and up.</p>',
+        'catalog',
+      )
       return
     }
     const db = host.cache.db
@@ -476,9 +527,13 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       return row == null ? undefined : graphFromJson(row.graph, row.workflow)
     })
     if (run == null) {
-      res
-        .status(404)
-        .send(page('Run unavailable', '<p>There is no such run.</p>'))
+      render(
+        res.status(404),
+        found.viewer,
+        'Run unavailable',
+        '<h1>Run unavailable</h1><p>There is no such run.</p>',
+        'dashboard',
+      )
       return
     }
     const query = (name: string): string | undefined =>
@@ -758,6 +813,7 @@ export function hostApp(
           ),
         )
     })
+  const frame = hostFrame(host, context)
   // The Profile Service posts a signed body, read raw before any form parser.
   app.use(deviceCallbackRoutes(host.cache.store, host.devices))
   app.use(express.urlencoded({ extended: false, limit: '16kb' }))
@@ -774,14 +830,21 @@ export function hostApp(
         })) as { account: Projected }
       }),
       people: false,
+      account: false,
+      frame,
       password: hostPassword(host),
       invitation: hostInvitation(host),
     }),
   )
-  app.use(deviceRoutes(host.cache.store, host.accounts, host.devices))
-  app.use(installationRoutes(host.cache.store, host.accounts))
+  app.use(
+    deviceRoutes(host.cache.store, host.accounts, {
+      relay: host.devices,
+      frame,
+    }),
+  )
+  app.use(installationRoutes(host.cache.store, host.accounts, frame))
   app.use(viewRoutes(host, context))
-  app.use(catalogRoutes(host.cache.store, host.accounts))
+  app.use(catalogRoutes(host.cache.store, host.accounts, frame))
   app.use((_req, res) => {
     res.status(404).send('Not found')
   })

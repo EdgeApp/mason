@@ -23,6 +23,8 @@ function saveScroll(throttle = false): void {
     // A browser quota must never prevent the actual navigation.
   }
 }
+/** The catalog's platform switch, the one navigation the platform links swap. */
+const PLATFORM_NAV = 'nav[data-catalog-platforms]'
 let navigationId = 0
 async function replace(
   url: URL,
@@ -45,11 +47,15 @@ async function replace(
     const body = await response.text()
     if (id !== navigationId) return
     const parsed = new DOMParser().parseFromString(body, 'text/html')
+    // The catalog's own platform switch and the content; the side menu and
+    // the top bar stay.
     const main = parsed.querySelector('main'),
-      nav = parsed.querySelector('nav')
+      nav = parsed.querySelector(PLATFORM_NAV)
     if (main == null || nav == null) throw new Error('Invalid page')
+    const shown = document.querySelector(PLATFORM_NAV)
     document.querySelector('main')!.replaceWith(main)
-    document.querySelector('nav')!.replaceWith(nav)
+    // The switch is inside main; one outside it is swapped on its own.
+    if (shown?.isConnected === true) shown.replaceWith(nav)
     document.title = parsed.title
     if (mode === 'push') history.pushState({ x, y }, '', url)
     if (mode === 'replace') history.replaceState({ x, y }, '', url)
@@ -65,7 +71,7 @@ async function replace(
 const current = new URL(location.href)
 const catalogPage =
   current.pathname === '/' ||
-  /^\/apps\/[0-9]+(?:\/branches\/[A-Za-z0-9_-]+)?$/.test(current.pathname)
+  /^\/apps(?:\/[0-9]+(?:\/branches\/[A-Za-z0-9_-]+)?)?$/.test(current.pathname)
 if (catalogPage) {
   document.addEventListener('click', (event) => {
     if (!(event.target instanceof Element)) return
@@ -113,7 +119,7 @@ if (catalogPage) {
       /Mac/.test(navigator.platform) &&
       navigator.maxTouchPoints > 1
     const chosen = document.querySelector<HTMLAnchorElement>(
-      'nav a[data-platform][aria-current="true"]',
+      `${PLATFORM_NAV} a[data-platform][aria-current="true"]`,
     )?.dataset.platform
     if (ipad) {
       current.searchParams.set('platform', 'ios')

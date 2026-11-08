@@ -206,17 +206,17 @@ describe('Pages on the master and the host', function () {
       developer.text,
       /aria-label="Your account" title="Developer Person · developer · master"/,
     )
-    // Testers keep the phone-first catalog on the host; on the master their
-    // home is Install apps, which lists nothing shared with them yet.
+    // Testers' home is Install apps on both nodes, which lists nothing
+    // shared with them yet.
     const catalog = await get(host, '/', onHost('tester'))
     assert.doesNotMatch(catalog.text, /Projects &amp; apps/)
     assert.equal((await get(host, '/artifacts', onHost('tester'))).status, 403)
     const tester = onMaster('tester')
-    assert.equal((await get(c.master, '/', tester)).location, '/apps')
-    assert.match(
-      (await get(c.master, '/apps', tester)).text,
-      /No apps have been configured yet/,
-    )
+    for (const route of ['/', '/apps'])
+      assert.match(
+        (await get(c.master, route, tester)).text,
+        /No apps have been configured yet/,
+      )
     assert.equal(
       (await get(c.master, '/artifacts', onMaster('tester'))).status,
       403,
@@ -228,13 +228,17 @@ describe('Pages on the master and the host', function () {
   it('U17.4 both nodes render the dashboard from their own data; only the master lists nodes', async () => {
     const master = await get(
       c.master,
-      '/?platform=android',
+      '/projects?platform=android',
       onMaster('developer'),
     )
     assert.match(master.text, /app\.example\.views/)
     assert.match(master.text, /Worker nodes/)
     assert.match(master.text, /workers idle/)
-    const onHostPage = await get(host, '/?project=views', onHost('developer'))
+    const onHostPage = await get(
+      host,
+      '/projects?project=views',
+      onHost('developer'),
+    )
     assert.match(onHostPage.text, /app\.example\.views/)
     assert.doesNotMatch(onHostPage.text, /Worker nodes|workers idle/)
     assert.match(

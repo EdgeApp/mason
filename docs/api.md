@@ -1667,7 +1667,7 @@ session:
 
 | Method and path | What it does |
 | --- | --- |
-| `GET /apps` | Install apps: the apps the person may install, with a platform switch. |
+| `GET /`, `GET /apps` | Install apps: the apps the person may install, with a platform switch. `/` is everyone's home on both nodes. |
 | `GET /apps/:appId`, `GET /apps/:appId/branches/:branchKey` | An app's branches; a branch's builds for a platform, each with its install control. |
 | `POST /builds/:id/install` | A grant for the build: 303 to its package, or the iOS installer page; 409 when the selected device must be registered or the build prepared for it. |
 | `POST /builds/:id/prepare` | Requests a build of that branch and commit for the selected device. |
@@ -1681,23 +1681,29 @@ is not the person's counts as none, and selecting one is 404.
 
 **On the master** these pages draw their data from the host over the link,
 for the account the master session authenticated; the host decides what
-the person sees from its cache, as for its own pages. The master's `/`
-sends a tester to `/apps`. For each master session that uses them the host
+the person sees from its cache, as for its own pages. For each master session that uses them the host
 keeps a relay session (`sessions.relayed = 1`, keyed by an HMAC of the
 master session's digest), which holds its install grants and registration
 requests, expires with the master session, ends when that session signs
 out (`catalog.endSession`) or its account's permission version changes, and
 never signs a browser in on the host. Install tokens live on the host; the
 master relays a grant's manifest and package with the request's method,
-`Range` and `If-Range`. With the host disconnected, or no host paired, the
-pages answer 503 "The host is unreachable".
+`Range` and `If-Range`. With a paired host disconnected the pages answer
+503 "The host is unreachable". A master whose cluster has no host yet opens
+Projects & apps at `/` for developers and up; its Install apps and Devices
+pages, and a tester's `/`, say "No host is linked yet — installs come from
+a host" (200; a form post answers 503).
+
+Projects & apps is `/projects` on both nodes, with its filters
+(`?platform=`, `?project=`) there. To a tester `/projects` and every page
+under it answer 404, on both nodes.
 
 The master's public origin is its `master` setting. A manifest from the
 master names its package there, and a registration started on the master
 carries the host's callback URL (devices live on the host), whose 301 sends
 the device back to `<master origin>/devices/complete/<token>`. Without that
 setting the master serves a certificate iOS will not install from, so its
-iOS rows and Register Device link to the host's own pages instead, saying
+iOS rows and device registration link to the host's own pages instead, saying
 installs on iPhone and iPad go through the host until the master has a
 public address; other platforms still download from the master.
 

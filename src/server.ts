@@ -10,6 +10,8 @@ import {
   deviceRoutes,
   installationRoutes,
 } from './catalog/routes.js'
+import { contentSecurityPolicy } from './node/webApp.js'
+import { assetRoutes } from './view/assets.js'
 import { page } from './view/shell.js'
 import { stylesheet } from './view/stylesheet.js'
 import type { Server } from 'node:http'
@@ -28,8 +30,7 @@ export function createApp(
       'Cache-Control': 'no-store',
       'Referrer-Policy': 'no-referrer',
       'X-Content-Type-Options': 'nosniff',
-      'Content-Security-Policy':
-        "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      'Content-Security-Policy': contentSecurityPolicy,
     })
     next()
   })
@@ -44,6 +45,8 @@ export function createApp(
   app.get('/assets/style.css', (_req, res) => {
     res.type('css').send(stylesheet)
   })
+  // The shell's fonts, icons and logo; search and notifications are the cluster's.
+  app.use(assetRoutes({ shell: false }))
   app.get('/assets/catalog.js', (_req, res) => {
     res
       .type('js')
