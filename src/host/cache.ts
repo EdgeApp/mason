@@ -271,6 +271,19 @@ export class HostCache {
   revision(): number {
     return Number(this.meta('revision') ?? 0)
   }
+  /**
+   * The revision an opening sync asks from: the one saved before the first
+   * attempt since an opening sync last applied. The master counts a failed
+   * answer as sent and pushes what came after it, which moves `revision()`
+   * past the range the host missed; this one survives a restart.
+   */
+  syncFrom(): number {
+    const saved = this.meta('sync_from')
+    if (saved != null) return Number(saved)
+    const revision = this.revision()
+    this.setMeta('sync_from', revision)
+    return revision
+  }
   /** Whether a sync has brought the keys since this cache began keeping them (schema 9). */
   keysSynced(): boolean {
     return this.meta('keys_synced') !== '0'
@@ -441,10 +454,16 @@ export class HostCache {
     )
   }
 
-  /** Applies a sync from the master in one transaction, then records its revision and the time. */
-  apply(sync: Sync): void {
+  /**
+   * Applies a sync from the master in one transaction, then records its
+   * revision and the time. An opening sync also ends the range `syncFrom()`
+   * holds.
+   */
+  apply(sync: Sync, opening = false): void {
     this.store.transaction(() => {
       this.db.exec('PRAGMA defer_foreign_keys=ON')
+      if (opening)
+        this.db.prepare("DELETE FROM host_meta WHERE key='sync_from'").run()
       if (sync.kind === 'snapshot') {
         for (const entity of [...order].reverse()) {
           const values = sync.entities[entity] ?? []

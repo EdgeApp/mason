@@ -11,6 +11,7 @@ import {
 import path from 'node:path'
 import { Accounts } from '../auth/accounts.js'
 import { Providers } from '../auth/providers.js'
+import { backoffDelay } from '../link/backoff.js'
 import type { Link, MethodTable, Stream } from '../link/link.js'
 import type { Sync } from '../master/changes.js'
 import { HostCache } from './cache.js'
@@ -36,6 +37,8 @@ export interface HostOptions {
   storageFetch?: typeof fetch
   /** Whether the host runs with `--test-endpoints`: only then may an extra Profile Service root be trusted. */
   testEndpoints?: boolean
+  /** How long to wait before retrying a failed opening sync. Tests set this. */
+  syncRetryMs?: (attempt: number) => number
 }
 
 /**
@@ -71,6 +74,12 @@ export class HostRuntime {
   private timer: NodeJS.Timeout | undefined
   private providerCache: { key: string; providers: Providers } | undefined
   private stopped = false
+  /** The opening sync, retried while its link stays up. */
+  private syncing: Promise<void> | undefined
+  /** Whether `syncing` is still running; cleared before its callers resume. */
+  private syncRunning = false
+  /** Resolves the wait between sync attempts, so a new link or a stop skips it. */
+  private syncWake: (() => void) | undefined
   /** The host's own web listener: its URL and, when it serves its own certificate, the pin. */
   web: { url: string; pin?: string } | undefined
 
@@ -220,31 +229,100 @@ export class HostRuntime {
   async stop(): Promise<void> {
     this.stopped = true
     clearInterval(this.timer)
+    this.syncWake?.()
     this.cache.close()
   }
 
-  /** On each link open: sync from the cache's revision, then deliver what waited. */
-  async connected(): Promise<void> {
-    const link = this.options.link()
-    if (link == null || this.stopped) return
-    const sync = (await link.request(
-      'host.sync',
-      {
-        revision: this.cache.revision(),
-        ...(this.web == null ? {} : { web: this.web }),
-      },
-      5 * 60_000,
-    )) as Sync
-    if (this.stopped) return
-    this.apply(sync)
-    this.synced = link
-    await this.outbox.flush(link)
-    await this.webhooks.flush()
+  /**
+   * On each link open: sync from the cache's revision, then deliver what
+   * waited. A failed sync is retried on that same link, so the host does not
+   * stay offline until the link drops.
+   */
+  connected(): Promise<void> {
+    this.syncWake?.()
+    if (this.syncRunning && this.syncing != null) return this.syncing
+    this.syncing = this.syncLoop()
+    return this.syncing
   }
 
-  apply(sync: Sync): void {
+  /** Syncs the current link, and tries again until it does or the link is gone. */
+  private async syncLoop(): Promise<void> {
+    this.syncRunning = true
+    try {
+      let attempt = 0
+      let previous: Link | undefined
+      while (!this.stopped) {
+        const link = this.options.link()
+        if (link == null || link.closed) return
+        if (link === this.synced) return
+        if (link !== previous) {
+          attempt = 0
+          previous = link
+        }
+        try {
+          const sync = (await link.request(
+            'host.sync',
+            {
+              revision: this.cache.syncFrom(),
+              ...(this.web == null ? {} : { web: this.web }),
+            },
+            5 * 60_000,
+          )) as Sync
+          if (this.stopped) return
+          if (this.replaced(link)) continue
+          this.apply(sync, true)
+          this.synced = link
+          await this.outbox.flush(link)
+          // A link that arrived while a flush ran still needs its own sync,
+          // before the webhooks that waited go out over it.
+          if (this.replaced(link)) continue
+          await this.webhooks.flush()
+          if (this.replaced(link)) continue
+          return
+        } catch (error) {
+          if (this.stopped) return
+          if (this.replaced(link)) continue
+          // The master's failures carry no code that marks one as lasting, so
+          // every one is retried; the backoff caps a lasting one at one a minute.
+          attempt++
+          const message = error instanceof Error ? error.message : 'Sync failed'
+          this.options.log?.(`Sync with the master failed: ${message}`)
+          await this.pause(this.syncRetryDelay(attempt))
+        }
+      }
+    } finally {
+      // Cleared as the loop ends, not a microtask later, so a link that
+      // opens next starts its own sync instead of joining this finished one.
+      this.syncRunning = false
+    }
+  }
+
+  /** Whether `link` is no longer the master's current, open link. */
+  private replaced(link: Link): boolean {
+    return this.options.link() !== link || link.closed
+  }
+
+  /** The backoff the master redials a node with, unless a test names one. */
+  private syncRetryDelay(attempt: number): number {
+    return this.options.syncRetryMs?.(attempt) ?? backoffDelay(attempt)
+  }
+
+  private pause(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const finish = (): void => {
+        clearTimeout(timer)
+        if (this.syncWake === finish) this.syncWake = undefined
+        resolve()
+      }
+      this.syncWake = finish
+      const timer = setTimeout(finish, ms)
+      timer.unref()
+    })
+  }
+
+  apply(sync: Sync, opening = false): void {
     if (this.stopped) return
-    this.cache.apply(sync)
+    this.cache.apply(sync, opening)
     void this.artifacts.cleanup().catch((error: unknown) => {
       this.options.log?.(`Artifact cleanup failed: ${(error as Error).message}`)
     })
