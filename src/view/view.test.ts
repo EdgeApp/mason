@@ -2093,6 +2093,96 @@ describe('Project tabs and the Secrets tab', () => {
     assert.match(runs, /No runs yet/)
   })
 
+  it('M10 the App IDs card is a grid of App ID, Platforms and Apple team, each row linking to its app ID page', () => {
+    const overview = (
+      apps: Parameters<typeof projectView>[0]['apps'],
+      node: 'master' | 'host' = 'master',
+    ): string =>
+      projectView({
+        viewer: viewer('developer', node),
+        slug: 'my app',
+        name: 'App',
+        repository: 'https://github.com/a/app',
+        defaultBranch: 'master',
+        format: 'pipeline',
+        apps,
+        rules: [],
+        webhook: false,
+        buildNumbers: [],
+        canSeed: false,
+      })
+    const apps = [
+      {
+        bundleId: 'com.example.alpha',
+        platforms: ['ios', 'android'],
+        apple: { team: 'ABCDE12345' },
+      },
+      { bundleId: 'com.example.beta-with-a-longer-id', platforms: ['macos'] },
+      { bundleId: 'a&b', platforms: [] },
+    ]
+    for (const node of ['master', 'host'] as const) {
+      const html = overview(apps, node)
+      const card = html.slice(
+        html.indexOf('App IDs</h2>'),
+        html.indexOf('Branch rules'),
+      )
+      assert.doesNotMatch(card, /<ul|<li/)
+      assert.match(
+        card,
+        /^App IDs<\/h2><div class="app-grid" role="table" aria-label="App IDs"><div class="app-grid-row app-grid-head" role="row"><span role="columnheader">App ID<\/span><span role="columnheader">Platforms<\/span><span role="columnheader">Apple team<\/span><\/div>/,
+      )
+      // One row per app ID, three cells each: its link, its chips back to back, its team.
+      const rows = [
+        ...card.matchAll(
+          /<div class="app-grid-row" role="row"><div role="cell"><a class="row-link" href="([^"]+)">([^<]+)<\/a><\/div><div role="cell"><span class="app-platforms">(.*?)<\/span><\/div><div role="cell">(.*?)<\/div><\/div>/g,
+        ),
+      ].map((match) => ({
+        href: match[1],
+        id: match[2],
+        chips: match[3],
+        team: match[4],
+      }))
+      assert.deepEqual(rows, [
+        {
+          href: '/projects/my%20app/apps/com.example.alpha',
+          id: 'com.example.alpha',
+          chips: platformChip('ios') + platformChip('android'),
+          team: '<span class="mono">ABCDE12345</span>',
+        },
+        {
+          href: '/projects/my%20app/apps/com.example.beta-with-a-longer-id',
+          id: 'com.example.beta-with-a-longer-id',
+          chips: platformChip('macos'),
+          team: '',
+        },
+        {
+          href: '/projects/my%20app/apps/a%26b',
+          id: 'a&amp;b',
+          chips: '',
+          team: '',
+        },
+      ])
+    }
+    assert.match(overview([]), /App IDs<\/h2><p>None\.<\/p><\/section>/)
+    // The columns: the app ID's at least 12rem, the chips' as wide as the widest row's, the team's the rest.
+    assert.match(
+      stylesheet,
+      /\.app-grid\{display:grid;grid-template-columns:minmax\(12rem,max-content\) max-content 1fr;/,
+    )
+    assert.match(
+      stylesheet,
+      /\.app-grid-row\{display:grid;grid-column:1\/-1;grid-template-columns:subgrid;/,
+    )
+    assert.match(
+      stylesheet,
+      /\.app-platforms\{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-start;/,
+    )
+    assert.match(
+      stylesheet,
+      /\.app-grid \.row-link::after\{content:'';position:absolute;inset:0\}/,
+    )
+  })
+
   it('U18.13 a manager sees the add buttons, Edit or Replace then Delete per row, the editor and the audit', () => {
     const html = secretsView({
       slug: 'app',
