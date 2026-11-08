@@ -19,7 +19,7 @@ import { cluster, type Cluster } from '../test/cluster.js'
 import { LOCKOUT, MasterAuth, SetupGate, SignInRefused } from './auth.js'
 import { MasterDatabase } from './database.js'
 import { createPasswordRecord } from './passwords.js'
-import { asForwardRequest, isRunAction } from './forward.js'
+import { asForwardRequest, isAccountChange, isRunAction } from './forward.js'
 import { policy, type Action } from './permissions.js'
 import { localOperator, roles, type Role } from './roles.js'
 import { masterApp } from './web.js'
@@ -240,7 +240,10 @@ describe('Master sign-in, setup, people and permissions', function () {
     assert.equal((await request(c.master, 'GET', '/')).status, 303)
     const home = await request(c.master, 'GET', '/', { cookie })
     assert.equal(home.status, 200)
-    assert.match(home.text, /<strong>paul<\/strong><small>admin · master/)
+    assert.match(
+      home.text,
+      /aria-label="Your account" title="paul · admin · master"/,
+    )
     assert.match(home.text, /Projects &amp; apps/)
     assert.match(home.text, /This master is not backed up/)
     // Only the pages that hash a password, and the worker, may run WebAssembly.
@@ -1722,6 +1725,196 @@ export async function one(ctx: Stage) { return 1 }
       },
     )
     assert.equal(cancel.status, 200, cancel.text)
+    // A host session changes its own name and emails through the master (M4),
+    // and stays signed in; never another's record, nor its own role or username.
+    const own = await request(host, 'PUT', `/api/v2/people/${dev.id}`, {
+      cookie,
+      body: {
+        name: 'Host developer renamed',
+        emails: [
+          'person11@example.test',
+          'hostdev@example.test',
+          'mine@example.test',
+        ],
+      },
+      csrf: session.csrf,
+      origin: hostOrigin,
+    })
+    assert.equal(own.status, 200, own.text)
+    assert.equal(own.json.name, 'Host developer renamed')
+    assert.deepEqual(own.json.emails.at(-1), {
+      email: 'mine@example.test',
+      confirmed: false,
+    })
+    for (const [path, change] of [
+      [`/api/v2/people/${admin.accountId ?? 1}`, { name: 'Not mine' }],
+      [`/api/v2/people/${dev.id}`, { role: 'admin' }],
+      [`/api/v2/people/${dev.id}`, { username: 'mine' }],
+    ] as const) {
+      const refused = await request(host, 'PUT', path, {
+        cookie,
+        body: change,
+        csrf: session.csrf,
+        origin: hostOrigin,
+      })
+      assert.equal(refused.status, 403, `${path} ${JSON.stringify(change)}`)
+    }
+    assert.equal(
+      (
+        await request(host, 'PUT', `/api/v2/people/${dev.id}`, {
+          cookie,
+          body: { name: 'No proof' },
+          origin: hostOrigin,
+        })
+      ).status,
+      403,
+    )
+    // The host answers once its own copy has the change: the page that
+    // reloads after Save reads it.
+    assert.ok(
+      host
+        .host!.cache.db.prepare(
+          "SELECT 1 FROM accounts WHERE id=? AND name='Host developer renamed'",
+        )
+        .get(dev.id),
+    )
+    assert.ok(host.host!.accounts.session(token), 'still signed in on the host')
+    // Catch-ups at once share syncs: the first, and one more for those that
+    // came while it ran (reviews 2.harness-review.4, 3.harness-review.1).
+    const link = host.host!.options.link()!
+    const ask = link.request.bind(link)
+    let syncs = 0
+    link.request = (async (method: string, ...rest: unknown[]) => {
+      if (method === 'host.sync') syncs++
+      return await (ask as (...args: unknown[]) => Promise<unknown>)(
+        method,
+        ...rest,
+      )
+    }) as typeof link.request
+    try {
+      await Promise.all([
+        host.host!.catchUp(),
+        host.host!.catchUp(),
+        host.host!.catchUp(),
+      ])
+    } finally {
+      link.request = ask
+    }
+    assert.equal(syncs, 2)
+    // A caller arriving while a sync is in flight still sees what changed
+    // after that sync was computed (review 3.harness-review.1).
+    let computed: () => void = () => undefined
+    const firstComputed = new Promise<void>((resolve) => {
+      computed = resolve
+    })
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let calls = 0
+    link.request = (async (method: string, ...rest: unknown[]) => {
+      const answer = await (ask as (...args: unknown[]) => Promise<unknown>)(
+        method,
+        ...rest,
+      )
+      if (method === 'host.sync' && calls++ === 0) {
+        computed()
+        await gate
+      }
+      return answer
+    }) as typeof link.request
+    try {
+      const first = host.host!.catchUp()
+      await firstComputed
+      await master().people.update(admin, dev.id, { name: 'Renamed after' })
+      const second = host.host!.catchUp()
+      release()
+      await Promise.all([first, second])
+    } finally {
+      link.request = ask
+    }
+    assert.equal(calls, 2)
+    assert.ok(
+      host
+        .host!.cache.db.prepare(
+          "SELECT 1 FROM accounts WHERE id=? AND name='Renamed after'",
+        )
+        .get(dev.id),
+    )
+    // Through the host, only a tester's password is taken, and an address is
+    // never confirmed, whoever the host says is asking (review 2.harness-review.1).
+    const throughHost = async (
+      accountId: number,
+      body: unknown,
+    ): Promise<Reply> => {
+      const started = host.host!.accounts.startSession(accountId)
+      return await request(host, 'PUT', `/api/v2/people/${accountId}`, {
+        cookie: `__Host-mason-session=${started.token}`,
+        body,
+        csrf: started.session.csrf,
+        origin: hostOrigin,
+      })
+    }
+    const refusedPassword = await throughHost(dev.id, {
+      password: await newPassword('Dev-Horse-9'),
+    })
+    assert.equal(refusedPassword.status, 403, refusedPassword.text)
+    assert.match(
+      refusedPassword.json.error,
+      /Change your password on the master/,
+    )
+    const paulId = Number(
+      master()
+        .database.db.prepare("SELECT id FROM accounts WHERE username='paul'")
+        .get()!.id,
+    )
+    const before = master().people.get(admin, paulId)
+    assert.equal(
+      (
+        await throughHost(paulId, {
+          password: await newPassword('Stolen-Horse-9'),
+        })
+      ).status,
+      403,
+    )
+    const added = await throughHost(paulId, {
+      emails: [
+        ...before.emails.map((entry) => entry.email),
+        'attacker@example.test',
+      ],
+    })
+    assert.equal(added.status, 200, added.text)
+    assert.deepEqual(added.json.emails.at(-1), {
+      email: 'attacker@example.test',
+      confirmed: false,
+    })
+    await master().people.update(admin, paulId, {
+      emails: before.emails.map((entry) => entry.email),
+    })
+    // Your account on the host: editable over the link, read-only without it.
+    const account = await request(host, 'GET', '/account', { cookie })
+    assert.equal(account.status, 200)
+    assert.match(account.text, /<h1>Your account<\/h1>/)
+    // A developer sets their password on the master, not through the host.
+    assert.match(account.text, /Change your password on the master/)
+    assert.doesNotMatch(account.text, /data-open="password-own"/)
+    assert.match(account.text, /data-edit="self"/)
+    assert.match(
+      account.text,
+      /mine@example\.test<\/span><small class="tag">unconfirmed/,
+    )
+    assert.match(
+      account.text,
+      /<script type="module" src="\/assets\/people\.js">/,
+    )
+    assert.match(account.text, /action="\/auth\/logout"/)
+    let offline = ''
+    await c.drop('host', 2000, async () => {
+      offline = (await request(host, 'GET', '/account', { cookie })).text
+    })
+    assert.match(offline, /cannot reach the master/)
+    assert.match(offline, /data-edit="none"/)
+    assert.doesNotMatch(offline, /data-add-email|data-open="password-own"/)
     // A tester's session is refused by its role; a stale permission version by the master.
     const answer = async (
       params: unknown,
@@ -1900,6 +2093,12 @@ export async function one(ctx: Stage) { return 1 }
     assert(isRunAction('POST', '/api/jobs/abc/cancel'))
     assert(!isRunAction('GET', '/api/v2/runs'))
     assert(!isRunAction('POST', '/api/v2/keys'))
+    // A person's own record, through the host (M4).
+    assert(isAccountChange('PUT', '/api/v2/people/12'))
+    assert(isAccountChange('PUT', '/api/v2/people/12?x=1'))
+    assert(!isAccountChange('POST', '/api/v2/people/12'))
+    assert(!isAccountChange('PUT', '/api/v2/people/12/invitation'))
+    assert(!isAccountChange('PUT', '/api/v2/people'))
   })
 
   it('U13.10 the master’s pages: Backups first for an administrator until they confirm the key, and sessions on every page', async () => {

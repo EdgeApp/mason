@@ -21,6 +21,7 @@ import {
   testBanner,
   type WebAppContext,
 } from '../node/webApp.js'
+import { accountView } from '../view/admin.js'
 import { artifactsView } from '../view/artifacts.js'
 import { dashboardData, dashboardView } from '../view/dashboard.js'
 import {
@@ -190,6 +191,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
     body: string,
     active: string,
     csrf?: string,
+    scripts: string[] = [],
   ): void => {
     res.send(
       shell({
@@ -197,7 +199,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
         body,
         viewer,
         active,
-        scripts: ['/assets/run.js'],
+        scripts: ['/assets/run.js', ...scripts],
         ...(csrf == null
           ? {}
           : { head: `<meta name="mason-csrf" content="${escape(csrf)}">` }),
@@ -218,6 +220,63 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       }),
     )
   }
+  // Your account: the person's own record from the cache; changes go to the
+  // master over the link, so the page is read-only while it is down.
+  router.get('/account', (req, res) => {
+    const found = hostViewer(host, req)
+    if (found == null) {
+      res.redirect(
+        303,
+        '/auth/login?return=' + encodeURIComponent(req.originalUrl),
+      )
+      return
+    }
+    const db = host.cache.db
+    const row = db
+      .prepare(
+        'SELECT id,name,username,role,has_password FROM accounts WHERE id=?',
+      )
+      .get(found.accountId) as {
+      id: number
+      name: string
+      username: string | null
+      role: string
+      has_password: number
+    }
+    const link = host.options.link()
+    res.set('Content-Security-Policy', masterContentSecurityPolicy)
+    render(
+      res,
+      found.viewer,
+      'Your account',
+      accountView({
+        person: {
+          id: row.id,
+          name: row.name,
+          role: row.role,
+          ...(row.username == null ? {} : { username: row.username }),
+          password: row.has_password === 1,
+          emails: (
+            db
+              .prepare(
+                'SELECT email,confirmed FROM account_emails WHERE account_id=? ORDER BY position',
+              )
+              .all(row.id) as Array<{ email: string; confirmed: number }>
+          ).map((entry) => ({
+            email: entry.email,
+            confirmed: entry.confirmed === 1,
+          })),
+        },
+        signOut: found.viewer.signOut,
+        editable: link != null && !link.closed,
+        // The master takes a password through a host from testers only.
+        passwordHere: row.role === 'tester',
+      }),
+      'account',
+      found.csrf,
+      ['/assets/master.js', '/assets/people.js'],
+    )
+  })
   router.get('/', (req, res, next) => {
     const found = hostViewer(host, req)
     if (found == null || found.viewer.role === 'tester') {
@@ -600,7 +659,7 @@ export function hostApp(
   app.use(offlineBanner(host))
   app.use(xcodeRoutes(host))
   // The sign-in page's script and the worker that hashes a password.
-  for (const name of ['master', 'password-worker'])
+  for (const name of ['master', 'password-worker', 'people'])
     app.get(`/assets/${name}.js`, (_req, res) => {
       if (name === 'password-worker')
         res.set('Content-Security-Policy', masterContentSecurityPolicy)

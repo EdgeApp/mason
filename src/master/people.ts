@@ -57,8 +57,12 @@ const asAddress = (value: unknown): string => {
     throw new Error('An address is an email address')
   return address
 }
-/** What a person may change on their own record. */
-const SELF_FIELDS = new Set(['name', 'emails', 'password'])
+/** What a person may change on their own record, here and through the host. */
+export const SELF_FIELDS: ReadonlySet<string> = new Set([
+  'name',
+  'emails',
+  'password',
+])
 /** The most addresses one person keeps. */
 const MAX_EMAILS = 10
 /** A list of email addresses, lower-cased and without repeats. */
@@ -311,10 +315,17 @@ export class People {
    * each bumps their permission version, which ends their sessions. The
    * last enabled admin cannot be disabled or demoted.
    */
-  async update(actor: Actor, id: number, value: unknown): Promise<Person> {
+  async update(
+    actor: Actor,
+    id: number,
+    value: unknown,
+    /** Forwarded by a host, which the master does not trust to confirm an address. */
+    options: { viaHost?: boolean } = {},
+  ): Promise<Person> {
     // A person may change their own name, emails and password; everything
-    // else, and anyone else, needs people.change.
-    const admin = can(actor, 'people.change')
+    // else, and anyone else, needs people.change. An address added through a
+    // host waits for an admin on the master, whoever the host says it is.
+    const admin = can(actor, 'people.change') && options.viaHost !== true
     const own =
       actor.accountId === id &&
       Object.keys((value as object | null) ?? {}).every((field) =>

@@ -1647,6 +1647,47 @@ export function peopleView(data: {
   return `${head('People', 'Who signs in, with which email addresses, and what their role lets them do.', ['Settings', 'People'])}<table class="list people"><thead><tr><th>Full name</th><th>Username</th><th>Email addresses</th><th>Role</th><th>Invite</th><th>Password</th><th><span class="sr-only">Remove or save</span></th></tr></thead><tbody>${people || '<tr><td colspan="7">Nobody yet.</td></tr>'}</tbody></table>${personDialogs}${add}`
 }
 
+/**
+ * Your account, on the master and the host: the person's own name and
+ * emails, edited as on the People page and saved through the same modal;
+ * their username and role, read-only; their password; and Sign out. While
+ * the host cannot reach the master the page is read-only.
+ */
+export function accountView(data: {
+  person: PersonRow
+  /** The sign-out control, which differs between the host and the master. */
+  signOut: string
+  /** False on a host whose link to the master is down. */
+  editable: boolean
+  /** False on a host for anyone but a tester: their password is set on the master. */
+  passwordHere?: boolean
+}): string {
+  const person = data.person
+  const edit = data.editable ? 'self' : 'none'
+  const cells = personCells(person, edit)
+  const notice = data.editable
+    ? ''
+    : '<p class="notice">The host cannot reach the master right now, so your account cannot be changed here. Try again shortly.</p>'
+  const password = !data.editable
+    ? ''
+    : data.passwordHere === false
+      ? '<small class="hint">Change your password on the master.</small>'
+      : modalPill(
+          'password-own',
+          person.password === true ? 'Change password' : 'Set password',
+          'Your password',
+          `<form data-mason="person-password" data-path="/api/v2/people/${person.id}" data-return="/account"><p>You sign in with it and your username or a confirmed email, on the host and the master. Your other sessions end, and you sign in again.</p>${passwordFields('own', true)}<button>${icon('key')} Set password</button>${statusLine}</form>`,
+        )
+  return `${head('Your account', 'Your name and email addresses, and how you sign in.', ['Your account'])}${notice}<section class="panel account" data-person="${person.id}" data-edit="${edit}" data-original="${escape(
+    JSON.stringify({
+      name: person.name,
+      username: person.username ?? '',
+      role: person.role,
+      emails: person.emails,
+    }),
+  )}"><dl class="account-fields"><dt>Full name</dt><dd class="person-name">${cells.name}</dd><dt>Username</dt><dd class="person-username">${person.username == null ? '<span class="muted">—</span>' : `<span class="mono">${escape(person.username)}</span>`}</dd><dt>Email addresses</dt><dd class="person-emails">${cells.emails}<small class="hint">An address you add signs you in once an administrator confirms it.</small></dd><dt>Role</dt><dd>${escape(person.role)}</dd><dt>Password</dt><dd>${password}</dd></dl><div class="actions">${edit === 'none' ? '' : '<button type="button" data-row-action hidden>Save</button>'}${data.signOut}</div></section>${personDialogs}`
+}
+
 /** The add-project wizard: repository, then the Masonfile's app IDs, then branches and triggers. */
 export function wizardView(data: {
   slug?: string

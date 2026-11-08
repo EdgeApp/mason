@@ -7,19 +7,43 @@ import express, {
 } from 'express'
 import { sessionContext } from '../auth/routes.js'
 import type { Stream } from '../link/link.js'
-import { clientAddress, isRunAction, isRunRead } from '../master/forward.js'
+import {
+  clientAddress,
+  isAccountChange,
+  isRunAction,
+  isRunRead,
+} from '../master/forward.js'
 import type { HostRuntime } from './runtime.js'
 
 const same = (a: string, b: string): boolean =>
   a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b))
 
-/** Reads the forwarded response: a JSON header line, then the body. */
-async function relay(stream: Stream, res: Response): Promise<void> {
+/**
+ * Reads the forwarded response: a JSON header line, then the body. With
+ * `hold`, the whole answer waits for it once the master has answered: the
+ * host first catches up with what the request changed.
+ */
+async function relay(
+  stream: Stream,
+  res: Response,
+  hold?: () => Promise<void>,
+): Promise<void> {
   let header: Buffer | undefined = Buffer.alloc(0)
+  const held: Buffer[] = []
+  let meta:
+    | { status: number; contentType: string | null; disposition?: string }
+    | undefined
+  const start = (): void => {
+    res.status(meta!.status)
+    if (meta!.contentType != null) res.set('Content-Type', meta!.contentType)
+    if (meta!.disposition != null)
+      res.set('Content-Disposition', meta!.disposition)
+  }
   await new Promise<void>((resolve, reject) => {
     stream.on('data', (chunk: Buffer) => {
       if (header == null) {
-        res.write(chunk)
+        if (hold == null) res.write(chunk)
+        else held.push(chunk)
         return
       }
       header = Buffer.concat([header, chunk])
@@ -31,17 +55,14 @@ async function relay(stream: Stream, res: Response): Promise<void> {
         }
         return
       }
-      const meta = JSON.parse(header.subarray(0, end).toString()) as {
-        status: number
-        contentType: string | null
-        disposition?: string
-      }
+      meta = JSON.parse(header.subarray(0, end).toString()) as typeof meta
       const rest = header.subarray(end + 1)
       header = undefined
-      res.status(meta.status)
-      if (meta.contentType != null) res.set('Content-Type', meta.contentType)
-      if (meta.disposition != null)
-        res.set('Content-Disposition', meta.disposition)
+      if (hold != null) {
+        if (rest.length > 0) held.push(rest)
+        return
+      }
+      start()
       if (rest.length > 0) res.write(rest)
     })
     stream.once('end', () => {
@@ -52,6 +73,11 @@ async function relay(stream: Stream, res: Response): Promise<void> {
       reject(new Error(reason))
     })
   })
+  if (hold != null && meta != null) {
+    if (meta.status < 300) await hold().catch(() => undefined)
+    start()
+    for (const chunk of held) res.write(chunk)
+  }
   res.end()
 }
 
@@ -90,10 +116,13 @@ export function forwardRoutes(host: HostRuntime): Router {
               id: context.account.id,
               permissionVersion: context.session.permission_version,
             }
-          } else if (!isRunAction(req.method, req.originalUrl)) {
+          } else if (
+            !isRunAction(req.method, req.originalUrl) &&
+            !isAccountChange(req.method, req.originalUrl)
+          ) {
             res.status(403).json({
               error:
-                'A host session may only read run logs, or request, cancel, restart or approve runs',
+                'A host session may only read run logs, request, cancel, restart or approve runs, or change its own account',
             })
             return
           }
@@ -149,7 +178,15 @@ export function forwardRoutes(host: HostRuntime): Router {
           address: clientAddress(req),
         })
         try {
-          await relay(stream, res)
+          // A person's own record changed: the page that reloads after it
+          // reads this host's copy, so the copy catches up first.
+          await relay(
+            stream,
+            res,
+            isAccountChange(req.method, req.originalUrl)
+              ? async (): Promise<void> => await host.catchUp()
+              : undefined,
+          )
         } catch (error) {
           if (!res.headersSent)
             res.status(502).json({ error: (error as Error).message })

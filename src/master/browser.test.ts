@@ -95,7 +95,9 @@ describe('Master sign-in in a real browser', () => {
         await visible('^Backups$')
         await screenshot('master-backup-prompt.png')
         assert.equal(node.master!.configured(), true)
-        await device.command('tapOn', { css: 'summary[aria-label="Account"]' })
+        // The account icon opens Your account, which holds Sign out.
+        await device.command('tapOn', { css: 'a[aria-label="Your account"]' })
+        await visible('^Your account$')
         await device.command('tapOn', {
           css: 'form[data-mason="sign-out"] button',
         })

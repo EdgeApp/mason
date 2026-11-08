@@ -328,6 +328,19 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     await b.type('#password', password)
     await b.tap('form[data-mason="sign-in"] button')
   }
+  /** The host's sign-in form, checked by the master over the link. */
+  const hostSignIn = async (
+    b: Browser,
+    identifier: string,
+    password: string,
+    destination: string,
+  ): Promise<void> => {
+    await b.open(`/auth/login?return=${encodeURIComponent(destination)}`)
+    await b.visible('^Sign in$')
+    await b.type('#username', identifier)
+    await b.type('#password', password)
+    await b.tap('form[data-mason="sign-in"] button')
+  }
   /** A request to a node, written to a proof log as a `$` line and its answer. */
   const logged = async (
     file: string,
@@ -484,6 +497,58 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       )
     } finally {
       await b.close()
+    }
+  })
+
+  it('E5 a tester changes her own name and adds an email from Your account on the host, stays signed in, and the master has it', async () => {
+    const h = await browser('mason-e5-tess', host, '1280x860')
+    try {
+      await hostSignIn(h, 'tess', PASSWORDS.tess!, '/account')
+      await h.visible('^Your account$')
+      await h.tap('section.account [data-edit="name"]')
+      await h.script(
+        `const input = document.querySelector('section.account [data-input="name"]'); input.value = 'Tess Self'; input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`,
+      )
+      await h.tap('section.account [data-add-email]')
+      await h.type('#new-email', 'tess.self@example.test')
+      await h.tap('[data-email-form] button[value="add"]')
+      await h.tap('section.account [data-row-action]')
+      await h.visible('Email added: tess.self@example.test')
+      await h.tap('[data-confirm-accept]')
+      await h.visible('unconfirmed')
+      await h.visible('Tess Self')
+      await h.shot('account-page-host.png')
+      // Still signed in: the page reloads as hers.
+      await h.open('/account')
+      await h.visible('^Your account$')
+    } finally {
+      await h.close()
+    }
+    const saved = c.master.master!.people.get(localOperator, people.tess!)
+    assert.equal(saved.name, 'Tess Self')
+    assert.deepEqual(saved.emails.at(-1), {
+      email: 'tess.self@example.test',
+      confirmed: false,
+    })
+    // On the master, the account icon is a link to Your account.
+    const m = await browser('mason-e5-paul', c.master, '1280x860')
+    try {
+      await masterSignIn(m, 'paul', PASSWORDS.paul!)
+      await m.visible('^Backups$|^Projects & apps$|^Install apps$')
+      await m.open('/projects/fixture')
+      await m.visible('App IDs')
+      // A link takes focus and shows its ring; the old menu trigger was a <summary>.
+      await m.script(
+        'document.querySelector(\'a.account[href="/account"]\').focus()',
+      )
+      await m.shot('account-menu-after.png')
+      await m.tap('a[aria-label="Your account"]')
+      await m.visible('^Your account$')
+      await m.shot('account-page.png')
+      await m.open('/people')
+      await m.visible('Tess Self')
+    } finally {
+      await m.close()
     }
   })
 })

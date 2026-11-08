@@ -199,7 +199,7 @@ describe('Pages on the master and the host', function () {
     assert.doesNotMatch(developer.text, /href="\/(backups|groups)"/)
     assert.match(
       developer.text,
-      /<strong>Developer Person<\/strong><small>developer · master/,
+      /aria-label="Your account" title="Developer Person · developer · master"/,
     )
     // Testers keep the phone-first catalog on the host and their apps on the master.
     const catalog = await get(host, '/', onHost('tester'))

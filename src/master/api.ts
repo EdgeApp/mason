@@ -16,7 +16,12 @@ import {
   type MasterAuth,
 } from './auth.js'
 import type { MasterDatabase } from './database.js'
-import { isRunAction, isRunRead, type Forwarder } from './forward.js'
+import {
+  isAccountChange,
+  isRunAction,
+  isRunRead,
+  type Forwarder,
+} from './forward.js'
 import {
   asAssignment,
   setsWorkerFields,
@@ -151,12 +156,16 @@ export function authenticate(
       if (
         actor == null ||
         (!isRunAction(req.method, req.originalUrl) &&
-          !isRunRead(req.method, req.originalUrl))
+          !isRunRead(req.method, req.originalUrl) &&
+          !isAccountChange(req.method, req.originalUrl))
       ) {
         res.status(403).json({ error: 'The host session is not allowed this' })
         return
       }
       res.locals.actor = actor
+      // Through the host a person changes only their own record (the route checks).
+      if (isAccountChange(req.method, req.originalUrl))
+        res.locals.hostAccount = asserted.accountId
       next()
       return
     }

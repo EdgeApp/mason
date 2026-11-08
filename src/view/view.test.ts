@@ -10,6 +10,7 @@ import {
   groupView,
   masonfileView,
   nodesView,
+  accountView,
   peopleView,
   projectRunsView,
   projectTabs,
@@ -2209,6 +2210,76 @@ describe('People and groups pages', () => {
       /data-edit="name"|data-remove-email|data-row-action/,
     )
     assert.match(peopleView({ people: [], canChange: false }), /Nobody yet\./)
+  })
+
+  it('M4.9 Your account shows the person’s own record, editable but for the username and role, with the password and Sign out', () => {
+    const person = {
+      id: 5,
+      name: 'Tess <T>',
+      role: 'tester',
+      username: 'tess',
+      password: true,
+      emails: [
+        { email: 'tess@example.test', confirmed: true },
+        { email: 'tess@claim.test', confirmed: false },
+      ],
+    }
+    const html = accountView({
+      person,
+      signOut: '<form data-mason="sign-out"><button>Sign out</button></form>',
+      editable: true,
+    })
+    assert.match(html, /<h1>Your account<\/h1>/)
+    assert.match(
+      html,
+      /<section class="panel account" data-person="5" data-edit="self"/,
+    )
+    assert.match(
+      html,
+      /data-edit="name" aria-label="Edit full name">Tess &lt;T&gt;</,
+    )
+    assert.doesNotMatch(
+      html,
+      /data-edit="username"|data-role|data-confirm-email/,
+    )
+    assert.match(
+      html,
+      /<dd class="person-username"><span class="mono">tess<\/span>/,
+    )
+    assert.match(html, /<dd>tester<\/dd>/)
+    assert.equal(html.match(/data-remove-email/g)!.length, 2)
+    assert.match(html, /data-add-email/)
+    assert.match(html, /data-open="password-own">Change password</)
+    assert.match(
+      html,
+      /data-path="\/api\/v2\/people\/5" data-return="\/account"/,
+    )
+    assert.match(
+      html,
+      /<button type="button" data-row-action hidden>Save<\/button><form data-mason="sign-out">/,
+    )
+    assert.match(html, /data-confirm-dialog/)
+    const offline = accountView({
+      person: { ...person, password: false },
+      signOut: '',
+      editable: false,
+    })
+    assert.match(offline, /cannot reach the master/)
+    assert.match(offline, /data-edit="none"/)
+    assert.doesNotMatch(offline, /data-row-action|data-add-email|data-open=/)
+  })
+
+  it('M4.10 the top-right account icon is a link to Your account', () => {
+    const html = shell({
+      title: 'x',
+      body: '',
+      viewer: { name: 'ada', role: 'admin', node: 'master', signOut: '' },
+    })
+    assert.match(
+      html,
+      /<a class="account" href="\/account" aria-label="Your account" title="ada · admin · master"><span class="avatar">A<\/span><\/a>/,
+    )
+    assert.doesNotMatch(html, /<details class="account"/)
   })
 
   it('U20.2 the Groups list links one row per group and adds a group by name', () => {

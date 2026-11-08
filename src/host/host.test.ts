@@ -31,7 +31,7 @@ import {
   DEFAULT_PASSWORD_COSTS,
 } from '../auth/passwordProtocol.js'
 import { named, xcodeRoutes } from './web.js'
-import { HostRuntime } from './runtime.js'
+import { HostRuntime, newerPart } from './runtime.js'
 import { DatabaseSync } from 'node:sqlite'
 import { LinkError, type Link } from '../link/link.js'
 import { Outbox } from './outbox.js'
@@ -1732,6 +1732,37 @@ describe('Plain emails on the host', () => {
       identifier: 'tess@example.test',
     })
     assert.deepEqual(named(undefined), { identifier: undefined })
+  })
+
+  it('an on-demand sync applies only what is newer than the cache (review 3.harness-review.2)', () => {
+    const change = (revision: number): Change => ({
+      revision,
+      entity: 'account',
+      key: String(revision),
+      operation: 'delete',
+    })
+    assert.equal(
+      newerPart({ kind: 'changes', revision: 2, changes: [change(2)] }, 3),
+      undefined,
+    )
+    assert.equal(
+      newerPart({ kind: 'changes', revision: 3, changes: [change(3)] }, 3),
+      undefined,
+    )
+    assert.deepEqual(
+      newerPart(
+        {
+          kind: 'changes',
+          revision: 5,
+          changes: [change(3), change(4), change(5)],
+        },
+        3,
+      ),
+      { kind: 'changes', revision: 5, changes: [change(4), change(5)] },
+    )
+    const snapshot = { kind: 'snapshot' as const, revision: 2, entities: {} }
+    assert.equal(newerPart(snapshot, 3), undefined)
+    assert.equal(newerPart({ ...snapshot, revision: 3 }, 3)?.revision, 3)
   })
 
   it('a provider subject stops mapping to an account once the email it came with is taken away', () => {

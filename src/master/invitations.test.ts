@@ -703,6 +703,16 @@ describe('Invitation links', function () {
         `${JSON.stringify(body)} ${signedIn.text}`,
       )
     }
+    // Her account page on the host knows she has a password (M4).
+    const ivy = onHost()
+    await ivy.send('POST', '/auth/password', {
+      identifier: 'ivy.mail@example.test',
+      clientHash: chosen.clientHash,
+    })
+    assert.match(
+      (await ivy.send('GET', '/account')).text,
+      /data-open="password-own">Change password</,
+    )
     const wrong = await onHost().send('POST', '/auth/password', {
       identifier: 'ivy.mail@example.test',
       clientHash: '0'.repeat(64),

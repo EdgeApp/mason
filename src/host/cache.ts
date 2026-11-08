@@ -301,6 +301,12 @@ export class HostCache {
     this.setMeta('sync_from', revision)
     return revision
   }
+  /** Makes the next opening sync ask from `revision` at the latest: a sync from it never arrived. */
+  holdSyncFrom(revision: number): void {
+    const saved = this.meta('sync_from')
+    if (saved == null || Number(saved) > revision)
+      this.setMeta('sync_from', revision)
+  }
   /** Whether a sync has brought the keys since this cache began keeping them (schema 9). */
   keysSynced(): boolean {
     return this.meta('keys_synced') !== '0'

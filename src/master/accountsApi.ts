@@ -3,6 +3,7 @@ import { identifierOf, rejectRawPassword } from '../auth/passwordProtocol.js'
 import { cookie } from '../auth/routes.js'
 import { AlreadyConfigured, createFirstAdmin } from '../setup/setup.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
+import { SELF_FIELDS } from './people.js'
 import { MASTER_SESSION_COOKIE, SetupGate, SignInRefused } from './auth.js'
 import { Forbidden } from './roles.js'
 import type { Master } from './runtime.js'
@@ -228,10 +229,35 @@ export function accountsApi(
   )
   router.put(
     '/api/v2/people/:id',
-    json(
-      async (req, res) =>
-        await master.people.update(actorOf(res), id(req.params.id), req.body),
-    ),
+    json(async (req, res) => {
+      const person = id(req.params.id)
+      // Through the host, a person changes only their own name, emails and password.
+      const via = res.locals.hostAccount as number | undefined
+      if (
+        via != null &&
+        (via !== person ||
+          !Object.keys((req.body as object | null) ?? {}).every((field) =>
+            SELF_FIELDS.has(field),
+          ))
+      )
+        throw new Forbidden(
+          'Through the host a person changes only their own name, emails and password',
+        )
+      // The host vouches for whom it forwards: a password through it is a
+      // tester's alone, so a host cannot set a manager's or an admin's.
+      const actor = actorOf(res)
+      if (
+        via != null &&
+        (req.body as { password?: unknown } | null)?.password !== undefined &&
+        actor.role !== 'tester'
+      )
+        throw new Forbidden(
+          'Change your password on the master: through the host only a tester may set one',
+        )
+      return await master.people.update(actor, person, req.body, {
+        viaHost: via != null,
+      })
+    }),
   )
   router.delete(
     '/api/v2/people/:id',

@@ -13,7 +13,9 @@ import {
   groupView,
   masonfileView,
   nodesView,
+  accountView,
   peopleView,
+  type PersonRow,
   projectRunsView,
   projectView,
   secretsView,
@@ -46,12 +48,27 @@ import { shell, type Viewer } from '../view/shell.js'
 import type { GroupApp } from '../view/groups.js'
 import { MASTER_SESSION_COOKIE, type MasterSession } from './auth.js'
 import { can } from './permissions.js'
+import type { Person } from './people.js'
 import { sessionActor } from './auth.js'
 import type { Master } from './runtime.js'
 import { repository, version } from '../version.js'
 import { clientAddress } from './forward.js'
 import { ProjectNotFound } from './projects.js'
 import type { ProviderSignIn } from './providerSignIn.js'
+
+/** A person as the People page and Your account draw them. */
+function personRow(person: Person): PersonRow {
+  return {
+    id: person.id,
+    name: person.name,
+    role: person.role,
+    emails: person.emails,
+    ...(person.username == null ? {} : { username: person.username }),
+    disabled: person.disabled,
+    password: person.password,
+    ...(person.invitation == null ? {} : { invitation: person.invitation }),
+  }
+}
 
 /** The signed-in person as the views see them. */
 function viewerOf(session: MasterSession): Viewer {
@@ -878,6 +895,29 @@ export function masterPages(
       })
     },
   )
+  // Your account: everyone's own record, behind the top-right account icon.
+  app.get('/account', (req, res) => {
+    hashing(res)
+    const current = session(req)
+    if (current == null) {
+      res.redirect(303, master.configured() ? '/sign-in' : '/')
+      return
+    }
+    const actor = sessionActor(current)
+    send(
+      res,
+      'Your account',
+      accountView({
+        person: personRow(master.people.get(actor, actor.accountId!)),
+        signOut: viewerOf(current).signOut,
+        editable: true,
+      }),
+      current,
+      200,
+      'account',
+      ['/assets/people.js'],
+    )
+  })
   guarded(
     '/people',
     'people.read',
@@ -886,18 +926,7 @@ export function masterPages(
     (current) => {
       const actor = sessionActor(current)
       return peopleView({
-        people: master.people.list(actor).map((person) => ({
-          id: person.id,
-          name: person.name,
-          role: person.role,
-          emails: person.emails,
-          ...(person.username == null ? {} : { username: person.username }),
-          disabled: person.disabled,
-          password: person.password,
-          ...(person.invitation == null
-            ? {}
-            : { invitation: person.invitation }),
-        })),
+        people: master.people.list(actor).map(personRow),
         now: master.database.now(),
         canChange: can(actor, 'people.change'),
         ...(actor.accountId == null ? {} : { viewerId: actor.accountId }),

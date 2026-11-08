@@ -13,7 +13,7 @@ import { Accounts } from '../auth/accounts.js'
 import { Providers } from '../auth/providers.js'
 import { backoffDelay } from '../link/backoff.js'
 import type { Link, MethodTable, Stream } from '../link/link.js'
-import type { Sync } from '../master/changes.js'
+import type { Change, Sync } from '../master/changes.js'
 import { HostCache } from './cache.js'
 import { Outbox } from './outbox.js'
 import type { HostStatus } from '../master/clusterCheck.js'
@@ -274,10 +274,11 @@ export class HostRuntime {
           this.synced = link
           await this.outbox.flush(link)
           // A link that arrived while a flush ran still needs its own sync,
-          // before the webhooks that waited go out over it.
-          if (this.replaced(link)) continue
+          // before the webhooks that waited go out over it; so does this one
+          // when an on-demand sync failed meanwhile (`syncNow`).
+          if (this.replaced(link) || this.synced !== link) continue
           await this.webhooks.flush()
-          if (this.replaced(link)) continue
+          if (this.replaced(link) || this.synced !== link) continue
           return
         } catch (error) {
           if (this.stopped) return
@@ -318,6 +319,54 @@ export class HostRuntime {
       const timer = setTimeout(finish, ms)
       timer.unref()
     })
+  }
+
+  /** The catch-up in flight, and the one queued after it for callers since. */
+  private catching: Promise<void> | undefined
+  private trailing: Promise<void> | undefined
+
+  /**
+   * Brings the cache up to the master's latest revision now, as a link open
+   * does. One sync runs at a time; a caller arriving while one runs waits for
+   * it and then for one more, started after it and shared by every such
+   * caller, so each sees a revision at least as new as when it called.
+   */
+  async catchUp(): Promise<void> {
+    if (this.catching == null) {
+      this.catching = this.syncNow().finally(() => {
+        this.catching = undefined
+      })
+      return await this.catching
+    }
+    this.trailing ??= this.catching
+      .catch(() => undefined)
+      .then(async () => {
+        this.trailing = undefined
+        await this.catchUp()
+      })
+    await this.trailing
+  }
+
+  /** One on-demand sync, applied only for what is newer than the cache. */
+  private async syncNow(): Promise<void> {
+    const link = this.options.link()
+    if (link == null || link.closed || this.stopped) return
+    const from = this.cache.revision()
+    try {
+      const sync = newerPart(
+        (await link.request('host.sync', { revision: from }, 30_000)) as Sync,
+        this.cache.revision(),
+      )
+      if (sync != null) this.apply(sync)
+    } catch (error) {
+      // The master counts an answer as sent even when it never arrives, and
+      // pushes what follows it: hand the range to the opening sync, which
+      // asks again from it on this link.
+      this.cache.holdSyncFrom(from)
+      if (this.synced === link) this.synced = undefined
+      void this.connected()
+      throw error
+    }
   }
 
   apply(sync: Sync, opening = false): void {
@@ -451,5 +500,22 @@ export class HostRuntime {
     } catch {
       return false
     }
+  }
+}
+
+/**
+ * What of an on-demand sync is newer than the cache's revision: change
+ * events may have applied later revisions while it was in flight. Undefined
+ * when nothing is.
+ */
+export function newerPart(sync: Sync, current: number): Sync | undefined {
+  if (sync.kind === 'snapshot')
+    return sync.revision < current ? undefined : sync
+  if (sync.revision <= current) return undefined
+  return {
+    ...sync,
+    changes: (sync.changes as Change[]).filter(
+      (change) => change.revision > current,
+    ),
   }
 }

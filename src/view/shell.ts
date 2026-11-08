@@ -13,7 +13,7 @@ export interface Viewer {
   name: string
   role: ViewerRole
   node: 'master' | 'host'
-  /** The sign-out control, which differs between the host and the master. */
+  /** The sign-out control, which differs between the host and the master; on Your account. */
   signOut: string
 }
 
@@ -182,7 +182,7 @@ function topbar(options: ShellOptions): string {
   const account =
     viewer == null
       ? ''
-      : `<details class="account"><summary aria-label="Account"><span class="avatar">${escape(viewer.name.trim().charAt(0).toUpperCase() || '?')}</span></summary><div class="menu"><div class="who"><strong>${escape(viewer.name)}</strong><small>${escape(viewer.role)} · ${viewer.node}</small></div>${viewer.signOut}</div></details>`
+      : `<a class="account" href="/account" aria-label="Your account" title="${escape(`${viewer.name} · ${viewer.role} · ${viewer.node}`)}"><span class="avatar">${escape(viewer.name.trim().charAt(0).toUpperCase() || '?')}</span></a>`
   return `<header class="topbar"><a class="brand" href="/"><img src="/assets/logo/mason-logo-64.png" alt="" width="32" height="32"><span>Mason</span><small class="mono">v${escape(version)}</small></a>${search}${status}${
     options.actions == null ? '' : `<nav>${options.actions}</nav>`
   }${notifications}${account}</header>`
