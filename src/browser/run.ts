@@ -751,12 +751,15 @@ export function liveRuns(doc: Document, live: () => LiveClient): void {
       const entries = frame.data as QueueEntry[]
       list.innerHTML = queueItems(entries)
       for (const entry of entries) {
-        if (doc.querySelector(`[data-run-id="${quoted(entry.job)}"]`) != null)
-          continue
         const runs = doc.querySelector(
           `[data-project-runs="${quoted(entry.project)}"]`,
         )
-        if (runs == null) continue
+        // A build chip of the run, in an app ID's row, is not the header's run chip.
+        if (
+          runs == null ||
+          runs.querySelector(`[data-run-id="${quoted(entry.job)}"]`) != null
+        )
+          continue
         runs.querySelector(`[data-branch="${quoted(entry.branch)}"]`)?.remove()
         const status = entry.status === 'queued' ? 'queued' : 'running'
         runs.insertAdjacentHTML(

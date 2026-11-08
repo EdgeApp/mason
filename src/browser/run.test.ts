@@ -808,11 +808,22 @@ describe('Run view script', () => {
     row.set('[data-status-text]', rowText)
     const done = new El()
     done.dataset = { runId: 'r0', status: 'succeeded' }
+    // An app ID's build chips carry their run too: r1's, and r2's, a run
+    // that published a build before the card's header had its chip.
+    const buildDot = new El({ class: 'dot running' })
+    const build = new El({ title: 'feature 41 running' })
+    build.dataset = { runId: 'r1', status: 'running' }
+    build.set('.dot', buildDot)
+    const early = new El()
+    early.dataset = { runId: 'r2', status: 'running' }
     const old = new El()
-    const cards = new El().set('[data-branch="feature"]', old)
+    const cards = new El()
+      .set('[data-branch="feature"]', old)
+      .set('[data-run-id="r1"]', running)
     const dashboard = new El()
-      .set('[data-run-id]', running, row, done)
-      .set('[data-run-id="r1"]', running, row)
+      .set('[data-run-id]', running, row, done, build, early)
+      .set('[data-run-id="r1"]', running, row, build)
+      .set('[data-run-id="r2"]', early)
       .set('[data-queue] ul', list)
       .set('[data-project-runs="app"]', cards)
     start(dashboard as unknown as Document, win)
@@ -820,6 +831,7 @@ describe('Run view script', () => {
     board.accept()
     assert.deepEqual(board.sent, [
       { subscribe: 'status', run: 'r1', key: 'status:r1' },
+      { subscribe: 'status', run: 'r2', key: 'status:r2' },
       { subscribe: 'queue', key: 'queue' },
     ])
     board.frame({ key: 'status:r1', event: 'run', data: { status: 'failed' } })
@@ -828,8 +840,15 @@ describe('Run view script', () => {
       ['failed', 'dot failed', 'failed'],
     )
     assert.equal(running.getAttribute('title'), 'build failed')
+    // The build chip's dot follows its run as well.
+    assert.deepEqual(
+      [build.dataset.status, buildDot.className, build.getAttribute('title')],
+      ['failed', 'dot failed', 'feature 41 failed'],
+    )
     board.frame({ key: 'status:r1', event: 'end' })
-    // A queued run the card has no chip for gets one, in place of its branch's.
+    // A queued run the card's header has no chip for gets one, in place of
+    // its branch's, though a build chip of it is on the page; a run the
+    // header has a chip for gets none.
     const entry = {
       job: 'r2',
       project: 'app',
@@ -846,19 +865,20 @@ describe('Run view script', () => {
         entry,
         { ...entry, job: 'r1' },
         { ...entry, job: 'r3', project: 'gone' },
+        { ...entry, job: 'r4', branch: 'other' },
       ],
     })
     assert.match(list.innerHTML, /app · test/)
     assert(old.removed)
     assert.match(
       cards.innerHTML,
-      /data-run-id="r2" data-branch="feature" data-status="queued"/,
+      /^<a class="run-chip" [^>]*data-run-id="r2" data-branch="feature" data-status="queued">.*<\/a><a class="run-chip" [^>]*data-run-id="r4" data-branch="other" data-status="queued">.*<\/a>$/,
     )
-    assert.deepEqual(board.sent.at(-1), {
-      subscribe: 'status',
-      run: 'r2',
-      key: 'status:r2',
-    })
+    assert.doesNotMatch(cards.innerHTML, /data-run-id="r1"/)
+    // r2 is followed already, from its build chip; r4 from its new chip.
+    assert.deepEqual(board.sent.slice(3), [
+      { subscribe: 'status', run: 'r4', key: 'status:r4' },
+    ])
     board.frame({ key: 'queue', event: 'other' })
     board.frame({ key: 'queue', event: 'queue', data: [] })
     assert.match(list.innerHTML, /Nothing is running/)

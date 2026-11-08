@@ -534,6 +534,16 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       typeof req.query.platform === 'string' ? req.query.platform : undefined
     const project =
       typeof req.query.project === 'string' ? req.query.project : undefined
+    // Each project's repository, webhook and push branches, from the copy of its details the master sent.
+    const details = (
+      host.cache.db.prepare('SELECT id,details FROM projects').all() as Array<{
+        id: number
+        details: string | null
+      }>
+    ).flatMap((row) => {
+      const kept = storedDetails(row.details)
+      return kept == null ? [] : [[row.id, kept] as const]
+    })
     render(
       res,
       found.viewer,
@@ -545,6 +555,13 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
             viewer: found.viewer,
             now,
             appVisible: visible(found.accountId),
+            repositories: new Map(
+              details.map(([id, kept]) => [
+                id,
+                { repository: kept.repository, webhook: kept.webhook },
+              ]),
+            ),
+            pinned: new Map(details.map(([id, kept]) => [id, kept.pinned])),
           },
           {
             ...(platform == null ? {} : { platform }),

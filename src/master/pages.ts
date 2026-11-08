@@ -52,7 +52,11 @@ import type { GroupApp } from '../view/groups.js'
 import { MASTER_SESSION_COOKIE, type MasterSession } from './auth.js'
 import { can } from './permissions.js'
 import type { Person } from './people.js'
-import { projectDetails, SCRIPT_PROJECT } from './projectDetails.js'
+import {
+  projectDetails,
+  pushBranches,
+  SCRIPT_PROJECT,
+} from './projectDetails.js'
 import { masonfileTooLarge } from './scheduler.js'
 import { sessionActor } from './auth.js'
 import type { Master } from './runtime.js'
@@ -314,6 +318,14 @@ export function masterPages(
         appVisible: appVisible(master, current),
         nodes: cluster(master).nodes,
         repositories,
+        pinned: new Map(
+          master.projects
+            .list()
+            .map((project) => [
+              project.id,
+              pushBranches(project, master.pushes),
+            ]),
+        ),
       },
       {
         ...(platform == null ? {} : { platform }),
@@ -1129,11 +1141,7 @@ export function masterPages(
         ? req.query.branch
         : undefined
     const now = master.database.now()
-    const { pinned } = projectDetails(
-      project,
-      master.buildNumbers,
-      master.pushes,
-    )
+    const pinned = pushBranches(project, master.pushes)
     const { branches, runs } = projectRunsData(
       {
         db: master.database.db,
