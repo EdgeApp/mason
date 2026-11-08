@@ -1,5 +1,5 @@
 import express, { Router, type Response } from 'express'
-import { rejectRawPassword } from '../auth/passwordProtocol.js'
+import { identifierOf, rejectRawPassword } from '../auth/passwordProtocol.js'
 import { cookie } from '../auth/routes.js'
 import { AlreadyConfigured, createFirstAdmin } from '../setup/setup.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
@@ -128,11 +128,7 @@ export function accountsApi(
     '/api/v2/session/parameters',
     direct,
     body,
-    json((req) =>
-      master.auth.parameters(
-        (req.body as { username?: unknown } | null)?.username,
-      ),
-    ),
+    json((req) => master.auth.parameters(identifierOf(req.body))),
   )
   router.post(
     '/api/v2/session',

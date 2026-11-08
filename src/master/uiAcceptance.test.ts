@@ -1,0 +1,429 @@
+// The master and the host in a real browser: Chrome driven by maestro-d's
+// web driver, as src/master/browser.test.ts is. Skipped unless
+// MASON_WEB_E2E=1; it needs MASON_TEST_ROOT, MASON_ARTIFACTS,
+// MASON_BROWSER_BIN, MAESTRO_D and MAESTRO_D_CLIENT_ROOT. Run it compiled,
+// from lib/: a real checkout needs lib/worker/gitProxy.js. Each scenario
+// writes the screenshots and logs that prove it into MASON_ARTIFACTS.
+import assert from 'node:assert/strict'
+import {
+  appendFileSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { createRequire } from 'node:module'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { after, before, describe, it } from 'mocha'
+import { clientPasswordHash } from '../auth/passwordKdf.js'
+import {
+  clientParameters,
+  DEFAULT_PASSWORD_COSTS,
+} from '../auth/passwordProtocol.js'
+import { pinnedFetch } from '../node/pinnedFetch.js'
+import type { RunningNode } from '../node/serve.js'
+import { cluster, type Cluster } from '../test/cluster.js'
+import { localOperator } from './roles.js'
+
+// Replies are read field by field.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Json = any
+interface Device {
+  command: (name: string, value?: unknown) => Promise<unknown>
+  screenshot: () => Promise<Buffer>
+}
+interface Daemon {
+  attach: (options: object) => Promise<Device>
+  detach: (id: string) => Promise<void>
+}
+const quote = (value: string): string =>
+  "'" + value.replaceAll("'", "'\\''") + "'"
+
+export const ALPHA = 'com.example.alpha'
+export const BETA = 'com.example.beta-with-a-longer-id'
+/** The upload fixtures, compiled; the stages build packages numbered by their run. */
+const FIXTURES = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../upload/fixtures.test.js',
+)
+
+/** Two apps, two workflows: build-alpha publishes alpha, build-beta beta; beta shares alpha's sequence. */
+export const masonfile = `
+import type { Setup, Stage } from '@mason/types'
+export function setup(m: Setup) {
+  m.apiVersion(1)
+  m.buildNumber('${ALPHA}', { format: 'YYMMDDCC', apps: ['${BETA}'] })
+  m.workflow('build-alpha', { triggers: [{ request: true }] }, (w) => {
+    w.stage('android', { on: 'master', publishes: ['${ALPHA}'], run: shipAlpha })
+  })
+  m.workflow('build-beta', { triggers: [{ request: true }] }, (w) => {
+    w.stage('macos', { on: 'master', publishes: ['${BETA}'], run: shipBeta })
+  })
+}
+export async function shipAlpha(ctx: Stage) {
+  const { writeFileSync } = await import('node:fs')
+  const f = await import(${JSON.stringify(FIXTURES)})
+  f.packageFields.bundleId = '${ALPHA}'
+  f.packageFields.version = '1.0.' + ctx.run.number
+  const n = Number(ctx.getBuildNumber('${ALPHA}'))
+  writeFileSync('alpha.apk', f.zip([['AndroidManifest.xml', f.manifest(false, false, n)]]))
+  return await ctx.publish({ app: '${ALPHA}', platform: 'android', path: 'alpha.apk', changelog: 'Alpha on ' + ctx.run.branch })
+}
+export async function shipBeta(ctx: Stage) {
+  const { writeFileSync } = await import('node:fs')
+  const f = await import(${JSON.stringify(FIXTURES)})
+  const image = f.desktop('dmg')
+  image[16] = ctx.run.number % 256
+  writeFileSync('beta.dmg', image)
+  return await ctx.publish({ app: '${BETA}', platform: 'macos', path: 'beta.dmg', version: '2.0.' + ctx.run.number, changelog: 'Beta on ' + ctx.run.branch })
+}
+`
+
+export const PASSWORDS: Record<string, string> = {
+  paul: 'Correct-Horse-9',
+  tess: 'Tess-Horse-9-long',
+  nora: 'Nora-Horse-9-long',
+  dev: 'Dev-Horse-9-long',
+}
+
+describe('Mason in a real browser: people, accounts, navigation', function () {
+  this.timeout(600_000)
+  const enabled = process.env.MASON_WEB_E2E === '1'
+  const {
+    MASON_TEST_ROOT: parent,
+    MASON_ARTIFACTS: artifacts,
+    MASON_BROWSER_BIN: browserBin,
+    MAESTRO_D: daemonName,
+    MAESTRO_D_CLIENT_ROOT: clientRoot,
+  } = process.env
+  let c: Cluster
+  let host: RunningNode
+  let daemon: Daemon
+  let wrapper: string
+  let root: string
+  const runs: Record<string, Json> = {}
+  const people: Record<string, number> = {}
+  const origin = (node: RunningNode): string =>
+    node.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:')
+
+  before(async function () {
+    if (!enabled) return this.skip()
+    assert(parent && artifacts && browserBin && daemonName && clientRoot)
+    root = mkdtempSync(path.join(realpathSync(parent), 'ui-'))
+    c = await cluster(path.join(root, 'cluster'), { coWorker: true })
+    host = await c.startHost('host')
+    const master = c.master.master!
+    await master.settings.set(localOperator, 'host', {
+      origin: origin(host),
+      workerOrigin: host.web!.url,
+    })
+    const repo = c.repo('fixtures/fixture')
+    repo.commit({ 'Masonfile.ts': masonfile }, 'master', 'Fixture Masonfile')
+    repo.commit({ 'develop.txt': 'develop\n' }, 'develop', 'Develop work')
+    master.saveProject(localOperator, 'fixture', {
+      name: 'Fixture',
+      repository: repo.url,
+      rules: [
+        { pattern: 'master', mode: 'request' },
+        { pattern: 'develop', mode: 'request' },
+      ],
+      apps: [
+        { bundleId: ALPHA, name: 'Alpha', platforms: ['ios', 'android'] },
+        { bundleId: BETA, name: 'Beta', platforms: ['macos'] },
+      ],
+    })
+    // Real runs on the co-worker: each workflow on master, then on develop.
+    for (const branch of ['master', 'develop'])
+      for (const workflow of ['build-alpha', 'build-beta']) {
+        const created = await c.api('POST', '/api/v2/runs', {
+          project: 'fixture',
+          branch,
+          workflow,
+        })
+        assert.equal(created.status, 202, created.text)
+        const value = await c.until(
+          () => {
+            const run = master.run(created.json.id) as Json
+            return ['succeeded', 'failed', 'cancelled', 'unstable'].includes(
+              run.status,
+            )
+              ? run
+              : undefined
+          },
+          120_000,
+          `${workflow} on ${branch}`,
+        )
+        assert.equal(value.status, 'succeeded', master.scheduler.logs(value.id))
+        runs[`${workflow}@${branch}`] = value
+      }
+    const person = async (
+      key: string,
+      fields: Record<string, unknown>,
+    ): Promise<void> => {
+      const p = clientParameters(
+        Buffer.from(key.padEnd(16, '-')).toString('hex').slice(0, 32),
+        DEFAULT_PASSWORD_COSTS,
+      )
+      people[key] = (
+        await master.people.create(localOperator, {
+          ...fields,
+          password: {
+            clientHash: await clientPasswordHash(PASSWORDS[key]!, p),
+            clientParameters: p,
+          },
+        })
+      ).id
+    }
+    await person('tess', {
+      name: 'Tess Tester',
+      username: 'tess',
+      role: 'tester',
+      emails: ['tess@example.test', 'tess2@example.test'],
+    })
+    // No username: she signs in with her email.
+    await person('nora', {
+      name: 'Nora Tester',
+      role: 'tester',
+      emails: ['nora@example.test'],
+    })
+    await person('dev', {
+      name: 'Dev Developer',
+      username: 'dev',
+      role: 'developer',
+      emails: ['dev@example.test'],
+    })
+    people.paul = Number(
+      master.database.db
+        .prepare("SELECT id FROM accounts WHERE username='paul'")
+        .get()!.id,
+    )
+    const appIds = master.database.db
+      .prepare('SELECT id FROM apps WHERE slug IN (?,?) ORDER BY id')
+      .all(ALPHA, BETA)
+      .map((row) => Number(row.id))
+    master.people.createGroup(localOperator, {
+      name: 'Testers',
+      apps: appIds,
+      members: [people.tess!, people.nora!],
+    })
+    await c.until(
+      () =>
+        (
+          host
+            .host!.cache.db.prepare(
+              "SELECT COUNT(*) AS n FROM builds WHERE state='ready'",
+            )
+            .get() as { n: number }
+        ).n >= 4 &&
+        host
+          .host!.cache.db.prepare("SELECT 1 FROM groups WHERE name='Testers'")
+          .get() != null &&
+        host
+          .host!.cache.db.prepare(
+            "SELECT 1 FROM accounts WHERE name='Dev Developer'",
+          )
+          .get() != null,
+      20_000,
+      'the builds, people and group on the host',
+    )
+    wrapper = path.join(root, 'browser')
+    const pins = [c.master, host]
+      .map((node) => node.web!.certificate!.pin.replace(/^sha256\/\//, ''))
+      .join(',')
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\nexec ${quote(browserBin)} --ignore-certificate-errors-spki-list=${quote(pins)} "$@"\n`,
+      { mode: 0o700 },
+    )
+    const require = createRequire(import.meta.url)
+    const { MaestroD } = require(
+      path.join(clientRoot, 'dist/cjs/index.js'),
+    ) as { MaestroD: { connect: (options: object) => Promise<Daemon> } }
+    daemon = await MaestroD.connect({ name: daemonName })
+  })
+  after(async () => {
+    await c?.close()
+  })
+
+  /** A fresh Chrome (its own profile) at a window size, on a node's origin. */
+  const browser = async (
+    name: string,
+    node: RunningNode,
+    windowSize: string,
+  ): Promise<{
+    open: (suffix: string) => Promise<void>
+    visible: (text: string) => Promise<void>
+    gone: (text: string) => Promise<void>
+    tap: (css: string) => Promise<void>
+    type: (css: string, text: string) => Promise<void>
+    script: (script: string) => Promise<unknown>
+    shot: (file: string) => Promise<void>
+    close: () => Promise<void>
+  }> => {
+    const base = origin(node)
+    const device = await daemon.attach({
+      device: name,
+      platform: 'web',
+      url: base,
+      extra: { browser: wrapper, windowSize },
+      artifacts: 'none',
+      commandTimeout: 30000,
+      // maestro-d writes reports here; the artifacts directory holds only proof.
+      outputDir: path.join(realpathSync(parent!), 'maestro-output'),
+    })
+    const retry = async (step: () => Promise<unknown>): Promise<void> => {
+      try {
+        await step()
+      } catch (error) {
+        // A navigation can land mid-command; the page is asked once more.
+        if (!/navigated|execution context|find context/i.test(String(error)))
+          throw error
+        await step()
+      }
+    }
+    return {
+      open: async (suffix): Promise<void> => {
+        await device.command('openBrowser', { url: base + suffix })
+      },
+      visible: async (text): Promise<void> =>
+        await retry(
+          async () =>
+            await device.command('assertVisible', { text, timeout: 30000 }),
+        ),
+      gone: async (text): Promise<void> =>
+        await retry(
+          async () =>
+            await device.command('assertNotVisible', { text, timeout: 30000 }),
+        ),
+      tap: async (css): Promise<void> =>
+        await retry(async () => await device.command('tapOn', { css })),
+      type: async (css, text): Promise<void> => {
+        await device.command('tapOn', { css })
+        await device.command('inputText', { text })
+      },
+      script: async (script): Promise<unknown> =>
+        await device.command('evalBrowserScript', { script }),
+      shot: async (file): Promise<void> => {
+        // Let fonts and layout settle before the capture.
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        writeFileSync(path.join(artifacts!, file), await device.screenshot())
+      },
+      close: async (): Promise<void> => {
+        // Detach only: the daemon is shared by every scenario here.
+        await daemon.detach(name).catch(() => undefined)
+      },
+    }
+  }
+  type Browser = Awaited<ReturnType<typeof browser>>
+  /** The master's sign-in form, by username or email. */
+  const masterSignIn = async (
+    b: Browser,
+    identifier: string,
+    password: string,
+  ): Promise<void> => {
+    await b.open('/sign-in')
+    await b.visible('^Sign in$')
+    await b.type('#username', identifier)
+    await b.type('#password', password)
+    await b.tap('form[data-mason="sign-in"] button')
+  }
+  /** A request to a node, written to a proof log as a `$` line and its answer. */
+  const logged = async (
+    file: string,
+    node: RunningNode,
+    method: string,
+    route: string,
+    body: unknown,
+    show: (reply: { status: number; json: Json }) => string,
+  ): Promise<{ status: number; json: Json; cookie: string | undefined }> => {
+    const url = origin(node) + route
+    const response = await pinnedFetch(
+      url,
+      {
+        method,
+        redirect: 'manual',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      node.web!.certificate?.pin,
+    )
+    const json = await response.json().catch(() => undefined)
+    const shown = JSON.stringify(body).replace(
+      /"clientHash":"[0-9a-f]+"/,
+      '"clientHash":"<64 hex>"',
+    )
+    appendFileSync(
+      path.join(artifacts!, file),
+      `$ curl -X ${method} ${url} -d '${shown}'\n${show({ status: response.status, json })}\n\n`,
+    )
+    return {
+      status: response.status,
+      json,
+      cookie: response.headers.get('set-cookie') ?? undefined,
+    }
+  }
+
+  it('E1 a password signs in by an email, a second email or a username, and a wrong one is refused', async () => {
+    const log = 'sign-in-by-email.log'
+    rmSync(path.join(artifacts!, log), { force: true })
+    const parameters = async (identifier: string): Promise<Json> =>
+      (
+        await logged(
+          log,
+          c.master,
+          'POST',
+          '/api/v2/session/parameters',
+          { identifier },
+          (reply) =>
+            `HTTP ${reply.status} ${JSON.stringify({ ...reply.json, salt: reply.json?.salt == null ? undefined : '<32 hex>' })}`,
+        )
+      ).json
+    for (const [identifier, who] of [
+      ['nora@example.test', 'nora'],
+      ['TESS2@example.test', 'tess'],
+      ['tess', 'tess'],
+    ] as const) {
+      const p = await parameters(identifier)
+      const signedIn = await logged(
+        log,
+        c.master,
+        'POST',
+        '/api/v2/session',
+        {
+          identifier,
+          clientHash: await clientPasswordHash(PASSWORDS[who]!, p),
+        },
+        (reply) =>
+          `HTTP ${reply.status} ${JSON.stringify({ name: reply.json?.name, role: reply.json?.role })}`,
+      )
+      assert.equal(signedIn.status, 200, identifier)
+    }
+    const p = await parameters('nora@example.test')
+    const wrong = await logged(
+      log,
+      c.master,
+      'POST',
+      '/api/v2/session',
+      {
+        identifier: 'nora@example.test',
+        clientHash: await clientPasswordHash('Wrong-Horse-9-long', p),
+      },
+      (reply) => `HTTP ${reply.status} ${JSON.stringify(reply.json)}`,
+    )
+    assert.equal(wrong.status, 401)
+    assert.equal(wrong.json.error, 'The username or password is wrong')
+    c.master.master!.database.db.prepare('DELETE FROM sign_in_failures').run()
+    // The same through the page: Nora has no username.
+    const b = await browser('mason-e1-nora', c.master, '1280x860')
+    try {
+      await b.open('/sign-in')
+      await b.visible('^Username or email$')
+      await b.shot('sign-in-after.png')
+      await masterSignIn(b, 'nora@example.test', PASSWORDS.nora!)
+      await b.visible('Nora Tester|Alpha|Install apps|Your apps')
+    } finally {
+      await b.close()
+    }
+  })
+})

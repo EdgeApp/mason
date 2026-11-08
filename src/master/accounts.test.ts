@@ -527,15 +527,18 @@ describe('Master sign-in, setup, people and permissions', function () {
     await assert.rejects(people.create(admin, {}), /name or a username/)
     await assert.rejects(
       people.create(admin, { name: 'No mail' }),
-      /needs an email address/,
+      /needs a username or an email address/,
     )
-    await assert.rejects(
-      people.create(admin, {
-        emails: ['person5@example.test'],
-        name: 'p',
-        password: await newPassword('Password-1x'),
-      }),
-      /needs a username/,
+    // An email is enough for a password.
+    assert.equal(
+      (
+        await people.create(admin, {
+          emails: ['person5@example.test'],
+          name: 'p',
+          password: await newPassword('Password-1x'),
+        })
+      ).password,
+      true,
     )
     await assert.rejects(
       people.create(admin, {
@@ -594,8 +597,30 @@ describe('Master sign-in, setup, people and permissions', function () {
       (await request(c.master, 'GET', '/api/v2/session', { cookie })).status,
       401,
     )
-    // Someone may change their own password, and only that.
+    // An admin removing an address that was never confirmed leaves her
+    // signed in: she could not have signed in with it (review 4.3).
     const self = { role: 'developer' as const, accountId: mia.id, label: 's' }
+    const still = await signIn('mia', 'Mia-Horse-9')
+    const pending = await people.update(self, mia.id, {
+      emails: [...changed.emails.map((entry) => entry.email), 'mia@new.test'],
+    })
+    assert.equal(
+      pending.emails.find((entry) => entry.email === 'mia@new.test')?.confirmed,
+      false,
+    )
+    const unconfirmed = await people.update(admin, mia.id, {
+      emails: changed.emails.map((entry) => entry.email),
+    })
+    assert.equal(unconfirmed.permissionVersion, pending.permissionVersion)
+    assert.equal(
+      (
+        await request(c.master, 'GET', '/api/v2/session', {
+          cookie: still.cookie,
+        })
+      ).status,
+      200,
+    )
+    // Someone may change their own password, and only that.
     await people.update(self, mia.id, {
       password: await newPassword('Mia-Horse-10'),
     })
@@ -659,6 +684,264 @@ describe('Master sign-in, setup, people and permissions', function () {
       (await c.api('DELETE', `/api/v2/people/${made.json.id}`)).status,
       200,
     )
+  })
+
+  it('M2.1 a username is optional with an email; a password signs in by username or any confirmed email', async () => {
+    const people = master().people
+    // Signs in by `identifier`, as this release's pages send it.
+    const signInAs = async (
+      identifier: string,
+      password: string,
+    ): Promise<{ reply: Reply; cookie?: string }> => {
+      const p = await request(c.master, 'POST', '/api/v2/session/parameters', {
+        body: { identifier },
+      })
+      assert.equal(p.status, 200, p.text)
+      const reply = await request(c.master, 'POST', '/api/v2/session', {
+        body: {
+          identifier,
+          clientHash: await clientPasswordHash(password, p.json),
+        },
+      })
+      return reply.status === 200
+        ? { reply, cookie: sessionCookie(reply) }
+        : { reply }
+    }
+    const nora = await people.create(admin, {
+      name: 'Nora',
+      emails: ['nora@example.test', 'nora2@example.test'],
+      password: await newPassword('Nora-Horse-9'),
+    })
+    assert.equal(nora.username, undefined)
+    for (const identifier of [
+      'nora@example.test',
+      'NORA2@Example.test',
+      ' nora@example.test ',
+    ])
+      assert.equal(
+        (await signInAs(identifier, 'Nora-Horse-9')).reply.status,
+        200,
+        identifier,
+      )
+    assert.equal(
+      (await signInAs('nora@example.test', 'Wrong-Horse-9')).reply.json.error,
+      'The username or password is wrong',
+    )
+    // An unknown email gets stable decoy parameters, like an unknown username.
+    const decoy = async (identifier: string): Promise<unknown> =>
+      (
+        await request(c.master, 'POST', '/api/v2/session/parameters', {
+          body: { identifier },
+        })
+      ).json
+    assert.deepEqual(
+      await decoy('nobody@example.test'),
+      await decoy('NOBODY@example.test'),
+    )
+    assert.notDeepEqual(
+      await decoy('nobody@example.test'),
+      await decoy('somebody@example.test'),
+    )
+    assert.equal(
+      (
+        await request(c.master, 'POST', '/api/v2/session/parameters', {
+          body: { identifier: 'not an@email' },
+        })
+      ).status,
+      400,
+    )
+    // A username, or emails, or both; never neither.
+    const uma = await people.create(admin, {
+      name: 'Uma',
+      username: 'uma',
+      password: await newPassword('Uma-Horse-9'),
+    })
+    assert.deepEqual(uma.emails, [])
+    assert.equal((await signInAs('uma', 'Uma-Horse-9')).reply.status, 200)
+    await assert.rejects(
+      people.create(admin, { name: 'Nobody' }),
+      /needs a username or an email address/,
+    )
+    await assert.rejects(
+      people.update(admin, uma.id, { username: null }),
+      /needs a username or an email address/,
+    )
+    await assert.rejects(
+      people.update(admin, uma.id, { username: '' }),
+      /A username is 1–64/,
+    )
+    const cleared = await people.update(admin, nora.id, { username: 'nora' })
+    assert.equal(cleared.username, 'nora')
+    assert.equal(
+      (await people.update(admin, nora.id, { username: null })).username,
+      undefined,
+    )
+    // Lockouts follow the account whichever identifier fails.
+    const tries = await people.create(admin, {
+      name: 'Locked',
+      emails: ['locked@example.test'],
+      username: 'locked',
+      password: await newPassword('Lock-Horse-9'),
+    })
+    for (let n = 0; n < LOCKOUT.account; n++)
+      await signInAs('locked@example.test', 'Wrong-Horse-9')
+    assert.equal((await signInAs('locked', 'Lock-Horse-9')).reply.status, 429)
+    assert.ok(tries.id > 0)
+    // The address's failures would lock later tests out too.
+    master().database.db.prepare('DELETE FROM sign_in_failures').run()
+  })
+
+  it('M2.2 people change their own name and emails and stay signed in; what they add waits for an admin', async () => {
+    const people = master().people
+    const tess = await people.create(admin, {
+      name: 'Tess',
+      role: 'tester',
+      emails: ['tess.self@example.test'],
+      password: await newPassword('Tess-Horse-9'),
+    })
+    const other = await people.create(admin, {
+      name: 'Other',
+      emails: ['other.self@example.test'],
+    })
+    const self = { role: 'tester' as const, accountId: tess.id, label: 't' }
+    const { cookie } = await signIn('tess.self@example.test', 'Tess-Horse-9')
+    const renamed = await people.update(self, tess.id, {
+      name: 'Tess Renamed',
+      emails: ['tess.self@example.test', 'tess.claim@example.test'],
+    })
+    assert.equal(renamed.name, 'Tess Renamed')
+    assert.equal(renamed.permissionVersion, tess.permissionVersion)
+    assert.deepEqual(renamed.emails, [
+      { email: 'tess.self@example.test', confirmed: true },
+      { email: 'tess.claim@example.test', confirmed: false },
+    ])
+    // Still signed in.
+    assert.equal(
+      (await request(c.master, 'GET', '/api/v2/session', { cookie })).status,
+      200,
+    )
+    // The unconfirmed address signs nobody in.
+    assert.equal(
+      (await signIn('tess.claim@example.test', 'Tess-Horse-9')).reply.status,
+      401,
+    )
+    // Not their role, username or confirmations, nor anyone else.
+    for (const change of [
+      { role: 'admin' },
+      { username: 'tess' },
+      { confirmEmails: ['tess.claim@example.test'] },
+    ])
+      await assert.rejects(people.update(self, tess.id, change), /Not allowed/)
+    await assert.rejects(
+      people.update(self, other.id, { name: 'Mine' }),
+      /Not allowed/,
+    )
+    // An admin may not clear the username of someone whose emails are all
+    // unconfirmed: they could not sign in at all (review 1.harness-review.3).
+    const only = await people.create(admin, {
+      name: 'Only Username',
+      username: 'onlyuser',
+      password: await newPassword('Only-Horse-9'),
+    })
+    await people.update(
+      { role: 'tester', accountId: only.id, label: 'o' },
+      only.id,
+      { emails: ['only.claim@example.test'] },
+    )
+    await assert.rejects(
+      people.update(admin, only.id, { username: null }),
+      /Keep a confirmed email or a username/,
+    )
+    // Someone who already has neither (an import, a migration's dropped
+    // duplicate) can still be disabled or re-roled (review 2.harness-review.2).
+    master()
+      .database.db.prepare('UPDATE accounts SET username=NULL WHERE id=?')
+      .run(only.id)
+    master()
+      .database.db.prepare('DELETE FROM account_emails WHERE account_id=?')
+      .run(only.id)
+    assert.equal(
+      (await people.update(admin, only.id, { disabled: true })).disabled,
+      true,
+    )
+    // Their own last confirmed email stays while they have no username.
+    await assert.rejects(
+      people.update(self, tess.id, { emails: ['tess.claim@example.test'] }),
+      /Keep a confirmed email or a username/,
+    )
+    // Another person's confirmed address is refused; an admin takes over a claim.
+    await assert.rejects(
+      people.update(self, tess.id, {
+        emails: ['tess.self@example.test', 'other.self@example.test'],
+      }),
+      /belongs to someone else/,
+    )
+    const given = await people.update(admin, other.id, {
+      emails: ['other.self@example.test', 'tess.claim@example.test'],
+    })
+    assert.deepEqual(given.emails.at(-1), {
+      email: 'tess.claim@example.test',
+      confirmed: true,
+    })
+    assert.deepEqual(
+      people.get(admin, tess.id).emails.map((entry) => entry.email),
+      ['tess.self@example.test'],
+    )
+    // An admin confirms an address the person added.
+    await people.update(self, tess.id, {
+      emails: ['tess.self@example.test', 'tess.second@example.test'],
+    })
+    const confirmed = await people.update(admin, tess.id, {
+      confirmEmails: ['tess.second@example.test'],
+    })
+    assert.deepEqual(confirmed.emails.at(-1), {
+      email: 'tess.second@example.test',
+      confirmed: true,
+    })
+    assert.equal(
+      (await signIn('tess.second@example.test', 'Tess-Horse-9')).reply.status,
+      200,
+    )
+    // An admin taking an address away ends the person's sessions; a role
+    // change does too.
+    const removed = await people.update(admin, tess.id, {
+      emails: ['tess.self@example.test'],
+    })
+    assert.equal(removed.permissionVersion, confirmed.permissionVersion + 1)
+    assert.equal(
+      (await request(c.master, 'GET', '/api/v2/session', { cookie })).status,
+      401,
+    )
+    const promoted = await people.update(admin, tess.id, { role: 'developer' })
+    assert.equal(promoted.permissionVersion, removed.permissionVersion + 1)
+    // Renaming someone else keeps their sessions.
+    const kept = await people.update(admin, tess.id, { name: 'Tess Again' })
+    assert.equal(kept.permissionVersion, promoted.permissionVersion)
+    // An open-admission sign-in with a verified email takes it from a claim.
+    await people.update(self, tess.id, {
+      emails: ['tess.self@example.test', 'owner@example.test'],
+    })
+    const owner = people.admit('first', {
+      name: 'Owner',
+      email: 'owner@example.test',
+    })
+    assert.notEqual(owner, tess.id)
+    assert.deepEqual(people.get(admin, owner).emails, [
+      { email: 'owner@example.test', confirmed: true },
+    ])
+    assert.deepEqual(
+      people.get(admin, tess.id).emails.map((entry) => entry.email),
+      ['tess.self@example.test'],
+    )
+    // Each takeover is recorded as whoever did it: the sign-in, or the admin.
+    const takeover = (email: string): unknown =>
+      master()
+        .database.db.prepare(
+          "SELECT via FROM audit WHERE action='person.email.remove' AND target=? ORDER BY id DESC LIMIT 1",
+        )
+        .get(`${tess.id} ${email}`)?.via
+    assert.equal(takeover('owner@example.test'), 'first sign-in')
+    assert.equal(takeover('tess.claim@example.test'), admin.label)
   })
 
   it('U13.12 groups decide which apps a tester sees on the host, within a second', async () => {

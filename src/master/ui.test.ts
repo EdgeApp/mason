@@ -998,7 +998,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       await request(c.master, 'GET', '/people', signIn('admin'))
     ).text
     assert.match(adminPeople, /<form data-mason="person-add">/)
-    assert.match(adminPeople, /name="email" type="email" required/)
+    assert.match(adminPeople, /name="email" type="email">/)
     assert.doesNotMatch(adminPeople, /addresses\./)
     const managerPeople = (
       await request(c.master, 'GET', '/people', signIn('manager'))
@@ -1242,7 +1242,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     const admin = signIn('admin')
     const manager = signIn('manager')
     const adminPeople = (await request(c.master, 'GET', '/people', admin)).text
-    assert.match(adminPeople, /name="email" type="email" required/)
+    assert.match(adminPeople, /name="email" type="email">/)
     assert.doesNotMatch(adminPeople, /\/api\/v2\/groups/)
     const managerPeople = (await request(c.master, 'GET', '/people', manager))
       .text

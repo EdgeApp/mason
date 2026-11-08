@@ -1,4 +1,5 @@
 import { createHmac, sign, timingSafeEqual, type KeyObject } from 'node:crypto'
+import { identifierOf } from '../auth/passwordProtocol.js'
 import {
   LinkError,
   type Link,
@@ -561,14 +562,12 @@ export class HostLinks {
           this.host(link)
           return this.webhook(params)
         },
-        /** A username's hashing parameters, for the host's sign-in page. */
+        /** A username's or email's hashing parameters, for the host's sign-in page. */
         'auth.parameters': (params, link): unknown => {
           this.host(link)
           if (this.options.password == null)
             throw new LinkError('Password sign-in is unavailable', 'failed')
-          return this.options.password.parameters(
-            (params as { username?: unknown } | null)?.username,
-          )
+          return this.options.password.parameters(identifierOf(params))
         },
         /** Checks a password the host received; answers only whose it is. */
         'auth.password': async (
@@ -578,14 +577,14 @@ export class HostLinks {
           this.host(link)
           if (this.options.password == null)
             throw new LinkError('Password sign-in is unavailable', 'failed')
-          const { username, clientHash, address } = (params ?? {}) as Record<
+          const { clientHash, address } = (params ?? {}) as Record<
             string,
             unknown
           >
           try {
             return {
               accountId: await this.options.password.verify(
-                { username, clientHash },
+                { identifier: identifierOf(params), clientHash },
                 `host:${String(address ?? '')}`,
               ),
             }

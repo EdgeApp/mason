@@ -30,7 +30,7 @@ import {
   clientParameters,
   DEFAULT_PASSWORD_COSTS,
 } from '../auth/passwordProtocol.js'
-import { xcodeRoutes } from './web.js'
+import { named, xcodeRoutes } from './web.js'
 import { HostRuntime } from './runtime.js'
 import { DatabaseSync } from 'node:sqlite'
 import { LinkError, type Link } from '../link/link.js'
@@ -38,7 +38,7 @@ import { Outbox } from './outbox.js'
 import { HostCache } from './cache.js'
 import { proofLog } from '../test/proofLog.js'
 import { migrateMaster } from '../master/schema.js'
-import { entities } from '../master/changes.js'
+import { entities, type Change } from '../master/changes.js'
 import { seedLegacySecrets } from '../test/secrets.js'
 
 // API responses are read field by field in assertions.
@@ -1722,6 +1722,71 @@ describe('Plain emails on the host', () => {
         cache.close()
       }
     } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('names a username both ways on the link, for a master on the previous release (review 3.harness-review.5)', () => {
+    assert.deepEqual(named('tess'), { identifier: 'tess', username: 'tess' })
+    assert.deepEqual(named('tess@example.test'), {
+      identifier: 'tess@example.test',
+    })
+    assert.deepEqual(named(undefined), { identifier: undefined })
+  })
+
+  it('a provider subject stops mapping to an account once the email it came with is taken away', () => {
+    const dir = mkdtempSync(
+      path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'host-ident-'),
+    )
+    const cache = new HostCache(dir)
+    try {
+      const account = (emails: string[]): Change => ({
+        revision: 0,
+        entity: 'account',
+        key: '7',
+        operation: 'put',
+        value: {
+          row: {
+            id: 7,
+            name: 'Ida',
+            role: 'tester',
+            permission_version: 1,
+            created_at: 0,
+          },
+          children: {
+            account_emails: emails.map((email, position) => ({
+              account_id: 7,
+              email,
+              position,
+              confirmed: 1,
+            })),
+          },
+        },
+      })
+      cache.apply({
+        kind: 'changes',
+        revision: 1,
+        changes: [account(['ida@example.test', 'ida@work.test'])],
+      })
+      const identity = cache.db.prepare(
+        "INSERT INTO identities(account_id,provider,issuer,subject,email,email_verified) VALUES(7,?,'https://idp.example.test',?,?,1)",
+      )
+      identity.run('first', 'ida-1', 'Ida@Example.test')
+      identity.run('second', 'ida-2', 'ida@work.test')
+      cache.apply({
+        kind: 'changes',
+        revision: 2,
+        changes: [account(['ida@example.test'])],
+      })
+      assert.deepEqual(
+        cache.db
+          .prepare('SELECT subject FROM identities WHERE account_id=7')
+          .all()
+          .map((row) => row.subject),
+        ['ida-1'],
+      )
+    } finally {
+      cache.close()
       rmSync(dir, { recursive: true, force: true })
     }
   })

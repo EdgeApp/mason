@@ -2103,7 +2103,7 @@ describe('People and groups pages', () => {
     assert.match(admin, /<h1>People<\/h1>/)
     assert.match(admin, /<strong>Ada &lt;Admin&gt;<\/strong>/)
     assert.match(admin, /<small>tess@gmail\.example<\/small>/)
-    assert.match(admin, /name="email" type="email" required/)
+    assert.match(admin, /name="email" type="email">/)
     assert.doesNotMatch(admin, /\/api\/v2\/groups|Tester groups/)
     const manager = peopleView({ people, canChange: false })
     assert.doesNotMatch(manager, /name="email"|data-path=/)

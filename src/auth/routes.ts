@@ -1,4 +1,5 @@
 import { asObject, asOptional, asString } from 'cleaners'
+import { identifierOf } from './passwordProtocol.js'
 import express, {
   Router,
   type Request,
@@ -149,9 +150,10 @@ export interface AuthOptions {
   }
   /** Username and password sign-in, checked by the master (a host). */
   password?: {
-    parameters: (username: unknown) => Promise<unknown>
+    /** The hashing parameters for a username or an email. */
+    parameters: (identifier: unknown) => Promise<unknown>
     signIn: (
-      value: { username?: unknown; clientHash?: unknown },
+      value: { identifier?: unknown; clientHash?: unknown },
       address: string,
       previousToken: string | undefined,
     ) => Promise<{ token: string; session: Session }>
@@ -212,7 +214,7 @@ export function authRoutes(
     res.send(
       shell({
         title: 'Sign in',
-        body: `<h1>Sign in</h1><section class="card"><p>Sign in to app builds and run logs with your Mason account.</p>${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username and password:</p>`}<form data-mason="sign-in" data-parameters="/auth/password/parameters" data-session="/auth/password" data-return="${escape(destination)}"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><button>Sign in</button><p data-field="status" hidden></p></form></section>`,
+        body: `<h1>Sign in</h1><section class="card"><p>Sign in to app builds and run logs with your Mason account.</p>${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username or email and a password:</p>`}<form data-mason="sign-in" data-parameters="/auth/password/parameters" data-session="/auth/password" data-return="${escape(destination)}"><label for="username">Username or email</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><button>Sign in</button><p data-field="status" hidden></p></form></section>`,
         phone: true,
         scripts: ['/assets/master.js'],
       }),
@@ -241,11 +243,7 @@ export function authRoutes(
     }
     router.post('/auth/password/parameters', json, async (req, res) => {
       try {
-        res.json(
-          await password.parameters(
-            (req.body as { username?: unknown } | null)?.username,
-          ),
-        )
+        res.json(await password.parameters(identifierOf(req.body)))
       } catch (error) {
         refused(res, error)
       }
@@ -253,7 +251,11 @@ export function authRoutes(
     router.post('/auth/password', json, async (req, res) => {
       try {
         const result = await password.signIn(
-          (req.body ?? {}) as { username?: unknown; clientHash?: unknown },
+          {
+            identifier: identifierOf(req.body),
+            clientHash: (req.body as { clientHash?: unknown } | null)
+              ?.clientHash,
+          },
           req.ip ?? '',
           cookie(req, SESSION_COOKIE),
         )

@@ -188,10 +188,10 @@ function signInPage(signIn: ProviderSignIn): string {
         `<a class="button" href="${escape(`${origin!}/auth/start/${encodeURIComponent(provider.id)}?return=/`)}">Sign in with ${escape(provider.name)}</a>`,
     )
     .join('')
-  return `<section class="card">${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username and password:</p>`}${passwordForm}</section>`
+  return `<section class="card">${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username or email and a password:</p>`}${passwordForm}</section>`
 }
 
-const passwordForm = `<form data-mason="sign-in"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><p><button>Sign in</button></p>${status}</form>`
+const passwordForm = `<form data-mason="sign-in"><label for="username">Username or email</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><p><button>Sign in</button></p>${status}</form>`
 
 function backupsPage(master: Master, session: MasterSession): string {
   const actor = sessionActor(session)

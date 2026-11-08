@@ -189,10 +189,16 @@ describe('Master page script', () => {
         body: { id: 9, invitation: { url: link } },
       },
     })
+    // Neither an email nor a username: nothing is sent.
+    fields.email.value = ''
     add.submit()
     await settle()
-    assert.equal(add.outputs.status!.textContent, 'A password needs a username')
+    assert.equal(
+      add.outputs.status!.textContent,
+      'Give them an email address, a username, or both',
+    )
     assert.equal(calls.length, 0)
+    fields.email.value = 'tess@example.test'
     fields.username.value = 'tess'
     add.submit()
     await settle()
@@ -294,6 +300,36 @@ describe('Master page script', () => {
     assert.deepEqual(forgotten, [token])
   })
 
+  it('M2.12 an invitation for a person with a confirmed email makes the username optional', async () => {
+    const fields = {
+      username: { value: '', required: true },
+      password: { value: 'Tess-Horse-9' },
+      confirm: { value: 'Tess-Horse-9' },
+    }
+    const invite = form('invite', fields)
+    Object.assign(invite.dataset, {
+      lookup: '/auth/invite/lookup',
+      accept: '/auth/invite',
+    })
+    page(
+      [invite],
+      {
+        'POST /auth/invite/lookup': {
+          status: 200,
+          body: { name: 'Mail', usernameRequired: false },
+        },
+      },
+      'proof',
+      'x'.repeat(43),
+    )
+    await settle()
+    assert.equal(
+      invite.outputs.welcome!.textContent,
+      'Welcome, Mail. Choose a password (and a username, if you want one) to sign in to Mason.',
+    )
+    assert.equal(fields.username.required, false)
+  })
+
   it('M2.2 an invitation refuses mismatched or weak passwords before hashing, and shows a refused or incomplete link', async () => {
     const fields = {
       username: { value: 'new-person' },
@@ -382,7 +418,7 @@ describe('Master page script', () => {
     assert.equal(signIn.outputs.status!.textContent, 'Working…')
     await settle()
     assert.deepEqual(body(calls[1]!.init), {
-      username: 'paul',
+      identifier: 'paul',
       clientHash: 'hash-of-Correct-Horse-9',
     })
     assert(!JSON.stringify(calls).includes('"Correct-Horse-9"'))
@@ -415,7 +451,7 @@ describe('Master page script', () => {
       ['/auth/password/parameters', '/auth/password'],
     )
     assert.deepEqual(body(calls[1]!.init), {
-      username: 'tess',
+      identifier: 'tess',
       clientHash: 'hash-of-Tess-Horse-9',
     })
     assert.deepEqual(visits, ['/apps/3'])

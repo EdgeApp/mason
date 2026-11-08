@@ -239,13 +239,15 @@ the master's own listener.
 
 | Method and path | What it does | Who |
 | --- | --- | --- |
-| `POST /api/v2/session/parameters` | The Argon2id parameters to hash a username's password with. | anyone |
+| `POST /api/v2/session/parameters` | The Argon2id parameters to hash the password of a username or email with. | anyone |
 | `POST /api/v2/session` | Signs in and sets the session cookie. | anyone |
 | `GET /api/v2/session` | The signed-in session, from the cookie. | a session |
 | `DELETE /api/v2/session` | Signs out and clears the cookie. | a session, with CSRF |
 
-**`POST /api/v2/session/parameters`** takes `{ "username": "ada" }` (1–64
-letters, digits, dots, dashes or underscores) and answers the parameters:
+**`POST /api/v2/session/parameters`** takes `{ "identifier": "ada" }`: a
+username (1–64 letters, digits, dots, dashes or underscores) or one of the
+person's confirmed emails (anything with `@`, ignoring case). `username` is
+still read when `identifier` is absent. It answers the parameters:
 
 ```json
 {
@@ -259,14 +261,15 @@ letters, digits, dots, dashes or underscores) and answers the parameters:
 }
 ```
 
-An unknown username gets stable decoy parameters, so the answer does not
-tell whether an account exists.
+An unknown username or email gets stable decoy parameters, so the answer
+does not tell whether an account exists.
 
-**`POST /api/v2/session`** takes `{ "username": "ada", "clientHash": "<64
+**`POST /api/v2/session`** takes `{ "identifier": "ada", "clientHash": "<64
 lowercase hex>" }`, the 32-byte Argon2id hash of the password. A body with a
 `password` field is refused (400). It answers
-`{ "name", "role", "csrf" }` and sets the cookie; a wrong username or
-password is 401, a locked account or address 429.
+`{ "name", "role", "csrf" }` and sets the cookie; a wrong username, email
+or password is 401, a locked account or address 429. Failures count against
+the account whichever identifier named it.
 
 **`GET /api/v2/session`** answers `{ "accountId", "name", "role", "csrf" }`,
 or 401 `Not signed in`.
@@ -280,7 +283,7 @@ or 401 `Not signed in`.
 | `GET /api/v2/people` | Every person who is not removed. | `people.read` |
 | `POST /api/v2/people` | Adds a person. 201. | `people.change` |
 | `GET /api/v2/people/:id` | One person. | `people.read`, or the person themselves |
-| `PUT /api/v2/people/:id` | Changes a person. | `people.change`; a person may change only their own `password` |
+| `PUT /api/v2/people/:id` | Changes a person. | `people.change`; a person may change their own `name`, `emails` and `password` |
 | `DELETE /api/v2/people/:id` | Removes a person. | `people.change` |
 | `POST /api/v2/people/:id/invitation` | Makes the person's invitation link and answers it, once. 201. | `people.change` |
 | `DELETE /api/v2/people/:id/invitation` | Revokes the person's invitation link. | `people.change` |
@@ -326,8 +329,15 @@ The body of `POST` and `PUT` takes these fields, all optional for `PUT`:
 
 An address already on the person keeps whether it is confirmed; one an
 administrator adds is confirmed. The old `email` and `addresses` fields are
-refused (400). `POST` needs `emails`, and `name` or `username`; a password needs a
-username. Setting a password is audited as `person.password` besides
+refused (400). An address a person adds to their own record is
+unconfirmed: it signs nobody in until an administrator confirms it
+(`confirmEmails`), and an administrator who gives that address to someone
+else takes it over. A verified email from an open-admission sign-in takes
+it over too. `POST` needs `name` or `username`, and a username or at least
+one email; `"username": null` clears a username, which is refused when the
+person would be left with neither, or with no confirmed email and no
+username after having one. A person may not remove their own last
+confirmed email while they have no username. Setting a password is audited as `person.password` besides
 `person.create` or `person.update`; only `people.change` (administrators)
 may set another person's, and the People page does it with a client hash
 the browser makes from a password typed twice, as the sign-in page hashes
@@ -335,8 +345,10 @@ one. Mason never sees the password, so its length and character rules are
 checked in the browser; the master holds the hash's costs to the minimums
 above. `POST` also takes `"invite": true`, which makes the person's
 invitation link at once and adds `"invitation": { "url", "expiresAt" }` to
-the answer. Every `PUT` bumps the person's permission version, which ends
-their sessions. Each address added or removed is audited as
+the answer. A `PUT` that changes the role, disables or enables, sets a
+password, or takes away an address of someone other than the caller bumps
+the person's permission version, which ends their sessions; a change of
+name, username or a person's own emails keeps them. Each address added or removed is audited as
 `person.email.add` or `person.email.remove`, with the person's id and the
 address. A raw `password` string is refused (400). 404 for an unknown
 person; 409 when the username or an address is taken, or when the change
@@ -374,13 +386,16 @@ script reads the token from the fragment and makes two requests, which
 must come from that origin's own page (`Origin`) and are limited with the
 other `/auth` pages:
 
-- `POST /auth/invite/lookup` `{ "token" }` answers `{ "name", "username"? }`
+- `POST /auth/invite/lookup` `{ "token" }` answers `{ "name", "username"?,
+  "usernameRequired" }` (`false` when the person has a username or a
+  confirmed email to sign in with)
   for a live link, or 404 `This invitation link is not valid or has
   expired` (400 on the host).
 - `POST /auth/invite` `{ "token", "username", "clientHash",
   "clientParameters" }` sets the password from a client hash made as for
   `password` above (a raw `password` is refused) and the username, which a
-  person who has one keeps (409 when it is taken). The link is used up, the
+  person who has one keeps (409 when it is taken) and a person with a
+  confirmed email may leave empty. The link is used up, the
   permission version bumped, and the browser signed in (`{ "signedIn": true
   }` with the session cookie). It is audited as `person.invite.accept` by
   the person. On the host, the master does this over the host's link and

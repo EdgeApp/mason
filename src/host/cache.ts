@@ -436,6 +436,14 @@ export class HostCache {
       for (const entry of value.children?.[child] ?? [])
         this.insertChild(child, entry)
     }
+    // A provider subject maps to an account only through one of its
+    // confirmed emails: one taken away no longer signs that subject in.
+    if (entity === 'account')
+      this.db
+        .prepare(
+          'DELETE FROM identities WHERE account_id=?1 AND (email IS NULL OR lower(email) NOT IN (SELECT email FROM account_emails WHERE account_id=?1 AND confirmed=1))',
+        )
+        .run(row.id as number)
   }
   private insertChild(table: string, row: Row): void {
     const known = this.tableColumns(table)

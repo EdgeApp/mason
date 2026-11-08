@@ -431,10 +431,23 @@ export function xcodeRoutes(
 }
 
 /**
- * Username and password sign-in on the host: the master checks the hash the
+ * Username-or-email and password sign-in on the host: the master checks the hash the
  * browser made, with its lockouts, and answers only whose account it is; the
  * host then signs that cached account in, with its role's limits.
  */
+/**
+ * How the link names a person: `identifier`, and for a username also
+ * `username`, which a master on the previous release reads.
+ */
+export function named(identifier: unknown): {
+  identifier: unknown
+  username?: unknown
+} {
+  return typeof identifier === 'string' && !identifier.includes('@')
+    ? { identifier, username: identifier }
+    : { identifier }
+}
+
 function hostPassword(host: HostRuntime): NonNullable<AuthOptions['password']> {
   const link = (): Link => {
     const current = host.options.link()
@@ -443,15 +456,15 @@ function hostPassword(host: HostRuntime): NonNullable<AuthOptions['password']> {
     return current
   }
   return {
-    parameters: async (username): Promise<unknown> =>
-      await link().request('auth.parameters', { username }),
+    parameters: async (identifier): Promise<unknown> =>
+      await link().request('auth.parameters', named(identifier)),
     signIn: async (
       value,
       address,
       previousToken,
     ): Promise<{ token: string; session: Session }> => {
       const { accountId } = (await link().request('auth.password', {
-        username: value.username,
+        ...named(value.identifier),
         clientHash: value.clientHash,
         address,
       })) as { accountId: number }
