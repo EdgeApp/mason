@@ -551,7 +551,7 @@ export async function startNode(
           void hostRuntime
             ?.connected()
             .catch((error: unknown) =>
-              log(`Sync with the master failed: ${(error as Error).message}`),
+              log(`The opening sync stopped: ${(error as Error).message}`),
             )
         },
         ...(options.heartbeatMs == null

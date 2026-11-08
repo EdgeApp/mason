@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import type { DatabaseSync } from 'node:sqlite'
 import { asArray, asNumber, asObject, asOptional, asString } from 'cleaners'
 import { parsePairingKey, type Identity } from '../node/identity.js'
+import { backoffDelay } from '../link/backoff.js'
 import { handshake, HandshakeRefused } from '../link/handshake.js'
 import { CLOSE, Link, type MethodTable } from '../link/link.js'
 import { dialWire, parseAddress, type Address } from '../link/network.js'
@@ -473,10 +474,11 @@ export class NodeRegistry extends EventEmitter {
 
   /** Jittered exponential backoff, capped. */
   redialDelay(attempt: number): number {
-    const base = this.options.redialBaseMs ?? 1000
-    const max = this.options.redialMaxMs ?? 60000
-    const raw = Math.min(max, base * 2 ** Math.max(0, attempt - 1))
-    return Math.min(max, Math.round(raw * (0.75 + Math.random() * 0.5)))
+    return backoffDelay(
+      attempt,
+      this.options.redialBaseMs ?? 1000,
+      this.options.redialMaxMs ?? 60000,
+    )
   }
 
   private schedule(fingerprint: string): void {
