@@ -134,16 +134,25 @@ export function entities(setting: SettingProjection): Record<string, Entity> {
       project: (db, id): Projected | undefined => {
         const row = one(
           db,
-          'SELECT id,name,email,is_admin,is_tester,disabled,permission_version,created_at,role,open_admission FROM accounts WHERE id=?',
+          // Whether they have a password, never the password itself.
+          'SELECT id,name,username,email,is_admin,is_tester,disabled,permission_version,created_at,role,open_admission,(password IS NOT NULL) AS has_password FROM accounts WHERE id=?',
           Number(id),
         )
         if (row == null) return undefined
         return {
           row,
           children: {
+            account_emails: all(
+              db,
+              'SELECT account_id,email,position,confirmed FROM account_emails WHERE account_id=? ORDER BY position',
+              Number(id),
+            ),
+            // For this release only: a host still on the previous one reads
+            // its any-method address from here, so it keeps provider sign-in
+            // for the person's first confirmed email until it updates.
             account_addresses: all(
               db,
-              'SELECT account_id,method,email FROM account_addresses WHERE account_id=?',
+              "SELECT account_id,'*' AS method,email FROM account_emails WHERE account_id=? AND confirmed=1 ORDER BY position LIMIT 1",
               Number(id),
             ),
             account_devices: all(

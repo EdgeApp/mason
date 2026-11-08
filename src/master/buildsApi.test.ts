@@ -229,7 +229,7 @@ describe('The builds API through the host and the master', function () {
       people[name] = (
         await master.people.create(admin, {
           name,
-          email: `${name}@example.test`,
+          emails: [`${name}@example.test`],
           role,
         })
       ).id

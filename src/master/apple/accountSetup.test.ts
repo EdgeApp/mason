@@ -346,10 +346,9 @@ describe('Apple setup on a master', function () {
     if (settingsToken == null) {
       const person = (
         await master.people.create(localOperator, {
-          email: 'manager.person@example.test',
+          emails: ['manager.person@example.test', 'manager@example.test'],
           name: 'manager person',
           role: 'manager',
-          addresses: { google: 'manager@example.test' },
         })
       ).id
       settingsToken = master.auth.start(person, '127.0.0.1').token

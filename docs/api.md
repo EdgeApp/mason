@@ -295,8 +295,10 @@ A person:
   "role": "manager",
   "disabled": false,
   "password": true,
-  "email": "ada@example.test",
-  "addresses": { "github": "ada@users.example.test" },
+  "emails": [
+    { "email": "ada@example.test", "confirmed": true },
+    { "email": "ada@users.example.test", "confirmed": true }
+  ],
   "groups": [2],
   "permissionVersion": 4,
   "createdAt": 1793450000000,
@@ -305,9 +307,10 @@ A person:
 ```
 
 `password` says whether the account can sign in to the master with a
-password. `email` matches every sign-in method; `addresses` holds an
-address for one method where it differs. `invitation` is there while the
-person has an unused, unexpired invitation link.
+password. `emails` are the person's email addresses, in order. An address
+carries no sign-in method: any enabled method that verifies a confirmed
+address signs its person in. `invitation` is there while the person has an
+unused, unexpired invitation link.
 
 The body of `POST` and `PUT` takes these fields, all optional for `PUT`:
 
@@ -317,11 +320,13 @@ The body of `POST` and `PUT` takes these fields, all optional for `PUT`:
 | `username` | 1–64 letters, digits, dots, dashes or underscores; unique, ignoring case (a person may change only its case) |
 | `role` | `admin`, `manager`, `developer` or `tester` (default `tester`) |
 | `disabled` | boolean |
-| `email` | an email address, up to 320 characters; unique |
-| `addresses` | `{ "<method id>": "<address>" }`; `null` removes a method's address |
+| `emails` | a list of up to 10 email addresses, each up to 320 characters, lower-cased and without repeats; it replaces the person's list. No address may be another person's |
+| `confirmEmails` | addresses the person already has, to confirm |
 | `password` | `{ "clientHash": "<64 hex>", "clientParameters": { … } }`, with parameters of at least 32 MiB, 6 iterations and 4 lanes |
 
-`POST` needs `email`, and `name` or `username`; a password needs a
+An address already on the person keeps whether it is confirmed; one an
+administrator adds is confirmed. The old `email` and `addresses` fields are
+refused (400). `POST` needs `emails`, and `name` or `username`; a password needs a
 username. Setting a password is audited as `person.password` besides
 `person.create` or `person.update`; only `people.change` (administrators)
 may set another person's, and the People page does it with a client hash
@@ -331,11 +336,13 @@ checked in the browser; the master holds the hash's costs to the minimums
 above. `POST` also takes `"invite": true`, which makes the person's
 invitation link at once and adds `"invitation": { "url", "expiresAt" }` to
 the answer. Every `PUT` bumps the person's permission version, which ends
-their sessions. A raw `password` string is refused (400). 404 for an unknown
+their sessions. Each address added or removed is audited as
+`person.email.add` or `person.email.remove`, with the person's id and the
+address. A raw `password` string is refused (400). 404 for an unknown
 person; 409 when the username or an address is taken, or when the change
 would disable, demote or remove the last enabled admin.
 
-`DELETE` disables the account, removes its username, password, addresses
+`DELETE` disables the account, removes its username, password, emails
 and group memberships, and revokes every key it created. The record stays for
 the audit history. It answers `null`.
 

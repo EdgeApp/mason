@@ -2069,25 +2069,28 @@ describe('People and groups pages', () => {
     id: number
     name: string
     role: string
-    email?: string
-    addresses: Record<string, string>
+    emails: Array<{ email: string; confirmed: boolean }>
     username?: string
   }> = [
     {
       id: 1,
       name: 'Ada <Admin>',
       role: 'admin',
-      email: 'ada@example.com',
-      addresses: {},
+      emails: [{ email: 'ada@example.com', confirmed: true }],
       username: 'ada',
     },
     {
       id: 2,
       name: 'Tess',
       role: 'tester',
-      addresses: { google: 'tess@gmail.example' },
+      emails: [{ email: 'tess@gmail.example', confirmed: true }],
     },
   ]
+  const groupPeople = people.map((person) => ({
+    id: person.id,
+    name: person.name,
+    emails: person.emails.map((entry) => entry.email),
+  }))
   const apps = [
     { id: 7, name: 'Wallet', slug: 'app.example.wallet', enabled: true },
     { id: 3, name: 'Maps & more', slug: 'app.example.maps', enabled: true },
@@ -2099,7 +2102,7 @@ describe('People and groups pages', () => {
     const admin = peopleView({ people, canChange: true })
     assert.match(admin, /<h1>People<\/h1>/)
     assert.match(admin, /<strong>Ada &lt;Admin&gt;<\/strong>/)
-    assert.match(admin, /<small>google: tess@gmail\.example<\/small>/)
+    assert.match(admin, /<small>tess@gmail\.example<\/small>/)
     assert.match(admin, /name="email" type="email" required/)
     assert.doesNotMatch(admin, /\/api\/v2\/groups|Tester groups/)
     const manager = peopleView({ people, canChange: false })
@@ -2144,7 +2147,12 @@ describe('People and groups pages', () => {
   })
 
   it('U20.3 a group page: the name row, one row per app and member, and Remove group', () => {
-    const html = groupView({ group, apps, people, canChange: true })
+    const html = groupView({
+      group,
+      apps,
+      people: groupPeople,
+      canChange: true,
+    })
     assert.match(html, /<h1 data-group-title>Beta &quot;crew&quot;<\/h1>/)
     assert.match(
       html,
@@ -2196,7 +2204,7 @@ describe('People and groups pages', () => {
     const read = groupView({
       group: { id: 5, name: 'Beta', apps: [], members: [1] },
       apps,
-      people,
+      people: groupPeople,
       canChange: false,
     })
     assert.match(
@@ -2216,7 +2224,12 @@ describe('People and groups pages', () => {
       ...apps,
       { id: 11, name: '</script><b>x', slug: 'app.example.x', enabled: true },
     ]
-    const html = groupView({ group, apps: tricky, people, canChange: true })
+    const html = groupView({
+      group,
+      apps: tricky,
+      people: groupPeople,
+      canChange: true,
+    })
     for (const [kind, add, find] of [
       ['apps', 'Add App', 'Find an app'],
       ['members', 'Add member', 'Find a person'],
@@ -2245,12 +2258,17 @@ describe('People and groups pages', () => {
     assert(!source.includes('<'))
     assert.deepEqual(JSON.parse(source), {
       apps: tricky,
-      people,
+      people: groupPeople,
       group: { apps: [3, 7], members: [2] },
     })
     assert.equal(html.match(/<\/script>/g)!.length, 1)
     // Without groups.change: no pickers and no catalog.
-    const read = groupView({ group, apps, people, canChange: false })
+    const read = groupView({
+      group,
+      apps,
+      people: groupPeople,
+      canChange: false,
+    })
     assert.doesNotMatch(read, /data-group-add|data-group-catalog|Add App/)
   })
 

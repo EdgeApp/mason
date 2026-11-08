@@ -351,20 +351,14 @@ describe('Group page script', () => {
     { id: 4, name: 'Harbor Pilot', slug: 'app.scratch.pilot', enabled: true },
   ]
   const people: GroupPerson[] = [
-    {
-      id: 1,
-      name: 'Quill Ravensworth',
-      email: 'quill@groups.test',
-      addresses: {},
-    },
+    { id: 1, name: 'Quill Ravensworth', emails: ['quill@groups.test'] },
     {
       id: 2,
       name: 'Mirela Tondbury',
-      email: 'mirela.tondbury@groups.test',
-      addresses: { google: 'mt@gmail.example' },
+      emails: ['mirela.tondbury@groups.test', 'mt@gmail.example'],
     },
-    { id: 5, name: 'Osric <P>', addresses: { github: 'osric@hub.example' } },
-    { id: 6, name: 'No Address', addresses: {} },
+    { id: 5, name: 'Osric <P>', emails: ['osric@hub.example'] },
+    { id: 6, name: 'No Address', emails: [] },
   ]
 
   it('U20.13 the picker lists the first three, or every case-insensitive match', () => {

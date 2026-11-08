@@ -116,7 +116,7 @@ describe('Invitation links', function () {
     // Without a host or master address, the link is where the admin reached the master.
     const early = await c.api('POST', '/api/v2/people', {
       name: 'Early Bird',
-      email: 'early@example.test',
+      emails: ['early@example.test'],
       invite: true,
     })
     assert.equal(early.status, 201)
@@ -144,7 +144,7 @@ describe('Invitation links', function () {
 
     const added = await c.api('POST', '/api/v2/people', {
       name: 'Tess Tester',
-      email: 'tess@example.test',
+      emails: ['tess@example.test'],
       invite: true,
     })
     assert.equal(added.status, 201)
@@ -184,7 +184,7 @@ describe('Invitation links', function () {
       (
         await c.api('POST', '/api/v2/people', {
           name: 'X',
-          email: 'x@example.test',
+          emails: ['x@example.test'],
           invite: 'yes',
         })
       ).status,
@@ -207,7 +207,7 @@ describe('Invitation links', function () {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Dev One',
       role: 'developer',
-      email: 'dev@example.test',
+      emails: ['dev@example.test'],
       invite: true,
     })
     const token = tokenOf(made.json.invitation.url)
@@ -302,7 +302,7 @@ describe('Invitation links', function () {
   it('M2.6 on the host the link sets the password through the master, signs the person in there, and the password then signs in on the host', async () => {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Hilda Host',
-      email: 'hilda@example.test',
+      emails: ['hilda@example.test'],
       username: 'hilda',
       invite: true,
     })
@@ -359,7 +359,7 @@ describe('Invitation links', function () {
   it('M2.7 a new link replaces the old; an expired, revoked, disabled or removed person’s link is refused', async () => {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Rita Revoked',
-      email: 'rita@example.test',
+      emails: ['rita@example.test'],
       invite: true,
     })
     const id = made.json.id as number
@@ -454,7 +454,7 @@ describe('Invitation links', function () {
     const before = master().people.list(admin).length
     const refused = await c.api('POST', '/api/v2/people', {
       name: 'Dora Disabled',
-      email: 'dora@example.test',
+      emails: ['dora@example.test'],
       disabled: true,
       invite: true,
     })
@@ -512,7 +512,7 @@ describe('Invitation links', function () {
   it('M2.8 the People page offers Invite, shows a pending link’s expiry, and the Add form can invite at once', async () => {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Paula Page',
-      email: 'paula@example.test',
+      emails: ['paula@example.test'],
       invite: true,
     })
     const b = onMaster()
@@ -554,7 +554,7 @@ describe('Invitation links', function () {
   it('M4.3 an administrator sets a person’s password and username: their sessions end, it is audited, and it signs them in on the master and the host', async () => {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Sam Set',
-      email: 'sam@example.test',
+      emails: ['sam@example.test'],
       invite: true,
     })
     const id = made.json.id as number
@@ -630,11 +630,11 @@ describe('Invitation links', function () {
       name: 'Morgan Manager',
       username: 'morgan',
       role: 'manager',
-      email: 'morgan@example.test',
+      emails: ['morgan@example.test'],
     })
     const target = await c.api('POST', '/api/v2/people', {
       name: 'Nobody Yet',
-      email: 'nobody@example.test',
+      emails: ['nobody@example.test'],
     })
     const chosen = await password('Morgan-Horse-9', 'c5')
     const manager = master().keys.create(admin, {
@@ -713,7 +713,7 @@ describe('Invitation links', function () {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Ivy Invited',
       username: 'ivy',
-      email: 'ivy@example.test',
+      emails: ['ivy@example.test'],
       invite: true,
     })
     const id = made.json.id as number
@@ -761,7 +761,7 @@ describe('Invitation links', function () {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Della Both',
       username: 'della',
-      email: 'della@example.test',
+      emails: ['della@example.test'],
       invite: true,
     })
     const id = made.json.id as number
@@ -791,7 +791,7 @@ describe('Invitation links', function () {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Sam Case',
       username: 'SamCase',
-      email: 'samcase@example.test',
+      emails: ['samcase@example.test'],
     })
     const lower = await c.api('PUT', `/api/v2/people/${made.json.id}`, {
       username: 'samcase',

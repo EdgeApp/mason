@@ -37,7 +37,7 @@ const tables: Record<
     table: 'accounts',
     key: 'id',
     children: {
-      account_addresses: { column: 'account_id', field: 'id' },
+      account_emails: { column: 'account_id', field: 'id' },
       account_devices: { column: 'account_id', field: 'id' },
     },
   },
@@ -78,7 +78,7 @@ const order = [
   'key',
 ]
 
-const HOST_SCHEMA = 9
+const HOST_SCHEMA = 10
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -147,6 +147,23 @@ function migrateHost(db: DatabaseSync): void {
     INSERT INTO host_meta(key,value) VALUES('keys_synced','0') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     INSERT INTO host_meta(key,value) VALUES('host_schema','9') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
+  // A person's addresses are plain emails, and their username and whether
+  // they have a password show on their account page. The next sync is a snapshot that refills both.
+  if (current < 10) {
+    const accounts = db.prepare('PRAGMA table_info(accounts)').all()
+    db.exec(`BEGIN IMMEDIATE;
+    DROP TABLE IF EXISTS account_addresses;
+    CREATE TABLE IF NOT EXISTS account_emails(
+      account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      email TEXT NOT NULL COLLATE NOCASE, position INTEGER NOT NULL,
+      confirmed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(account_id, email)) STRICT;
+    CREATE INDEX IF NOT EXISTS account_email ON account_emails(email);
+    ${accounts.some((column) => column.name === 'username') ? '' : 'ALTER TABLE accounts ADD COLUMN username TEXT;'}
+    ${accounts.some((column) => column.name === 'has_password') ? '' : 'ALTER TABLE accounts ADD COLUMN has_password INTEGER NOT NULL DEFAULT 0;'}
+    INSERT INTO host_meta(key,value) VALUES('revision','0') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    INSERT INTO host_meta(key,value) VALUES('host_schema','10') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  }
 }
 
 function migrateHostV2(db: DatabaseSync): void {

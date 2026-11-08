@@ -230,7 +230,7 @@ export function start(doc: PageDocument, deps: PageDeps): void {
       const added = await call('POST', '/api/v2/people', {
         name: field(form, 'name'),
         role: field(form, 'role'),
-        email: field(form, 'email'),
+        emails: [field(form, 'email')],
         invite,
         ...(username === '' ? {} : { username }),
         ...(password == null

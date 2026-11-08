@@ -180,7 +180,7 @@ function searchable(
     return [app.name, app.slug]
   }
   const person = item as GroupPerson
-  return [person.name, person.email ?? '', ...Object.values(person.addresses)]
+  return [person.name, ...person.emails]
 }
 
 /**
@@ -210,7 +210,7 @@ export function choiceRow(
   checked: boolean,
 ): string {
   const person = item as GroupPerson
-  const address = person.email ?? Object.values(person.addresses ?? {})[0]
+  const address = person.emails?.[0]
   const detail =
     kind === 'apps'
       ? `<small class="mono">${escape((item as GroupApp).slug)}</small>`

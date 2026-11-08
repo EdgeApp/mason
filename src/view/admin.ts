@@ -1500,8 +1500,7 @@ export function peopleView(data: {
     id: number
     name: string
     role: string
-    email?: string
-    addresses: Record<string, string>
+    emails: Array<{ email: string; confirmed: boolean }>
     username?: string
     disabled?: boolean
     /** Whether they have a password. */
@@ -1552,13 +1551,8 @@ export function peopleView(data: {
   const people = data.people
     .map(
       (person) =>
-        `<tr><td><strong>${escape(person.name)}</strong>${person.username == null ? '' : ` <small class="mono">${escape(person.username)}</small>`}</td><td>${person.email == null ? '' : `<small>${escape(person.email)}</small>`}${Object.entries(
-          person.addresses,
-        )
-          .map(
-            ([method, address]) =>
-              `<small>${escape(method)}: ${escape(address)}</small>`,
-          )
+        `<tr><td><strong>${escape(person.name)}</strong>${person.username == null ? '' : ` <small class="mono">${escape(person.username)}</small>`}</td><td>${person.emails
+          .map((entry) => `<small>${escape(entry.email)}</small>`)
           .join('')}</td><td>${
           data.canChange
             ? apiForm(

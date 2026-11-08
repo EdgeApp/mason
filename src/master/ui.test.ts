@@ -210,10 +210,9 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     for (const role of ['admin', 'manager', 'developer', 'tester'] as const)
       people[role] = (
         await master.people.create(localOperator, {
-          email: `${role}.person@example.test`,
+          emails: [`${role}.person@example.test`, `${role}@example.test`],
           name: `${role} person`,
           role,
-          addresses: { google: `${role}@example.test` },
         })
       ).id
     await c.until(
@@ -1228,8 +1227,10 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       (await request(c.master, 'GET', '/', signIn('tester'))).text,
       /Your apps/,
     )
-    c.master.master!.database.db
-      .prepare("UPDATE accounts SET open_admission=1 WHERE role='tester'")
+    c.master
+      .master!.database.db.prepare(
+        "UPDATE accounts SET open_admission=1 WHERE role='tester'",
+      )
       .run()
     assert.match(
       (await request(c.master, 'GET', '/', signIn('tester'))).text,
@@ -1304,7 +1305,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       catalog.people.some(
         (person: Json) =>
           person.id === people.tester &&
-          person.email === 'tester.person@example.test',
+          person.emails[0] === 'tester.person@example.test',
       ),
     )
     assert.deepEqual(catalog.group, {

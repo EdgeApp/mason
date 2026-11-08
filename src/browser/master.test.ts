@@ -199,7 +199,7 @@ describe('Master page script', () => {
     assert.deepEqual(body(calls[0]!.init), {
       name: 'Tess',
       role: 'tester',
-      email: 'tess@example.test',
+      emails: ['tess@example.test'],
       invite: true,
       username: 'tess',
       password: {
@@ -226,7 +226,7 @@ describe('Master page script', () => {
     assert.deepEqual(body(second.calls[0]!.init), {
       name: 'Tess',
       role: 'tester',
-      email: 'tess@example.test',
+      emails: ['tess@example.test'],
       invite: false,
     })
     assert.deepEqual(second.visits, ['/people'])

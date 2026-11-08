@@ -148,7 +148,7 @@ describe('Master database, setup and import', function () {
     )
     for (const table of [
       'accounts',
-      'account_addresses',
+      'account_emails',
       'groups',
       'group_apps',
       'group_members',
@@ -177,6 +177,102 @@ describe('Master database, setup and import', function () {
     newer.exec('PRAGMA user_version=9')
     assert.throws(() => migrateMaster(newer), /newer Mason/)
     newer.close()
+  })
+
+  it('migration 34 turns every address into a plain email of its person, collisions resolved and audited', () => {
+    const db = new DatabaseSync(path.join(root, 'e.sqlite'), {
+      enableForeignKeyConstraints: true,
+    })
+    migrateMaster(db)
+    // Back to schema 33, with the address table it had.
+    db.exec(`DROP TABLE account_emails;
+      CREATE TABLE account_addresses (
+        account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+        method TEXT NOT NULL, email TEXT NOT NULL,
+        PRIMARY KEY(account_id, method), UNIQUE(method, email)
+      ) STRICT;
+      UPDATE meta SET value='33' WHERE key='master_schema';`)
+    const add = db.prepare(
+      "INSERT INTO accounts(name,role,created_at) VALUES(?,'tester',0)",
+    )
+    const [ada, ben, cy, dee] = ['Ada', 'Ben', 'Cy', 'Dee'].map((name) =>
+      Number(add.run(name).lastInsertRowid),
+    ) as [number, number, number, number]
+    const address = db.prepare(
+      'INSERT INTO account_addresses(account_id,method,email) VALUES(?,?,?)',
+    )
+    // Ada: the same address any-method and for google, and one for okta.
+    address.run(ada, '*', 'ada@example.test')
+    address.run(ada, 'google', 'ada@example.test')
+    address.run(ada, 'okta', 'ada@work.test')
+    // Ben holds Ada's okta address for google: Ada keeps it (lower id).
+    address.run(ben, 'google', 'ada@work.test')
+    // Cy's any-method address beats Dee's, whatever the ids.
+    address.run(dee, 'github', 'shared@example.test')
+    address.run(cy, '*', 'shared@example.test')
+    // Case variants under one method, which the old table allowed.
+    address.run(cy, 'okta', 'Case@Example.test')
+    address.run(dee, 'okta', 'case@example.test')
+    migrateMaster(db)
+    assert.deepEqual(
+      db
+        .prepare(
+          'SELECT account_id,email,position,confirmed FROM account_emails ORDER BY account_id,position',
+        )
+        .all()
+        .map((row) => [row.account_id, row.email, row.position, row.confirmed]),
+      [
+        [ada, 'ada@example.test', 0, 1],
+        [ada, 'ada@work.test', 1, 1],
+        [cy, 'shared@example.test', 0, 1],
+        [cy, 'case@example.test', 1, 1],
+      ],
+    )
+    assert.deepEqual(
+      db
+        .prepare(
+          "SELECT target,via FROM audit WHERE action='person.email.dropped' ORDER BY id",
+        )
+        .all()
+        .map((row) => [row.target, row.via]),
+      [
+        [`${ben} ada@work.test`, 'migration'],
+        [`${dee} shared@example.test`, 'migration'],
+        [`${dee} case@example.test`, 'migration'],
+      ],
+    )
+    assert.equal(
+      db
+        .prepare("SELECT 1 FROM sqlite_master WHERE name='account_addresses'")
+        .get(),
+      undefined,
+    )
+    // Every person with an email goes to the host again.
+    assert.deepEqual(
+      db
+        .prepare(
+          "SELECT key FROM change_log WHERE entity='account' ORDER BY revision",
+        )
+        .all()
+        .map((row) => Number(row.key)),
+      [ada, cy],
+    )
+    // An empty table migrates to an empty one.
+    db.exec(`DROP TABLE account_emails;
+      CREATE TABLE account_addresses (
+        account_id INTEGER NOT NULL, method TEXT NOT NULL, email TEXT NOT NULL
+      ) STRICT;
+      UPDATE meta SET value='33' WHERE key='master_schema';`)
+    migrateMaster(db)
+    assert.equal(
+      (
+        db.prepare('SELECT COUNT(*) n FROM account_emails').get() as {
+          n: number
+        }
+      ).n,
+      0,
+    )
+    db.close()
   })
 
   it('U1.1 schema 17 makes every known Space a storage location: the storage setting’s, and each cloud host’s', () => {
@@ -905,17 +1001,17 @@ describe('Master database, setup and import', function () {
     assert.equal(role(fixture.accounts.neither), 'tester')
     const addresses = db
       .prepare(
-        'SELECT account_id,method,email FROM account_addresses ORDER BY account_id,method',
+        'SELECT account_id,email FROM account_emails ORDER BY account_id,position',
       )
       .all()
     assert.deepEqual(
-      addresses.map((row) => [row.account_id, row.method, row.email]),
+      addresses.map((row) => [row.account_id, row.email]),
       [
-        [fixture.accounts.admin, 'google', 'admin@example.test'],
-        [fixture.accounts.tester, 'google', 'tester@example.test'],
-        [fixture.accounts.tester, 'okta', 'tester.okta@example.test'],
-        [fixture.accounts.neither, 'google', 'waiting@example.test'],
-        [6, 'google', 'invited@example.test'],
+        [fixture.accounts.admin, 'admin@example.test'],
+        [fixture.accounts.tester, 'tester@example.test'],
+        [fixture.accounts.tester, 'tester.okta@example.test'],
+        [fixture.accounts.neither, 'waiting@example.test'],
+        [6, 'invited@example.test'],
       ],
     )
     // The invited tester exists with that address and no group.
