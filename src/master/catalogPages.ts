@@ -86,6 +86,7 @@ export function masterCatalogPages(
       if (current == null) return undefined
       const { master: own, host } = origins()
       const viewer = {
+        node: 'master' as const,
         csrf: current.csrf,
         origin: own ?? '',
         ...(own == null && host != null ? { hostPages: host } : {}),
@@ -114,7 +115,7 @@ export function masterCatalogPages(
           send(
             res,
             page.title,
-            catalogBody(page),
+            catalogBody(page, viewer),
             current,
             page.status ?? 200,
             active,

@@ -1,6 +1,15 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { bytes, platformChip, runHref, statusDot } from './dashboard.js'
-import { ago, duration, escape, localTime, runName, time } from './html.js'
+import {
+  ago,
+  breadcrumbs,
+  duration,
+  escape,
+  localTime,
+  runName,
+  time,
+  type Crumb,
+} from './html.js'
 import { icon } from './icons.js'
 import type { Viewer } from './shell.js'
 import { isGlob, matches } from '../master/rules.js'
@@ -120,7 +129,17 @@ function runDetail(source: ArtifactsSource, run: RunRow): string {
     run.started == null
       ? ''
       : ` · took ${duration((run.finished ?? source.now) - run.started)}`
-  return `<div class="page-head"><div><div class="breadcrumbs"><a href="/artifacts">Artifacts</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.slug)}">${escape(run.slug)}</a></div><h1>${escape(runName(run.workflow, run.number))}</h1><p>${statusDot(run.status)} ${escape(run.status)} · <span class="mono">${escape(run.branch)}</span>${run.commit_sha == null ? '' : ` · <span class="mono">${escape(run.commit_sha.slice(0, 12))}</span>`} · ${time(run.created)}${escape(took)}${run.description == null ? '' : ` · ${escape(run.description)}`}</p></div></div><section class="panel"><h2>${icon('account_tree')}Stages</h2><ul>${stages
+  return `<div class="page-head"><div>${breadcrumbs(source.viewer, [
+    { label: 'Artifacts', href: '/artifacts' },
+    {
+      label: run.name,
+      href: `/artifacts?project=${encodeURIComponent(run.slug)}`,
+    },
+    {
+      label: `Run ${run.number}`,
+      href: `/artifacts?run=${encodeURIComponent(run.id)}`,
+    },
+  ])}<h1>${escape(runName(run.workflow, run.number))}</h1><p>${statusDot(run.status)} ${escape(run.status)} · <span class="mono">${escape(run.branch)}</span>${run.commit_sha == null ? '' : ` · <span class="mono">${escape(run.commit_sha.slice(0, 12))}</span>`} · ${time(run.created)}${escape(took)}${run.description == null ? '' : ` · ${escape(run.description)}`}</p></div></div><section class="panel"><h2>${icon('account_tree')}Stages</h2><ul>${stages
     .map(
       (stage) =>
         `<li><span class="mono">${escape(stage.name)}</span><span class="state-${escape(stage.status)}">${statusDot(stage.status)} ${escape(stage.status)}${stage.started == null ? '' : ` · ${escape(duration((stage.finished ?? source.now) - stage.started))}`}</span></li>`,
@@ -301,10 +320,26 @@ export function artifactsView(
       return '<h1>Run unavailable</h1><p class="empty-state">There is no such run.</p>'
     return runDetail(source, run)
   }
-  const heading = [filter.project, filter.branch]
-    .filter((part) => part != null)
-    .join(' · ')
-  return `<div class="page-head"><div><div class="breadcrumbs"><a href="/artifacts">Artifacts</a>${heading === '' ? '' : `<span>/</span><span>${escape(heading)}</span>`}</div><h1>Artifacts</h1><p>Each run's saved artifacts, test results and published builds.</p></div></div>${runsTable(
+  // Artifacts, then the project and the branch it is narrowed to.
+  const crumbs: Crumb[] = [{ label: 'Artifacts', href: '/artifacts' }]
+  if (filter.project != null) {
+    const project = source.db
+      .prepare('SELECT name FROM projects WHERE slug=?')
+      .get(filter.project) as { name: string } | undefined
+    crumbs.push({
+      label: project?.name ?? filter.project,
+      href: `/artifacts?project=${encodeURIComponent(filter.project)}`,
+    })
+  }
+  if (filter.branch != null)
+    crumbs.push({
+      label: filter.branch,
+      href: `/artifacts?${new URLSearchParams({
+        ...(filter.project == null ? {} : { project: filter.project }),
+        branch: filter.branch,
+      }).toString()}`,
+    })
+  return `<div class="page-head"><div>${breadcrumbs(source.viewer, crumbs)}<h1>Artifacts</h1><p>Each run's saved artifacts, test results and published builds.</p></div></div>${runsTable(
     source,
     {
       ...(filter.project == null ? {} : { project: filter.project }),

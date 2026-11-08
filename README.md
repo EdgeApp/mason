@@ -198,6 +198,18 @@ Devices say that installs come from a host. On a phone the side menu is a
 bar above the page. The top-right account icon opens **Your account**,
 which holds Sign out.
 
+Above each page's title, its breadcrumbs say where it is, as a row of pill
+links that wraps on a phone. The first is **Mason Master** on the master and
+**Mason Host** on the host (and on the standalone server), and opens that
+node's home; the last is the page itself. A project's pages go Projects ›
+the project › Runs and builds (or Masonfile, or Secrets) › a branch picked
+there, and a run's page Projects › the project › Runs and builds › its
+branch › Run N, so Runs and builds returns to all branches. Install apps
+goes Install apps › the app › the branch, and Artifacts › the project ›
+Run N; Devices, Your account and the master's Nodes, Cloud, People,
+Groups › a group, Settings and Backups are one level each, as the side menu
+lists them.
+
 The standalone distribution server (below) draws its pages the same way,
 with Install apps and Devices, **People** for its administrators, and a
 Your account page with Sign out; it has no search or notifications.

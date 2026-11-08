@@ -37,6 +37,7 @@ import { LinkError, type Link } from '../link/link.js'
 import { Outbox } from './outbox.js'
 import { HostCache } from './cache.js'
 import { proofLog } from '../test/proofLog.js'
+import { crumbTrail } from '../test/crumbs.js'
 import { migrateMaster } from '../master/schema.js'
 import { entities, type Change } from '../master/changes.js'
 import { seedLegacySecrets } from '../test/secrets.js'
@@ -886,7 +887,25 @@ describe('Host cache, sign-in and offline serving', function () {
     )
     const runs = await (await developer.get('/projects/edge/runs')).text()
     assert.match(runs, /href="\/runs\/m4-run"/)
-    assert.equal((await developer.get('/runs/m4-run')).status, 200)
+    const runPage = await developer.get('/runs/m4-run')
+    assert.equal(runPage.status, 200)
+    // The host's run page starts its breadcrumbs from Mason Host.
+    assert.deepEqual(crumbTrail(await runPage.text()), [
+      'Mason Host /',
+      'Projects /projects',
+      'Edge /projects/edge',
+      'Runs and builds /projects/edge/runs',
+      'develop /projects/edge/runs?branch=develop',
+      'Run 4242 /runs/m4-run *',
+    ])
+    const masonfile = await (
+      await developer.get('/projects/edge/masonfile')
+    ).text()
+    assert.deepEqual(crumbTrail(masonfile).slice(-2), [
+      'Edge /projects/edge',
+      'Masonfile /projects/edge/masonfile *',
+    ])
+    assert.equal(crumbTrail(masonfile)[0], 'Mason Host /')
     master.db.prepare("DELETE FROM jobs WHERE id='m4-run'").run()
     master.change('job', 'm4-run', 'delete')
   })

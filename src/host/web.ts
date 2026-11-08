@@ -259,6 +259,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       page.found.viewer,
       page.project.name,
       projectView({
+        viewer: page.found.viewer,
         slug: page.project.slug,
         name: page.project.name,
         ...page.details,
@@ -299,6 +300,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       `${page.project.name} · Runs and builds`,
       projectRunsView(
         {
+          viewer: page.found.viewer,
           slug: page.project.slug,
           name: page.project.name,
           ...(branch == null ? {} : { branch }),
@@ -336,6 +338,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       page.found.viewer,
       `${page.project.name} · Masonfile`,
       masonfileView({
+        viewer: page.found.viewer,
         slug: page.project.slug,
         name: page.project.name,
         commits,
@@ -385,6 +388,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       found.viewer,
       'Your account',
       accountView({
+        viewer: found.viewer,
         person: {
           id: row.id,
           name: row.name,
@@ -582,6 +586,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
             ).includes(role),
         },
         base: '',
+        viewer: found.viewer,
       }),
       'dashboard',
       found.csrf,
@@ -840,11 +845,19 @@ export function hostApp(
     deviceRoutes(host.cache.store, host.accounts, {
       relay: host.devices,
       frame,
+      node: 'host',
     }),
   )
-  app.use(installationRoutes(host.cache.store, host.accounts, frame))
+  app.use(
+    installationRoutes(host.cache.store, host.accounts, {
+      frame,
+      node: 'host',
+    }),
+  )
   app.use(viewRoutes(host, context))
-  app.use(catalogRoutes(host.cache.store, host.accounts, frame))
+  app.use(
+    catalogRoutes(host.cache.store, host.accounts, { frame, node: 'host' }),
+  )
   app.use((_req, res) => {
     res.status(404).send('Not found')
   })

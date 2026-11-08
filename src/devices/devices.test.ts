@@ -18,6 +18,7 @@ import { verifyCms } from './cms.js'
 import { inspectProvisioning, saveProvisioning } from './provisioning.js'
 import { backfillDevices } from './backfill.js'
 import { branchKey } from '../catalog/platform.js'
+import { crumbTrail } from '../test/crumbs.js'
 import { zip, plist } from '../upload/fixtures.test.js'
 
 const fakeUdid = '0'.repeat(39) + '1'
@@ -340,6 +341,7 @@ describe('Device registration, account ownership and iOS compatibility', () => {
       /<a href="\/devices" aria-current="page" title="Devices">/,
     )
     assert.match(html, /<h1>Devices<\/h1>/)
+    assert.deepEqual(crumbTrail(html), ['Mason Host /', 'Devices /devices *'])
     assert.doesNotMatch(html, /action="\/auth\/logout"/)
     assert.equal((await request('/devices/qr')).status, 200)
   })

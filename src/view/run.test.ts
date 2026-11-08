@@ -12,6 +12,7 @@ import {
   type LayoutStage,
   type StageState,
 } from './graph.js'
+import { crumbTrail } from '../test/crumbs.js'
 import { ansiLine, lineAt, logHtml, plainLog } from './log.js'
 import { stylesheet } from './stylesheet.js'
 import {
@@ -375,9 +376,23 @@ describe('Run view', () => {
       log: { text: 'one\ntwo\n' },
       can: { cancel: true, restart: true, request: true, approve: () => true },
       base: '',
+      viewer: { node: 'master' },
       ...extra,
     })
     const whole = runView(run, options({}))
+    // Where the run is: its project's Runs and builds, its branch there, then the run.
+    assert.deepEqual(crumbTrail(whole), [
+      'Mason Master /',
+      'Projects /projects',
+      'Phones /projects/phones',
+      'Runs and builds /projects/phones/runs',
+      'main /projects/phones/runs?branch=main',
+      'Run 7 /runs/r1 *',
+    ])
+    assert.equal(
+      crumbTrail(runView(run, options({ viewer: { node: 'host' } })))[0],
+      'Mason Host /',
+    )
     assert.match(whole, /<h2 data-log-title>.*Whole run log<\/h2>/)
     assert.match(whole, /data-run="r1" data-live="1"/)
     // A live run's page says when its socket reconnects, has a step list for

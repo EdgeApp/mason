@@ -15,7 +15,6 @@ import {
 import { DEVICE_COOKIE, Devices, type DeviceRelay } from '../devices/store.js'
 import { Store } from '../store.js'
 import { asId, type Platform } from '../validation.js'
-import { escape } from '../view/html.js'
 import type { FileRequest } from './install.js'
 import { platform } from './platform.js'
 import {
@@ -394,6 +393,8 @@ export interface StorePagesOptions {
   relay?: DeviceRelay
   /** The node's shell; the standalone server's by default. */
   frame?: Frame
+  /** The node the pages are on: a host, or a standalone server by default. */
+  node?: 'host' | 'standalone'
 }
 
 /** The catalog pages over a distribution store: a standalone server's, or a host's cache. */
@@ -414,7 +415,11 @@ function storePages(
           session: context.session,
           ...(relay == null ? {} : { relay }),
         }),
-        viewer: { csrf: context.session.csrf, origin: store.config.origin },
+        viewer: {
+          node: options.node ?? 'standalone',
+          csrf: context.session.csrf,
+          origin: store.config.origin,
+        },
         checkCsrf: (req): void => {
           csrf(req, store, context.session)
         },
@@ -425,7 +430,7 @@ function storePages(
           res.status(view.status ?? 200).send(
             frame(req, {
               title: view.title,
-              body: `<h1>${escape(view.title)}</h1>${catalogBody(view)}`,
+              body: catalogBody(view, { node: options.node ?? 'standalone' }),
               active: catalogActive(req.path),
               ...(view.interactive === true
                 ? { scripts: ['/assets/catalog.js'] }
@@ -451,18 +456,18 @@ function storePages(
 export function catalogRoutes(
   store: Store,
   accounts = new Accounts(store),
-  frame?: Frame,
+  options: StorePagesOptions = {},
 ): Router {
-  return storePages(store, accounts, frame == null ? {} : { frame }).catalog
+  return storePages(store, accounts, options).catalog
 }
 
 /** Install and a grant's manifest and package, on a standalone server or a host. */
 export function installationRoutes(
   store: Store,
   accounts = new Accounts(store),
-  frame?: Frame,
+  options: StorePagesOptions = {},
 ): Router {
-  return storePages(store, accounts, frame == null ? {} : { frame }).installs
+  return storePages(store, accounts, options).installs
 }
 
 /** Devices, registration and Prepare for this device, on a standalone server or a host. */

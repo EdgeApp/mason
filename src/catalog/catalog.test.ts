@@ -23,6 +23,7 @@ import type { Build, Format, Platform } from '../validation.js'
 import { byteRange, Installations } from './install.js'
 import { branchKey, branchName, platform } from './platform.js'
 import { branches } from './routes.js'
+import { crumbTrail } from '../test/crumbs.js'
 
 let store: Store,
   accounts: Accounts,
@@ -164,10 +165,26 @@ describe('Mason protected catalog and installation', () => {
       assert.match(html, /<a href="\/apps" aria-current="page"/)
       assert.match(
         html,
-        /<main><h1>[^<]+<\/h1><nav class="catalog-nav" data-catalog-platforms aria-label="Build platform"><div class="platforms"/,
+        /<main><div class="page-head"><div><nav class="breadcrumbs" aria-label="Breadcrumb">[^]*<\/nav><h1>[^<]+<\/h1><\/div><\/div><nav class="catalog-nav" data-catalog-platforms aria-label="Build platform"><div class="platforms"/,
       )
       assert.doesNotMatch(html, /Register Device<\/a>|action="\/auth\/logout"/)
     }
+    // Mason Host › Install apps › the app › the branch, keeping the platform.
+    assert.match(
+      crumbTrail(home).join(),
+      /^Mason Host \/,Install apps \/apps\?platform=[a-z]+ \*$/,
+    )
+    assert.deepEqual(crumbTrail(list), [
+      'Mason Host /',
+      'Install apps /apps?platform=ios',
+      `Example App /apps/${app}?platform=ios *`,
+    ])
+    assert.deepEqual(crumbTrail(builds), [
+      'Mason Host /',
+      'Install apps /apps?platform=ios',
+      `Example App /apps/${app}?platform=ios`,
+      `feature/new ${route}?platform=ios *`,
+    ])
     assert.match(
       await (await request(route + '?platform=windows')).text(),
       /No Windows builds/,
