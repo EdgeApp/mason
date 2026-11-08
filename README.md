@@ -10,7 +10,9 @@ each the same `mason` program:
   the master tells each one which tools its node type needs.
 - the **host** serves the catalog, installs, device registration and sign-in
   from a replicated cache, and keeps serving builds while the master is away.
-  It holds no secrets.
+  It holds no secrets. The master serves the same Install apps and Devices
+  pages to people signed in on it, getting their data and files from the
+  host over its link.
 
 The Masonfile reference, with every option and the stage API, is
 [docs/masonfile.md](docs/masonfile.md). The master's HTTP API is
@@ -490,7 +492,10 @@ stopping at 4 MiB.
 ### Registering iOS test devices
 
 The green **Register Device** button beside **Sign out** opens a temporary
-Profile Service download. In Safari on an iPhone or iPad, download the profile,
+Profile Service download. On the master it is above Install apps; a
+registration started there returns to the master once the device is
+registered, and needs the master's public address (its `master` setting):
+without one, Register Device and iOS installs link to the host. In Safari on an iPhone or iPad, download the profile,
 then open Settings → Profile Downloaded → Install. The device sends a signed
 UDID/model/OS response to Mason. The registration is saved to the signed-in
 tester's account. Model names default to `iPhone13 of mark@example` and can be

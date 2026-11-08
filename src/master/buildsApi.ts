@@ -16,6 +16,9 @@ const RELAYED = [
   'etag',
   'location',
   'cache-control',
+  // An install grant's package answers single ranges, as the host does.
+  'accept-ranges',
+  'content-range',
 ]
 /** The longest header line a host's download answer may start with. */
 const MAX_HEADER = 16 * 1024
@@ -36,7 +39,7 @@ export function viewerOf(actor: Actor): BuildsViewer {
 }
 
 /** Why the master cannot reach a host for the builds API, or undefined when it can try. */
-function noHost(master: Master): string | undefined {
+export function noHost(master: Master): string | undefined {
   return master.registry.list().some((node) => node.role === 'host')
     ? undefined
     : 'This cluster has no host'

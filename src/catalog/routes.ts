@@ -1,15 +1,59 @@
-import { Devices } from '../devices/store.js'
-import { Router, type Request } from 'express'
+import {
+  Router,
+  type Request,
+  type RequestHandler,
+  type Response,
+} from 'express'
+import QRCode from 'qrcode'
 import { Accounts } from '../auth/accounts.js'
-import { navigation, sessionContext } from '../auth/routes.js'
+import { csrf, navigation, sessionContext } from '../auth/routes.js'
+import { DEVICE_COOKIE, Devices, type DeviceRelay } from '../devices/store.js'
 import { Store } from '../store.js'
-import { asId, downloadOnly, type Build, type Platform } from '../validation.js'
-import { escape } from '../view/html.js'
+import { asId, type Platform } from '../validation.js'
 import { page } from '../view/shell.js'
-import { branchKey, branchName, labels, platform } from './platform.js'
-import { Installations } from './install.js'
+import type { FileRequest } from './install.js'
+import { platform } from './platform.js'
+import {
+  CatalogRefused,
+  StoreCatalogSource,
+  type CatalogSource,
+  type DeviceAction,
+} from './source.js'
+import {
+  appUnavailableView,
+  appView,
+  branchView,
+  catalogView,
+  completeView,
+  devicesView,
+  installView,
+  prepareYourDeviceView,
+  preparingView,
+  waitingView,
+  type CatalogPage,
+  type CatalogViewer,
+} from './views.js'
 
-function selected(req: Request): Platform {
+export { branches } from './source.js'
+
+/** The device cookie each node keeps for its own origin. */
+export const deviceCookieOptions = {
+  httpOnly: true,
+  secure: true,
+  sameSite: 'lax' as const,
+  path: '/',
+  maxAge: 30 * 86400000,
+}
+
+/** The device a request's cookie selects, unchecked: the source checks it is the caller's. */
+export function selectedDevice(req: Request): number | undefined {
+  const id = /(?:^|;\s*)__Host-mason-device=(\d+)(?:;|$)/.exec(
+    req.headers.cookie ?? '',
+  )?.[1]
+  return id == null ? undefined : Number(id)
+}
+
+function chosenPlatform(req: Request): Platform {
   const preferences = (req.headers.cookie ?? '')
     .split(';')
     .map((part) => part.trim())
@@ -20,239 +64,386 @@ function selected(req: Request): Platform {
     req.get('user-agent') ?? '',
   )
 }
-/** The platform switch: only the platforms the apps shown have a channel for. */
-function pill(path: string, chosen: Platform, platforms: Platform[]): string {
-  return `<div class="platforms" role="group" aria-label="Build platform">${Object.entries(
-    labels,
+
+/** The signed-in person the catalog pages are for, on one node. */
+export interface CatalogCaller {
+  accountId: number
+  source: CatalogSource
+  viewer: CatalogViewer
+  /** Throws unless a state-changing request carries the session's proof from this origin. */
+  checkCsrf(req: Request): void
+  /** Whether the person may register devices at all. */
+  mayRegister: boolean
+  /** Whether device registration is configured. */
+  registration: boolean
+  /** Draws a page in the node's own frame. */
+  render(res: Response, page: CatalogPage): void
+}
+
+export interface CatalogPagesOptions {
+  /** The signed-in caller, or undefined. */
+  caller(req: Request): CatalogCaller | undefined
+  /** Where a page sends someone who is not signed in. */
+  signIn(req: Request): string
+  /** A refusal with a short message, such as 403 "Tester access required". */
+  refuse(
+    res: Response,
+    status: number,
+    message: string,
+    caller?: CatalogCaller,
+  ): void
+  /** Where grant files come from; they carry no session. */
+  files(): CatalogSource
+  /** The catalog pages' paths; the master's own `/` is not one. */
+  paths?: string[]
+  /** The address the device-registration QR code opens. */
+  qr(caller: CatalogCaller): string
+  /** Answers an error the handlers did not; the node's error page by default. */
+  failed?(
+    req: Request,
+    res: Response,
+    error: unknown,
+    caller?: CatalogCaller,
+  ): void
+}
+
+/**
+ * Install apps, installs and Devices over a source: the handlers the
+ * standalone server, the host and the master share. Each node passes who
+ * is signed in, its source, and how its pages are drawn.
+ */
+export function catalogPages(options: CatalogPagesOptions): {
+  catalog: Router
+  installs: Router
+  devices: Router
+} {
+  const guarded =
+    (
+      run: (
+        req: Request,
+        res: Response,
+        caller: CatalogCaller | undefined,
+      ) => Promise<void>,
+    ): RequestHandler =>
+    async (req, res) => {
+      const caller = options.caller(req)
+      try {
+        await run(req, res, caller)
+      } catch (error) {
+        if (error instanceof CatalogRefused)
+          options.refuse(res, error.status, error.message, caller)
+        else if (options.failed != null) options.failed(req, res, error, caller)
+        else throw error
+      }
+    }
+  const catalog = Router()
+  catalog.get(
+    options.paths ?? [
+      '/',
+      '/apps',
+      '/apps/:appId',
+      '/apps/:appId/branches/:branchKey',
+    ],
+    guarded(async (req, res, caller) => {
+      if (caller == null) {
+        res.redirect(303, options.signIn(req))
+        return
+      }
+      const chosen = chosenPlatform(req)
+      try {
+        if (req.params.appId == null) {
+          caller.render(
+            res,
+            catalogView(
+              await caller.source.apps(caller.accountId),
+              chosen,
+              req.path,
+            ),
+          )
+          return
+        }
+        const appId = asId(Number(req.params.appId))
+        if (req.params.branchKey == null) {
+          caller.render(
+            res,
+            appView(
+              await caller.source.app(caller.accountId, appId, chosen),
+              chosen,
+              req.path,
+            ),
+          )
+          return
+        }
+        caller.render(
+          res,
+          branchView(
+            await caller.source.branch(
+              caller.accountId,
+              appId,
+              String(req.params.branchKey),
+              chosen,
+              selectedDevice(req),
+            ),
+            caller.viewer,
+            chosen,
+            req.path,
+          ),
+        )
+      } catch (error) {
+        if (!(error instanceof CatalogRefused)) throw error
+        caller.render(
+          res,
+          error.status === 403
+            ? waitingView()
+            : appUnavailableView(chosen, req.path),
+        )
+      }
+    }),
   )
-    .filter(([value]) => platforms.includes(value as Platform))
-    .map(
-      ([value, label]) =>
-        `<a data-platform="${value}" href="${escape(path)}?platform=${value}" aria-current="${chosen === value ? 'true' : 'false'}">${label}</a>`,
-    )
-    .join('')}</div>`
+
+  const installs = Router()
+  installs.post(
+    '/builds/:id/install',
+    guarded(async (req, res, caller) => {
+      if (caller == null) {
+        options.refuse(res, 401, 'Sign in required')
+        return
+      }
+      caller.checkCsrf(req)
+      const result = await caller.source.install(
+        caller.accountId,
+        asId(Number(req.params.id)),
+        selectedDevice(req),
+      )
+      if (result.kind === 'register' || result.kind === 'prepare') {
+        caller.render(res, prepareYourDeviceView(caller.viewer, result))
+        return
+      }
+      if (result.kind === 'download') {
+        res.redirect(303, `/install/${result.token}/artifact`)
+        return
+      }
+      caller.render(res, installView(caller.viewer, result.token))
+    }),
+  )
+  installs.get(
+    '/install/:token/:part',
+    guarded(async (req, res) => {
+      const part = String(req.params.part)
+      if (part !== 'manifest.plist' && part !== 'artifact') {
+        options.refuse(res, 404, 'Not found')
+        return
+      }
+      const request: FileRequest = {
+        method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+        ...(req.get('range') == null ? {} : { range: req.get('range')! }),
+        ...(req.get('if-range') == null
+          ? {}
+          : { ifRange: req.get('if-range')! }),
+      }
+      await options
+        .files()
+        .installFile(String(req.params.token), part, request, res)
+    }),
+  )
+
+  const devices = Router()
+  devices.get(
+    ['/devices', '/devices/complete/:token', '/devices/qr'],
+    guarded(async (req, res, caller) => {
+      if (caller == null) {
+        res.redirect(303, options.signIn(req))
+        return
+      }
+      if (!caller.mayRegister) {
+        options.refuse(res, 403, 'Tester access required', caller)
+        return
+      }
+      if (req.path === '/devices/qr') {
+        res.type('image/svg+xml').send(
+          await QRCode.toString(options.qr(caller), {
+            type: 'svg',
+            margin: 2,
+            color: { dark: '#10151e', light: '#ffffff' },
+          }),
+        )
+        return
+      }
+      if (req.params.token != null) {
+        const done = await caller.source.complete(
+          caller.accountId,
+          String(req.params.token),
+        )
+        if (done.state === 'unavailable') {
+          options.refuse(
+            res,
+            410,
+            'Registration link is unavailable. Return to Register Device.',
+            caller,
+          )
+          return
+        }
+        if (done.state === 'registered')
+          res.cookie(DEVICE_COOKIE, String(done.device.id), deviceCookieOptions)
+        caller.render(res, completeView(done))
+        return
+      }
+      caller.render(
+        res,
+        devicesView(
+          await caller.source.devices(caller.accountId, selectedDevice(req)),
+          caller.viewer,
+        ),
+      )
+    }),
+  )
+  devices.post(
+    '/devices/profile',
+    guarded(async (req, res, caller) => {
+      if (caller == null || !caller.mayRegister || !caller.registration) {
+        options.refuse(res, 403, 'Tester access required', caller)
+        return
+      }
+      caller.checkCsrf(req)
+      const profile = await caller.source.deviceProfile(caller.accountId)
+      res
+        .set(
+          'Content-Disposition',
+          'attachment; filename="mason-device-registration.mobileconfig"',
+        )
+        .type('application/x-apple-aspen-config')
+        .send(profile)
+    }),
+  )
+  devices.post(
+    '/devices/:id/:action',
+    guarded(async (req, res, caller) => {
+      if (caller == null || !caller.mayRegister) {
+        options.refuse(res, 403, 'Tester access required', caller)
+        return
+      }
+      caller.checkCsrf(req)
+      const id = asId(Number(req.params.id))
+      const action = String(req.params.action) as DeviceAction
+      const name = (req.body as { name?: unknown } | undefined)?.name
+      const wasSelected = selectedDevice(req) === id
+      if (
+        !(await caller.source.deviceAction(
+          caller.accountId,
+          id,
+          action,
+          typeof name === 'string' ? name : undefined,
+        ))
+      ) {
+        options.refuse(res, 404, 'Device unavailable', caller)
+        return
+      }
+      if (action === 'select')
+        res.cookie(DEVICE_COOKIE, String(id), deviceCookieOptions)
+      if (action === 'remove' && wasSelected)
+        res.clearCookie(DEVICE_COOKIE, deviceCookieOptions)
+      res.redirect(303, '/devices')
+    }),
+  )
+  devices.post(
+    '/builds/:id/prepare',
+    guarded(async (req, res, caller) => {
+      if (caller == null || !caller.mayRegister || !caller.registration) {
+        options.refuse(res, 403, 'Tester access required', caller)
+        return
+      }
+      caller.checkCsrf(req)
+      const device = selectedDevice(req)
+      if (device == null) {
+        res.redirect(303, '/devices')
+        return
+      }
+      // A device that is not the person's is as good as none.
+      if (
+        !(await caller.source.prepare(
+          caller.accountId,
+          asId(Number(req.params.id)),
+          device,
+        ))
+      ) {
+        res.redirect(303, '/devices')
+        return
+      }
+      caller.render(res, preparingView())
+    }),
+  )
+  return { catalog, installs, devices }
 }
-export function branches(
-  builds: Build[],
-): Array<{ name: string; time: number }> {
-  const map = new Map<string, number>()
-  for (const build of builds)
-    map.set(
-      build.branch,
-      Math.max(map.get(build.branch) ?? 0, build.published_at),
-    )
-  return [...map]
-    .map(([name, time]) => ({ name, time }))
-    .sort((a, b) =>
-      a.name === b.name
-        ? 0
-        : a.name === 'master'
-          ? -1
-          : b.name === 'master'
-            ? 1
-            : b.time - a.time || (a.name < b.name ? -1 : 1),
-    )
+
+/** The catalog pages over a distribution store: a standalone server's, or a host's cache. */
+function storePages(
+  store: Store,
+  accounts: Accounts,
+  relay?: DeviceRelay,
+): ReturnType<typeof catalogPages> {
+  return catalogPages({
+    caller(req) {
+      const context = sessionContext(req, accounts)
+      if (context == null) return undefined
+      const nav = navigation(context.session, context.account)
+      return {
+        accountId: context.account.id,
+        source: new StoreCatalogSource(store, {
+          session: context.session,
+          ...(relay == null ? {} : { relay }),
+        }),
+        viewer: { csrf: context.session.csrf, origin: store.config.origin },
+        checkCsrf: (req): void => {
+          csrf(req, store, context.session)
+        },
+        mayRegister: new Devices(store, relay).allowed(context.account),
+        registration: store.config.devices != null,
+        render(res, view): void {
+          if (view.refresh != null) res.set('Refresh', String(view.refresh))
+          res
+            .status(view.status ?? 200)
+            .send(
+              page(
+                view.title,
+                view.body,
+                (view.platforms ?? '') + nav,
+                view.interactive === true,
+              ),
+            )
+        },
+      }
+    },
+    signIn: (req) =>
+      '/auth/login?return=' + encodeURIComponent(req.originalUrl),
+    refuse(res, status, message) {
+      res.status(status).send(message)
+    },
+    files: () => new StoreCatalogSource(store),
+    qr: () => store.config.origin + '/devices',
+  })
 }
-function time(at: number): string {
-  const iso = new Date(at).toISOString()
-  return `<time datetime="${iso}" title="${iso}">${iso.replace('T', ' ').replace(/\.\d+Z$/, ' UTC')}</time>`
-}
+
+/** Install apps on a standalone server or a host: `/`, `/apps` and each app and branch. */
 export function catalogRoutes(
   store: Store,
   accounts = new Accounts(store),
 ): Router {
-  const router = Router(),
-    installations = new Installations(store)
-  router.get(
-    ['/', '/apps', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
-    (req, res) => {
-      const context = sessionContext(req, accounts)
-      if (context == null) {
-        res.redirect(
-          303,
-          '/auth/login?return=' + encodeURIComponent(req.originalUrl),
-        )
-        return
-      }
-      const { account, session } = context
-      if (!account.is_admin && !account.is_tester) {
-        res
-          .status(403)
-          .send(
-            page(
-              'Waiting for tester access',
-              '<section class="card"><p>Your account is signed in. A Mason administrator needs to grant you tester access before you can view or download builds.</p></section>',
-              navigation(session, account),
-            ),
-          )
-        return
-      }
-      const chosen = selected(req),
-        apps = store.apps().filter((app) => store.visible(account.id, app.id))
-      // The platforms of the app shown, or of every app the list shows.
-      const shown =
-        req.params.appId == null
-          ? apps
-          : apps.filter((item) => String(item.id) === req.params.appId)
-      const platforms = (
-        shown.length === 0
-          ? []
-          : store.db
-              .prepare(
-                `SELECT DISTINCT platform FROM channels WHERE enabled=1 AND app_id IN (${shown.map(() => '?').join(',')})`,
-              )
-              .all(...shown.map((item) => item.id))
-      ).map((row) => String(row.platform) as Platform)
-      const nav =
-        pill(req.path, chosen, platforms) + navigation(session, account)
-      const query = `?platform=${chosen}`
-      if (req.params.appId == null) {
-        const cards = apps
-          .map(
-            (app, index) =>
-              `<a class="app-card" href="/apps/${app.id}${query}"><span class="app-index">${String(index + 1).padStart(2, '0')}</span><div><h2>${escape(app.name)}</h2><small>${escape(app.slug)}</small></div><span aria-hidden="true">→</span></a>`,
-          )
-          .join('')
-        res.send(
-          page(
-            'Apps',
-            `<p class="intro">Choose an app to browse recent builds.</p><div class="app-list">${cards || '<p>No apps have been configured yet.</p>'}</div>`,
-            nav,
-            true,
-          ),
-        )
-        return
-      }
-      const app = apps.find(
-        (item) => item.id === asId(Number(req.params.appId)),
-      )
-      if (app == null) {
-        res
-          .status(404)
-          .send(page('App unavailable', '<p>This app is unavailable.</p>', nav))
-        return
-      }
-      const home = `<a href="/${query}">Apps</a>`,
-        appPath = `/apps/${app.id}`
-      if (req.params.branchKey == null) {
-        const all = store.builds(app.id)
-        const rows = branches(all)
-          .map(
-            (branch) =>
-              `<a class="list-row" href="${appPath}/branches/${branchKey(branch.name)}${query}"><div><strong>${escape(branch.name)}</strong><small>Last built ${time(branch.time)}</small></div><span aria-hidden="true">→</span></a>`,
-          )
-          .join('')
-        // With no build for the chosen platform on any branch, the platforms that have one.
-        const others = (Object.keys(labels) as Platform[])
-          .map((value) => ({
-            value,
-            latest: Math.max(
-              0,
-              ...all
-                .filter((build) => build.platform === value)
-                .map((build) => build.published_at),
-            ),
-          }))
-          .filter((entry) => entry.latest > 0)
-          .map(
-            (entry) =>
-              `<a class="list-row" data-platform="${entry.value}" href="${appPath}?platform=${entry.value}"><div><strong>${labels[entry.value]}</strong><small>Last built ${time(entry.latest)}</small></div><span aria-hidden="true">→</span></a>`,
-          )
-          .join('')
-        res.send(
-          page(
-            app.name,
-            `<p class="breadcrumbs">${home}</p><p class="intro">Branches · ${labels[chosen]}</p><div class="build-list">${
-              rows === ''
-                ? '<section class="card"><p>No retained builds yet.</p></section>'
-                : all.some((build) => build.platform === chosen)
-                  ? rows
-                  : `<section class="card"><p>There are currently no builds for ${labels[chosen]}. Select one of these other platforms:</p></section>${others}`
-            }</div>`,
-            nav,
-            true,
-          ),
-        )
-        return
-      }
-      const branch = branchName(req.params.branchKey)
-      const builds = store
-        .builds(app.id, branch)
-        .filter((build) => build.platform === chosen)
-      const deviceStore = new Devices(store),
-        selectedDevice = deviceStore.selected(account.id, req.headers.cookie)
-      const megabytes = (bytes: number): string =>
-        `${(bytes / 1024 ** 2).toFixed(1)} MB`
-      // A build's version, number and commit, and when it was published.
-      const heading = (build: Build, size?: string): string =>
-        `<strong>${escape(build.version)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${time(build.published_at)}${size == null ? '' : ` · ${size}`}</small><code title="${escape(build.commit_hash)}">${escape(build.commit_hash.slice(0, 12))}</code>`
-      // One install control: a direct link for an IPA the device may install, else a form.
-      // A build that is only downloaded (an iPhone Simulator app) is a download, for any device.
-      const install = (build: Build, variant?: string): string => {
-        const download = downloadOnly(build)
-        const eligible = deviceStore.eligible(build, selectedDevice)
-        const verb =
-          download != null
-            ? 'Download'
-            : eligible
-              ? 'Install'
-              : selectedDevice == null
-                ? 'Register Device for'
-                : 'Prepare for this device'
-        const label = `${verb} ${build.version} build ${build.build_number}${variant == null ? '' : ` (${variant})`}${download == null ? '' : ` for the ${download}`}`
-        const action = `<span class="download-label">${download != null ? 'Download' : eligible ? 'Install' : selectedDevice == null ? 'Register Device' : 'Prepare for device'} <span aria-hidden="true">↓</span></span>`
-        const size =
-          download == null
-            ? megabytes(build.size)
-            : `${download} · ${megabytes(build.size)}`
-        const content =
-          variant == null
-            ? `<div>${heading(build, size)}</div>${action}`
-            : `<div><strong>${escape(variant)} <span class="build-number">(${escape(build.build_number)})</span></strong><small>${size}</small></div>${action}`
-        if (eligible && download == null && build.format === 'ipa') {
-          // The tap itself must open the native installer. A page-load
-          // redirect loses Safari's user gesture and adds an app-open prompt.
-          const grant = installations.create(build.id, session, selectedDevice)
-          return `<a id="build-${build.id}" class="list-row build-row" data-install aria-label="${escape(label)}" href="${escape(installations.iosUrl(grant.token))}">${content}</a>`
-        }
-        return `<form id="build-${build.id}" method="post" action="/builds/${build.id}/install"><input type="hidden" name="csrf" value="${escape(session.csrf)}"><button class="list-row build-row" aria-label="${escape(label)}">${content}</button></form>`
-      }
-      // A run's variants are one build: grouped, newest run first. The default
-      // leads, else the first variant by name in byte order (plain `<`, not
-      // `localeCompare`), as the dashboard's `leadsItsBuild` and the run
-      // pages order them, so every view names the same lead build.
-      const groups = new Map<string, Build[]>()
-      for (const build of builds) {
-        const key = build.run == null ? `build:${build.id}` : `run:${build.run}`
-        const group = groups.get(key)
-        if (group == null) groups.set(key, [build])
-        else group.push(build)
-      }
-      const rows = [...groups.values()]
-        .map((group) => {
-          const sorted = [...group].sort(
-            (a, b) =>
-              Number(a.variant !== '') - Number(b.variant !== '') ||
-              (a.variant < b.variant ? -1 : a.variant > b.variant ? 1 : 0),
-          )
-          const head = sorted[0]!
-          if (sorted.length === 1 && head.variant === '') return install(head)
-          return `<section class="build-group" id="run-${escape(head.run ?? String(head.id))}"><div class="build-group-head">${heading(head)}</div>${sorted
-            .map((build) =>
-              install(build, build.variant === '' ? 'Default' : build.variant),
-            )
-            .join('')}</section>`
-        })
-        .join('')
-      res.send(
-        page(
-          branch,
-          `<p class="breadcrumbs">${home}<span>/</span><a href="${appPath}${query}">${escape(app.name)}</a></p><p class="intro">${labels[chosen]} builds · newest first${chosen === 'ios' && builds.length > 0 ? '<br>Installation links last up to one hour. Refresh this page if a link expires.' : ''}</p><div class="build-list">${rows || `<section class="card"><h2>No ${labels[chosen]} builds</h2><p>This branch has no retained builds for the selected platform. Choose another platform or publish a new build.</p></section>`}</div>`,
-          nav,
-          true,
-        ),
-      )
-    },
-  )
-  return router
+  return storePages(store, accounts).catalog
+}
+
+/** Install and a grant's manifest and package, on a standalone server or a host. */
+export function installationRoutes(
+  store: Store,
+  accounts = new Accounts(store),
+): Router {
+  return storePages(store, accounts).installs
+}
+
+/** Devices, registration and Prepare for this device, on a standalone server or a host. */
+export function deviceRoutes(
+  store: Store,
+  accounts = new Accounts(store),
+  relay?: DeviceRelay,
+): Router {
+  return storePages(store, accounts, relay).devices
 }

@@ -111,7 +111,12 @@ export class Devices {
     )?.[1]
     return this.list(accountId).find((d) => String(d.id) === id)
   }
-  challenge(session: Session): string {
+  /**
+   * A registration request for the session's account. `returnOrigin` is
+   * where the profile callback sends the device afterwards, when another
+   * origin (the master's) asked; the server's own origin by default.
+   */
+  challenge(session: Session, returnOrigin?: string): string {
     return this.store.transaction(() => {
       this.store.db
         .prepare('DELETE FROM device_challenges WHERE expires_at<=?')
@@ -127,13 +132,14 @@ export class Devices {
       const token = randomToken()
       this.store.db
         .prepare(
-          'INSERT INTO device_challenges(hash,account_id,session_hash,expires_at) VALUES(?,?,?,?)',
+          'INSERT INTO device_challenges(hash,account_id,session_hash,expires_at,return_origin) VALUES(?,?,?,?,?)',
         )
         .run(
           digest(token),
           session.account_id,
           session.hash,
           Math.min(session.expires_at, this.store.now() + 20 * 60000),
+          returnOrigin ?? null,
         )
       return token
     })

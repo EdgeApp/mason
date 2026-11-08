@@ -1,6 +1,6 @@
 import { Devices, type Device } from '../devices/store.js'
 import { asObject, asString } from 'cleaners'
-import { Router } from 'express'
+import type { Response } from 'express'
 import {
   closeSync,
   constants,
@@ -11,7 +11,6 @@ import {
 import type { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { Accounts, randomToken, type Session } from '../auth/accounts.js'
-import { csrf, navigation, sessionContext } from '../auth/routes.js'
 import { Store, digest } from '../store.js'
 import {
   asId,
@@ -21,7 +20,6 @@ import {
   type Format,
 } from '../validation.js'
 import { escape } from '../view/html.js'
-import { page } from '../view/shell.js'
 
 const asGrant = asObject({
   hash: asString,
@@ -110,21 +108,33 @@ export class Installations {
         .find((d) => d.id === grant.device_id)
     return build != null && devices.eligible(build, device) ? build : undefined
   }
-  manifest(build: Build, token: string): string {
+  /** The installer's manifest; its package URL is on `origin`, the server's own by default. */
+  manifest(build: Build, token: string, origin?: string): string {
     if (build.format !== 'ipa' || downloadOnly(build) != null)
       throw new Error('Not an iOS application')
-    return `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>items</key><array><dict><key>assets</key><array><dict><key>kind</key><string>software-package</string><key>url</key><string>${escape(this.url(token, 'artifact'))}</string></dict></array><key>metadata</key><dict><key>bundle-identifier</key><string>${escape(build.bundle_id)}</string><key>bundle-version</key><string>${escape(build.build_number)}</string><key>kind</key><string>software</string><key>title</key><string>${escape(this.store.apps().find((app) => app.id === build.app_id)!.name)}</string></dict></dict></array></dict></plist>`
+    return `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>items</key><array><dict><key>assets</key><array><dict><key>kind</key><string>software-package</string><key>url</key><string>${escape(this.url(token, 'artifact', origin))}</string></dict></array><key>metadata</key><dict><key>bundle-identifier</key><string>${escape(build.bundle_id)}</string><key>bundle-version</key><string>${escape(build.build_number)}</string><key>kind</key><string>software</string><key>title</key><string>${escape(this.store.apps().find((app) => app.id === build.app_id)!.name)}</string></dict></dict></array></dict></plist>`
   }
-  url(token: string, resource: 'manifest.plist' | 'artifact'): string {
-    return `${this.store.config.origin}/install/${token}/${resource}`
+  url(
+    token: string,
+    resource: 'manifest.plist' | 'artifact',
+    origin = this.store.config.origin,
+  ): string {
+    return installUrl(origin, token, resource)
   }
   iosUrl(token: string): string {
-    return (
-      'itms-services://?action=download-manifest&url=' +
-      encodeURIComponent(this.url(token, 'manifest.plist'))
-    )
+    return iosInstallUrl(this.store.config.origin, token)
   }
 }
+/** Where a grant's manifest or package is served on an origin. */
+export const installUrl = (
+  origin: string,
+  token: string,
+  resource: 'manifest.plist' | 'artifact',
+): string => `${origin}/install/${token}/${resource}`
+/** The link that opens iOS's installer on a grant's manifest. */
+export const iosInstallUrl = (origin: string, token: string): string =>
+  'itms-services://?action=download-manifest&url=' +
+  encodeURIComponent(installUrl(origin, token, 'manifest.plist'))
 export function byteRange(
   value: string | undefined,
   size: number,
@@ -157,153 +167,148 @@ export const formatTypes: Record<Format, string> = {
   msi: 'application/octet-stream',
   zip: 'application/zip',
 }
-export function installationRoutes(
+/** What a request for a grant's file asks: its method, and the ranges it takes. */
+export interface FileRequest {
+  method: 'GET' | 'HEAD'
+  range?: string
+  ifRange?: string
+  /** The origin a manifest names the package on; the server's own by default. */
+  origin?: string
+}
+/**
+ * A grant's file as an answer: its status and headers, and its text or a
+ * way to open its bytes. `release` frees what `open` would have used, for
+ * an answer whose bytes are not sent.
+ */
+export interface FileDelivery {
+  status: number
+  headers: Record<string, string>
+  body?: string
+  open?: () => Promise<Readable>
+  release?: () => void
+}
+const unavailable = (message: string): FileDelivery => ({
+  status: 404,
+  headers: { 'Content-Type': 'text/html; charset=utf-8' },
+  body: message,
+})
+/**
+ * A grant's manifest or package: the manifest only for an iOS app; the
+ * package with `ETag`, single ranges (honouring `If-Range`) and `HEAD`. A
+ * host keeps builds through its storage driver (disk or S3); a standalone
+ * server on its disk, opened once so a swapped file is never followed.
+ */
+export async function installDelivery(
   store: Store,
-  accounts = new Accounts(store),
-): Router {
-  const router = Router(),
-    installs = new Installations(store)
-  router.post('/builds/:id/install', (req, res) => {
-    const context = sessionContext(req, accounts)
-    if (context == null) {
-      res.status(401).send('Sign in required')
-      return
+  installs: Installations,
+  token: string,
+  part: 'manifest.plist' | 'artifact',
+  request: FileRequest,
+): Promise<FileDelivery> {
+  const build = installs.build(token)
+  if (part === 'manifest.plist') {
+    if (build == null || build.format !== 'ipa' || downloadOnly(build) != null)
+      return unavailable('Installation link is unavailable or expired')
+    return {
+      status: 200,
+      headers: { 'Content-Type': 'application/xml; charset=utf-8' },
+      body: installs.manifest(build, token, request.origin),
     }
-    csrf(req, store, context.session)
-    const build = store.build(asId(Number(req.params.id)))
-    const devices = new Devices(store)
-    const selected = devices.selected(context.account.id, req.headers.cookie)
-    if (build != null && !devices.eligible(build, selected)) {
-      res
-        .status(409)
-        .send(
-          page(
-            'Prepare your device',
-            selected == null
-              ? '<section class="card"><p>Register or select your iPhone or iPad before installing this build.</p><a class="button register-device" href="/devices">Register Device</a></section>'
-              : `<section class="card"><p>This build does not yet include your device. Mason can prepare a new build of this branch and commit.</p><form method="post" action="/builds/${build.id}/prepare"><input type="hidden" name="csrf" value="${escape(context.session.csrf)}"><button>Prepare for this device</button></form></section>`,
-            navigation(context.session, context.account),
-          ),
-        )
-      return
+  }
+  if (build == null)
+    return unavailable('Installation link is unavailable or expired')
+  const objects = store.objects
+  let fd: number | undefined
+  let open: (range?: { start: number; end: number }) => Promise<Readable>
+  if (objects != null) {
+    const head = await objects.head(build.file_key).catch(() => undefined)
+    if (head == null || head.size !== build.size)
+      return unavailable('Build is no longer available')
+    open = async (range): Promise<Readable> => {
+      const found = await objects.get(build.file_key, range)
+      if (found == null) throw new Error('Unavailable file')
+      return found.stream
     }
-    const result = installs.create(
-      asId(Number(req.params.id)),
-      context.session,
-      selected,
-    )
-    // Only an iOS IPA installs over the air; the rest (a tvOS app too) download.
-    if (result.build.format !== 'ipa' || downloadOnly(result.build) != null) {
-      res.redirect(303, installs.url(result.token, 'artifact'))
-      return
-    }
-    const url = installs.iosUrl(result.token)
-    res.send(
-      page(
-        'Install app',
-        `<section class="card"><p>Tap Install on iOS, then confirm the installation on your device.</p><a class="button" data-install href="${escape(url)}">Install on iOS</a><p>This installation link expires within one hour.</p></section>`,
-        navigation(context.session, context.account),
-        true,
-      ),
-    )
-  })
-  router.get('/install/:token/manifest.plist', (req, res) => {
-    const build = installs.build(req.params.token)
-    if (
-      build == null ||
-      build.format !== 'ipa' ||
-      downloadOnly(build) != null
-    ) {
-      res.status(404).send('Installation link is unavailable or expired')
-      return
-    }
-    res
-      .type('application/xml')
-      .send(installs.manifest(build, String(req.params.token)))
-  })
-  router.get('/install/:token/artifact', async (req, res) => {
-    const build = installs.build(req.params.token)
-    if (build == null) {
-      res.status(404).send('Installation link is unavailable or expired')
-      return
-    }
-    // A host keeps builds through its storage driver (disk or S3); a standalone server on its disk.
-    const objects = store.objects
-    let fd: number | undefined
-    let open: (range?: { start: number; end: number }) => Promise<Readable>
-    if (objects != null) {
-      const head = await objects.head(build.file_key).catch(() => undefined)
-      if (head == null || head.size !== build.size) {
-        res.status(404).send('Build is no longer available')
-        return
-      }
-      open = async (range): Promise<Readable> => {
-        const found = await objects.get(build.file_key, range)
-        if (found == null) throw new Error('Unavailable file')
-        return found.stream
-      }
-    } else {
-      try {
-        fd = openSync(
-          store.filePath(build.file_key),
-          constants.O_RDONLY | constants.O_NOFOLLOW,
-        )
-        const stat = fstatSync(fd)
-        if (!stat.isFile() || stat.size !== build.size) {
-          throw new Error('Unavailable file')
-        }
-      } catch {
-        if (fd != null) closeSync(fd)
-        res.status(404).send('Build is no longer available')
-        return
-      }
-      const local = fd
-      open = async (range): Promise<Readable> =>
-        createReadStream('', {
-          fd: local,
-          autoClose: true,
-          start: range?.start,
-          end: range?.end,
-        })
-    }
-    const etag = `"${build.digest}"`
-    res.set({
-      'Content-Type': formatTypes[build.format],
-      'Content-Disposition': `attachment; filename="build-${build.id}.${build.format}"`,
-      'Accept-Ranges': 'bytes',
-      ETag: etag,
-    })
-    let range: ReturnType<typeof byteRange>
+  } else {
     try {
-      range = byteRange(
-        req.get('if-range') != null && req.get('if-range') !== etag
-          ? undefined
-          : req.get('range'),
-        build.size,
+      fd = openSync(
+        store.filePath(build.file_key),
+        constants.O_RDONLY | constants.O_NOFOLLOW,
       )
+      const stat = fstatSync(fd)
+      if (!stat.isFile() || stat.size !== build.size)
+        throw new Error('Unavailable file')
     } catch {
       if (fd != null) closeSync(fd)
-      res.status(416).set('Content-Range', `bytes */${build.size}`).end()
-      return
+      return unavailable('Build is no longer available')
     }
-    if (range != null)
-      res
-        .status(206)
-        .set('Content-Range', `bytes ${range.start}-${range.end}/${build.size}`)
-    res.set(
-      'Content-Length',
-      String(range == null ? build.size : range.end - range.start + 1),
+    const local = fd
+    open = async (range): Promise<Readable> =>
+      createReadStream('', {
+        fd: local,
+        autoClose: true,
+        start: range?.start,
+        end: range?.end,
+      })
+  }
+  const release = (): void => {
+    if (fd != null) closeSync(fd)
+  }
+  const etag = `"${build.digest}"`
+  const headers: Record<string, string> = {
+    'Content-Type': formatTypes[build.format],
+    'Content-Disposition': `attachment; filename="build-${build.id}.${build.format}"`,
+    'Accept-Ranges': 'bytes',
+    ETag: etag,
+  }
+  let range: ReturnType<typeof byteRange>
+  try {
+    range = byteRange(
+      request.ifRange != null && request.ifRange !== etag
+        ? undefined
+        : request.range,
+      build.size,
     )
-    if (req.method === 'HEAD') {
-      if (fd != null) closeSync(fd)
-      res.end()
-      return
+  } catch {
+    release()
+    return {
+      status: 416,
+      headers: { ...headers, 'Content-Range': `bytes */${build.size}` },
     }
-    try {
-      await pipeline(await open(range), res)
-    } catch {
-      res.destroy()
-    }
-  })
-  return router
+  }
+  if (range != null)
+    headers['Content-Range'] = `bytes ${range.start}-${range.end}/${build.size}`
+  headers['Content-Length'] = String(
+    range == null ? build.size : range.end - range.start + 1,
+  )
+  if (request.method === 'HEAD') {
+    release()
+    return { status: range == null ? 200 : 206, headers }
+  }
+  return {
+    status: range == null ? 200 : 206,
+    headers,
+    open: async (): Promise<Readable> => await open(range),
+    release,
+  }
+}
+/** Sends a grant's file answer: its text, or its bytes once opened. */
+export async function sendDelivery(
+  res: Response,
+  delivery: FileDelivery,
+): Promise<void> {
+  res.status(delivery.status).set(delivery.headers)
+  if (delivery.body != null) {
+    res.send(delivery.body)
+    return
+  }
+  if (delivery.open == null) {
+    res.end()
+    return
+  }
+  try {
+    await pipeline(await delivery.open(), res)
+  } catch {
+    res.destroy()
+  }
 }

@@ -350,6 +350,51 @@ describe('Mason protected catalog and installation', () => {
     )
   })
 
+  it('migrates a standalone store to distribution user_version 9, whose relay sessions never sign a browser in', () => {
+    const file = path.join(root, 'v8.sqlite')
+    const old = new Store(
+      asConfig({
+        origin: 'https://builds.example.test',
+        database: file,
+        storage: path.join(root, 'v8-packages'),
+        freeSpaceBytes: 0,
+      }),
+    )
+    old.db.exec(`ALTER TABLE sessions DROP COLUMN relayed;
+      ALTER TABLE device_challenges DROP COLUMN return_origin;
+      PRAGMA user_version=8;`)
+    old.close()
+    const migrated = new Store(
+      asConfig({
+        origin: 'https://builds.example.test',
+        database: file,
+        storage: path.join(root, 'v8-packages'),
+        freeSpaceBytes: 0,
+      }),
+    )
+    try {
+      assert.equal(
+        migrated.db.prepare('PRAGMA user_version').get()?.user_version,
+        9,
+      )
+      const people = new Accounts(migrated)
+      const started = people.login(identity)
+      assert.equal(
+        migrated.db
+          .prepare('SELECT relayed FROM sessions WHERE hash=?')
+          .get(started.session.hash)?.relayed,
+        0,
+      )
+      assert(people.session(started.token) != null)
+      migrated.db
+        .prepare('UPDATE sessions SET relayed=1 WHERE hash=?')
+        .run(started.session.hash)
+      assert.equal(people.session(started.token), undefined)
+      assert(people.sessionHash(started.session.hash) != null)
+    } finally {
+      migrated.close()
+    }
+  })
   it('does not reveal catalog data to anonymous or pending accounts', async () => {
     publish('android')
     const anonymous = await request(`/apps/${app}`, {}, false)

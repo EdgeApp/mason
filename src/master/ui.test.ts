@@ -973,7 +973,8 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       admin: [200, 200, 200, 200, 200, 200, 200],
       manager: [200, 200, 200, 200, 200, 200, 200],
       developer: [200, 403, 403, 403, 403, 403, 200],
-      tester: [200, 403, 403, 403, 403, 403, 403],
+      // A tester's home sends them to Install apps.
+      tester: [303, 403, 403, 403, 403, 403, 403],
     }
     for (const [role, statuses] of Object.entries(expected)) {
       const session = signIn(role)
@@ -1223,18 +1224,10 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       404,
     )
     // A developer may not cancel others' runs from a page without the controls of a manager either way; testers see no runs.
-    assert.match(
-      (await request(c.master, 'GET', '/', signIn('tester'))).text,
-      /Your apps/,
-    )
-    c.master
-      .master!.database.db.prepare(
-        "UPDATE accounts SET open_admission=1 WHERE role='tester'",
-      )
-      .run()
-    assert.match(
-      (await request(c.master, 'GET', '/', signIn('tester'))).text,
-      /Your apps/,
+    // A tester's home is Install apps (catalogRelay.test.ts follows it).
+    assert.equal(
+      (await request(c.master, 'GET', '/', signIn('tester'))).status,
+      303,
     )
   })
 

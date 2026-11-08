@@ -832,7 +832,7 @@ describe('Host cache, sign-in and offline serving', function () {
       assert.equal(await artifact.text(), `apk ${KEY}`)
       assert.equal(
         (await tess.post('/builds/101/install', { csrf })).status,
-        400,
+        404,
         'another group’s build',
       )
       // An expired build stops at once, even offline.
@@ -847,7 +847,7 @@ describe('Host cache, sign-in and offline serving', function () {
       assert.doesNotMatch(later, /1\.0\.102/)
       assert.equal(
         (await tess.post('/builds/102/install', { csrf })).status,
-        400,
+        404,
       )
       // Sign-in keeps working from the cache.
       const again = browser()
@@ -1363,7 +1363,7 @@ describe('Host cache, sign-in and offline serving', function () {
     legacy.db.exec(`
       INSERT INTO accounts(id,name,email,is_tester,permission_version,created_at) VALUES(10,'Tess Tester','tess@example.com',1,0,${now});
       INSERT INTO identities(account_id,provider,issuer,subject,email,email_verified) VALUES(10,'first','https://identity.example.test/first','tess-subject','tess@example.com',1);
-      INSERT INTO sessions VALUES('${digest(token)}',10,0,'${'c'.repeat(43)}',${now},${now + 86_400_000});
+      INSERT INTO sessions(hash,account_id,permission_version,csrf,created_at,expires_at) VALUES('${digest(token)}',10,0,'${'c'.repeat(43)}',${now},${now + 86_400_000});
     `)
     mkdirSync(path.join(storage, 'files'), { recursive: true })
     writeFileSync(

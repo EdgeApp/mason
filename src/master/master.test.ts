@@ -144,7 +144,7 @@ describe('Master database, setup and import', function () {
     assert.equal(
       (db.prepare('PRAGMA user_version').get() as { user_version: number })
         .user_version,
-      8,
+      9,
     )
     for (const table of [
       'accounts',
@@ -174,7 +174,7 @@ describe('Master database, setup and import', function () {
     assert.throws(() => migrateMaster(db), /newer Mason/)
     db.close()
     const newer = new DatabaseSync(path.join(root, 'n.sqlite'))
-    newer.exec('PRAGMA user_version=9')
+    newer.exec('PRAGMA user_version=10')
     assert.throws(() => migrateMaster(newer), /newer Mason/)
     newer.close()
   })

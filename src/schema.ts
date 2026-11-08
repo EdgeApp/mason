@@ -13,7 +13,7 @@ export function migrate(db: DatabaseSync): void {
   const version = asObject({ user_version: integer() })(
     db.prepare('PRAGMA user_version').get(),
   ).user_version
-  if (version > 8) throw new Error('Database belongs to a newer Mason version')
+  if (version > 9) throw new Error('Database belongs to a newer Mason version')
   if (version < 1)
     db.exec(`BEGIN IMMEDIATE;
     CREATE TABLE accounts (
@@ -56,4 +56,12 @@ export function migrate(db: DatabaseSync): void {
   if (version < 6) migrateDevices(db)
   if (version < 7) migrateAdmin(db)
   if (version < 8) migrateBuildVariants(db)
+  // A host's relay sessions stand for a master session and never sign a
+  // browser in; a device registration returns to the origin that asked.
+  if (version < 9)
+    db.exec(`BEGIN IMMEDIATE;
+    ALTER TABLE sessions ADD COLUMN relayed INTEGER NOT NULL DEFAULT 0 CHECK(relayed IN (0,1));
+    ALTER TABLE device_challenges ADD COLUMN return_origin TEXT;
+    PRAGMA user_version=9;
+    COMMIT;`)
 }

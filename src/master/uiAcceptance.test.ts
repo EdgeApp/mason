@@ -5,6 +5,7 @@
 // from lib/: a real checkout needs lib/worker/gitProxy.js. Each scenario
 // writes the screenshots and logs that prove it into MASON_ARTIFACTS.
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import {
   appendFileSync,
   mkdtempSync,
@@ -37,6 +38,8 @@ interface Daemon {
   attach: (options: object) => Promise<Device>
   detach: (id: string) => Promise<void>
 }
+const sha = (data: Buffer): string =>
+  createHash('sha256').update(data).digest('hex')
 const quote = (value: string): string =>
   "'" + value.replaceAll("'", "'\\''") + "'"
 
@@ -573,5 +576,207 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     } finally {
       await h.close()
     }
+  })
+
+  it('E7 a tester installs Alpha’s Android build and reads her devices on the master, through the host', async () => {
+    const master = c.master.master!
+    const db = master.database.db
+    const alpha = Number(
+      db.prepare('SELECT id FROM apps WHERE slug=?').get(ALPHA)!.id,
+    )
+    // A device the master registered for her: the host has it from the change feed.
+    const now = Date.now()
+    const device = Number(
+      db
+        .prepare(
+          "INSERT INTO devices(udid,product,model,os_version,status,created_at,updated_at) VALUES(?,'iPhone14,5','iPhone 13','26.0','registered',?,?)",
+        )
+        .run('E'.repeat(39) + '7', now, now).lastInsertRowid,
+    )
+    db.prepare(
+      'INSERT INTO account_devices(account_id,device_id,name,created_at) VALUES(?,?,?,?)',
+    ).run(people.tess!, device, 'iPhone of Tess', now)
+    master.database.change('device', device)
+    master.database.change('account', people.tess!)
+    await c.until(
+      () =>
+        host
+          .host!.cache.db.prepare(
+            'SELECT 1 FROM account_devices WHERE device_id=?',
+          )
+          .get(device),
+      10_000,
+      'her device on the host',
+    )
+    const b = await browser('mason-e7-tess', c.master, '1280x860')
+    try {
+      await masterSignIn(b, 'tess', PASSWORDS.tess!)
+      // A tester's home on the master is Install apps.
+      await b.visible('Choose an app to browse recent builds')
+      await b.tap(`a.app-card[href^="/apps/${alpha}?"]`)
+      await b.visible('^Branches · ')
+      await b.tap('a[data-platform="android"]')
+      await b.visible('^Branches · Android$')
+      await b.visible('^master$')
+      await b.shot('master-install-apps.png')
+      await b.tap('a.list-row[href*="/branches/"]')
+      await b.visible('^Android builds · newest first$')
+      // An Android build installs by downloading its package.
+      await b.visible('^Install')
+      await b.open('/devices')
+      await b.visible('^Your devices$')
+      await b.visible('^iPhone of Tess$')
+    } finally {
+      await b.close()
+    }
+    // The download, through the master, with her master session.
+    const log = 'master-install-relay.log'
+    rmSync(path.join(artifacts!, log), { force: true })
+    const base = origin(c.master)
+    const parameters = (await (
+      await pinnedFetch(
+        base + '/api/v2/session/parameters',
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ identifier: 'tess' }),
+        },
+        c.master.web!.certificate!.pin,
+      )
+    ).json()) as Json
+    const signedIn = await pinnedFetch(
+      base + '/api/v2/session',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          identifier: 'tess',
+          clientHash: await clientPasswordHash(PASSWORDS.tess!, parameters),
+        }),
+      },
+      c.master.web!.certificate!.pin,
+    )
+    const { csrf } = (await signedIn.json()) as { csrf: string }
+    const session = /^([^;]+)/.exec(signedIn.headers.get('set-cookie')!)![1]!
+    const build = db
+      .prepare(
+        "SELECT id,file_key,digest,size FROM builds WHERE app_id=? AND platform='android' AND branch='master' AND state='ready' ORDER BY id DESC LIMIT 1",
+      )
+      .get(alpha) as Json
+    const stored = await host.host!.objects.get(build.file_key)
+    const hash = createHash('sha256')
+    for await (const chunk of stored!.stream) hash.update(chunk as Buffer)
+    const hostSha = hash.digest('hex')
+    type Reply = Awaited<ReturnType<typeof pinnedFetch>>
+    const curl = async (
+      shown: string,
+      route: string,
+      init: {
+        method?: string
+        headers?: Record<string, string>
+        body?: string
+      },
+      describe: (reply: Reply, body: Buffer) => string,
+    ): Promise<{ reply: Reply; body: Buffer }> => {
+      const reply = await pinnedFetch(
+        base + route,
+        {
+          redirect: 'manual',
+          ...init,
+          // Only Install needs her session; a grant's URLs carry none.
+          headers: {
+            ...(route.startsWith('/install/') ? {} : { cookie: session }),
+            ...init.headers,
+          },
+        },
+        c.master.web!.certificate!.pin,
+      )
+      const body = Buffer.from(await reply.arrayBuffer())
+      appendFileSync(
+        path.join(artifacts!, log),
+        `$ curl ${shown} ${base}${route.replace(/\/install\/[^/]+\//, '/install/<token>/')}\n${describe(reply, body)}\n\n`,
+      )
+      return { reply, body }
+    }
+    const header = (reply: Reply, name: string): string =>
+      `${name}: ${reply.headers.get(name) ?? '(none)'}`
+    const install = await curl(
+      "-sS -i -b '__Host-mason-master=<tess>' -X POST -d 'csrf=<csrf>'",
+      `/builds/${build.id}/install`,
+      {
+        method: 'POST',
+        headers: {
+          origin: base,
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({ csrf }).toString(),
+      },
+      (reply) =>
+        `HTTP ${reply.status}\n${header(reply, 'location').replace(/\/install\/[^/]+\//, '/install/<token>/')}`,
+    )
+    assert.equal(install.reply.status, 303)
+    const artifact = install.reply.headers.get('location')!
+    const full = await curl(
+      '-sS -o alpha.apk -w "%{http_code}"',
+      artifact,
+      {},
+      (reply, body) =>
+        [
+          `HTTP ${reply.status}`,
+          header(reply, 'content-type'),
+          header(reply, 'content-length'),
+          header(reply, 'accept-ranges'),
+          `$ shasum -a 256 alpha.apk`,
+          `${sha(body)}  alpha.apk`,
+          `host's file ${build.file_key}: ${hostSha}`,
+          sha(body) === hostSha ? 'match' : 'MISMATCH',
+        ].join('\n'),
+    )
+    assert.equal(full.reply.status, 200)
+    assert.equal(sha(full.body), hostSha)
+    assert.equal(hostSha, build.digest)
+    const head = await curl(
+      '-sS -I',
+      artifact,
+      { method: 'HEAD' },
+      (reply, body) =>
+        [
+          `HTTP ${reply.status}`,
+          header(reply, 'content-length'),
+          header(reply, 'etag'),
+          `body: ${body.length} bytes`,
+        ].join('\n'),
+    )
+    assert.equal(head.reply.status, 200)
+    assert.equal(head.body.length, 0)
+    const range = await curl(
+      "-sS -i -H 'Range: bytes=0-99'",
+      artifact,
+      { headers: { range: 'bytes=0-99' } },
+      (reply, body) =>
+        [
+          `HTTP ${reply.status}`,
+          header(reply, 'content-range'),
+          header(reply, 'content-length'),
+          `body: ${body.length} bytes`,
+        ].join('\n'),
+    )
+    assert.equal(range.reply.status, 206)
+    assert.equal(
+      range.reply.headers.get('content-range'),
+      `bytes 0-99/${build.size}`,
+    )
+    const beyond = await curl(
+      `-sS -i -H 'Range: bytes=${build.size}-'`,
+      artifact,
+      { headers: { range: `bytes=${build.size}-` } },
+      (reply) =>
+        [`HTTP ${reply.status}`, header(reply, 'content-range')].join('\n'),
+    )
+    assert.equal(beyond.reply.status, 416)
+    assert.equal(
+      beyond.reply.headers.get('content-range'),
+      `bytes */${build.size}`,
+    )
   })
 })

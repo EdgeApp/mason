@@ -206,13 +206,16 @@ describe('Pages on the master and the host', function () {
       developer.text,
       /aria-label="Your account" title="Developer Person · developer · master"/,
     )
-    // Testers keep the phone-first catalog on the host and their apps on the master.
+    // Testers keep the phone-first catalog on the host; on the master their
+    // home is Install apps, which lists nothing shared with them yet.
     const catalog = await get(host, '/', onHost('tester'))
     assert.doesNotMatch(catalog.text, /Projects &amp; apps/)
     assert.equal((await get(host, '/artifacts', onHost('tester'))).status, 403)
+    const tester = onMaster('tester')
+    assert.equal((await get(c.master, '/', tester)).location, '/apps')
     assert.match(
-      (await get(c.master, '/', onMaster('tester'))).text,
-      /No apps are shared with you yet/,
+      (await get(c.master, '/apps', tester)).text,
+      /No apps have been configured yet/,
     )
     assert.equal(
       (await get(c.master, '/artifacts', onMaster('tester'))).status,

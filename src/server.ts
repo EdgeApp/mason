@@ -1,12 +1,15 @@
-import { deviceCallbackRoutes, deviceRoutes } from './devices/routes.js'
+import { deviceCallbackRoutes } from './devices/routes.js'
 import express, { type ErrorRequestHandler } from 'express'
 import { adminRoutes } from './admin/routes.js'
 import { Accounts } from './auth/accounts.js'
 import { Providers } from './auth/providers.js'
 import { authRoutes } from './auth/routes.js'
 import { readFileSync } from 'node:fs'
-import { catalogRoutes } from './catalog/routes.js'
-import { installationRoutes } from './catalog/install.js'
+import {
+  catalogRoutes,
+  deviceRoutes,
+  installationRoutes,
+} from './catalog/routes.js'
 import { page } from './view/shell.js'
 import { stylesheet } from './view/stylesheet.js'
 import type { Server } from 'node:http'

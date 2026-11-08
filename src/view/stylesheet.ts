@@ -175,6 +175,7 @@ table.compact th,table.compact td{width:1%;white-space:nowrap;padding-right:16px
 const catalog = `.platforms{display:inline-flex;gap:2px;padding:2px;border:1px solid var(--color-border-strong);border-radius:var(--radius);background:var(--color-panel)}
 .platforms a{padding:6px 10px;border-radius:var(--radius);font-size:13px;text-decoration:none;color:var(--color-text);min-height:36px;display:flex;align-items:center}
 .platforms a[aria-current=true]{background:var(--color-slate);color:var(--color-on-slate)}
+.catalog-nav{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;max-width:760px;margin:4px 0 20px}
 .intro{margin-bottom:20px}
 .app-list,.build-list{max-width:760px}
 .app-card,.list-row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px;border:1px solid var(--color-border);border-radius:var(--radius-panel);background:var(--color-panel);margin-bottom:8px;color:var(--color-text);text-decoration:none;width:100%;text-align:left;font-weight:400}

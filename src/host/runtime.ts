@@ -21,6 +21,7 @@ import { version } from '../version.js'
 import { Webhooks } from './webhooks.js'
 import { HostArtifacts, HostObjects } from './artifacts.js'
 import { HostBuilds } from './builds.js'
+import { HostCatalog } from './catalog.js'
 import type { DeviceRelay } from '../devices/store.js'
 
 export interface HostOptions {
@@ -69,6 +70,8 @@ export class HostRuntime {
   readonly artifacts: HostArtifacts
   /** The builds API the host serves itself, and relays for the master. */
   readonly builds: HostBuilds
+  /** Install apps and Devices, answered for the master's pages. */
+  readonly catalog: HostCatalog
   private synced: Link | undefined
   private offset = 0
   private timer: NodeJS.Timeout | undefined
@@ -120,6 +123,13 @@ export class HostRuntime {
       now: (): number => this.now(),
       maintenance: (): boolean => this.maintenance(),
       log: (line): void => this.options.log?.(line),
+    })
+    this.catalog = new HostCatalog({
+      cache: this.cache,
+      accounts: this.accounts,
+      devices: this.devices,
+      ready: (): void => this.builds.ready(),
+      catchUp: async (): Promise<void> => await this.catchUp(),
     })
     this.webhooks = new Webhooks({
       db: this.cache.db,
@@ -425,6 +435,8 @@ export class HostRuntime {
         }),
         /** A list or one build, for a caller the master authenticated. */
         'builds.request': (params): unknown => this.builds.request(params),
+        /** Install apps and Devices for a person signed in on the master. */
+        ...this.catalog.requests(),
         /** For `mason cluster check`: the cache revision applied, and what the outbox holds. */
         'host.status': (): HostStatus => ({
           revision: this.cache.revision(),
@@ -446,6 +458,10 @@ export class HostRuntime {
         /** A build's file, or its redirect, for a caller the master authenticated. */
         'builds.download': async (stream, params): Promise<void> => {
           await this.builds.stream(stream, params)
+        },
+        /** A grant's manifest or package, for an install from the master's pages. */
+        'catalog.installFile': async (stream, params): Promise<void> => {
+          await this.catalog.stream(stream, params)
         },
         /** An Xcode a node downloaded first, relayed by the master into the host's storage. */
         'mirror.put': async (stream, params): Promise<void> => {

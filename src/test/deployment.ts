@@ -112,11 +112,9 @@ export function deploymentFixture(
     'admin@example.test',
     1,
   )
-  db.prepare("INSERT INTO sessions VALUES('h1',?,3,'c',?,?)").run(
-    accounts.tester,
-    now,
-    now + 86400000,
-  )
+  db.prepare(
+    "INSERT INTO sessions(hash,account_id,permission_version,csrf,created_at,expires_at) VALUES('h1',?,3,'c',?,?)",
+  ).run(accounts.tester, now, now + 86400000)
   const invite = db.prepare(
     'INSERT INTO invitations(provider,issuer,email,creator,created_at,expires_at,revoked,claimed_account) VALUES(?,?,?,?,?,?,?,?)',
   )

@@ -120,7 +120,7 @@ describe('Mason durable store', () => {
     const first = publish('77')
     store.db
       .exec(`INSERT INTO accounts(id,name,created_at) VALUES(1,'Fixture',0);
-      INSERT INTO sessions VALUES('session',1,0,'csrf',0,9999999999999);
+      INSERT INTO sessions(hash,account_id,permission_version,csrf,created_at,expires_at) VALUES('session',1,0,'csrf',0,9999999999999);
       INSERT INTO install_grants(hash,build_id,session_hash,created_at,expires_at) VALUES('grant',${first.id},'session',0,9999999999999);`)
     // Builds whose custom fields name a run, are not JSON, or name none.
     const copy = store.db.prepare(

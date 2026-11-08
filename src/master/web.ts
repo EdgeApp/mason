@@ -54,6 +54,14 @@ export function masterApp(context: MasterWebContext): express.Express {
         res.set('Content-Security-Policy', masterContentSecurityPolicy)
       res.type('js').send(bundle(name))
     })
+  // The catalog's platform switch, local times and iPad check.
+  app.get('/assets/catalog.js', (_req, res) => {
+    res
+      .type('js')
+      .send(
+        readFileSync(new URL('../browser/client.js', import.meta.url), 'utf8'),
+      )
+  })
   app.use(
     accountsApi(master, {
       setupCode: context.setupCode ?? ((): undefined => undefined),

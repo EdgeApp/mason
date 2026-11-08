@@ -650,6 +650,10 @@ export class Master {
           workerOrigin?: string
         },
     })
+    // A signed-out master session ends the host's relay session for it.
+    this.auth.onEnd = (id): void => {
+      this.hosts.endSession(id)
+    }
     this.provisioning = new Provisioning({
       master: this.database,
       apple: this.appleSigning,

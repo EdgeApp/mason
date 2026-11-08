@@ -182,6 +182,13 @@ describe('Device registration, account ownership and iOS compatibility', () => {
     const content = profile.PayloadContent as Record<string, unknown>,
       token = String(content.Challenge)
     assert.deepEqual(content.DeviceAttributes, ['UDID', 'PRODUCT', 'VERSION'])
+    // A registration this server started names no other origin to return to.
+    assert.equal(
+      store.db
+        .prepare('SELECT return_origin FROM device_challenges WHERE hash=?')
+        .get(createHash('sha256').update(token).digest('hex'))?.return_origin,
+      null,
+    )
     const callback = await request(
       '/devices/callback/' + token,
       {
@@ -221,12 +228,31 @@ describe('Device registration, account ownership and iOS compatibility', () => {
       ).status,
       410,
     )
+    // One another origin asked for (a master's) returns there.
+    const returning = devices.challenge(
+      user.session,
+      'https://master.example.test',
+    )
+    const elsewhere = await request(
+      '/devices/callback/' + returning,
+      {
+        method: 'POST',
+        body: new Uint8Array(sign(payload(returning, fakeOther))),
+      },
+      false,
+    )
+    assert.equal(elsewhere.status, 301)
+    assert.equal(
+      elsewhere.headers.get('location'),
+      'https://master.example.test/devices/complete/' + returning,
+    )
     const next = devices.challenge(user.session)
     devices.receive(next, {
       ...decodePlist(Buffer.from(payload(next))),
       PRODUCT: 'iPhone18,1',
     })
-    assert.equal(devices.list(user.account.id).length, 1)
+    // The same device again is still one device (beside the second one).
+    assert.equal(devices.list(user.account.id).length, 2)
     assert.match(
       await (await request('/devices/complete/' + next)).text(),
       /<strong>iPhone 17 Pro<\/strong>/,

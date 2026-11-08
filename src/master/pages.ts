@@ -57,6 +57,7 @@ import { repository, version } from '../version.js'
 import { clientAddress } from './forward.js'
 import { ProjectNotFound } from './projects.js'
 import type { ProviderSignIn } from './providerSignIn.js'
+import { masterCatalogPages } from './catalogPages.js'
 
 /** A person as the People page and Your account draw them. */
 function personRow(person: Person): PersonRow {
@@ -236,28 +237,6 @@ function backupsPage(master: Master, session: MasterSession): string {
   return `<section class="card"><p>Every hour the master encrypts a snapshot of its database and pushes it to a git repository. Add the deploy key below to that repository with write access.</p>${state}<form data-mason="backup"><label for="repository">Repository</label><input id="repository" name="repository" value="${escape(value.repository ?? '')}" placeholder="git@github.com:owner/mason-backup.git" required><label for="branch">Branch</label><input id="branch" name="branch" value="${escape(value.branch ?? 'master')}" required><p><button>Save</button></p><p>Deploy key</p><pre data-field="deployKey"${value.deployKey == null ? ' hidden' : ''}>${escape(value.deployKey?.publicKey ?? '')}</pre><pre data-field="backupKey" hidden></pre>${status}</form><p><a href="/?later=backups">Skip for now</a></p></section>${key}`
 }
 
-/** A tester's apps on the master: installs happen on the host. */
-function testerApps(master: Master, session: MasterSession): string {
-  const visible = appVisible(master, session)
-  const origin = ((master.settings.value('host') ?? {}) as { origin?: string })
-    .origin
-  const apps = (
-    master.database.db
-      .prepare(
-        'SELECT id,name,slug FROM apps WHERE enabled=1 ORDER BY position,id',
-      )
-      .all() as Array<{ id: number; name: string; slug: string }>
-  ).filter((app) => visible(app.id))
-  return `<p class="intro">Install builds from ${origin == null ? 'the Mason host' : `<a href="${escape(origin)}">${escape(new URL(origin).host)}</a>`}.</p><div class="app-list">${
-    apps
-      .map(
-        (app) =>
-          `<a class="app-card" href="${escape(origin == null ? '#' : `${origin}/apps/${app.id}`)}"><div><h2>${escape(app.name)}</h2><small>${escape(app.slug)}</small></div><span aria-hidden="true">→</span></a>`,
-      )
-      .join('') || '<p class="empty-state">No apps are shared with you yet.</p>'
-  }</div>`
-}
-
 /** Set by "Skip for now": the dashboard stops sending an administrator to Backups for this browser session. */
 const BACKUP_LATER_COOKIE = 'mason-backups-later'
 
@@ -341,8 +320,9 @@ export function masterPages(
       return
     }
     const now = master.database.now()
+    // A tester's home is Install apps.
     if (current.role === 'tester') {
-      send(res, 'Your apps', testerApps(master, current), current)
+      res.redirect(303, '/apps')
       return
     }
     const platform =
@@ -1282,6 +1262,8 @@ export function masterPages(
       ),
     )
   })
+  // Install apps and Devices, from the host over the link.
+  masterCatalogPages(app, master, session, send)
   app.get('/sign-in', (req, res) => {
     if (!master.configured()) {
       res.redirect(303, '/')

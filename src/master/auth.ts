@@ -50,6 +50,10 @@ export interface MasterSession {
   role: Role
   csrf: string
   expiresAt: number
+  /** The digest the session is kept by: what a host's relay session stands for. */
+  id: string
+  /** The account's permission version when the session started. */
+  permissionVersion: number
 }
 
 /**
@@ -80,6 +84,8 @@ const asSignIn = (
  */
 export class MasterAuth {
   private decoy: Promise<string> | undefined
+  /** Told each session that ends by signing out or going stale, by its digest. */
+  onEnd: ((id: string) => void) | undefined
   constructor(private readonly master: MasterDatabase) {}
   private get db(): MasterDatabase['db'] {
     return this.master.db
@@ -239,6 +245,8 @@ export class MasterAuth {
         role: asRole(row.role),
         csrf,
         expiresAt,
+        id: digest(secret),
+        permissionVersion: row.permission_version,
       },
     }
   }
@@ -261,6 +269,7 @@ export class MasterAuth {
       this.db
         .prepare('DELETE FROM master_sessions WHERE hash=?')
         .run(digest(secret))
+      this.onEnd?.(digest(secret))
       return undefined
     }
     return {
@@ -269,14 +278,17 @@ export class MasterAuth {
       role: asRole(row.role),
       csrf: String(row.csrf),
       expiresAt: Number(row.expires_at),
+      id: digest(secret),
+      permissionVersion: Number(row.permission_version),
     }
   }
 
   signOut(secret: string | undefined): void {
     if (secret == null) return
-    this.db
+    const ended = this.db
       .prepare('DELETE FROM master_sessions WHERE hash=?')
       .run(digest(secret))
+    if (Number(ended.changes) > 0) this.onEnd?.(digest(secret))
   }
 
   /** Sessions and invitation links past their expiry. */

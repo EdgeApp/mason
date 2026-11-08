@@ -152,7 +152,9 @@ export class Accounts {
         expires_at: this.store.now() + this.store.config.sessionDays * 86400000,
       }
       this.store.db
-        .prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?)')
+        .prepare(
+          'INSERT INTO sessions(hash,account_id,permission_version,csrf,created_at,expires_at) VALUES(?,?,?,?,?,?)',
+        )
         .run(
           session.hash,
           id,
@@ -187,17 +189,22 @@ export class Accounts {
     this.store.db.prepare('DELETE FROM sessions WHERE account_id=?').run(id)
     this.audit(id, 'invitation.claim', String(invite.id))
   }
+  /** A browser's session by its cookie; a host's relay session never is one. */
   session(
     token: string | undefined,
   ): { account: Account; session: Session } | undefined {
     if (token == null || !/^[A-Za-z0-9_-]{43}$/.test(token)) return undefined
-    return this.sessionHash(digest(token))
+    return this.sessionHash(digest(token), true)
   }
+  /** A session by its hash: a browser's, or a relay session the grants and challenges hang off. */
   sessionHash(
     hash: string,
+    browser = false,
   ): { account: Account; session: Session } | undefined {
     const row = this.store.db
-      .prepare('SELECT * FROM sessions WHERE hash=? AND expires_at>?')
+      .prepare(
+        `SELECT * FROM sessions WHERE hash=? AND expires_at>?${browser ? ' AND relayed=0' : ''}`,
+      )
       .get(hash, this.store.now())
     if (row == null) return undefined
     const session = asSession(row)

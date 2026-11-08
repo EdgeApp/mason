@@ -19,7 +19,7 @@ const like = (text: string): string => text.replace(/[\\%_]/g, (c) => '\\' + c)
 /**
  * ⌘K search: projects, app IDs, runs by number, commits by SHA prefix and
  * branches, within what the viewer may see. Testers find only the app IDs
- * they may install, and on the master the projects that hold them; runs,
+ * they may install, each opening its Install apps page; projects, runs,
  * commits and branches are for developers and up.
  */
 export function search(scope: SearchScope, text: string): SearchResult[] {
@@ -41,24 +41,13 @@ export function search(scope: SearchScope, text: string): SearchResult[] {
       project: string
     }>
   ).filter((app) => scope.appVisible(app.id))
-  const visibleProjects = new Set<string>()
-  if (!developer)
-    for (const row of db
+  // A tester has no project pages; Install apps holds their apps.
+  if (developer)
+    for (const project of db
       .prepare(
-        'SELECT p.slug,pa.app_id FROM projects p JOIN project_apps pa ON pa.project_id=p.id WHERE p.enabled=1',
+        "SELECT slug,name FROM projects WHERE enabled=1 AND (lower(slug) LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\') ORDER BY position,id LIMIT 20",
       )
-      .all() as Array<{ slug: string; app_id: number }>)
-      if (scope.appVisible(row.app_id)) visibleProjects.add(row.slug)
-  // A tester has no project pages on the host; Install apps holds their apps.
-  for (const project of db
-    .prepare(
-      "SELECT slug,name FROM projects WHERE enabled=1 AND (lower(slug) LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\') ORDER BY position,id LIMIT 20",
-    )
-    .all(pattern, pattern) as Array<{ slug: string; name: string }>)
-    if (
-      developer ||
-      (viewer.node === 'master' && visibleProjects.has(project.slug))
-    )
+      .all(pattern, pattern) as Array<{ slug: string; name: string }>)
       out.push({
         kind: 'project',
         label: project.name,
@@ -71,7 +60,7 @@ export function search(scope: SearchScope, text: string): SearchResult[] {
       label: app.slug,
       detail: `${app.name} · ${app.project}`,
       href:
-        viewer.node === 'host'
+        viewer.node === 'host' || !developer
           ? `/apps/${app.id}`
           : `/projects/${encodeURIComponent(app.project)}`,
     })

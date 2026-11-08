@@ -86,10 +86,11 @@ export function importDeployment(
         }
       ).user_version,
     )
-    // 8 adds build variants; an imported build is the default variant either way.
-    if (version !== 7 && version !== 8)
+    // 8 adds build variants; an imported build is the default variant either
+    // way. 9 adds relay sessions and registration return origins, neither imported.
+    if (version < 7 || version > 9)
       throw new ImportRefused(
-        `The distribution database is at schema ${version}; migrate it to 8 first (mason migrate --config …)`,
+        `The distribution database is at schema ${version}; migrate it to 9 first (mason migrate --config …)`,
       )
     const builderVersion = (
       builder.prepare('SELECT version FROM builder_meta').get() as

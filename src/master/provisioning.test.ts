@@ -628,6 +628,22 @@ describe('Devices across nodes', function () {
       2000,
       'the build on the host',
     )
+    // A tester prepares only a build of an app shared with her.
+    const group = master.people.createGroup(admin, {
+      name: 'Prepare testers',
+      apps: [appId],
+      members: [tester.id],
+    })
+    await c.until(
+      () =>
+        host
+          .host!.cache.db.prepare(
+            'SELECT 1 FROM group_members WHERE group_id=?',
+          )
+          .get(group.id),
+      2000,
+      'the group on the host',
+    )
     const device = db()
       .prepare('SELECT id FROM devices WHERE udid=?')
       .get(udidA) as Json

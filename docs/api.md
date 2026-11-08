@@ -226,8 +226,9 @@ lowest role each permission needs (`src/master/permissions.ts`):
 | | | | `backups.key` | admin |
 
 `builds.read` is checked by the builds routes (section 14), on the master
-and on the host, and by the host's catalog; `devices.register` is checked
-on the host only.
+and on the host, and by the catalog; `devices.register` is checked by the
+host, for its own pages and for the master's (section 15, "Install apps and
+Devices").
 
 ## 2. Session and accounts
 
@@ -1658,6 +1659,47 @@ A wrong code delays the next guess (5 s, then 10, 20, …); it and any guess
 during the wait answer 429 with `retryAt`, and a guess during the wait is not
 checked. Once the master is configured these routes
 are 404.
+
+### Install apps and Devices
+
+The tester pages are served on both nodes, signed in with that node's
+session:
+
+| Method and path | What it does |
+| --- | --- |
+| `GET /apps` | Install apps: the apps the person may install, with a platform switch. |
+| `GET /apps/:appId`, `GET /apps/:appId/branches/:branchKey` | An app's branches; a branch's builds for a platform, each with its install control. |
+| `POST /builds/:id/install` | A grant for the build: 303 to its package, or the iOS installer page; 409 when the selected device must be registered or the build prepared for it. |
+| `POST /builds/:id/prepare` | Requests a build of that branch and commit for the selected device. |
+| `GET /install/:token/manifest.plist`, `GET /install/:token/artifact` | A grant's iOS manifest and package, with no cookie: `HEAD`, a single `Range` (206 with `Content-Range`, 416 when unsatisfiable) and `If-Range`. |
+| `GET /devices`, `POST /devices/profile`, `POST /devices/:id/:action` | The person's devices; a registration profile; `select`, `rename`, `retry` or `remove`. |
+| `GET /devices/complete/:token` | Where a registered device lands. |
+
+The forms post `csrf`, the session's proof, from the node's own origin. The
+selected device is that node's `__Host-mason-device` cookie; a device that
+is not the person's counts as none, and selecting one is 404.
+
+**On the master** these pages draw their data from the host over the link,
+for the account the master session authenticated; the host decides what
+the person sees from its cache, as for its own pages. The master's `/`
+sends a tester to `/apps`. For each master session that uses them the host
+keeps a relay session (`sessions.relayed = 1`, keyed by an HMAC of the
+master session's digest), which holds its install grants and registration
+requests, expires with the master session, ends when that session signs
+out (`catalog.endSession`) or its account's permission version changes, and
+never signs a browser in on the host. Install tokens live on the host; the
+master relays a grant's manifest and package with the request's method,
+`Range` and `If-Range`. With the host disconnected, or no host paired, the
+pages answer 503 "The host is unreachable".
+
+The master's public origin is its `master` setting. A manifest from the
+master names its package there, and a registration started on the master
+carries the host's callback URL (devices live on the host), whose 301 sends
+the device back to `<master origin>/devices/complete/<token>`. Without that
+setting the master serves a certificate iOS will not install from, so its
+iOS rows and Register Device link to the host's own pages instead, saying
+installs on iPhone and iPad go through the host until the master has a
+public address; other platforms still download from the master.
 
 ### The host's GitHub webhook
 

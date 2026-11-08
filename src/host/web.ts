@@ -10,9 +10,12 @@ import {
 import { LinkError, type Link } from '../link/link.js'
 import type { Session } from '../auth/accounts.js'
 import { forwardRoutes } from './forward.js'
-import { deviceCallbackRoutes, deviceRoutes } from '../devices/routes.js'
-import { installationRoutes } from '../catalog/install.js'
-import { catalogRoutes } from '../catalog/routes.js'
+import { deviceCallbackRoutes } from '../devices/routes.js'
+import {
+  catalogRoutes,
+  deviceRoutes,
+  installationRoutes,
+} from '../catalog/routes.js'
 import {
   masterContentSecurityPolicy,
   nodeWebApp,
