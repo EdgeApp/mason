@@ -7,7 +7,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 34
+export const MASTER_SCHEMA = 35
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -808,6 +808,13 @@ const migrations: Array<(db: DatabaseSync) => void> = [
   // any-method one first; an address two people held stays with the
   // any-method holder, else the lower account id, and the drop is audited.
   (db): void => migrateEmails(db),
+  // 35: each run's Masonfile, as the master read it when it pinned the
+  // commit, so a host can show it without the repository.
+  (db): void =>
+    db.exec(`CREATE TABLE IF NOT EXISTS masonfiles (
+      key TEXT PRIMARY KEY, project_id INTEGER NOT NULL, commit_sha TEXT NOT NULL,
+      file TEXT NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL
+    ) STRICT;`),
 ]
 
 /** Moves `account_addresses` into `account_emails` (migration 34). */

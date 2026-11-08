@@ -448,6 +448,7 @@ export class Pushes {
         this.db
           .prepare('DELETE FROM push_triggers WHERE project_id=? AND branch=?')
           .run(project.id, branch)
+        this.options.master.change('project', project.slug)
         return
       }
       this.db
@@ -462,6 +463,8 @@ export class Pushes {
           commit,
           this.options.master.now(),
         )
+      // The host lists a project's push branches first on Runs and builds.
+      this.options.master.change('project', project.slug)
     })()
       .catch(() => undefined)
       .finally(() => this.writes.delete(write))

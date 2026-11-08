@@ -28,6 +28,7 @@ import { GitHub, storedConnection, type GitHubOptions } from './github.js'
 import { Jobs } from './jobs.js'
 import { gitHeadLister, Poller, type HeadLister } from './poller.js'
 import { Pushes } from './pushes.js'
+import { projectDetails } from './projectDetails.js'
 import { Projects, type ProjectApp } from './projects.js'
 import { clusterCheck } from './clusterCheck.js'
 import { integer } from '../validation.js'
@@ -582,7 +583,17 @@ export class Master {
       identity,
       version,
     )
-    this.changes = new Changes(this.database, hostProjection)
+    this.changes = new Changes(this.database, hostProjection, (slug) => {
+      try {
+        return projectDetails(
+          this.projects.get(slug),
+          this.buildNumbers,
+          this.pushes,
+        )
+      } catch {
+        return undefined
+      }
+    })
     this.hosts = new HostLinks({
       master: this.database,
       registry: this.registry,

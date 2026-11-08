@@ -49,6 +49,8 @@ import type { GroupApp } from '../view/groups.js'
 import { MASTER_SESSION_COOKIE, type MasterSession } from './auth.js'
 import { can } from './permissions.js'
 import type { Person } from './people.js'
+import { projectDetails, SCRIPT_PROJECT } from './projectDetails.js'
+import { masonfileTooLarge } from './scheduler.js'
 import { sessionActor } from './auth.js'
 import type { Master } from './runtime.js'
 import { repository, version } from '../version.js'
@@ -1091,30 +1093,7 @@ export function masterPages(
       projectView({
         slug: project.slug,
         name: project.name,
-        repository: project.repository,
-        defaultBranch: project.defaultBranch,
-        format: project.format,
-        apps: project.apps.map((entry) => ({
-          bundleId: entry.bundleId,
-          platforms: entry.platforms,
-          ...(entry.apple == null ? {} : { apple: { team: entry.apple.team } }),
-        })),
-        rules: project.rules.map((rule) => ({
-          pattern: rule.pattern,
-          mode: rule.mode,
-        })),
-        webhook: project.webhookSecret.set,
-        ...(project.signingLabel == null
-          ? {}
-          : { signingLabel: project.signingLabel }),
-        buildNumbers: master.buildNumbers
-          .sequences(project.id)
-          .map((sequence) => ({
-            key: sequence.key,
-            format: sequence.scheme.format,
-            scope: sequence.scheme.scope,
-            last: sequence.last,
-          })),
+        ...projectDetails(project, master.buildNumbers, master.pushes),
         canSeed: can(actor, 'buildNumbers.seed'),
       }),
       current,
@@ -1131,18 +1110,11 @@ export function masterPages(
         ? req.query.branch
         : undefined
     const now = master.database.now()
-    // The branches the build's push trigger names, from the default branch's last setup, else any branch's.
-    const push =
-      master.pushes.cached(project, project.defaultBranch) ??
-      master.pushes.latest(project)
-    const pinned =
-      push?.build == null
-        ? []
-        : push.build === true
-          ? project.rules
-              .filter((rule) => rule.mode === 'automatic')
-              .map((rule) => rule.pattern)
-          : push.build
+    const { pinned } = projectDetails(
+      project,
+      master.buildNumbers,
+      master.pushes,
+    )
     const { branches, runs } = projectRunsData(
       {
         db: master.database.db,
@@ -1242,7 +1214,16 @@ export function masterPages(
       .all(project.id) as Array<{ sha: string; branch: string }>
     const commit =
       typeof req.query.commit === 'string' ? req.query.commit : commits[0]?.sha
-    const file = project.entrypoint ?? 'Masonfile.ts'
+    // The copy kept when the run pinned the commit, else the mirror.
+    const kept =
+      commit == null
+        ? undefined
+        : (master.database.db
+            .prepare('SELECT file,text FROM masonfiles WHERE key=?')
+            .get(`${project.id}:${commit}`) as
+            | { file: string; text: string }
+            | undefined)
+    const file = kept?.file ?? project.entrypoint ?? 'Masonfile.ts'
     const render = (extra: { text?: string; error?: string }): void => {
       send(
         res,
@@ -1260,8 +1241,17 @@ export function masterPages(
         'dashboard',
       )
     }
+    if (project.format === 'script') {
+      render({ error: SCRIPT_PROJECT })
+      return
+    }
     if (commit == null) {
       render({ error: 'No run has a commit yet.' })
+      return
+    }
+    // The master still reads from its mirror a Masonfile too large to copy.
+    if (kept != null && kept.text !== masonfileTooLarge(kept.file)) {
+      render({ text: kept.text })
       return
     }
     master.mirrors.show(slug, project.repository, commit, file).then(

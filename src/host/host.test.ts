@@ -328,7 +328,7 @@ describe('Host cache schema', () => {
             .prepare("SELECT value FROM host_meta WHERE key='host_schema'")
             .get() as { value: string }
         ).value,
-        '10',
+        '11',
       )
       // Schema 9: the key verifiers, kept on a replay, and a revision of 0,
       // so the next sync is a snapshot that brings every key.
@@ -795,7 +795,7 @@ describe('Host cache, sign-in and offline serving', function () {
     )
   })
 
-  it('U10.4/U10.7 serves the catalog, project home and installs of the tester’s apps from the cache with the master link down', async () => {
+  it('U10.4/U10.7 serves the catalog and installs of the tester’s apps from the cache with the master link down', async () => {
     const tess = browser()
     await signIn(tess, 'first', { email: 'tess@example.com' })
     const online = await (await tess.get('/')).text()
@@ -818,9 +818,8 @@ describe('Host cache, sign-in and offline serving', function () {
       ).text()
       assert.match(branch, /1\.0\.100/)
       assert.equal((await tess.get('/apps/2')).status, 404)
-      const project = await tess.get('/projects/edge')
-      assert.equal(project.status, 200, 'project home')
-      assert.match(await project.text(), /Edge Wallet/)
+      // A tester has no project pages on the host; Install apps holds her apps.
+      assert.equal((await tess.get('/projects/edge')).status, 404)
       const csrf = runtime().accounts.session(session(tess))!.session.csrf
       const install = await tess.post('/builds/100/install', { csrf })
       assert.equal(install.status, 303)
@@ -864,11 +863,12 @@ describe('Host cache, sign-in and offline serving', function () {
     await signIn(developer, 'first', { email: 'dev@example.com' })
     const all = await (await developer.get('/')).text()
     assert.match(all, /Zcash/, 'developers see every app')
+    // The project's Overview, as on the master.
     assert.match(
       await (await developer.get('/projects/edge')).text(),
-      /Recent runs/,
+      /<nav class="tabs" aria-label="Project">/,
     )
-    // Each recent run opens its run's page on the host.
+    // Runs and builds lists each run, which opens its page on the host.
     const master = c.master.master!.database
     master.db
       .prepare(
@@ -884,14 +884,56 @@ describe('Host cache, sign-in and offline serving', function () {
       10000,
       'the run on the host',
     )
-    const home = await (await developer.get('/projects/edge')).text()
-    assert.match(
-      home,
-      /<a class="list-row" href="\/runs\/m4-run"><div><strong>Run 4242<\/strong><small>develop · /,
-    )
+    const runs = await (await developer.get('/projects/edge/runs')).text()
+    assert.match(runs, /href="\/runs\/m4-run"/)
     assert.equal((await developer.get('/runs/m4-run')).status, 200)
     master.db.prepare("DELETE FROM jobs WHERE id='m4-run'").run()
     master.change('job', 'm4-run', 'delete')
+  })
+
+  it('U10.21 Masonfile copies larger than one link message reach the host after a catch-up', async () => {
+    const master = c.master.master!.database
+    const project = c.master.master!.projects.get('edge').id
+    // Three copies of 400 KiB: one sync carrying their texts would pass the link's 1 MiB cap.
+    const shas = ['a', 'b', 'c'].map((letter) => letter.repeat(40))
+    const text = (sha: string): string => `// ${sha}\n${'x'.repeat(400 * 1024)}`
+    await c.drop('host', 1000, async () => {
+      for (const sha of shas) {
+        master.db
+          .prepare(
+            "INSERT INTO masonfiles(key,project_id,commit_sha,file,text,created_at) VALUES(?,?,?,'Masonfile.ts',?,?)",
+          )
+          .run(`${project}:${sha}`, project, sha, text(sha), master.now())
+        master.change('masonfile', `${project}:${sha}`)
+      }
+    })
+    await c.until(
+      () =>
+        (
+          runtime()
+            .cache.db.prepare(
+              'SELECT count(*) AS n FROM masonfiles WHERE project_id=? AND text IS NOT NULL',
+            )
+            .get(project) as { n: number }
+        ).n === shas.length,
+      20000,
+      'the Masonfile texts on the host',
+    )
+    for (const sha of shas)
+      assert.equal(
+        (
+          runtime()
+            .cache.db.prepare('SELECT text FROM masonfiles WHERE key=?')
+            .get(`${project}:${sha}`) as { text: string }
+        ).text,
+        text(sha),
+      )
+    for (const sha of shas) {
+      master.db
+        .prepare('DELETE FROM masonfiles WHERE key=?')
+        .run(`${project}:${sha}`)
+      master.change('masonfile', `${project}:${sha}`, 'delete')
+    }
   })
 
   it('U10.10 a permission-version change ends that account’s host sessions', async () => {
@@ -1763,6 +1805,41 @@ describe('Plain emails on the host', () => {
     const snapshot = { kind: 'snapshot' as const, revision: 2, entities: {} }
     assert.equal(newerPart(snapshot, 3), undefined)
     assert.equal(newerPart({ ...snapshot, revision: 3 }, 3)?.revision, 3)
+  })
+
+  it('host schema 11 adds the project details column and the Masonfile copies, and resyncs', () => {
+    const dir = mkdtempSync(
+      path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'host-v11-'),
+    )
+    try {
+      new HostCache(dir).close()
+      const file = path.join(dir, 'host-cache.sqlite')
+      const old = new DatabaseSync(file)
+      old.exec(`DROP TABLE masonfiles;
+        ALTER TABLE projects DROP COLUMN details;
+        UPDATE host_meta SET value='10' WHERE key='host_schema';
+        UPDATE host_meta SET value='12' WHERE key='revision';`)
+      old.close()
+      const cache = new HostCache(dir)
+      try {
+        assert.ok(
+          cache.db
+            .prepare('PRAGMA table_info(projects)')
+            .all()
+            .some((column) => column.name === 'details'),
+        )
+        assert.ok(
+          cache.db
+            .prepare("SELECT 1 FROM sqlite_master WHERE name='masonfiles'")
+            .get(),
+        )
+        assert.equal(cache.revision(), 0)
+      } finally {
+        cache.close()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('a provider subject stops mapping to an account once the email it came with is taken away', () => {

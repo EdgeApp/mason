@@ -63,6 +63,8 @@ const tables: Record<
   setting: { table: 'host_settings', key: 'area' },
   /** API key verifiers, for the builds API: digests, never tokens. */
   key: { table: 'host_keys', key: 'id' },
+  /** Each run's Masonfile, as the master read it. */
+  masonfile: { table: 'masonfiles', key: 'key' },
 }
 
 /** Deleting in this order keeps foreign keys satisfied; applying uses the reverse. */
@@ -76,9 +78,10 @@ const order = [
   'build',
   'job',
   'key',
+  'masonfile',
 ]
 
-const HOST_SCHEMA = 10
+const HOST_SCHEMA = 11
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -162,6 +165,18 @@ function migrateHost(db: DatabaseSync): void {
     ${accounts.some((column) => column.name === 'has_password') ? '' : 'ALTER TABLE accounts ADD COLUMN has_password INTEGER NOT NULL DEFAULT 0;'}
     INSERT INTO host_meta(key,value) VALUES('revision','0') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     INSERT INTO host_meta(key,value) VALUES('host_schema','10') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  }
+  // The project pages' details and each run's Masonfile, kept here so the
+  // host shows them without the master. A snapshot fills both.
+  if (current < 11) {
+    const projects = db.prepare('PRAGMA table_info(projects)').all()
+    db.exec(`BEGIN IMMEDIATE;
+    ${projects.some((column) => column.name === 'details') ? '' : 'ALTER TABLE projects ADD COLUMN details TEXT;'}
+    CREATE TABLE IF NOT EXISTS masonfiles(key TEXT PRIMARY KEY, project_id INTEGER NOT NULL,
+      commit_sha TEXT NOT NULL, file TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, text TEXT) STRICT;
+    INSERT INTO host_meta(key,value) VALUES('revision','0') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    INSERT INTO host_meta(key,value) VALUES('host_schema','11') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
   }
 }
@@ -434,6 +449,19 @@ export class HostCache {
     const spec = tables[entity]!
     let row = value.row
     if (entity === 'account') row = { ...row, is_admin: 0, is_tester: 1 }
+    // A sync leaves out a Masonfile's text, which the host fetches; a row
+    // the master replaced under the same key (another size or file) drops
+    // the text it had, so it is fetched again.
+    if (entity === 'masonfile') {
+      const cached = this.db
+        .prepare('SELECT size,file FROM masonfiles WHERE key=?')
+        .get(row.key as string) as { size: number; file: string } | undefined
+      if (
+        cached != null &&
+        (cached.size !== row.size || cached.file !== row.file)
+      )
+        row = { ...row, text: null }
+    }
     this.insert(spec.table, row, spec.key)
     for (const [child, link] of Object.entries(spec.children ?? {})) {
       this.db

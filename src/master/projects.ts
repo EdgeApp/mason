@@ -353,6 +353,13 @@ export class Projects {
       if (busy != null)
         throw new ProjectConflict('The project has queued or running jobs')
       this.db.prepare('DELETE FROM jobs WHERE project_id=?').run(Number(row.id))
+      // Its kept Masonfiles go too, here and on the host.
+      for (const copy of this.db
+        .prepare('SELECT key FROM masonfiles WHERE project_id=?')
+        .all(Number(row.id)) as Array<{ key: string }>) {
+        this.db.prepare('DELETE FROM masonfiles WHERE key=?').run(copy.key)
+        this.master.change('masonfile', copy.key, 'delete')
+      }
       this.db.prepare('DELETE FROM projects WHERE id=?').run(Number(row.id))
       this.master.audit(actor, 'project.remove', slug)
       this.master.change('project', slug, 'delete')

@@ -551,4 +551,27 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await m.close()
     }
   })
+
+  it('E6 a developer reads the project’s Overview, Runs and builds and Masonfile on the host, the Masonfile also while the link is down', async () => {
+    const h = await browser('mason-e6-dev', host, '1280x860')
+    try {
+      // Signing in returns to the page asked for.
+      await hostSignIn(h, 'dev', PASSWORDS.dev!, '/projects/fixture')
+      await h.visible('App IDs')
+      await h.visible('Build numbers')
+      await h.gone('^Secrets$')
+      await h.gone('Set where it stands')
+      await h.shot('host-project-after.png')
+      await h.open('/projects/fixture/runs?branch=develop')
+      await h.visible('build-beta')
+      await h.open('/projects/fixture/masonfile')
+      await h.visible('m.workflow')
+      await c.drop('host', 8000, async () => {
+        await h.open('/projects/fixture/masonfile')
+        await h.visible('m.workflow')
+      })
+    } finally {
+      await h.close()
+    }
+  })
 })

@@ -3,7 +3,6 @@ import { existsSync, readFileSync } from 'node:fs'
 import {
   authRoutes,
   cookieOptions,
-  navigation,
   SESSION_COOKIE,
   sessionContext,
   type AuthOptions,
@@ -21,8 +20,18 @@ import {
   testBanner,
   type WebAppContext,
 } from '../node/webApp.js'
-import { accountView } from '../view/admin.js'
-import { artifactsView } from '../view/artifacts.js'
+import {
+  accountView,
+  masonfileView,
+  projectRunsView,
+  projectView,
+} from '../view/admin.js'
+import {
+  SCRIPT_PROJECT,
+  storedDetails,
+  type ProjectDetails,
+} from '../master/projectDetails.js'
+import { artifactsView, projectRunsData } from '../view/artifacts.js'
 import { dashboardData, dashboardView } from '../view/dashboard.js'
 import {
   approvalNotifications,
@@ -32,7 +41,7 @@ import {
 import { graphFromJson, runData, runTitle, runView } from '../view/run.js'
 import { search } from '../view/search.js'
 import { page, shell, type Viewer } from '../view/shell.js'
-import { escape, runName } from '../view/html.js'
+import { escape } from '../view/html.js'
 import { stylesheet } from '../view/stylesheet.js'
 import type { Projected } from '../master/changes.js'
 import type { HostRuntime } from './runtime.js'
@@ -56,99 +65,6 @@ function offlineBanner(host: HostRuntime): RequestHandler {
     }) as typeof res.send
     next()
   }
-}
-
-/** A project's home: its apps the account may see and, for developers and up, its latest runs, each opening its run's page. */
-function projectRoutes(host: HostRuntime): express.Router {
-  const router = express.Router()
-  router.get('/projects/:slug', (req, res) => {
-    const context = sessionContext(req, host.accounts)
-    if (context == null) {
-      res.redirect(
-        303,
-        '/auth/login?return=' + encodeURIComponent(req.originalUrl),
-      )
-      return
-    }
-    const db = host.cache.db
-    const project = db
-      .prepare('SELECT * FROM projects WHERE slug=? AND enabled=1')
-      .get(String(req.params.slug)) as
-      | { id: number; slug: string; name: string }
-      | undefined
-    const nav = navigation(context.session, context.account)
-    const apps =
-      project == null
-        ? []
-        : (
-            db
-              .prepare(
-                'SELECT a.id,a.name,a.slug FROM project_apps pa JOIN apps a ON a.id=pa.app_id WHERE pa.project_id=? AND a.enabled=1 ORDER BY a.position,a.id',
-              )
-              .all(project.id) as Array<{
-              id: number
-              name: string
-              slug: string
-            }>
-          ).filter((app) =>
-            host.cache.store.visible(context.account.id, app.id),
-          )
-    const role = (
-      db
-        .prepare('SELECT role FROM accounts WHERE id=?')
-        .get(context.account.id) as { role: string }
-    ).role
-    if (project == null || (apps.length === 0 && role === 'tester')) {
-      res
-        .status(404)
-        .send(
-          page(
-            'Project unavailable',
-            '<p>This project is unavailable.</p>',
-            nav,
-          ),
-        )
-      return
-    }
-    const cards = apps
-      .map(
-        (app) =>
-          `<a class="app-card" href="/apps/${app.id}"><div><h2>${escape(app.name)}</h2><small>${escape(app.slug)}</small></div><span aria-hidden="true">→</span></a>`,
-      )
-      .join('')
-    const runs =
-      role === 'tester'
-        ? ''
-        : `<h2>Recent runs</h2><div class="build-list">${
-            (
-              db
-                .prepare(
-                  'SELECT id,number,workflow,branch,status,created FROM jobs WHERE project_id=? ORDER BY created DESC LIMIT 10',
-                )
-                .all(project.id) as Array<{
-                id: string
-                number: number
-                workflow: string
-                branch: string
-                status: string
-                created: number
-              }>
-            )
-              .map(
-                (run) =>
-                  `<a class="list-row" href="/runs/${encodeURIComponent(run.id)}"><div><strong>${escape(runName(run.workflow, run.number))}</strong><small>${escape(run.branch)} · ${new Date(run.created).toISOString().slice(0, 16).replace('T', ' ')} UTC</small></div><span>${escape(run.status)} <span aria-hidden="true">→</span></span></a>`,
-              )
-              .join('') || '<section class="card"><p>No runs yet.</p></section>'
-          }</div>`
-    res.send(
-      page(
-        project.name,
-        `<div class="app-list">${cards || '<section class="card"><p>No apps.</p></section>'}</div>${runs}`,
-        nav,
-      ),
-    )
-  })
-  return router
 }
 
 /** The signed-in person as the views see them, from the host's cache. */
@@ -220,6 +136,173 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       }),
     )
   }
+  /**
+   * A project's pages on the host: the master's views over the copy the
+   * master sends, read-only, for developers and up and only for a project
+   * with an app they may see. Testers reach apps through Install apps.
+   */
+  const projectPage = (
+    req: express.Request,
+    res: express.Response,
+  ):
+    | {
+        found: NonNullable<ReturnType<typeof hostViewer>>
+        project: { id: number; slug: string; name: string }
+        details: ProjectDetails
+      }
+    | undefined => {
+    const found = hostViewer(host, req)
+    if (found == null) {
+      res.redirect(
+        303,
+        '/auth/login?return=' + encodeURIComponent(req.originalUrl),
+      )
+      return undefined
+    }
+    const db = host.cache.db
+    const row = db
+      .prepare(
+        'SELECT id,slug,name,details FROM projects WHERE slug=? AND enabled=1',
+      )
+      .get(String(req.params.slug)) as
+      | { id: number; slug: string; name: string; details: string | null }
+      | undefined
+    const details = storedDetails(row?.details)
+    const sees =
+      row != null &&
+      (
+        db
+          .prepare('SELECT app_id FROM project_apps WHERE project_id=?')
+          .all(row.id) as Array<{ app_id: number }>
+      ).some((app) => host.cache.store.visible(found.accountId, app.app_id))
+    if (
+      row == null ||
+      details == null ||
+      !sees ||
+      found.viewer.role === 'tester'
+    ) {
+      render(
+        res.status(404),
+        found.viewer,
+        'Project',
+        '<p class="empty-state">There is no such project.</p>',
+        'dashboard',
+      )
+      return undefined
+    }
+    return {
+      found,
+      project: { id: row.id, slug: row.slug, name: row.name },
+      details,
+    }
+  }
+  router.get('/projects/:slug', (req, res) => {
+    const page = projectPage(req, res)
+    if (page == null) return
+    render(
+      res,
+      page.found.viewer,
+      page.project.name,
+      projectView({
+        slug: page.project.slug,
+        name: page.project.name,
+        ...page.details,
+        canSeed: false,
+        secrets: false,
+      }),
+      'dashboard',
+    )
+  })
+  router.get('/projects/:slug/runs', (req, res) => {
+    const page = projectPage(req, res)
+    if (page == null) return
+    const branch =
+      typeof req.query.branch === 'string' && req.query.branch !== ''
+        ? req.query.branch
+        : undefined
+    const now = host.now()
+    const { branches, runs } = projectRunsData(
+      {
+        db: host.cache.db,
+        viewer: page.found.viewer,
+        now,
+        appVisible: visible(page.found.accountId),
+        artifactBase: '',
+        reserved: (run): string | undefined =>
+          (
+            host.cache.db
+              .prepare('SELECT build_number FROM jobs WHERE id=?')
+              .get(run) as { build_number: string | null } | undefined
+          )?.build_number ?? undefined,
+      },
+      page.project.slug,
+      { ...(branch == null ? {} : { branch }), pinned: page.details.pinned },
+    )
+    render(
+      res,
+      page.found.viewer,
+      `${page.project.name} · Runs and builds`,
+      projectRunsView(
+        {
+          slug: page.project.slug,
+          name: page.project.name,
+          ...(branch == null ? {} : { branch }),
+          branches,
+          runs,
+          secrets: false,
+        },
+        now,
+      ),
+      'dashboard',
+    )
+  })
+  router.get('/projects/:slug/masonfile', (req, res) => {
+    const page = projectPage(req, res)
+    if (page == null) return
+    const db = host.cache.db
+    // The commits the host has a copy for, newest run first.
+    const commits = db
+      .prepare(
+        "SELECT j.commit_sha AS sha, j.branch FROM jobs j JOIN masonfiles m ON m.key=j.project_id || ':' || j.commit_sha WHERE j.project_id=? GROUP BY j.commit_sha ORDER BY MAX(j.created) DESC LIMIT 50",
+      )
+      .all(page.project.id) as Array<{ sha: string; branch: string }>
+    const commit =
+      typeof req.query.commit === 'string' ? req.query.commit : commits[0]?.sha
+    const kept =
+      commit == null
+        ? undefined
+        : (db
+            .prepare('SELECT file,text FROM masonfiles WHERE key=?')
+            .get(`${page.project.id}:${commit}`) as
+            | { file: string; text: string | null }
+            | undefined)
+    render(
+      res,
+      page.found.viewer,
+      `${page.project.name} · Masonfile`,
+      masonfileView({
+        slug: page.project.slug,
+        name: page.project.name,
+        commits,
+        ...(commit == null ? {} : { commit }),
+        ...(kept?.text == null ? {} : { file: kept.file, text: kept.text }),
+        ...(kept?.text != null
+          ? {}
+          : {
+              error:
+                page.details.format === 'script'
+                  ? SCRIPT_PROJECT
+                  : commit == null
+                    ? 'No run has a commit yet.'
+                    : kept != null
+                      ? 'The host is still copying that commit’s Masonfile from the master.'
+                      : 'The host has no copy of that commit’s Masonfile.',
+            }),
+        secrets: false,
+      }),
+      'dashboard',
+    )
+  })
   // Your account: the person's own record from the cache; changes go to the
   // master over the link, so the page is read-only while it is down.
   router.get('/account', (req, res) => {
@@ -694,7 +777,6 @@ export function hostApp(
   )
   app.use(deviceRoutes(host.cache.store, host.accounts, host.devices))
   app.use(installationRoutes(host.cache.store, host.accounts))
-  app.use(projectRoutes(host))
   app.use(viewRoutes(host, context))
   app.use(catalogRoutes(host.cache.store, host.accounts))
   app.use((_req, res) => {

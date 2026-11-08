@@ -1771,9 +1771,11 @@ export function masonfileView(data: {
   file?: string
   text?: string
   error?: string
+  /** False on the host, which has no Secrets tab. */
+  secrets?: boolean
 }): string {
   const lines = (data.text ?? '').split('\n')
-  return `${head(`${data.name} · Masonfile`, 'The Masonfile is the project’s configuration; it changes with the code.', [data.name, 'Masonfile'])}${projectTabs(data.slug, 'masonfile')}<form method="get" class="actions"><label for="commit" class="sr-only">Commit</label><select id="commit" name="commit">${data.commits.map((entry) => `<option value="${escape(entry.sha)}"${entry.sha === data.commit ? ' selected' : ''}>${escape(entry.sha.slice(0, 12))} · ${escape(entry.branch)}</option>`).join('')}</select><button class="secondary">Show</button></form>${
+  return `${head(`${data.name} · Masonfile`, 'The Masonfile is the project’s configuration; it changes with the code.', [data.name, 'Masonfile'])}${projectTabs(data.slug, 'masonfile', data.secrets)}<form method="get" class="actions"><label for="commit" class="sr-only">Commit</label><select id="commit" name="commit">${data.commits.map((entry) => `<option value="${escape(entry.sha)}"${entry.sha === data.commit ? ' selected' : ''}>${escape(entry.sha.slice(0, 12))} · ${escape(entry.branch)}</option>`).join('')}</select><button class="secondary">Show</button></form>${
     data.error != null
       ? `<p class="empty-state">${escape(data.error)}</p>`
       : data.text == null
@@ -1786,6 +1788,8 @@ export function masonfileView(data: {
 export function projectTabs(
   slug: string,
   current: 'overview' | 'runs' | 'masonfile' | 'secrets',
+  /** The host has no Secrets tab. */
+  secrets = true,
 ): string {
   const path = `/projects/${encodeURIComponent(slug)}`
   const tab = (key: string, href: string, label: string): string =>
@@ -1794,7 +1798,7 @@ export function projectTabs(
     tab('overview', path, 'Overview'),
     tab('runs', `${path}/runs`, 'Runs and builds'),
     tab('masonfile', `${path}/masonfile`, 'Masonfile'),
-    tab('secrets', `${path}/secrets`, 'Secrets'),
+    ...(secrets ? [tab('secrets', `${path}/secrets`, 'Secrets')] : []),
   ].join('')}</nav>`
 }
 
@@ -1978,6 +1982,8 @@ export function projectRunsView(
     branch?: string
     branches: BranchItem[]
     runs: ProjectRunRow[]
+    /** False on the host, which has no Secrets tab. */
+    secrets?: boolean
   },
   now: number,
 ): string {
@@ -2005,7 +2011,7 @@ export function projectRunsView(
       ? '<li class="divider" role="separator"></li>'
       : ''
   }${others.map(branch).join('')}</ul></nav>`
-  return `${head(`${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch.' : `The latest runs on ${data.branch}.`, [data.name, 'Runs and builds'])}${projectTabs(data.slug, 'runs')}<div class="runs-columns">${list}<section class="panel"><h2>${data.branch == null ? 'All branches' : `<span class="mono">${escape(data.branch)}</span>`}</h2>${projectRunsTable(data.runs, now, data.branch == null)}</section></div>`
+  return `${head(`${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch.' : `The latest runs on ${data.branch}.`, [data.name, 'Runs and builds'])}${projectTabs(data.slug, 'runs', data.secrets)}<div class="runs-columns">${list}<section class="panel"><h2>${data.branch == null ? 'All branches' : `<span class="mono">${escape(data.branch)}</span>`}</h2>${projectRunsTable(data.runs, now, data.branch == null)}</section></div>`
 }
 
 /** A project on the master: repository, app IDs, branch rules, build numbers, and its tabs. */
@@ -2030,8 +2036,10 @@ export function projectView(data: {
     last: Array<{ branch: string; value: string }>
   }>
   canSeed: boolean
+  /** False on the host, which has no Secrets tab. */
+  secrets?: boolean
 }): string {
-  return `${head(data.name, data.repository, ['Projects', data.slug])}${projectTabs(data.slug, 'overview')}<section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
+  return `${head(data.name, data.repository, ['Projects', data.slug])}${projectTabs(data.slug, 'overview', data.secrets)}<section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
     data.apps
       .map(
         (app) =>

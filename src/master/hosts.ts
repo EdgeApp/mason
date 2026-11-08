@@ -558,6 +558,16 @@ export class HostLinks {
           this.sent.set(fingerprint, sync.revision)
           return sync
         },
+        /** A kept Masonfile's text, which a sync leaves out. */
+        'masonfile.text': (params, link): { text: string | null } => {
+          this.host(link)
+          const row = this.options.master.db
+            .prepare('SELECT text FROM masonfiles WHERE key=?')
+            .get(String((params as { key?: unknown } | null)?.key ?? '')) as
+            | { text: string }
+            | undefined
+          return { text: row?.text ?? null }
+        },
         'webhook.github': (params, link): WebhookResult => {
           this.host(link)
           return this.webhook(params)

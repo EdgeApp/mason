@@ -372,9 +372,43 @@ export class HostRuntime {
   apply(sync: Sync, opening = false): void {
     if (this.stopped) return
     this.cache.apply(sync, opening)
+    void this.fillMasonfiles()
     void this.artifacts.cleanup().catch((error: unknown) => {
       this.options.log?.(`Artifact cleanup failed: ${(error as Error).message}`)
     })
+  }
+
+  /** The texts of kept Masonfiles a sync brought without them, fetched one request each. */
+  private filling: Promise<void> | undefined
+  async fillMasonfiles(): Promise<void> {
+    this.filling ??= (async (): Promise<void> => {
+      for (;;) {
+        const link = this.options.link()
+        if (link == null || link.closed || this.stopped) return
+        const missing = this.cache.db
+          .prepare('SELECT key FROM masonfiles WHERE text IS NULL LIMIT 20')
+          .all() as Array<{ key: string }>
+        if (missing.length === 0) return
+        for (const { key } of missing) {
+          const { text } = (await link.request('masonfile.text', { key })) as {
+            text: string | null
+          }
+          // Gone on the master: its delete is on its way.
+          this.cache.db
+            .prepare('UPDATE masonfiles SET text=? WHERE key=?')
+            .run(text ?? '', key)
+        }
+      }
+    })()
+      .catch((error: unknown) => {
+        this.options.log?.(
+          `Fetching Masonfiles failed: ${(error as Error).message}`,
+        )
+      })
+      .finally(() => {
+        this.filling = undefined
+      })
+    await this.filling
   }
 
   methods(): MethodTable {

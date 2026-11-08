@@ -4,6 +4,7 @@ import path from 'node:path'
 import { after, before, describe, it } from 'mocha'
 import { SESSION_COOKIE } from '../auth/routes.js'
 import { MASTER_SESSION_COOKIE } from '../master/auth.js'
+import { MASONFILE_COPIES } from '../master/scheduler.js'
 import { localOperator } from '../master/roles.js'
 import { contentSecurityPolicy } from '../node/webApp.js'
 import { pinnedFetch } from '../node/pinnedFetch.js'
@@ -19,6 +20,10 @@ interface Reply {
   location: string
   setCookie: string
 }
+
+// Copies are read field by field.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Json = any
 
 describe('Pages on the master and the host', function () {
   this.timeout(120_000)
@@ -268,6 +273,232 @@ describe('Pages on the master and the host', function () {
       (await get(c.master, '/', onMaster('developer'))).text,
       /not backed up<\/li>/,
     )
+  })
+
+  it('M5.1 the host serves Overview, Runs and builds and Masonfile from its own copy, read-only, for developers and up', async () => {
+    const master = c.master.master!
+    const project = master.projects.get('views')
+    // A run pins its commit; the master keeps that commit's Masonfile once.
+    const run = await c.api('POST', '/api/v2/runs', {
+      project: 'views',
+      branch: 'master',
+    })
+    assert.equal(run.status, 202, run.text)
+    const key = await c.until(
+      () =>
+        master.database.db
+          .prepare('SELECT key FROM masonfiles WHERE project_id=?')
+          .get(project.id)?.key as string | undefined,
+      20_000,
+      'the Masonfile kept',
+    )
+    assert.match(key, new RegExp(`^${project.id}:[0-9a-f]{40}$`))
+    // A read that finds no Masonfile keeps nothing, and the next one tries again.
+    const commit = key.split(':')[1]!
+    master.database.db.prepare('DELETE FROM masonfiles WHERE key=?').run(key)
+    const keep = (
+      master.scheduler as unknown as {
+        keepMasonfile: (project: unknown, commit: string) => Promise<void>
+      }
+    ).keepMasonfile.bind(master.scheduler)
+    await keep({ ...project, entrypoint: 'Missing.ts' }, commit)
+    assert.equal(
+      master.database.db
+        .prepare('SELECT 1 FROM masonfiles WHERE key=?')
+        .get(key),
+      undefined,
+    )
+    await keep({ ...project, format: 'script' }, commit)
+    assert.equal(
+      master.database.db
+        .prepare('SELECT 1 FROM masonfiles WHERE key=?')
+        .get(key),
+      undefined,
+    )
+    await keep(project, commit)
+    await keep(project, commit)
+    // A Masonfile too large to copy is kept as a note saying so.
+    const mirrors = master.mirrors
+    const file = mirrors.file.bind(mirrors)
+    mirrors.file = async (...args): ReturnType<typeof file> => ({
+      blob: (await file(...args))!.blob,
+    })
+    master.database.db.prepare('DELETE FROM masonfiles WHERE key=?').run(key)
+    try {
+      await keep(project, commit)
+    } finally {
+      mirrors.file = file
+    }
+    assert.match(
+      (
+        master.database.db
+          .prepare('SELECT text FROM masonfiles WHERE key=?')
+          .get(key) as { text: string }
+      ).text,
+      /larger than 256 KiB; Mason keeps no copy/,
+    )
+    // The master still shows that Masonfile, from its mirror (review 2.harness-review.3).
+    const tab = await get(
+      c.master,
+      `/projects/views/masonfile?commit=${commit}`,
+      onMaster('developer'),
+    )
+    assert.match(tab.text, /export function setup/)
+    assert.doesNotMatch(tab.text, /Mason keeps no copy/)
+    // Only the newest commits' copies stay: past the limit the oldest go.
+    const fill = master.database.db.prepare(
+      "INSERT INTO masonfiles(key,project_id,commit_sha,file,text,created_at) VALUES(?,?,?,'Masonfile.ts','old',?)",
+    )
+    for (let n = 0; n < MASONFILE_COPIES; n++)
+      fill.run(`${project.id}:old${n}`, project.id, `old${n}`, n)
+    master.database.db.prepare('DELETE FROM masonfiles WHERE key=?').run(key)
+    await keep(project, commit)
+    const left = master.database.db
+      .prepare('SELECT key FROM masonfiles WHERE project_id=?')
+      .all(project.id)
+      .map((row) => String(row.key))
+    assert.equal(left.length, MASONFILE_COPIES)
+    assert.ok(left.includes(key))
+    assert.ok(!left.includes(`${project.id}:old0`))
+    assert.ok(
+      master.database.db
+        .prepare(
+          "SELECT 1 FROM change_log WHERE entity='masonfile' AND key=? AND operation='delete'",
+        )
+        .get(`${project.id}:old0`),
+    )
+    assert.equal(
+      (
+        master.database.db
+          .prepare('SELECT file FROM masonfiles WHERE key=?')
+          .get(key) as { file: string }
+      ).file,
+      'Masonfile.ts',
+    )
+    assert.equal(
+      (
+        master.database.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM change_log WHERE entity='masonfile' AND key=?",
+          )
+          .get(key) as { n: number }
+      ).n,
+      // One change per copy stored (the run's, then three stored again
+      // above); keeping a commit that has one adds none.
+      4,
+    )
+    // A declared sequence and a seed reach the host's copy.
+    master.buildNumbers.declare(project.id, 'app.example.views', {
+      format: 'N',
+      scope: 'app',
+      start: 1,
+      timeZone: 'UTC',
+    })
+    master.seed('views', 'app.example.views', { last: '41' }, localOperator)
+    const copy = async (): Promise<Json> =>
+      await c.until(
+        () => {
+          const row = host
+            .host!.cache.db.prepare(
+              "SELECT details FROM projects WHERE slug='views'",
+            )
+            .get() as { details: string | null } | undefined
+          const details =
+            row?.details == null ? undefined : JSON.parse(row.details)
+          return details?.buildNumbers?.[0]?.last?.[0]?.value === '41'
+            ? details
+            : undefined
+        },
+        10_000,
+        'the seeded sequence on the host',
+      )
+    const details = await copy()
+    assert.equal(details.repository, project.repository)
+    assert.deepEqual(details.apps, [
+      { bundleId: 'app.example.views', platforms: ['android', 'ios'] },
+    ])
+    await c.until(
+      () =>
+        host
+          .host!.cache.db.prepare('SELECT 1 FROM masonfiles WHERE key=?')
+          .get(key),
+      10_000,
+      'the Masonfile on the host',
+    )
+    // The Overview's App IDs card and Build numbers read the same on both
+    // nodes; the host has no Secrets tab and no seed form.
+    const onTheMaster = await get(
+      c.master,
+      '/projects/views',
+      onMaster('manager'),
+    )
+    const onTheHost = await get(host, '/projects/views', onHost('manager'))
+    assert.equal(onTheHost.status, 200, onTheHost.text.slice(0, 300))
+    const card = (html: string): string =>
+      html.slice(html.indexOf('App IDs'), html.indexOf('id="build-numbers"'))
+    assert.equal(card(onTheHost.text), card(onTheMaster.text))
+    assert.match(onTheMaster.text, /\/projects\/views\/secrets/)
+    assert.doesNotMatch(onTheHost.text, /\/projects\/views\/secrets/)
+    assert.match(onTheMaster.text, /Set where it stands/)
+    assert.doesNotMatch(onTheHost.text, /Set where it stands/)
+    assert.match(onTheHost.text, /<td class="mono">app\.example\.views<\/td>/)
+    const runs = await get(host, '/projects/views/runs', onHost('developer'))
+    assert.equal(runs.status, 200)
+    assert.match(runs.text, /Runs and builds/)
+    // The Masonfile shows from the copy, also while the link is down.
+    let offline = ''
+    await c.drop('host', 2000, async () => {
+      offline = (
+        await get(host, '/projects/views/masonfile', onHost('developer'))
+      ).text
+    })
+    assert.match(offline, /export function setup/)
+    // Testers reach apps through Install apps, not project pages.
+    for (const route of [
+      '/projects/views',
+      '/projects/views/runs',
+      '/projects/views/masonfile',
+    ])
+      assert.equal(
+        (await get(host, route, onHost('tester'))).status,
+        404,
+        route,
+      )
+    assert.equal(
+      (await get(host, '/projects/nothing', onHost('developer'))).status,
+      404,
+    )
+  })
+
+  it('removing a project removes its kept Masonfiles, on the host too (review 3.harness-review.4)', async () => {
+    const master = c.master.master!
+    const repo = c.repo('fixtures/gone')
+    repo.commit({ 'Masonfile.ts': 'export function setup() {}' })
+    master.saveProject(localOperator, 'gone', {
+      repository: repo.url,
+      rules: [{ pattern: '*', mode: 'request' }],
+    })
+    const id = master.projects.get('gone').id
+    const key = `${id}:${'d'.repeat(40)}`
+    master.database.db
+      .prepare(
+        "INSERT INTO masonfiles(key,project_id,commit_sha,file,text,created_at) VALUES(?,?,?,'Masonfile.ts','x',0)",
+      )
+      .run(key, id, 'd'.repeat(40))
+    master.database.change('masonfile', key)
+    const onHost = (): unknown =>
+      host
+        .host!.cache.db.prepare('SELECT 1 FROM masonfiles WHERE key=?')
+        .get(key)
+    await c.until(() => onHost(), 10_000, 'the copy on the host')
+    master.projects.remove(localOperator, 'gone')
+    assert.equal(
+      master.database.db
+        .prepare('SELECT 1 FROM masonfiles WHERE project_id=?')
+        .get(id),
+      undefined,
+    )
+    await c.until(() => onHost() == null || undefined, 10_000, 'the copy gone')
   })
 
   it('E2E only: the host opens a test session in a browser that cannot be handed a cookie', async () => {

@@ -234,15 +234,35 @@ export class BuildNumbers {
     readonly countBase: () => number = () => 0,
   ) {}
 
-  /** Records the scheme a project's setup declared for a key. */
+  /**
+   * Records the scheme a project's setup declared for a key, with the app
+   * IDs it is shared with (`apps`, which the graph checked), for the pages.
+   */
   declare(projectId: number, key: string, value: unknown): BuildNumberScheme {
-    const scheme = asScheme(value)
+    const apps = (value as { apps?: unknown } | undefined)?.apps
+    const scheme: BuildNumberScheme = {
+      ...asScheme(value),
+      ...(Array.isArray(apps) &&
+      apps.length > 0 &&
+      apps.every((app) => typeof app === 'string')
+        ? { apps: apps as string[] }
+        : {}),
+    }
     this.master.db
       .prepare(
         'INSERT INTO build_number_schemes(project_id,key,scheme) VALUES(?,?,?) ON CONFLICT(project_id,key) DO UPDATE SET scheme=excluded.scheme',
       )
       .run(projectId, key, JSON.stringify(scheme))
+    this.changed(projectId)
     return scheme
+  }
+
+  /** The host keeps each project's sequences: a write records the project's change. */
+  private changed(projectId: number): void {
+    const row = this.master.db
+      .prepare('SELECT slug FROM projects WHERE id=?')
+      .get(projectId) as { slug: string } | undefined
+    if (row != null) this.master.change('project', row.slug)
   }
   scheme(projectId: number, key: string): BuildNumberScheme | undefined {
     const row = this.master.db
@@ -417,6 +437,7 @@ export class BuildNumbers {
           'INSERT INTO build_number_reservations(project_id,key,reservation,value,block,created_at) VALUES(?,?,?,?,?,?)',
         )
         .run(projectId, key, reservation, rendered, block, this.master.now())
+      this.changed(projectId)
       return { value: rendered, block }
     })
   }
@@ -492,6 +513,7 @@ export class BuildNumbers {
         'build-numbers.seed',
         `${projectId}:${key}:${branch}`,
       )
+      this.changed(projectId)
     })
     return { key, branch, last }
   }

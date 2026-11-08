@@ -675,7 +675,8 @@ describe('Design system and views', () => {
         .href,
       '/apps/2',
     )
-    // A tester finds the app IDs shared with them and their projects, nothing else.
+    // A tester finds the app IDs shared with them; on the host no projects,
+    // which have no pages for testers there.
     const tester = {
       db,
       viewer: viewer('tester', 'host'),
@@ -683,10 +684,13 @@ describe('Design system and views', () => {
     }
     assert.deepEqual(
       search(tester, 'desk').map((result) => [result.kind, result.href]),
-      [
-        ['project', '/projects/desk'],
-        ['app', '/apps/3'],
-      ],
+      [['app', '/apps/3']],
+    )
+    assert.deepEqual(
+      search({ ...tester, viewer: viewer('tester', 'master') }, 'desk').map(
+        (result) => result.kind,
+      ),
+      ['project', 'app'],
     )
     assert.deepEqual(search(tester, 'phone'), [])
     assert.deepEqual(search(tester, '#1'), [])
