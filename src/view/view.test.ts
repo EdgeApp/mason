@@ -750,12 +750,16 @@ describe('Design system and views', () => {
     // LIKE wildcards are matched literally.
     assert.deepEqual(find('%'), [])
     assert.equal(search(developer, 'phone')[0]!.href, '/projects/phones')
-    assert.equal(search(developer, 'phone')[1]!.href, '/projects/phones')
+    // An app ID opens its page in its project, on either node.
+    assert.equal(
+      search(developer, 'phone')[1]!.href,
+      '/projects/phones/apps/app.example.phone',
+    )
     assert.equal(search(developer, '#2')[0]!.href, '/runs/run-2')
     assert.equal(
       search({ ...developer, viewer: viewer('developer', 'host') }, 'watch')[0]!
         .href,
-      '/apps/2',
+      '/projects/phones/apps/app.example.watch',
     )
     // A tester finds the app IDs shared with them, each opening Install
     // apps, and no projects, which have no pages for testers on either node.

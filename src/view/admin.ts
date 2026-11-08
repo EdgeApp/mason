@@ -1,6 +1,8 @@
 import { bytes, platformChip, statusDot } from './dashboard.js'
 import {
   ago,
+  appCrumbs,
+  appPath,
   breadcrumbs,
   escape,
   localTime,
@@ -23,6 +25,7 @@ import {
   type GroupPerson,
 } from './groups.js'
 import { spacesRegions } from '../master/cloud/regions.js'
+import type { BuildNumberSequence } from '../master/projectDetails.js'
 import { SETUP_LABEL } from '../pipeline/graph.js'
 
 const statusLine =
@@ -87,14 +90,14 @@ export interface CrumbViewer {
 /** The master's own pages, which no other node serves. */
 const MASTER: CrumbViewer = { node: 'master' }
 
-/** A page's heading: its breadcrumbs, title and one line about it. */
+/** A page's heading: its breadcrumbs, title and one line about it, text or `{ html }`. */
 export function head(
   viewer: CrumbViewer,
   title: string,
-  intro: string,
+  intro: string | { html: string },
   crumbs: Crumb[],
 ): string {
-  return `<div class="page-head"><div>${breadcrumbs(viewer, crumbs)}<h1>${escape(title)}</h1><p>${escape(intro)}</p></div></div>`
+  return `<div class="page-head"><div>${breadcrumbs(viewer, crumbs)}<h1>${escape(title)}</h1><p>${typeof intro === 'string' ? escape(intro) : intro.html}</p></div></div>`
 }
 
 export interface NodeRow {
@@ -1839,6 +1842,37 @@ export function projectTabs(
   ].join('')}</nav>`
 }
 
+/** The two tabs of an app ID's pages: Runs and builds (its own page) and Build numbers. */
+export function appTabs(
+  slug: string,
+  appId: string,
+  current: 'runs' | 'build-numbers',
+): string {
+  const path = appPath(slug, appId)
+  const tab = (key: string, href: string, label: string): string =>
+    `<a href="${escape(href)}"${key === current ? ' aria-current="page"' : ''}>${label}</a>`
+  return `<nav class="tabs" aria-label="App ID">${tab('runs', path, 'Runs and builds')}${tab('build-numbers', `${path}/build-numbers`, 'Build numbers')}</nav>`
+}
+
+/** An app ID as its pages head it: the ID, its name and its platforms. */
+export interface AppHeading {
+  bundleId: string
+  name: string
+  platforms: string[]
+}
+
+/** An app ID page's heading: the app ID, then its name and platform chips. */
+function appHead(
+  viewer: CrumbViewer,
+  slug: string,
+  name: string,
+  app: AppHeading,
+  tab: 'runs' | 'build-numbers',
+  branch?: string,
+): string {
+  return `${head(viewer, app.bundleId, { html: `${escape(app.name)} · ${app.platforms.map(platformChip).join(' ')}` }, appCrumbs(slug, name, app.bundleId, tab, branch))}${appTabs(slug, app.bundleId, tab)}`
+}
+
 /** One secret variant as the Secrets tab lists it. */
 export interface SecretRowView {
   id: number
@@ -2023,10 +2057,15 @@ export function projectRunsView(
     runs: ProjectRunRow[]
     /** False on the host, which has no Secrets tab. */
     secrets?: boolean
+    /** An app ID's Runs and builds: only the runs that publish it, under its own heading and tabs. */
+    app?: AppHeading
   },
   now: number,
 ): string {
-  const base = `/projects/${encodeURIComponent(data.slug)}/runs`
+  const base =
+    data.app == null
+      ? `/projects/${encodeURIComponent(data.slug)}/runs`
+      : appPath(data.slug, data.app.bundleId)
   const item = (
     label: string,
     href: string,
@@ -2050,7 +2089,18 @@ export function projectRunsView(
       ? '<li class="divider" role="separator"></li>'
       : ''
   }${others.map(branch).join('')}</ul></nav>`
-  return `${head(data.viewer, `${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch.' : `The latest runs on ${data.branch}.`, runsCrumbs(data.slug, data.name, data.branch))}${projectTabs(data.slug, 'runs', data.secrets)}<div class="runs-columns">${list}<section class="panel"><h2>${data.branch == null ? 'All branches' : `<span class="mono">${escape(data.branch)}</span>`}</h2>${projectRunsTable(data.runs, now, data.branch == null)}</section></div>`
+  const heading =
+    data.app == null
+      ? `${head(data.viewer, `${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch.' : `The latest runs on ${data.branch}.`, runsCrumbs(data.slug, data.name, data.branch))}${projectTabs(data.slug, 'runs', data.secrets)}`
+      : appHead(
+          data.viewer,
+          data.slug,
+          data.name,
+          data.app,
+          'runs',
+          data.branch,
+        )
+  return `${heading}<div class="runs-columns">${list}<section class="panel"><h2>${data.branch == null ? 'All branches' : `<span class="mono">${escape(data.branch)}</span>`}</h2>${projectRunsTable(data.runs, now, data.branch == null)}</section></div>`
 }
 
 /** A project on the master: repository, app IDs, branch rules, build numbers, and its tabs. */
@@ -2095,6 +2145,96 @@ export function projectView(data: {
       )
       .join('') || '<tr><td>No rules: nothing builds.</td></tr>'
   }</tbody></table><p>Default branch <span class="mono">${escape(data.defaultBranch)}</span> · ${escape(data.format)} Masonfile · webhook ${data.webhook ? 'set' : 'not set'}${data.signingLabel == null ? '' : ` · signs on nodes labelled <span class="mono">${escape(data.signingLabel)}</span>`}</p></section>${buildNumbersPanel(data)}`
+}
+
+/** An app ID page for one the project does not have, or the viewer may not see: 404 under the project. */
+export function appMissingView(
+  viewer: CrumbViewer,
+  slug: string,
+  name: string,
+): string {
+  return `${head(viewer, 'App ID unavailable', `${name} has no such app ID.`, projectCrumbs(slug, name))}<p class="empty-state">There is no such app ID in this project.</p>`
+}
+
+/**
+ * The sequence an app ID takes its build numbers from, as the scheduler
+ * picks it: a shared sequence whose `apps` lists it, else its own key;
+ * undefined for the default scheme.
+ */
+export function appSequence(
+  sequences: BuildNumberSequence[],
+  appId: string,
+): BuildNumberSequence | undefined {
+  return (
+    sequences.find((sequence) => sequence.apps.includes(appId)) ??
+    sequences.find((sequence) => sequence.key === appId)
+  )
+}
+
+/**
+ * An app ID's Build numbers tab: the sequence it takes its numbers from
+ * (its own key, or a shared one, naming the app IDs it is shared with), else
+ * the default scheme; and, for a manager on the master, a form preset to
+ * that sequence that sets where it stands.
+ */
+export function appBuildNumbersView(data: {
+  /** The node the page is on, which its breadcrumbs start from. */
+  viewer: CrumbViewer
+  slug: string
+  name: string
+  app: AppHeading
+  /** The project's app IDs: a shared sequence's key is one of them, or a name of its own. */
+  projectApps: string[]
+  buildNumbers: BuildNumberSequence[]
+  /** A manager on the master; the host is read-only. */
+  canSeed: boolean
+}): string {
+  const id = data.app.bundleId
+  const sequence = appSequence(data.buildNumbers, id)
+  const scope = (value: string): string =>
+    value === 'branch' ? 'per branch' : 'across branches'
+  let body: string
+  if (sequence == null)
+    body = `<p>No sequence in the Masonfile names <span class="mono">${escape(id)}</span>, so it takes the default scheme: <span class="mono">N</span>, ${scope('app')}.</p>`
+  else {
+    const shared = [
+      ...(sequence.key !== id && data.projectApps.includes(sequence.key)
+        ? [sequence.key]
+        : []),
+      ...sequence.apps.filter((app) => app !== id),
+    ]
+    // One line per branch (none for a sequence across branches).
+    const last =
+      sequence.last
+        .map(
+          (entry) =>
+            `${entry.branch === '' ? '' : `<span class="mono">${escape(entry.branch)}</span> `}<span class="mono">${escape(entry.value)}</span>`,
+        )
+        .join('<br>') || 'None yet.'
+    const form = data.canSeed
+      ? apiForm(
+          '/api/v2/build-numbers/seed',
+          `<input type="hidden" name="project" value="${escape(data.slug)}"><input type="hidden" name="key" value="${escape(sequence.key)}">${sequence.scope === 'branch' ? '<label for="seed-branch">Branch</label><input id="seed-branch" name="branch" required>' : ''}<label for="seed-last">Last number issued</label><input id="seed-last" name="last" class="mono" required placeholder="${escape(sequence.format)}"><p>The next build of <span class="mono">${escape(sequence.key)}</span> gets the number after it. Nothing is lowered.</p>`,
+          `${icon('edit')} Set where it stands`,
+          {
+            fields: [
+              'project',
+              'key',
+              ...(sequence.scope === 'branch' ? ['branch'] : []),
+              'last',
+            ],
+            then: 'reload',
+            className: 'secondary',
+          },
+        )
+      : ''
+    body = `<dl class="facts"><dt>Sequence</dt><dd class="mono">${escape(sequence.key)}</dd><dt>Format</dt><dd class="mono">${escape(sequence.format)}</dd><dt>Scope</dt><dd>${scope(sequence.scope)}</dd><dt>Last issued</dt><dd>${last}</dd></dl>${
+      shared.length === 0
+        ? ''
+        : `<p data-shared>Shared with: ${shared.map((app) => `<span class="mono">${escape(app)}</span>`).join(', ')}</p>`
+    }${form}`
+  }
+  return `${appHead(data.viewer, data.slug, data.name, data.app, 'build-numbers')}<section class="panel" id="build-numbers"><h2>${icon('label')}Build numbers</h2>${body}</section>`
 }
 
 /** One cloud account on the Cloud page: its provider, what its last check found, and its actions. */

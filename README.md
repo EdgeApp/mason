@@ -204,11 +204,25 @@ links that wraps on a phone. The first is **Mason Master** on the master and
 node's home; the last is the page itself. A project's pages go Projects ›
 the project › Runs and builds (or Masonfile, or Secrets) › a branch picked
 there, and a run's page Projects › the project › Runs and builds › its
-branch › Run N, so Runs and builds returns to all branches. Install apps
+branch › Run N, so Runs and builds returns to all branches. An app ID's
+pages go Projects › the project › the app ID › Runs and builds (or Build
+numbers) › a branch. Install apps
 goes Install apps › the app › the branch, and Artifacts › the project ›
 Run N; Devices, Your account and the master's Nodes, Cloud, People,
 Groups › a group, Settings and Backups are one level each, as the side menu
 lists them.
+
+Each app ID of a project has its own pages on both nodes, for developers
+and up: `/projects/<project>/apps/<app ID>` is its **Runs and builds**, the
+runs whose workflow publishes that app ID (from a stage or a post stage)
+and only the branches that have one, with `?branch=` as on the project; and
+`…/build-numbers` is its **Build numbers**: the sequence it takes its
+numbers from (its own key, or a shared one, saying which app IDs it is
+shared with), else the default scheme (`N`, across branches). On the master
+a manager can set where that sequence stands there; the host shows it read
+only. An app ID the project does not have answers 404 under the project.
+⌘K search opens an app ID's page for developers and up, and a tester's
+Install apps page for testers.
 
 The standalone distribution server (below) draws its pages the same way,
 with Install apps and Devices, **People** for its administrators, and a
