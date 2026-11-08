@@ -572,7 +572,8 @@ describe('Invitation links', function () {
     )
     const page = await b.send('GET', '/people')
     assert.equal(page.status, 200)
-    assert.match(page.text, /Invited · the link expires <time/)
+    assert.match(page.text, />Invite again<\/button>/)
+    assert.match(page.text, /<small class="hint">Expires <time/)
     assert(
       page.text.includes(
         `data-path="/api/v2/people/${made.json.id}/invitation" data-method="DELETE"`,

@@ -1494,86 +1494,157 @@ function nodeTypesCard(types: Record<string, NodeTypeView>): string {
 /** The box an invitation link appears in, once, with Copy. */
 const linkBox = `<div data-field="token" hidden><p class="notice">Copy this link to them now: Mason sends no email, keeps only a hash of it and cannot show it again. It works once.</p><div class="command"><pre class="mono"></pre><button type="button" class="secondary copy" data-copy="">${icon('content_copy')}<span data-copy-label>Copy</span></button></div><p><a href="/people">Done</a></p></div>`
 
-/** People: roles and per-method addresses; administrators change them. */
+/** One person as the People page and Your account show them. */
+export interface PersonRow {
+  id: number
+  name: string
+  role: string
+  emails: Array<{ email: string; confirmed: boolean }>
+  username?: string
+  disabled?: boolean
+  /** Whether they have a password. */
+  password?: boolean
+  /** An unused invitation link: when it expires. */
+  invitation?: { expiresAt: number }
+}
+
+const roles = ['admin', 'manager', 'developer', 'tester']
+
+const passwordFields = (prefix: string, required: boolean): string =>
+  `<label for="${prefix}-password">${required ? 'Password' : 'Password (optional)'}</label><input id="${prefix}-password" name="password" type="password" autocomplete="new-password"${required ? ' required' : ''}><label for="${prefix}-confirm">Confirm the password</label><input id="${prefix}-confirm" name="confirm" type="password" autocomplete="new-password"${required ? ' required' : ''}><small class="hint">At least 8 characters with uppercase, lowercase and a number, or 17 characters or more. The browser hashes it; Mason never sees it.</small>`
+const usernameField = (
+  prefix: string,
+  value: string | undefined,
+  required: boolean,
+): string =>
+  `<label for="${prefix}-username">${required ? 'Username' : 'Username (optional)'}</label><input id="${prefix}-username" name="username" autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}" maxlength="64" value="${escape(value ?? '')}"${required ? ' required' : ''}>`
+
+/** A small pill button that opens a modal holding `body`. */
+function modalPill(
+  id: string,
+  label: string,
+  title: string,
+  body: string,
+): string {
+  return `<button type="button" class="pill" data-open="${escape(id)}">${label}</button><dialog class="modal" id="${escape(id)}" aria-label="${escape(title)}"><div class="modal-head"><h2>${escape(title)}</h2><button type="button" class="icon-button" data-close aria-label="Close">${icon('close')}</button></div>${body}</dialog>`
+}
+
+/**
+ * A person's editable record: the name and username cells turn into
+ * fields when tapped, each email is a line with a red × to take it away,
+ * and Add opens a modal. Nothing is stored until Save, which asks first.
+ * `edit` says what the viewer may change: everything, their own name and
+ * emails, or nothing.
+ */
+function personCells(
+  person: PersonRow,
+  edit: 'all' | 'self' | 'none',
+): { name: string; username: string; emails: string; role: string } {
+  const text = (
+    field: string,
+    value: string,
+    label: string,
+    editable: boolean,
+  ): string =>
+    editable
+      ? `<button type="button" class="cell-edit" data-edit="${field}" aria-label="Edit ${label}">${value === '' ? '<span class="muted">—</span>' : escape(value)}</button><input class="cell-input" data-input="${field}" value="${escape(value)}" aria-label="${label}"${field === 'username' ? ' pattern="[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}" maxlength="64" autocomplete="off"' : ' maxlength="120"'} hidden>`
+      : value === ''
+        ? '<span class="muted">—</span>'
+        : `<span${field === 'username' ? ' class="mono"' : ''}>${escape(value)}</span>`
+  const emails = person.emails
+    .map(
+      (entry) =>
+        `<li data-email="${escape(entry.email)}"${entry.confirmed ? '' : ' data-unconfirmed'}><span class="email">${escape(entry.email)}</span>${entry.confirmed ? '' : `<small class="tag">unconfirmed</small>${edit === 'all' ? '<button type="button" class="pill" data-confirm-email>Confirm</button>' : ''}`}${edit === 'none' ? '' : `<button type="button" class="remove-email" data-remove-email aria-label="Remove ${escape(entry.email)}">${icon('close')}</button>`}</li>`,
+    )
+    .join('')
+  return {
+    name: text('name', person.name, 'full name', edit !== 'none'),
+    username: text(
+      'username',
+      person.username ?? '',
+      'username',
+      edit === 'all',
+    ),
+    emails: `<ul class="email-lines" data-emails>${emails}</ul>${edit === 'none' ? '' : '<button type="button" class="pill" data-add-email>Add</button>'}`,
+    role:
+      edit === 'all'
+        ? `<select data-role aria-label="Role">${roles.map((role) => `<option${role === person.role ? ' selected' : ''}>${role}</option>`).join('')}</select>`
+        : escape(person.role),
+  }
+}
+
+/** The modal Add opens, and the one Save and Remove ask in: one of each per page. */
+const personDialogs = `<dialog class="modal" data-email-dialog aria-label="Add an email address"><form method="dialog" data-email-form><div class="modal-head"><h2>Add an email address</h2></div><label for="new-email">Email address</label><input id="new-email" name="email" type="email" maxlength="320" required><p class="notice" role="alert" data-email-error hidden></p><div class="actions"><button value="add">${icon('add')} Add</button><button type="button" class="secondary" data-close>Cancel</button></div></form></dialog><dialog class="modal" data-confirm-dialog aria-labelledby="confirm-title"><div class="modal-head"><h2 id="confirm-title" data-confirm-title></h2></div><ul class="changes" data-confirm-list></ul><p class="notice" role="alert" data-confirm-error hidden></p><div class="actions"><button type="button" data-confirm-accept></button><button type="button" class="secondary" data-close>Cancel</button></div></dialog>`
+
+/** People: one compact, editable row each. */
 export function peopleView(data: {
-  people: Array<{
-    id: number
-    name: string
-    role: string
-    emails: Array<{ email: string; confirmed: boolean }>
-    username?: string
-    disabled?: boolean
-    /** Whether they have a password. */
-    password?: boolean
-    /** An unused invitation link: when it expires. */
-    invitation?: { expiresAt: number }
-  }>
+  people: PersonRow[]
+  /** An administrator: changes anyone. */
   canChange: boolean
+  /** The viewer, who may change their own name and emails. */
+  viewerId?: number
   /** Now, for when invitations expire. */
   now?: number
 }): string {
-  const roles = ['admin', 'manager', 'developer', 'tester']
   const now = data.now ?? Date.now()
-  const invitation = (person: (typeof data.people)[number]): string => {
+  const invite = (person: PersonRow): string => {
     if (!data.canChange || person.disabled === true) return ''
-    const status =
+    const pending =
       person.invitation == null
         ? ''
-        : `<p><small>Invited · the link expires ${localTime(person.invitation.expiresAt, now, 'date')}</small></p>${apiForm(`/api/v2/people/${person.id}/invitation`, '', 'Revoke invitation', { method: 'DELETE', then: 'reload', className: 'secondary' })}`
-    return `${status}${action(
+        : `<small class="hint">Expires ${localTime(person.invitation.expiresAt, now, 'date')}</small>`
+    const revoke =
+      person.invitation == null
+        ? ''
+        : apiForm(
+            `/api/v2/people/${person.id}/invitation`,
+            '',
+            'Revoke invitation',
+            { method: 'DELETE', then: 'reload', className: 'secondary' },
+          )
+    return `${modalPill(
+      `invite-${person.id}`,
       person.invitation == null ? 'Invite' : 'Invite again',
-      apiForm(
+      `Invite ${person.name}`,
+      `${apiForm(
         `/api/v2/people/${person.id}/invitation`,
-        `<p>A link, valid for a week, where ${escape(person.name)} chooses ${person.username == null ? 'a username and ' : ''}a password.${person.invitation == null ? '' : ' The earlier link stops working.'}</p>${linkBox}`,
+        `<p>A link, valid for a week, where ${escape(person.name)} chooses ${person.username == null ? 'a password (and a username if they have no confirmed email)' : 'a password'}.${person.invitation == null ? '' : ' The earlier link stops working.'}</p>${linkBox}`,
         `${icon('link')} Make the link`,
         { then: 'link' },
-      ),
-      { kind: 'secondary' },
-    )}`
+      )}${revoke}`,
+    )}${pending}`
   }
-  const passwordFields = (prefix: string, required: boolean): string =>
-    `<label for="${prefix}-password">${required ? 'Password' : 'Password (optional)'}</label><input id="${prefix}-password" name="password" type="password" autocomplete="new-password"${required ? ' required' : ''}><label for="${prefix}-confirm">Confirm the password</label><input id="${prefix}-confirm" name="confirm" type="password" autocomplete="new-password"${required ? ' required' : ''}><small class="hint">At least 8 characters with uppercase, lowercase and a number, or 17 characters or more. The browser hashes it; Mason never sees it.</small>`
-  const usernameField = (
-    prefix: string,
-    value: string | undefined,
-    required: boolean,
-  ): string =>
-    `<label for="${prefix}-username">${required ? 'Username' : 'Username (optional)'}</label><input id="${prefix}-username" name="username" autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}" maxlength="64" value="${escape(value ?? '')}"${required ? ' required' : ''}>`
-  // Setting it ends the person's sessions; they sign in with it on the host and the master.
-  const password = (person: (typeof data.people)[number]): string =>
+  const password = (person: PersonRow): string =>
     !data.canChange || person.disabled === true
       ? ''
-      : action(
+      : modalPill(
+          `password-${person.id}`,
           person.password === true ? 'Change password' : 'Set password',
-          `<form data-mason="person-password" data-path="/api/v2/people/${person.id}"><p>${escape(person.name)} signs in with this username and password on the host and the master. Their sessions end.</p>${usernameField(`person-${person.id}`, person.username, true)}${passwordFields(`person-${person.id}`, true)}<button>${icon('key')} Set password</button>${statusLine}</form>`,
-          { kind: 'secondary' },
+          `${person.password === true ? 'Change' : 'Set'} ${person.name}’s password`,
+          `<form data-mason="person-password" data-path="/api/v2/people/${person.id}"><p>${escape(person.name)} signs in with it and their username or a confirmed email, on the host and the master. Their sessions end.</p>${passwordFields(`person-${person.id}`, true)}<button>${icon('key')} Set password</button>${statusLine}</form>`,
         )
   const people = data.people
-    .map(
-      (person) =>
-        `<tr><td><strong>${escape(person.name)}</strong>${person.username == null ? '' : ` <small class="mono">${escape(person.username)}</small>`}</td><td>${person.emails
-          .map((entry) => `<small>${escape(entry.email)}</small>`)
-          .join('')}</td><td>${
-          data.canChange
-            ? apiForm(
-                `/api/v2/people/${person.id}`,
-                `<select name="role" aria-label="Role">${roles.map((role) => `<option${role === person.role ? ' selected' : ''}>${role}</option>`).join('')}</select>`,
-                'Set role',
-                {
-                  method: 'PUT',
-                  fields: ['role'],
-                  then: 'reload',
-                  className: 'secondary',
-                },
-              )
-            : escape(person.role)
-        }</td><td>${invitation(person)}${password(person)}${data.canChange ? apiForm(`/api/v2/people/${person.id}`, '', 'Remove', { method: 'DELETE', then: 'reload', className: 'danger' }) : ''}</td></tr>`,
-    )
+    .map((person) => {
+      const edit = data.canChange
+        ? 'all'
+        : person.id === data.viewerId
+          ? 'self'
+          : 'none'
+      const cells = personCells(person, edit)
+      return `<tr data-person="${person.id}" data-edit="${edit}" data-original="${escape(
+        JSON.stringify({
+          name: person.name,
+          username: person.username ?? '',
+          role: person.role,
+          emails: person.emails,
+        }),
+      )}"><td class="person-name">${cells.name}</td><td class="person-username">${cells.username}</td><td class="person-emails">${cells.emails}</td><td>${cells.role}</td><td>${invite(person)}</td><td>${password(person)}</td><td class="row-action">${edit === 'none' ? '' : `<button type="button" data-row-action${data.canChange ? ' class="danger"' : ' hidden'}>${data.canChange ? 'Remove' : 'Save'}</button>`}</td></tr>`
+    })
     .join('')
   const add = data.canChange
-    ? `<section class="panel"><h2>${icon('add')}Add a person</h2><form data-mason="person-add"><label for="person-name">Name</label><input id="person-name" name="name" required><label for="person-role">Role</label><select id="person-role" name="role">${roles.map((role) => `<option${role === 'tester' ? ' selected' : ''}>${role}</option>`).join('')}</select><label for="person-email">Email</label><input id="person-email" name="email" type="email"><p>They sign in with any enabled sign-in method that confirms this address, or with this address or their username and a password you set here or they choose from an invitation link. Give them an email, a username, or both.</p>${usernameField('person-new', undefined, false)}${passwordFields('person-new', false)}${field('person-invite', 'Make an invitation link', '<input id="person-invite" name="invite" type="checkbox">', 'A link, valid for a week, where they choose a username and password. Mason sends no email: copy it to them.')}${linkBox}<button>${icon('add')} Add</button>${statusLine}</form></section>`
+    ? `<section class="panel"><h2>${icon('add')}Add a person</h2><form data-mason="person-add"><label for="person-name">Name</label><input id="person-name" name="name" required><label for="person-role">Role</label><select id="person-role" name="role">${roles.map((role) => `<option${role === 'tester' ? ' selected' : ''}>${role}</option>`).join('')}</select><label for="person-email">Email addresses</label><div class="email-fields" data-email-fields><input id="person-email" name="email" type="email" aria-label="Email address"></div><button type="button" class="pill" data-add-email-field>Add</button><p>They sign in with any enabled sign-in method that confirms one of these addresses, or with an address or their username and a password you set here or they choose from an invitation link. Give them an email, a username, or both.</p>${usernameField('person-new', undefined, false)}${passwordFields('person-new', false)}${field('person-invite', 'Make an invitation link', '<input id="person-invite" name="invite" type="checkbox">', 'A link, valid for a week, where they choose a password. Mason sends no email: copy it to them.')}${linkBox}<button>${icon('add')} Add</button>${statusLine}</form></section>`
     : ''
-  return `${head('People', 'Who signs in, with which addresses, and what their role lets them do.', ['Settings', 'People'])}<table class="list"><thead><tr><th>Person</th><th>Addresses</th><th>Role</th><th></th></tr></thead><tbody>${people || '<tr><td colspan="4">Nobody yet.</td></tr>'}</tbody></table>${add}`
+  return `${head('People', 'Who signs in, with which email addresses, and what their role lets them do.', ['Settings', 'People'])}<table class="list people"><thead><tr><th>Full name</th><th>Username</th><th>Email addresses</th><th>Role</th><th>Invite</th><th>Password</th><th><span class="sr-only">Remove or save</span></th></tr></thead><tbody>${people || '<tr><td colspan="7">Nobody yet.</td></tr>'}</tbody></table>${personDialogs}${add}`
 }
 
 /** The add-project wizard: repository, then the Masonfile's app IDs, then branches and triggers. */

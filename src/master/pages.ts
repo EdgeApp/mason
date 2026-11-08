@@ -523,6 +523,8 @@ export function masterPages(
     ) => Promise<string> | string,
     /** Whether the page hashes passwords in the browser. */
     passwords = false,
+    /** The page's own scripts, beside the shell's. */
+    scripts: string[] = [],
   ): void => {
     app.get(path, (req, res) => {
       if (passwords) hashing(res)
@@ -544,7 +546,7 @@ export function masterPages(
       }
       void Promise.resolve(body(current, req)).then(
         (content) => {
-          send(res, title, content, current, 200, active)
+          send(res, title, content, current, 200, active, scripts)
         },
         (error: unknown) => {
           send(
@@ -898,9 +900,11 @@ export function masterPages(
         })),
         now: master.database.now(),
         canChange: can(actor, 'people.change'),
+        ...(actor.accountId == null ? {} : { viewerId: actor.accountId }),
       })
     },
     true,
+    ['/assets/people.js'],
   )
   guarded(
     '/projects/new',

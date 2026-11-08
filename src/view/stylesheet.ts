@@ -197,6 +197,16 @@ button.list-row{border-color:var(--color-border);min-height:0}
 const responsive = `@media(max-width:${breakpoints.desktop - 1}px){.secret-editor{left:80px}.run-body{grid-template-columns:minmax(0,1fr)}.runs-columns{grid-template-columns:minmax(0,1fr)}.rail{flex-basis:64px;padding:12px 6px}.rail .label,.rail .section{display:none}.rail a{justify-content:center;padding:8px}.columns{grid-template-columns:minmax(0,1fr)}.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.topbar .status{display:none}}
 @media(max-width:${breakpoints.tablet - 1}px){.secret-editor{left:8px;right:8px;top:8px;bottom:8px}td.secret-actions{white-space:normal}.topbar{flex-wrap:wrap;height:auto;min-height:56px;padding:8px 12px;row-gap:8px}.topbar nav{order:3;flex:1 0 100%;flex-wrap:wrap}.layout{flex-direction:column;min-height:0}.rail{display:flex;flex-basis:auto;border-right:0;border-bottom:1px solid var(--color-border);overflow-x:auto;padding:4px 8px}.rail a{flex:none}main{padding:16px}.topbar{gap:8px;padding:0 12px}.topbar .search span:not(.icon),.topbar .search kbd,.brand .mono,.brand span{display:none}.topbar .search{flex:0 0 auto}.tiles{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.tile{padding:12px}.tile strong{font-size:20px}h1{font-size:26px;line-height:34px}.row,.app-row,.project header{flex-direction:column;align-items:flex-start}.app-row .runs{justify-content:flex-start}.app-card,.list-row{padding:14px}.platforms a{min-height:44px}}`
 
+/** The People page and Your account: compact rows edited in place, pills, and modals. */
+const people = `table.people [hidden],dialog.modal [hidden]{display:none}table.people td{vertical-align:middle;padding:6px 10px}table.people td.person-emails{vertical-align:top;min-width:15rem}ul.email-lines .email{white-space:nowrap}table.people select{min-height:32px;padding:4px 8px;width:auto}
+button.pill,.button.pill{min-height:24px;padding:1px 10px;border-radius:999px;font-size:12px;line-height:20px;background:var(--color-panel);color:var(--color-text);border-color:var(--color-border-strong)}button.pill:hover{background:var(--color-panel-low);border-color:var(--color-border-strong)}
+.cell-edit{background:none;border:1px solid transparent;color:var(--color-text);padding:2px 6px;min-height:28px;margin-left:-7px;border-radius:var(--radius);font-weight:500;white-space:normal;text-align:left}.cell-edit:hover{background:var(--color-panel-low);border-color:var(--color-border)}.person-username .cell-edit,.person-username>span{font-family:var(--font-mono);font-weight:400}.cell-input{min-height:30px;padding:2px 6px;max-width:16rem}.cell-input[aria-invalid=true]{border-color:var(--color-error-text)}.muted{color:var(--color-text-muted)}
+ul.email-lines{list-style:none;margin:0 0 4px;padding:0}ul.email-lines li{display:flex;align-items:center;gap:6px;min-height:26px}ul.email-lines .email{font-size:13px;overflow-wrap:anywhere}ul.email-lines li.removed .email{text-decoration:line-through;color:var(--color-text-muted)}ul.email-lines li.added .email{color:var(--color-success-text)}ul.email-lines li.confirming .tag{background:var(--color-success);color:var(--color-on-primary)}
+.tag{display:inline-block;margin:0;padding:0 6px;border-radius:999px;background:var(--color-warning-soft);color:var(--color-text);font-size:11px;line-height:18px}
+button.remove-email{flex:none;width:18px;height:18px;min-height:18px;padding:0;border-radius:50%;border:0;background:var(--color-error-text);color:#fff;justify-content:center}button.remove-email:hover{background:var(--color-error-text);filter:brightness(.9)}button.remove-email .icon{font-size:14px;color:#fff}ul.email-lines li.removed button.remove-email{background:var(--color-border-strong)}
+td.row-action{text-align:right;width:1%}td.row-action button{min-height:30px;padding:4px 12px}
+dialog.modal{border:1px solid var(--color-border);border-radius:var(--radius-panel);padding:20px;width:min(480px,calc(100vw - 32px));background:var(--color-panel);color:var(--color-text)}dialog.modal::backdrop{background:rgba(11,28,48,.35)}.modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}.modal-head h2{margin:0;font-size:18px}.icon-button{background:none;border:0;color:var(--color-text-muted);min-height:28px;padding:2px}.icon-button:hover{background:var(--color-panel-low)}dialog.modal .actions{display:flex;gap:8px;margin-top:16px}ul.changes{margin:0;padding-left:20px}ul.changes li{margin:4px 0}div.email-fields{display:flex;flex-direction:column;gap:6px;margin-bottom:6px}`
+
 export const stylesheet = [
   faces,
   base,
@@ -204,5 +214,6 @@ export const stylesheet = [
   components,
   run,
   catalog,
+  people,
   responsive,
 ].join('\n')

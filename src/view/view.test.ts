@@ -2098,16 +2098,116 @@ describe('People and groups pages', () => {
   ]
   const group = { id: 5, name: 'Beta "crew"', apps: [3, 7], members: [2] }
 
-  it('U20.1 People lists people and, for administrators, the add form; it has no groups', () => {
-    const admin = peopleView({ people, canChange: true })
+  it('U20.1 People lists one compact row per person in seven columns, editable as the viewer may', () => {
+    const withMore = [
+      {
+        ...people[0]!,
+        emails: [
+          { email: 'ada@example.com', confirmed: true },
+          { email: 'ada@claimed.example', confirmed: false },
+        ],
+        password: true,
+        invitation: { expiresAt: Date.UTC(2026, 10, 15) },
+      },
+      people[1]!,
+    ]
+    const admin = peopleView({
+      people: withMore,
+      canChange: true,
+      now: Date.UTC(2026, 10, 8),
+    })
     assert.match(admin, /<h1>People<\/h1>/)
-    assert.match(admin, /<strong>Ada &lt;Admin&gt;<\/strong>/)
-    assert.match(admin, /<small>tess@gmail\.example<\/small>/)
-    assert.match(admin, /name="email" type="email">/)
+    assert.deepEqual(
+      [...admin.matchAll(/<th>([^<]*)<\/th>/g)].map((match) => match[1]),
+      [
+        'Full name',
+        'Username',
+        'Email addresses',
+        'Role',
+        'Invite',
+        'Password',
+      ],
+    )
+    assert.match(admin, /<span class="sr-only">Remove or save<\/span>/)
+    // Names and usernames are buttons that turn into fields; labels escaped.
+    assert.match(
+      admin,
+      /<button type="button" class="cell-edit" data-edit="name" aria-label="Edit full name">Ada &lt;Admin&gt;<\/button><input class="cell-input" data-input="name" value="Ada &lt;Admin&gt;"/,
+    )
+    assert.match(
+      admin,
+      /data-edit="username"[^>]*><span class="muted">—<\/span><\/button>/,
+    )
+    // One line per email, each with a red ×; Add under the last; unconfirmed tagged.
+    const emails = admin.slice(
+      admin.indexOf('<ul class="email-lines"'),
+      admin.indexOf('</td>', admin.indexOf('<ul class="email-lines"')),
+    )
+    assert.equal(emails.match(/data-remove-email/g)!.length, 2)
+    assert.match(
+      emails,
+      /<\/ul><button type="button" class="pill" data-add-email>Add<\/button>$/,
+    )
+    assert.match(
+      emails,
+      /<li data-email="ada@claimed\.example" data-unconfirmed><span class="email">ada@claimed\.example<\/span><small class="tag">unconfirmed<\/small><button type="button" class="pill" data-confirm-email>Confirm<\/button>/,
+    )
+    assert.match(
+      admin,
+      /<select data-role aria-label="Role"><option selected>admin<\/option>/,
+    )
+    assert.doesNotMatch(admin, /Set role/)
+    // Invite and Password are pills opening modals; Remove is last.
+    assert.match(
+      admin,
+      /<button type="button" class="pill" data-open="invite-1">Invite again<\/button><dialog class="modal" id="invite-1"/,
+    )
+    assert.match(admin, /Expires/)
+    assert.match(
+      admin,
+      /<button type="button" class="pill" data-open="password-1">Change password<\/button>/,
+    )
+    assert.match(
+      admin,
+      /<button type="button" class="pill" data-open="password-2">Set password<\/button>/,
+    )
+    assert.match(
+      admin,
+      /<td class="row-action"><button type="button" data-row-action class="danger">Remove<\/button><\/td><\/tr>/,
+    )
+    assert.match(
+      admin,
+      /data-original="\{&quot;name&quot;:&quot;Ada &lt;Admin&gt;&quot;/,
+    )
+    assert.match(admin, /<dialog class="modal" data-email-dialog/)
+    assert.match(admin, /<dialog class="modal" data-confirm-dialog/)
+    assert.match(
+      admin,
+      /<div class="email-fields" data-email-fields><input id="person-email" name="email" type="email" aria-label="Email address"><\/div><button type="button" class="pill" data-add-email-field>Add<\/button>/,
+    )
     assert.doesNotMatch(admin, /\/api\/v2\/groups|Tester groups/)
-    const manager = peopleView({ people, canChange: false })
-    assert.doesNotMatch(manager, /name="email"|data-path=/)
+    // A manager reads everyone, edits only their own name and emails.
+    const manager = peopleView({ people, canChange: false, viewerId: 2 })
+    assert.doesNotMatch(manager, /data-mason="person-add"|data-open=|data-role/)
     assert.match(manager, /<td>tester<\/td>/)
+    const own = manager.slice(manager.indexOf('<tr data-person="2"'))
+    assert.match(own, /data-edit="self"/)
+    assert.match(own, /data-edit="name"/)
+    assert.doesNotMatch(own, /data-edit="username"/)
+    assert.match(own, /data-add-email/)
+    assert.match(
+      own,
+      /<button type="button" data-row-action hidden>Save<\/button>/,
+    )
+    const other = manager.slice(
+      manager.indexOf('<tr data-person="1"'),
+      manager.indexOf('</tr>', manager.indexOf('<tr data-person="1"')),
+    )
+    assert.match(other, /data-edit="none"/)
+    assert.doesNotMatch(
+      other,
+      /data-edit="name"|data-remove-email|data-row-action/,
+    )
     assert.match(peopleView({ people: [], canChange: false }), /Nobody yet\./)
   })
 

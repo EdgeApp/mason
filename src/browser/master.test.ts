@@ -110,7 +110,6 @@ const body = (init: RequestInit): unknown => JSON.parse(String(init.body))
 describe('Master page script', () => {
   it('M4.1 an administrator sets a person’s password: typed twice, checked, and only its new client hash is sent', async () => {
     const fields = {
-      username: { value: 'tess' },
       password: { value: 'Tess-Horse-9' },
       confirm: { value: 'Tess-Horse-0' },
     }
@@ -132,7 +131,6 @@ describe('Master page script', () => {
     await settle()
     assert.equal(calls[0]!.init.method, 'PUT')
     assert.deepEqual(body(calls[0]!.init), {
-      username: 'tess',
       password: {
         clientHash: 'hash-of-Tess-Horse-9',
         clientParameters: { p: 1 },
@@ -200,12 +198,17 @@ describe('Master page script', () => {
     assert.equal(calls.length, 0)
     fields.email.value = 'tess@example.test'
     fields.username.value = 'tess'
+    // A second field from Add, and a blank third one, which is skipped.
+    add.querySelectorAll = (selector: string): unknown[] =>
+      selector === 'input[name="email"]'
+        ? [fields.email, { value: ' Tess@Work.test ' }, { value: '' }]
+        : []
     add.submit()
     await settle()
     assert.deepEqual(body(calls[0]!.init), {
       name: 'Tess',
       role: 'tester',
-      emails: ['tess@example.test'],
+      emails: ['tess@example.test', 'Tess@Work.test'],
       invite: true,
       username: 'tess',
       password: {

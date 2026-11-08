@@ -41,7 +41,14 @@ const bundle = (name: string): string =>
 export function masterApp(context: MasterWebContext): express.Express {
   const app = nodeWebApp(context)
   const master = context.master
-  for (const name of ['groups', 'master', 'password-worker', 'run', 'secrets'])
+  for (const name of [
+    'groups',
+    'master',
+    'password-worker',
+    'people',
+    'run',
+    'secrets',
+  ])
     app.get(`/assets/${name}.js`, (_req, res) => {
       if (name === 'password-worker')
         res.set('Content-Security-Policy', masterContentSecurityPolicy)

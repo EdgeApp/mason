@@ -32,6 +32,7 @@ export interface Form {
   ) => void
   elements: { namedItem: (name: string) => unknown }
   querySelector: (selector: string) => unknown
+  querySelectorAll?: (selector: string) => Iterable<unknown>
 }
 /** A button that copies the command beside it (`data-copy`). */
 export interface CopyButton {
@@ -210,19 +211,26 @@ export function start(doc: PageDocument, deps: PageDeps): void {
         kind: 'new',
         password,
       })
+      // Only the password: a username is changed in the person's row.
       const saved = await call('PUT', form.dataset.path ?? '', {
-        username: field(form, 'username'),
         password: { clientHash, clientParameters },
       })
       if (!saved.ok) throw new Error(await failure(saved))
-      deps.assign('/people')
+      deps.assign(form.dataset.return ?? '/people')
     },
     // Adds a person, with a password or an invitation link when asked.
     'person-add': async (form) => {
       const username = field(form, 'username')
-      const email = field(form, 'email')
+      // Every email field the form has: Add puts more under the first.
+      const emails = [
+        ...((form.querySelectorAll?.('input[name="email"]') as
+          | Iterable<Field>
+          | undefined) ?? [{ value: field(form, 'email') }]),
+      ]
+        .map((input) => input.value.trim())
+        .filter((value) => value !== '')
       const typed = field(form, 'password') !== ''
-      if (username === '' && email === '')
+      if (username === '' && emails.length === 0)
         throw new Error('Give them an email address, a username, or both')
       const password = typed
         ? await hashed({ kind: 'new', password: newPassword(form) })
@@ -232,7 +240,7 @@ export function start(doc: PageDocument, deps: PageDeps): void {
       const added = await call('POST', '/api/v2/people', {
         name: field(form, 'name'),
         role: field(form, 'role'),
-        emails: email === '' ? [] : [email],
+        emails,
         invite,
         ...(username === '' ? {} : { username }),
         ...(password == null

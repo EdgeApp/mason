@@ -426,4 +426,64 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await b.close()
     }
   })
+
+  it('E4 an administrator edits a row in place, saves it through the modal, and cancels a removal', async () => {
+    const b = await browser('mason-e4-paul', c.master, '1280x860')
+    const row = (key: string): string => `tr[data-person="${people[key]}"]`
+    try {
+      await masterSignIn(b, 'paul', PASSWORDS.paul!)
+      await b.visible('^Backups$|^Projects & apps$|^Install apps$')
+      await b.open('/people')
+      await b.visible('^People$')
+      await b.visible('nora@example.test')
+      await b.shot('people-after.png')
+      // The name: tap, type, keep.
+      await b.tap(`${row('nora')} [data-edit="name"]`)
+      await b.script(
+        `const input = document.querySelector('${row('nora')} [data-input="name"]'); input.value = 'Nora Renamed'; input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`,
+      )
+      await b.visible('^Save$')
+      // Add an address through the modal.
+      await b.tap(`${row('nora')} [data-add-email]`)
+      await b.visible('^Add an email address$')
+      await b.type('#new-email', 'nora2@example.test')
+      await b.tap('[data-email-form] button[value="add"]')
+      await b.visible('nora2@example.test')
+      // × on her first address; a new role.
+      await b.tap(
+        `${row('nora')} li[data-email="nora@example.test"] [data-remove-email]`,
+      )
+      await b.script(
+        `const select = document.querySelector('${row('nora')} [data-role]'); select.value = 'developer'; select.dispatchEvent(new Event('change', { bubbles: true }))`,
+      )
+      await b.tap(`${row('nora')} [data-row-action]`)
+      await b.visible('^Save changes to Nora Tester\\?$')
+      await b.visible('Name: Nora Tester → Nora Renamed')
+      await b.visible('Email added: nora2@example.test')
+      await b.visible('Email removed: nora@example.test')
+      await b.visible('Role: tester → developer')
+      await b.shot('people-save-confirm.png')
+      await b.tap('[data-confirm-accept]')
+      // The page reloads with the saved row: the removed address is gone.
+      await b.gone('^nora@example\\.test$')
+      await b.visible('Nora Renamed')
+      const saved = c.master.master!.people.get(localOperator, people.nora!)
+      assert.equal(saved.name, 'Nora Renamed')
+      assert.equal(saved.role, 'developer')
+      assert.deepEqual(saved.emails, [
+        { email: 'nora2@example.test', confirmed: true },
+      ])
+      // Remove, then Cancel: Dev stays.
+      await b.tap(`${row('dev')} [data-row-action]`)
+      await b.visible('^Remove Dev Developer\\?$')
+      await b.tap('[data-confirm-dialog] [data-close]')
+      await b.gone('^Remove Dev Developer\\?$')
+      assert.equal(
+        c.master.master!.people.get(localOperator, people.dev!).disabled,
+        false,
+      )
+    } finally {
+      await b.close()
+    }
+  })
 })
