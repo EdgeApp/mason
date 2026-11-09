@@ -1957,11 +1957,13 @@ describe('Settings page', () => {
       card,
       /<table class="list compact"><thead><tr><th>Name<\/th><th>Role<\/th><th>Created<\/th><th>State<\/th><th>Key<\/th>/,
     )
+    // A listed key shows only its prefix, with nothing to copy: the whole
+    // key is copyable once, in the box that opens when it is created.
     assert.match(
       card,
-      /<td>2026-10-03<\/td><td>active<\/td><td><button type="button" class="secondary copy icon-only" data-copy="mason_v1_abcde…"/,
+      /<td>2026-10-03<\/td><td>active<\/td><td><span class="mono">mason_v1_abcde…<\/span><\/td>/,
     )
-    assert.match(card, /<span class="mono">mason_v1_abcde…<\/span>/)
+    assert.doesNotMatch(card, /data-copy="mason_v1_/)
     assert.match(
       card,
       /<td>revoked<\/td><td><small>builder key<\/small><\/td><td><\/td>/,

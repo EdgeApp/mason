@@ -978,11 +978,12 @@ export function settingsView(data: {
     const two = (n: number): string => String(n).padStart(2, '0')
     return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`
   }
-  // A v1 token is mason_v1_<id>.<secret>: its id's first characters name it without the secret.
+  // A v1 token is mason_v1_<id>.<secret>: its id's first characters name it
+  // without the secret. Only that prefix is shown, so there is nothing to copy:
+  // the whole key is copyable once, when it is created.
   const keyPrefix = (key: (typeof data.keys)[number]): string => {
     if (key.format === 'builder') return '<small>builder key</small>'
-    const prefix = `mason_v1_${key.id.slice(0, 5)}…`
-    return `<button type="button" class="secondary copy icon-only" data-copy="${escape(prefix)}" aria-label="Copy ${escape(prefix)}">${icon('content_copy')}<span data-copy-label hidden>Copy</span></button><span class="mono">${escape(prefix)}</span>`
+    return `<span class="mono">${escape(`mason_v1_${key.id.slice(0, 5)}…`)}</span>`
   }
   const roles = ['developer', 'tester', 'manager', 'admin']
   const createKey = data.canCreate
