@@ -684,21 +684,32 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
         ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
         tab: query('tab') === 'timeline' ? 'timeline' : 'graph',
         now: host.now(),
-        // The logs are on the master: a stage's arrive by its live stream, a step's are fetched.
+        // The logs are on the master. A running stage's arrive by its live
+        // stream, relayed over the host's link; a finished run's, the whole
+        // run's and a step's lines are fetched through the host, which
+        // forwards the request over that link as well.
         log:
-          stage == null
+          stage == null && run.finished == null
             ? {
                 unavailable:
-                  'The whole run’s log is on the master: download it, or choose a stage to follow its log here.',
+                  'The whole run’s log is shown once the run ends: choose a stage to follow its log here.',
               }
             : { text: '' },
-        ...(stage != null && step != null && Number.isSafeInteger(step)
+        ...(step != null && Number.isSafeInteger(step)
           ? {
-              logSource: `${logs}?stage=${encodeURIComponent(stage)}&step=${step}`,
+              logSource: `${logs}?stage=${encodeURIComponent(stage!)}&step=${step}`,
             }
-          : {}),
-        // It holds none of the stage's log: the socket starts at its end.
-        logTail: true,
+          : run.finished != null
+            ? {
+                logSource:
+                  stage == null
+                    ? logs
+                    : `${logs}?stage=${encodeURIComponent(stage)}`,
+              }
+            : {}),
+        // A running stage's page holds none of its log: the socket starts
+        // with its last part.
+        ...(run.finished == null ? { logTail: true } : {}),
         can: {
           cancel: true,
           restart: true,

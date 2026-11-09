@@ -836,10 +836,16 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       step.text,
       /data-src="\/api\/v2\/runs\/[^"]+\/logs\?stage=test&amp;step=1"/,
     )
-    assert.match(
-      (await request(host, 'GET', `/runs/${run}`, developer)).text,
-      /The whole run’s log is on the master/,
-    )
+    // A finished run's whole log is fetched through the host, over its link;
+    // a running one's waits for the run to end.
+    const whole = (await request(host, 'GET', `/runs/${run}`, developer)).text
+    if ((c.master.master!.run(run) as Json).finished == null)
+      assert.match(whole, /The whole run’s log is shown once the run ends/)
+    else
+      assert.match(
+        whole,
+        new RegExp(`<div data-log data-src="/api/v2/runs/${run}/logs">`),
+      )
     assert.equal(
       (await request(host, 'GET', `/runs/${run}`, onHost('tester'))).status,
       403,
@@ -1025,7 +1031,10 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       await request(c.master, 'GET', '/people', signIn('admin'))
     ).text
     assert.match(adminPeople, /<form data-mason="person-add">/)
-    assert.match(adminPeople, /data-email-fields><input id="person-email" name="email"/)
+    assert.match(
+      adminPeople,
+      /data-email-fields><input id="person-email" name="email"/,
+    )
     assert.doesNotMatch(adminPeople, /addresses\./)
     const managerPeople = (
       await request(c.master, 'GET', '/people', signIn('manager'))
@@ -1278,7 +1287,10 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     const admin = signIn('admin')
     const manager = signIn('manager')
     const adminPeople = (await request(c.master, 'GET', '/people', admin)).text
-    assert.match(adminPeople, /data-email-fields><input id="person-email" name="email"/)
+    assert.match(
+      adminPeople,
+      /data-email-fields><input id="person-email" name="email"/,
+    )
     assert.doesNotMatch(adminPeople, /\/api\/v2\/groups/)
     const managerPeople = (await request(c.master, 'GET', '/people', manager))
       .text

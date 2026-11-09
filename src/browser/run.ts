@@ -1,6 +1,6 @@
 // The run view and the actions on it: forms that call the API as JSON, the
 // run's status, stages, steps and log lines live from the page's socket, the
-// log's follow and Jump to latest, its wrap toggle, the stage list's
+// log's follow and its button to the end, its wrap toggle, the stage list's
 // filters, the graph's zoom and its highlighted rails, and the dashboard's
 // queue and run statuses, live from the same socket.
 import {
@@ -350,31 +350,38 @@ export async function submitAction(
 /** How near the bottom a viewer must be for the log to keep following. */
 export const FOLLOW_PX = 80
 
+/** The log box's scrolling and its button to the end, shared by live and finished logs. */
+export interface LogScroller {
+  /** Lines were added below: a log at its end stays there, one scrolled up shows the button. */
+  appended(): void
+  /** The log was replaced (a stage to follow, a fetched log): `atEnd` opens it at its end. */
+  reset(atEnd: boolean): void
+}
+
 /**
- * The real page's parts. A live log opens at its end and follows new lines
- * while the viewer is within 80px of its bottom; scrolling up stops it and
- * shows Jump to latest, which scrolls back down and follows again, as does
- * scrolling back within 80px of the bottom.
+ * The log box's scrolling. The round button at its bottom right shows while
+ * the log is not at its end and goes there; at the end, the log follows the
+ * lines that arrive, until the viewer scrolls up. Any move up stops it, even
+ * within 80px of the bottom, so lines arriving mid-scroll never pull the
+ * viewer back down; back within 80px of the bottom, it follows again. A
+ * live log opens at its end, a finished one at its start.
  */
-export function domRunPage(
-  doc: Document,
-  reload: () => void = (): void => undefined,
-): RunPage {
+export function logScroller(doc: Document, atEnd: boolean): LogScroller {
   const pre = (): HTMLElement | null =>
     doc.querySelector<HTMLElement>('[data-log] pre')
   const jump = doc.querySelector<HTMLElement>('[data-jump]')
   let following = true
   /** Where the log was scrolled to last, so a move up is told from new lines below. */
   let lastTop = 0
+  const show = (): void => {
+    if (jump != null) jump.hidden = following
+  }
   const toEnd = (): void => {
     const log = pre()
     if (log == null) return
     log.scrollTop = log.scrollHeight
     lastTop = log.scrollTop
   }
-  // Any move up stops following, even within 80px of the bottom, so lines
-  // arriving mid-scroll never pull the viewer back down; back within 80px
-  // of the bottom, it follows again.
   const scrolled = (): void => {
     const log = pre()
     if (log == null) return
@@ -384,7 +391,7 @@ export function domRunPage(
     if (distance > 1 && log.scrollTop < lastTop) following = false
     else if (distance < FOLLOW_PX) following = true
     lastTop = log.scrollTop
-    if (jump != null) jump.hidden = following
+    show()
   }
   let watched: HTMLElement | null = null
   const watch = (): void => {
@@ -393,13 +400,41 @@ export function domRunPage(
     watched = log
     log.addEventListener('scroll', scrolled)
   }
-  toEnd()
-  watch()
+  const reset = (end: boolean): void => {
+    watch()
+    const log = pre()
+    if (end) {
+      toEnd()
+      following = true
+    } else {
+      lastTop = log?.scrollTop ?? 0
+      following =
+        log == null ||
+        log.scrollHeight - log.scrollTop - log.clientHeight < FOLLOW_PX
+    }
+    show()
+  }
+  reset(atEnd)
   jump?.addEventListener('click', () => {
     toEnd()
     following = true
-    jump.hidden = true
+    show()
   })
+  return {
+    appended: (): void => {
+      if (following) toEnd()
+      else show()
+    },
+    reset,
+  }
+}
+
+/** The real page's parts; its log scrolls as `logScroller` says, opening at its end. */
+export function domRunPage(
+  doc: Document,
+  reload: () => void = (): void => undefined,
+  scroller: LogScroller = logScroller(doc, true),
+): RunPage {
   return {
     hasStage: (name): boolean =>
       doc.querySelector(`.stage-list li[data-name="${quoted(name)}"]`) != null,
@@ -464,10 +499,7 @@ export function domRunPage(
             '<pre class="log"><code></code></pre>',
           )
       doc.querySelector<HTMLElement>('[data-log] .empty-state')?.remove()
-      watch()
-      following = true
-      lastTop = pre()?.scrollTop ?? 0
-      if (jump != null) jump.hidden = true
+      scroller.reset(true)
     },
     setSteps: (stage, steps): void => {
       const list = doc.querySelector('[data-steps]')
@@ -477,8 +509,7 @@ export function domRunPage(
       const code = doc.querySelector('[data-log] code')
       if (code == null || html.length === 0) return
       code.insertAdjacentHTML('beforeend', html.join(''))
-      if (following) toEnd()
-      else if (jump != null) jump.hidden = false
+      scroller.appended()
     },
     ended: (): void => {
       doc
@@ -650,8 +681,16 @@ export function start(doc: Document, win: RunWindow): void {
         undefined,
     )
   }
-  // A log this node does not hold (a step's lines on the host) is fetched through it.
+  const head = doc.querySelector<HTMLElement>('.run-head')
+  // A live log the page follows opens at its end; a finished one, or a
+  // step's lines, at the start.
   const source = doc.querySelector<HTMLElement>('[data-log][data-src]')
+  const scroller = logScroller(
+    doc,
+    head?.dataset.live === '1' && source == null,
+  )
+  // A log this node does not hold (on the host: a finished run's, or a
+  // step's lines) is fetched through it.
   if (source != null)
     void win
       .fetch(source.dataset.src ?? '', { credentials: 'same-origin' })
@@ -659,8 +698,8 @@ export function start(doc: Document, win: RunWindow): void {
       .then((text) => {
         const code = source.querySelector('code')
         if (code != null) code.innerHTML = logLines(text, 1).join('')
+        scroller.reset(false)
       })
-  const head = doc.querySelector<HTMLElement>('.run-head')
   // One socket for the page, opened when something subscribes.
   const state = doc.querySelector<HTMLElement>('[data-live-state]')
   let client: LiveClient | undefined
@@ -684,7 +723,11 @@ export function start(doc: Document, win: RunWindow): void {
       doc.querySelector<HTMLElement>('.stage-panel')?.dataset.stage ?? ''
     const start = doc.querySelector<HTMLElement>('[data-log]')?.dataset.offset
     const offset = start === 'tail' ? 'tail' : Number(start ?? -1)
-    const page = domRunPage(doc, () => win.location.assign(win.location.href))
+    const page = domRunPage(
+      doc,
+      () => win.location.assign(win.location.href),
+      scroller,
+    )
     const run = new RunLive(
       page,
       head.dataset.run ?? '',

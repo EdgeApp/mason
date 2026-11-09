@@ -8,12 +8,15 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
   appendFileSync,
+  existsSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { after, before, describe, it } from 'mocha'
@@ -51,7 +54,14 @@ const FIXTURES = path.resolve(
   '../upload/fixtures.test.js',
 )
 
-/** Two apps, two workflows: build-alpha publishes alpha, build-beta beta; beta shares alpha's sequence. */
+/** The file whose arrival lets the stream stage finish. */
+const STREAM_GATE = path.join(tmpdir(), `mason-e11-gate-${process.pid}`)
+
+/**
+ * Two apps, two workflows: build-alpha publishes alpha, build-beta beta;
+ * beta shares alpha's sequence. A third, stream, logs 400 lines and then a
+ * line every quarter second until STREAM_GATE exists.
+ */
 export const masonfile = `
 import type { Setup, Stage } from '@mason/types'
 export function setup(m: Setup) {
@@ -63,6 +73,19 @@ export function setup(m: Setup) {
   m.workflow('build-beta', { triggers: [{ request: true }] }, (w) => {
     w.stage('macos', { on: 'master', publishes: ['${BETA}'], run: shipBeta })
   })
+  m.workflow('stream', { triggers: [{ request: true }] }, (w) => {
+    w.stage('stream', { on: 'master', run: streamLog })
+  })
+}
+export async function streamLog(ctx: Stage) {
+  const { existsSync } = await import('node:fs')
+  for (let i = 1; i <= 400; i++) ctx.log.info('stream line ' + i)
+  let n = 0
+  while (!existsSync(${JSON.stringify(STREAM_GATE)})) {
+    ctx.log.info('waiting ' + ++n)
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  ctx.log.info('stream done')
 }
 export async function shipAlpha(ctx: Stage) {
   const { writeFileSync } = await import('node:fs')
@@ -1161,6 +1184,113 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await at(`/runs/${run.id}`)
     } finally {
       await b.close()
+    }
+  })
+
+  it('E11 a developer on the host follows a running stage’s log live over the link, goes to its end with the round button, and reads it again once the run is finished', async () => {
+    const master = c.master.master!
+    rmSync(STREAM_GATE, { force: true })
+    const created = await c.api('POST', '/api/v2/runs', {
+      project: 'fixture',
+      branch: 'develop',
+      workflow: 'stream',
+    })
+    assert.equal(created.status, 202, created.text)
+    const id = String(created.json.id)
+    await c.until(
+      () => {
+        const file = master.scheduler.logFile(id, 'stream')
+        return (
+          existsSync(file) && readFileSync(file, 'utf8').includes('waiting 3')
+        )
+      },
+      120_000,
+      'the stream stage logging',
+    )
+    await c.until(
+      () =>
+        host.host!.cache.db.prepare('SELECT 1 FROM jobs WHERE id=?').get(id),
+      10_000,
+      'the run on the host',
+    )
+    const h = await browser('mason-e11-dev', host, '1280x860')
+    const pre = "document.querySelector('[data-log] pre')"
+    const button = "document.querySelector('[data-jump]')"
+    const lines = "document.querySelectorAll('[data-log] code .line').length"
+    const atEnd = `(${pre}.scrollHeight - ${pre}.scrollTop - ${pre}.clientHeight < 2)`
+    /** Waits until the page's condition holds, or fails saying what did not. */
+    const holds = async (condition: string, what: string): Promise<void> => {
+      const deadline = Date.now() + 20_000
+      for (;;) {
+        try {
+          await h.script(
+            `if (!(${condition})) throw new Error(${JSON.stringify(what)})`,
+          )
+          return
+        } catch (error) {
+          if (Date.now() > deadline) throw error
+          await new Promise((resolve) => setTimeout(resolve, 300))
+        }
+      }
+    }
+    /** Waits for more lines than the log holds now. */
+    const more = async (what: string, also = 'true'): Promise<void> => {
+      await h.script(`window.__lines = ${lines}`)
+      await holds(`${lines} > window.__lines + 3 && ${also}`, what)
+    }
+    try {
+      await hostSignIn(h, 'dev', PASSWORDS.dev!, `/runs/${id}?stage=stream`)
+      // The running stage's log comes live from the master, relayed over the
+      // host's link, and stays at its end with no button while it follows.
+      await holds(
+        `/stream line 400(?!\\d)/.test(${pre}.textContent) && /waiting \\d+/.test(${pre}.textContent)`,
+        'the live log',
+      )
+      await more('new lines', `${atEnd} && ${button}.hidden`)
+      // Scrolled up, it holds still while lines arrive, and offers the button.
+      await h.script(
+        `${pre}.scrollTop = 0; ${pre}.dispatchEvent(new Event('scroll'))`,
+      )
+      await holds(`!${button}.hidden`, 'the button shown')
+      await more('lines while scrolled up', `${pre}.scrollTop === 0`)
+      await h.script(
+        "document.querySelector('[data-log]').scrollIntoView({ block: 'end' })",
+      )
+      await h.shot('host-live-log-button.png')
+      // The button goes to the end and follows again, then hides.
+      await h.tap('[data-jump]')
+      await more('lines while following', `${atEnd} && ${button}.hidden`)
+      // The run ends: its log is fetched through the host, over the link.
+      writeFileSync(STREAM_GATE, '')
+      await c.until(
+        () =>
+          (
+            host
+              .host!.cache.db.prepare('SELECT status FROM jobs WHERE id=?')
+              .get(id) as { status: string } | undefined
+          )?.status === 'succeeded',
+        60_000,
+        'the run finished on the host',
+      )
+      await h.open(`/runs/${id}?stage=stream`)
+      await holds(
+        `/stream line 1(?!\\d)/.test(${pre}.textContent) && /stream done/.test(${pre}.textContent)`,
+        'the finished stage log',
+      )
+      // A finished log opens at its start, with the button to its end.
+      await holds(`${pre}.scrollTop === 0 && !${button}.hidden`, 'the button')
+      await h.script(
+        "document.querySelector('[data-log]').scrollIntoView({ block: 'end' })",
+      )
+      await h.shot('host-finished-log.png')
+      await h.tap('[data-jump]')
+      await holds(`${atEnd} && ${button}.hidden`, 'the end of the log')
+      // So is the whole run's.
+      await h.open(`/runs/${id}`)
+      await holds(`/stream done/.test(${pre}.textContent)`, 'the whole run log')
+    } finally {
+      await h.close()
+      rmSync(STREAM_GATE, { force: true })
     }
   })
 })

@@ -4,6 +4,7 @@ import { FakeLiveWindow } from '../test/fakeLiveSocket.js'
 import {
   actionBody,
   domRunPage,
+  logScroller,
   formFields,
   formPath,
   highlight,
@@ -626,6 +627,36 @@ describe('Run view script', () => {
     empty.follow('x')
     empty.appendLog(['x'])
     empty.ended()
+  })
+
+  it('opens a finished log at its start, with the button to its end until the viewer is there', () => {
+    const pre = new El()
+    pre.scrollHeight = 1000
+    pre.clientHeight = 200
+    const jump = new El()
+    const doc = new El()
+      .set('[data-log] pre', pre)
+      .set('[data-jump]', jump) as unknown as Document
+    const scroller = logScroller(doc, false)
+    assert.deepEqual([pre.scrollTop, jump.hidden], [0, false])
+    // Scrolled to the end by hand, the button goes; back up, it returns.
+    pre.scrollTop = 790
+    pre.fire('scroll')
+    assert.equal(jump.hidden, true)
+    pre.scrollTop = 300
+    pre.fire('scroll')
+    assert.equal(jump.hidden, false)
+    jump.fire('click')
+    assert.deepEqual([pre.scrollTop, jump.hidden], [1000, true])
+    // A short log needs no button.
+    pre.scrollHeight = 150
+    pre.scrollTop = 0
+    scroller.reset(false)
+    assert.equal(jump.hidden, true)
+    // A log fetched later (the host's) is measured again once it is in.
+    pre.scrollHeight = 5000
+    scroller.reset(false)
+    assert.equal(jump.hidden, false)
   })
 
   it('highlights a bubble’s inputs, dependents and rails', () => {
