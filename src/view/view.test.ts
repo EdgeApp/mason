@@ -5,26 +5,43 @@ import { describe, it } from 'mocha'
 import { MasterDatabase } from '../master/database.js'
 import {
   action,
+  cloudView,
   field,
   groupsView,
   groupView,
   masonfileView,
   nodesView,
+  accountView,
   peopleView,
   projectRunsView,
   projectTabs,
   projectView,
   secretsView,
   settingsView,
+  wizardView,
 } from './admin.js'
-import { artifactsView, projectRunsData } from './artifacts.js'
+import {
+  artifactsView,
+  projectRunsData,
+  projectRunsTable,
+} from './artifacts.js'
 import {
   bytes,
   dashboardData,
   dashboardView,
   platformChip,
 } from './dashboard.js'
-import { ago, duration, escape, localTime, since, stamp, time } from './html.js'
+import {
+  ago,
+  breadcrumbs,
+  duration,
+  escape,
+  localTime,
+  since,
+  stamp,
+  time,
+} from './html.js'
+import { crumbTrail } from '../test/crumbs.js'
 import { icon, icons } from './icons.js'
 import {
   approvalNotifications,
@@ -57,7 +74,7 @@ const TOKEN = 'stage-token-fixture'
 
 const viewer = (
   role: ViewerRole,
-  node: 'master' | 'host' = 'master',
+  node: 'master' | 'host' | 'standalone' = 'master',
 ): Viewer => ({
   name: `${role} person`,
   role,
@@ -338,15 +355,24 @@ describe('Design system and views', () => {
     const keys = (who: Viewer): string[] =>
       railItems(who).map((item) => item.key)
     assert.deepEqual(keys(viewer('admin', 'host')), [
-      'dashboard',
       'catalog',
+      'dashboard',
       'artifacts',
       'devices',
     ])
     assert.deepEqual(keys(viewer('tester', 'host')), ['catalog', 'devices'])
-    assert.deepEqual(keys(viewer('admin')), [
+    assert.deepEqual(keys(viewer('tester')), ['catalog', 'devices'])
+    assert.deepEqual(keys(viewer('developer', 'host')), [
+      'catalog',
       'dashboard',
       'artifacts',
+      'devices',
+    ])
+    assert.deepEqual(keys(viewer('admin')), [
+      'catalog',
+      'dashboard',
+      'artifacts',
+      'devices',
       'nodes',
       'cloud',
       'people',
@@ -354,6 +380,25 @@ describe('Design system and views', () => {
       'settings',
       'backups',
     ])
+    // The standalone server: Install apps and Devices, and People for its administrators.
+    assert.deepEqual(keys(viewer('tester', 'standalone')), [
+      'catalog',
+      'devices',
+    ])
+    assert.deepEqual(keys(viewer('admin', 'standalone')), [
+      'catalog',
+      'devices',
+      'people',
+    ])
+    assert.deepEqual(
+      railItems(viewer('admin'))
+        .filter((item) => ['catalog', 'dashboard'].includes(item.key))
+        .map((item) => [item.href, item.label]),
+      [
+        ['/apps', 'Install apps'],
+        ['/projects', 'Projects & apps'],
+      ],
+    )
     assert.deepEqual(
       railItems(viewer('manager'))
         .filter((item) => ['people', 'groups'].includes(item.key))
@@ -363,7 +408,12 @@ describe('Design system and views', () => {
         ['/groups', 'group'],
       ],
     )
-    assert.deepEqual(keys(viewer('developer')), ['dashboard', 'artifacts'])
+    assert.deepEqual(keys(viewer('developer')), [
+      'catalog',
+      'dashboard',
+      'artifacts',
+      'devices',
+    ])
     assert(atLeast(viewer('manager'), 'developer'))
     assert(!atLeast(viewer('developer'), 'manager'))
     const host = shell({
@@ -377,24 +427,48 @@ describe('Design system and views', () => {
       /\/backups|\/cloud|\/people|\/groups|\/settings|data-mason="/,
     )
     assert.match(host, /<a href="\/artifacts" aria-current="page"/)
-    // Testers' pages are phone-first, without the rail.
+    assert.match(host, /<div class="section">Host<\/div>/)
+    // Testers keep the side menu too, with only Install apps and Devices.
     const tester = shell({
       title: 'Apps',
       body: '',
       viewer: viewer('tester', 'host'),
+      active: 'catalog',
     })
-    assert.match(tester, /<body class="phone">/)
-    assert.doesNotMatch(tester, /class="rail"/)
-    const legacy = page(
-      'Sign in',
-      '<p>hi</p>',
-      '<a href="/devices">Devices</a>',
-      true,
+    assert.match(tester, /<body class="with-rail">/)
+    assert.match(tester, /<a href="\/apps" aria-current="page"/)
+    assert.deepEqual(
+      [...tester.matchAll(/<nav class="rail".*?<\/nav>/g)].map((nav) =>
+        [...nav[0].matchAll(/href="([^"]+)"/g)].map((m) => m[1]),
+      ),
+      [['/apps', '/devices']],
     )
+    assert.match(tester, /search-dialog/)
+    assert.match(tester, /\/assets\/shell\.js/)
+    // The standalone server serves neither search nor notifications.
+    const standalone = shell({
+      title: 'People',
+      body: '',
+      viewer: viewer('admin', 'standalone'),
+      active: 'people',
+      scripts: ['/assets/catalog.js'],
+    })
+    assert.match(standalone, /<div class="section">Host<\/div>/)
+    assert.match(standalone, /<a href="\/people" aria-current="page"/)
+    assert.match(standalone, /href="\/account" aria-label="Your account"/)
+    assert.match(standalone, /src="\/assets\/catalog\.js"/)
+    assert.doesNotMatch(
+      standalone,
+      /search-dialog|shell\.js|data-search|class="notifications"/,
+    )
+    // Signed-out pages have no side menu.
+    const legacy = page('Sign in', '<p>hi</p>')
+    assert.match(legacy, /<body class="phone">/)
     assert.match(legacy, /<h1>Sign in<\/h1><p>hi<\/p>/)
-    assert.match(legacy, /<nav><a href="\/devices">Devices<\/a><\/nav>/)
-    assert.match(legacy, /src="\/assets\/catalog\.js"/)
-    assert.doesNotMatch(legacy, /search-dialog|shell\.js/)
+    assert.doesNotMatch(
+      legacy,
+      /class="rail"|search-dialog|shell\.js|aria-label="Your account"/,
+    )
     const master = shell({
       title: 'M',
       body: '',
@@ -471,8 +545,15 @@ describe('Design system and views', () => {
       nodes: [],
       repositories: new Map(),
     })
+    // Each build names its run and the run's status.
     assert.deepEqual(withVariant.projects[0]!.apps[0]!.builds, [
-      { branch: 'main', buildNumber: '26102011', at: NOW - 29 * HOUR },
+      {
+        branch: 'main',
+        buildNumber: '26102011',
+        at: NOW - 29 * HOUR,
+        run: 'run-1',
+        status: 'succeeded',
+      },
     ])
     assert(!withVariant.builds.some((build) => build.id === 43))
     // A run that published only named variants shows as its first by name,
@@ -510,7 +591,13 @@ describe('Design system and views', () => {
       repositories: new Map(),
     })
     assert.deepEqual(onlyVariants.projects[0]!.apps[0]!.builds, [
-      { branch: 'main', buildNumber: '26102014', at: NOW - 30 * 60_000 },
+      {
+        branch: 'main',
+        buildNumber: '26102014',
+        at: NOW - 30 * 60_000,
+        run: 'run-2',
+        status: 'failed',
+      },
     ])
     assert.deepEqual(
       onlyVariants.builds
@@ -552,7 +639,13 @@ describe('Design system and views', () => {
       repositories: new Map(),
     })
     assert.deepEqual(mixedCase.projects[0]!.apps[0]!.builds, [
-      { branch: 'main', buildNumber: '26102016', at: NOW - 20 * 60_000 },
+      {
+        branch: 'main',
+        buildNumber: '26102016',
+        at: NOW - 20 * 60_000,
+        run: 'run-3',
+        status: 'running',
+      },
     ])
     db.prepare('DELETE FROM builds WHERE id IN (46,47)').run()
     // The running stage shows its progress against its usual duration; setup and approvals are not queue entries.
@@ -570,21 +663,26 @@ describe('Design system and views', () => {
     assert.equal(data.builds[0]!.app, 'Phone')
     const html = dashboardView(data, viewer('developer'), NOW)
     assert.match(html, /Projects &amp; apps/)
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Master /',
+      'Projects /projects *',
+    ])
     assert.match(html, /50\.0%/)
     assert.match(html, /11\.5 MB/)
     assert.match(
       html,
-      /<a class="chip" href="\/" aria-current="true">All \(3\)<\/a>/,
+      /<a class="chip" href="\/projects" aria-current="true">All \(3\)<\/a>/,
     )
-    assert.match(html, /href="\/\?platform=macos">macOS \(1\)/)
+    // The filter chips stay on Projects & apps, now at /projects.
+    assert.match(html, /href="\/projects\?platform=macos">macOS \(1\)/)
     assert.doesNotMatch(html, /Windows \(/)
     assert.match(html, /Webhook active/)
     assert.match(html, /buildbox/)
     assert.match(html, /role="progressbar"/)
-    // The card opens the project; only its run chips lead elsewhere, to their runs.
+    // The card's header opens the project; its run chips open their runs.
     assert.match(
       html,
-      /<h2><a class="card-link" href="\/projects\/phones">Phones<\/a><\/h2>/,
+      /<header>.*<h2><a class="card-link" href="\/projects\/phones">Phones<\/a><\/h2>.*<\/header>/,
     )
     assert.doesNotMatch(html, /meta-link|\/masonfile"|\?project=/)
     assert.match(html, /<a class="run-chip" href="\/runs\/run-\d+"/)
@@ -606,6 +704,10 @@ describe('Design system and views', () => {
     assert.doesNotMatch(
       dashboardView(mac, viewer('developer', 'host'), NOW),
       /Worker nodes/,
+    )
+    assert.deepEqual(
+      crumbTrail(dashboardView(mac, viewer('developer', 'host'), NOW)),
+      ['Mason Host /', 'Projects /projects *'],
     )
     const one = dashboardData(
       { db, viewer: viewer('developer'), now: NOW, appVisible: all },
@@ -647,6 +749,239 @@ describe('Design system and views', () => {
     assert.match(platformChip('linux'), />linux</)
   })
 
+  it('M11 a project card: the header opens the project, each app ID row its page, and each branch’s latest build its run, push branches first, six then +N more', () => {
+    const db = fixture()
+    // Six more app IDs: Phones has eight.
+    for (let n = 1; n <= 6; n++) {
+      db.prepare(
+        'INSERT INTO apps(id,slug,name,position,enabled) VALUES(?,?,?,?,1)',
+      ).run(10 + n, `app.example.extra${n}`, `Extra ${n}`, 10 + n)
+      db.prepare('INSERT INTO project_apps(app_id,project_id) VALUES(?,1)').run(
+        10 + n,
+      )
+    }
+    // Phone's latest build per branch: nine branches.
+    db.prepare("UPDATE builds SET run='run-1' WHERE id=2").run()
+    const build = db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(?,1,2,'android',?,?,'1.0',?,'app.example.phone','apk',?,1000,?,?,?,'ready','','pipeline','{}','',?)",
+    )
+    const branches: Array<[string, number, string | null]> = [
+      ['feature/login', 1, 'run-3'],
+      ['release/2', 2, 'run-2'],
+      ['topic/a', 3, 'gone'],
+      ['topic/b', 4, 'run-1'],
+      ['topic/c', 5, 'run-1'],
+      ['topic/d', 6, 'run-1'],
+      ['topic/e', 7, 'run-1'],
+      ['release/1', 10, null],
+    ]
+    for (const [index, [branch, hours, run]] of branches.entries())
+      build.run(
+        60 + index,
+        branch,
+        'e'.repeat(40),
+        `2610${60 + index}`,
+        `d${60 + index}`,
+        `f${60 + index}`,
+        NOW - hours * HOUR,
+        NOW + HOUR,
+        run,
+      )
+    const data = dashboardData({
+      db,
+      viewer: viewer('developer'),
+      now: NOW,
+      appVisible: () => true,
+      pinned: new Map([[1, ['main', 'release/*']]]),
+    })
+    const phones = data.projects.find((card) => card.slug === 'phones')!
+    const phone = phones.apps.find((app) => app.slug === 'app.example.phone')!
+    // The push branches first, in the trigger's order, then the newest.
+    assert.deepEqual(
+      phone.builds.map((entry) => [entry.branch, entry.run, entry.status]),
+      [
+        ['main', 'run-1', 'succeeded'],
+        ['release/2', 'run-2', 'failed'],
+        ['release/1', undefined, undefined],
+        ['feature/login', 'run-3', 'running'],
+        ['topic/a', 'gone', undefined],
+        ['topic/b', 'run-1', 'succeeded'],
+        ['topic/c', 'run-1', 'succeeded'],
+        ['topic/d', 'run-1', 'succeeded'],
+        ['topic/e', 'run-1', 'succeeded'],
+      ],
+    )
+    // Without push branches, newest first.
+    assert.deepEqual(
+      dashboardData({
+        db,
+        viewer: viewer('developer'),
+        now: NOW,
+        appVisible: () => true,
+      })
+        .projects[0]!.apps[0]!.builds.slice(0, 3)
+        .map((entry) => entry.branch),
+      ['feature/login', 'release/2', 'topic/a'],
+    )
+    const html = dashboardView(data, viewer('developer'), NOW)
+    const card = html.slice(
+      html.indexOf('<article class="project" id="project-phones">'),
+      html.indexOf('</article>') + '</article>'.length,
+    )
+    // The header holds the project's link and the run chips, and no app ID.
+    const header = card.slice(
+      card.indexOf('<header>'),
+      card.indexOf('</header>'),
+    )
+    assert.match(
+      header,
+      /<h2><a class="card-link" href="\/projects\/phones">Phones<\/a><\/h2>/,
+    )
+    assert.match(
+      header,
+      /<div class="runs" data-project-runs="phones"><a class="run-chip" href="\/runs\//,
+    )
+    assert.doesNotMatch(header, /app-grid|row-link/)
+    assert.equal([...card.matchAll(/class="card-link"/g)].length, 1)
+    // Every one of the eight rows opens its app ID's page.
+    const rows = [
+      ...card.matchAll(
+        /<div class="app-grid-row" role="row"><div role="cell"><a class="row-link" href="([^"]+)">([^<]+)<\/a><small>([^<]*)<\/small><\/div><div role="cell"><span class="app-platforms">/g,
+      ),
+    ].map((match) => [match[1], match[2], match[3]])
+    assert.match(
+      card,
+      /<h3>App IDs \(8\)<\/h3><div class="app-grid" role="table" aria-label="App IDs">/,
+    )
+    assert.deepEqual(rows, [
+      ['/projects/phones/apps/app.example.phone', 'app.example.phone', 'Phone'],
+      ['/projects/phones/apps/app.example.watch', 'app.example.watch', 'Watch'],
+      ...[1, 2, 3, 4, 5, 6].map((n) => [
+        `/projects/phones/apps/app.example.extra${n}`,
+        `app.example.extra${n}`,
+        `Extra ${n}`,
+      ]),
+    ])
+    // Phone's row: six branches' builds, each opening its run, then +3 more, opening its page.
+    const row = card.slice(
+      card.indexOf('href="/projects/phones/apps/app.example.phone"'),
+      card.indexOf('href="/projects/phones/apps/app.example.watch"'),
+    )
+    const chips = row.slice(row.indexOf('<span class="app-builds">'))
+    assert.deepEqual(
+      [
+        ...chips.matchAll(
+          /<(a|span) class="run-chip(?: more)?"(?: href="([^"]+)")?[^>]*>([^<]*)/g,
+        ),
+      ].map((match) => [match[1], match[2], match[3]!.trim()]),
+      [
+        ['a', '/runs/run-1', 'main'],
+        ['a', '/runs/run-2', 'release/2'],
+        ['span', undefined, 'release/1'],
+        ['a', '/runs/run-3', 'feature/login'],
+        ['a', '/runs/gone', 'topic/a'],
+        ['a', '/runs/run-1', 'topic/b'],
+        ['a', '/projects/phones/apps/app.example.phone', '+3 more'],
+      ],
+    )
+    // Branch, build number, the run's status dot and age; the page's socket keeps the status.
+    assert.match(
+      chips,
+      /<a class="run-chip" href="\/runs\/run-2" title="release\/2 261061 failed" data-run-id="run-2" data-status="failed">release\/2 <span>261061<\/span><span class="dot failed" aria-hidden="true"><\/span><small>2h ago<\/small><\/a>/,
+    )
+    assert.match(
+      chips,
+      /<span class="run-chip">release\/1 <span>261067<\/span><small>10h ago<\/small><\/span>/,
+    )
+    assert.match(
+      chips,
+      /data-run-id="gone" data-status="">topic\/a <span>261062<\/span><small>/,
+    )
+    assert.doesNotMatch(chips, /topic\/c|topic\/d|topic\/e/)
+    // Six or fewer: no +N more; none: No builds yet.
+    const watch = card.slice(
+      card.indexOf('href="/projects/phones/apps/app.example.watch"'),
+      card.indexOf('href="/projects/phones/apps/app.example.extra1"'),
+    )
+    assert.match(
+      watch,
+      /<span class="app-builds"><small>No builds yet<\/small><\/span>/,
+    )
+    db.prepare(
+      "DELETE FROM builds WHERE branch IN ('topic/c','topic/d','topic/e')",
+    ).run()
+    assert.doesNotMatch(
+      dashboardView(
+        dashboardData({
+          db,
+          viewer: viewer('developer'),
+          now: NOW,
+          appVisible: () => true,
+        }),
+        viewer('developer'),
+        NOW,
+      ),
+      /more<\/a>/,
+    )
+    // An app built on very many branches: the card reads only the newest
+    // hundred, and its +N still counts them all (review 1.harness-review.7).
+    const many = db.prepare(
+      "INSERT INTO builds(id,app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields) VALUES(?,1,2,'android',?,'c','1.0','1','app.example.phone','apk',?,1,?,?,?,'ready','','pipeline','{}')",
+    )
+    for (let n = 0; n < 110; n++)
+      many.run(
+        9000 + n,
+        `many/${n}`,
+        `dm${n}`,
+        `fm${n}`,
+        NOW - 10_000 + n,
+        NOW + 86_400_000,
+      )
+    const wide = dashboardData({
+      db,
+      viewer: viewer('developer'),
+      now: NOW,
+      appVisible: () => true,
+    })
+    const busy = wide.projects
+      .flatMap((project) => project.apps)
+      .find((app) => app.slug === 'app.example.phone')!
+    assert.equal(busy.builds.length, 100)
+    assert.ok(busy.branches > 110)
+    assert.match(
+      dashboardView(wide, viewer('developer'), NOW),
+      new RegExp(`\\+${busy.branches - 6} more</a>`),
+    )
+    // The header's link covers the header only; chips and rows sit above or beside it.
+    assert.match(stylesheet, /\.project header\{[^}]*position:relative\}/)
+    assert.match(
+      stylesheet,
+      /\.project \.card-link::after\{content:'';position:absolute;inset:0\}/,
+    )
+    assert.match(
+      stylesheet,
+      /\.project a\.run-chip\{position:relative;z-index:1\}/,
+    )
+    assert.match(
+      stylesheet,
+      /\.app-grid-row a:not\(\.row-link\)\{position:relative;z-index:1\}/,
+    )
+    // A project with no app IDs says so.
+    assert.match(
+      dashboardView(
+        dashboardData({
+          db: fixture(),
+          viewer: viewer('developer'),
+          now: NOW,
+          appVisible: (id) => id === 3,
+        }),
+        viewer('developer'),
+        NOW,
+      ),
+      /<h3>App IDs \(0\)<\/h3><p>No app IDs\.<\/p>/,
+    )
+  })
+
   it('U17.5 search finds projects, app IDs, runs, commits and branches the viewer may see', () => {
     const db = fixture()
     const developer = {
@@ -667,14 +1002,19 @@ describe('Design system and views', () => {
     // LIKE wildcards are matched literally.
     assert.deepEqual(find('%'), [])
     assert.equal(search(developer, 'phone')[0]!.href, '/projects/phones')
-    assert.equal(search(developer, 'phone')[1]!.href, '/projects/phones')
+    // An app ID opens its page in its project, on either node.
+    assert.equal(
+      search(developer, 'phone')[1]!.href,
+      '/projects/phones/apps/app.example.phone',
+    )
     assert.equal(search(developer, '#2')[0]!.href, '/runs/run-2')
     assert.equal(
       search({ ...developer, viewer: viewer('developer', 'host') }, 'watch')[0]!
         .href,
-      '/apps/2',
+      '/projects/phones/apps/app.example.watch',
     )
-    // A tester finds the app IDs shared with them and their projects, nothing else.
+    // A tester finds the app IDs shared with them, each opening Install
+    // apps, and no projects, which have no pages for testers on either node.
     const tester = {
       db,
       viewer: viewer('tester', 'host'),
@@ -682,10 +1022,13 @@ describe('Design system and views', () => {
     }
     assert.deepEqual(
       search(tester, 'desk').map((result) => [result.kind, result.href]),
-      [
-        ['project', '/projects/desk'],
-        ['app', '/apps/3'],
-      ],
+      [['app', '/apps/3']],
+    )
+    assert.deepEqual(
+      search({ ...tester, viewer: viewer('tester', 'master') }, 'desk').map(
+        (result) => [result.kind, result.href],
+      ),
+      [['app', '/apps/3']],
     )
     assert.deepEqual(search(tester, 'phone'), [])
     assert.deepEqual(search(tester, '#1'), [])
@@ -803,6 +1146,13 @@ describe('Design system and views', () => {
     assert.match(run, /Phone 1\.0 \(26102013\) arm64-v8a</)
     assert.doesNotMatch(run, /26102014/)
     assert.match(run, /<h1>Run 1<\/h1>/)
+    // Artifacts › the project › the run, on the host.
+    assert.deepEqual(crumbTrail(run), [
+      'Mason Host /',
+      'Artifacts /artifacts',
+      'Phones /artifacts?project=phones',
+      'Run 1 /artifacts?run=run-1 *',
+    ])
     assert.match(run, /Version 1\.0 \(11\)/)
     assert.match(run, /12 passed/)
     assert.match(run, /href="\/runs\/run-1\/artifacts\/report\/view"/)
@@ -814,7 +1164,25 @@ describe('Design system and views', () => {
     assert.match(running, /<li>None\.<\/li>/)
     assert.match(artifactsView(source, { run: 'none' }), /Run unavailable/)
     const list = artifactsView(source, { project: 'phones', branch: 'main' })
-    assert.match(list, /phones · main/)
+    assert.deepEqual(crumbTrail(list), [
+      'Mason Host /',
+      'Artifacts /artifacts',
+      'Phones /artifacts?project=phones',
+      'main /artifacts?project=phones&amp;branch=main *',
+    ])
+    assert.deepEqual(crumbTrail(artifactsView(source, {})), [
+      'Mason Host /',
+      'Artifacts /artifacts *',
+    ])
+    // A project it does not know keeps its slug; a branch alone narrows every project.
+    assert.deepEqual(
+      crumbTrail(artifactsView(source, { project: 'nothing' })).slice(2),
+      ['nothing /artifacts?project=nothing *'],
+    )
+    assert.deepEqual(
+      crumbTrail(artifactsView(source, { branch: 'feature/login' })).slice(2),
+      ['feature/login /artifacts?branch=feature%2Flogin *'],
+    )
     assert.match(list, /2 · 1\.5 MB/)
     assert.match(list, /<td class="mono">26102011, 26102013 · 3 files<\/td>/)
     // Each row names its run and status, for the page's socket to keep current.
@@ -877,9 +1245,16 @@ describe('Design system and views', () => {
       ],
     )
     const html = projectRunsView(
-      { slug: 'phones', name: 'Phones', ...all },
+      { viewer: viewer('developer'), slug: 'phones', name: 'Phones', ...all },
       NOW,
     )
+    // All branches: Runs and builds is the current pill.
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Master /',
+      'Projects /projects',
+      'Phones /projects/phones',
+      'Runs and builds /projects/phones/runs *',
+    ])
     // All branches first and current, then the pinned branches, a divider, the rest.
     assert.match(
       html,
@@ -909,8 +1284,32 @@ describe('Design system and views', () => {
       ['feature/login', 'main', 'old/branch'],
     )
     const selected = projectRunsView(
-      { slug: 'phones', name: 'Phones', branch: 'main', ...main },
+      {
+        viewer: viewer('developer', 'host'),
+        slug: 'phones',
+        name: 'Phones',
+        branch: 'main',
+        ...main,
+      },
       NOW,
+    )
+    // A branch picked: its pill is current, and Runs and builds returns to All branches.
+    assert.deepEqual(crumbTrail(selected), [
+      'Mason Host /',
+      'Projects /projects',
+      'Phones /projects/phones',
+      'Runs and builds /projects/phones/runs',
+      'main /projects/phones/runs?branch=main *',
+    ])
+    // The layout is the same: the branches on the left, then that branch's runs table.
+    assert(
+      selected.includes(
+        `<section class="panel"><h2><span class="mono">main</span></h2>${projectRunsTable(main.runs, NOW, false)}</section></div>`,
+      ),
+    )
+    assert.match(
+      selected,
+      /<div class="runs-columns"><nav class="panel branch-list" aria-label="Branches">/,
     )
     assert.match(selected, /The latest runs on main/)
     assert.match(
@@ -1002,6 +1401,7 @@ describe('Nodes page', () => {
       cloudHosts: [cloudHost],
     })
     assert.match(manager, /Store builds in a new DigitalOcean Space/)
+    assert.deepEqual(crumbTrail(manager), ['Mason Master /', 'Nodes /nodes *'])
     assert.doesNotMatch(manager, /cloud\/hosts\/h\/reconcile|Remove host/)
     const empty = nodesView({
       ...base,
@@ -1532,6 +1932,10 @@ describe('Settings page', () => {
         },
       ],
     })
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Master /',
+      'Settings /settings *',
+    ])
     const card = html.slice(html.indexOf('id="keys"'))
     assert.match(
       card,
@@ -1553,11 +1957,13 @@ describe('Settings page', () => {
       card,
       /<table class="list compact"><thead><tr><th>Name<\/th><th>Role<\/th><th>Created<\/th><th>State<\/th><th>Key<\/th>/,
     )
+    // A listed key shows only its prefix, with nothing to copy: the whole
+    // key is copyable once, in the box that opens when it is created.
     assert.match(
       card,
-      /<td>2026-10-03<\/td><td>active<\/td><td><button type="button" class="secondary copy icon-only" data-copy="mason_v1_abcde…"/,
+      /<td>2026-10-03<\/td><td>active<\/td><td><span class="mono">mason_v1_abcde…<\/span><\/td>/,
     )
-    assert.match(card, /<span class="mono">mason_v1_abcde…<\/span>/)
+    assert.doesNotMatch(card, /data-copy="mason_v1_/)
     assert.match(
       card,
       /<td>revoked<\/td><td><small>builder key<\/small><\/td><td><\/td>/,
@@ -1886,6 +2292,7 @@ describe('Project tabs and the Secrets tab', () => {
       ],
     )
     const overview = projectView({
+      viewer: viewer('developer'),
       slug: 'app',
       name: 'App',
       repository: 'https://github.com/a/app',
@@ -1902,12 +2309,35 @@ describe('Project tabs and the Secrets tab', () => {
       /href="\/projects\/app" aria-current="page">Overview/,
     )
     assert.doesNotMatch(overview, /data-secrets|Save secrets/)
+    assert.deepEqual(crumbTrail(overview), [
+      'Mason Master /',
+      'Projects /projects',
+      'App /projects/app *',
+    ])
+    const masonfile = masonfileView({
+      viewer: viewer('developer', 'host'),
+      slug: 'app',
+      name: 'App',
+      commits: [],
+    })
     assert.match(
-      masonfileView({ slug: 'app', name: 'App', commits: [] }),
+      masonfile,
       /href="\/projects\/app\/masonfile" aria-current="page">Masonfile/,
     )
+    assert.deepEqual(crumbTrail(masonfile), [
+      'Mason Host /',
+      'Projects /projects',
+      'App /projects/app',
+      'Masonfile /projects/app/masonfile *',
+    ])
     const runs = projectRunsView(
-      { slug: 'app', name: 'App', branches: [], runs: [] },
+      {
+        viewer: viewer('developer'),
+        slug: 'app',
+        name: 'App',
+        branches: [],
+        runs: [],
+      },
       NOW,
     )
     assert.match(
@@ -1915,6 +2345,96 @@ describe('Project tabs and the Secrets tab', () => {
       /href="\/projects\/app\/runs" aria-current="page">Runs and builds/,
     )
     assert.match(runs, /No runs yet/)
+  })
+
+  it('M10 the App IDs card is a grid of App ID, Platforms and Apple team, each row linking to its app ID page', () => {
+    const overview = (
+      apps: Parameters<typeof projectView>[0]['apps'],
+      node: 'master' | 'host' = 'master',
+    ): string =>
+      projectView({
+        viewer: viewer('developer', node),
+        slug: 'my app',
+        name: 'App',
+        repository: 'https://github.com/a/app',
+        defaultBranch: 'master',
+        format: 'pipeline',
+        apps,
+        rules: [],
+        webhook: false,
+        buildNumbers: [],
+        canSeed: false,
+      })
+    const apps = [
+      {
+        bundleId: 'com.example.alpha',
+        platforms: ['ios', 'android'],
+        apple: { team: 'ABCDE12345' },
+      },
+      { bundleId: 'com.example.beta-with-a-longer-id', platforms: ['macos'] },
+      { bundleId: 'a&b', platforms: [] },
+    ]
+    for (const node of ['master', 'host'] as const) {
+      const html = overview(apps, node)
+      const card = html.slice(
+        html.indexOf('App IDs</h2>'),
+        html.indexOf('Branch rules'),
+      )
+      assert.doesNotMatch(card, /<ul|<li/)
+      assert.match(
+        card,
+        /^App IDs<\/h2><div class="app-grid" role="table" aria-label="App IDs"><div class="app-grid-row app-grid-head" role="row"><span role="columnheader">App ID<\/span><span role="columnheader">Platforms<\/span><span role="columnheader">Apple team<\/span><\/div>/,
+      )
+      // One row per app ID, three cells each: its link, its chips back to back, its team.
+      const rows = [
+        ...card.matchAll(
+          /<div class="app-grid-row" role="row"><div role="cell"><a class="row-link" href="([^"]+)">([^<]+)<\/a><\/div><div role="cell"><span class="app-platforms">(.*?)<\/span><\/div><div role="cell">(.*?)<\/div><\/div>/g,
+        ),
+      ].map((match) => ({
+        href: match[1],
+        id: match[2],
+        chips: match[3],
+        team: match[4],
+      }))
+      assert.deepEqual(rows, [
+        {
+          href: '/projects/my%20app/apps/com.example.alpha',
+          id: 'com.example.alpha',
+          chips: platformChip('ios') + platformChip('android'),
+          team: '<span class="mono">ABCDE12345</span>',
+        },
+        {
+          href: '/projects/my%20app/apps/com.example.beta-with-a-longer-id',
+          id: 'com.example.beta-with-a-longer-id',
+          chips: platformChip('macos'),
+          team: '',
+        },
+        {
+          href: '/projects/my%20app/apps/a%26b',
+          id: 'a&amp;b',
+          chips: '',
+          team: '',
+        },
+      ])
+    }
+    assert.match(overview([]), /App IDs<\/h2><p>None\.<\/p><\/section>/)
+    // The columns: the app ID's at least 12rem, the chips' as wide as the widest row's, the team's the rest.
+    assert.match(
+      stylesheet,
+      /\.app-grid\{display:grid;grid-template-columns:minmax\(12rem,max-content\) max-content 1fr;/,
+    )
+    assert.match(
+      stylesheet,
+      /\.app-grid-row\{display:grid;grid-column:1\/-1;grid-template-columns:subgrid;/,
+    )
+    assert.match(
+      stylesheet,
+      /\.app-platforms\{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-start;/,
+    )
+    assert.match(
+      stylesheet,
+      /\.app-grid \.row-link::after\{content:'';position:absolute;inset:0\}/,
+    )
   })
 
   it('U18.13 a manager sees the add buttons, Edit or Replace then Delete per row, the editor and the audit', () => {
@@ -1937,6 +2457,12 @@ describe('Project tabs and the Secrets tab', () => {
         },
       ],
     })
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Master /',
+      'Projects /projects',
+      'App /projects/app',
+      'Secrets /projects/app/secrets *',
+    ])
     assert.match(
       html,
       /data-secret-add="value"><span[^>]*>[^<]*<\/span>Add secret value/,
@@ -2069,25 +2595,28 @@ describe('People and groups pages', () => {
     id: number
     name: string
     role: string
-    email?: string
-    addresses: Record<string, string>
+    emails: Array<{ email: string; confirmed: boolean }>
     username?: string
   }> = [
     {
       id: 1,
       name: 'Ada <Admin>',
       role: 'admin',
-      email: 'ada@example.com',
-      addresses: {},
+      emails: [{ email: 'ada@example.com', confirmed: true }],
       username: 'ada',
     },
     {
       id: 2,
       name: 'Tess',
       role: 'tester',
-      addresses: { google: 'tess@gmail.example' },
+      emails: [{ email: 'tess@gmail.example', confirmed: true }],
     },
   ]
+  const groupPeople = people.map((person) => ({
+    id: person.id,
+    name: person.name,
+    emails: person.emails.map((entry) => entry.email),
+  }))
   const apps = [
     { id: 7, name: 'Wallet', slug: 'app.example.wallet', enabled: true },
     { id: 3, name: 'Maps & more', slug: 'app.example.maps', enabled: true },
@@ -2095,17 +2624,263 @@ describe('People and groups pages', () => {
   ]
   const group = { id: 5, name: 'Beta "crew"', apps: [3, 7], members: [2] }
 
-  it('U20.1 People lists people and, for administrators, the add form; it has no groups', () => {
-    const admin = peopleView({ people, canChange: true })
+  it('U20.1 People lists one compact row per person in seven columns, editable as the viewer may', () => {
+    const withMore = [
+      {
+        ...people[0]!,
+        emails: [
+          { email: 'ada@example.com', confirmed: true },
+          { email: 'ada@claimed.example', confirmed: false },
+        ],
+        password: true,
+        invitation: { expiresAt: Date.UTC(2026, 10, 15) },
+      },
+      people[1]!,
+    ]
+    const admin = peopleView({
+      people: withMore,
+      canChange: true,
+      now: Date.UTC(2026, 10, 8),
+    })
     assert.match(admin, /<h1>People<\/h1>/)
-    assert.match(admin, /<strong>Ada &lt;Admin&gt;<\/strong>/)
-    assert.match(admin, /<small>google: tess@gmail\.example<\/small>/)
-    assert.match(admin, /name="email" type="email" required/)
+    // People is top-level, as the side menu has it, not under Settings.
+    assert.deepEqual(crumbTrail(admin), ['Mason Master /', 'People /people *'])
+    assert.deepEqual(
+      [...admin.matchAll(/<th>([^<]*)<\/th>/g)].map((match) => match[1]),
+      [
+        'Full name',
+        'Username',
+        'Email addresses',
+        'Role',
+        'Invite',
+        'Password',
+      ],
+    )
+    assert.match(admin, /<span class="sr-only">Remove or save<\/span>/)
+    // Names and usernames are buttons that turn into fields; labels escaped.
+    assert.match(
+      admin,
+      /<button type="button" class="cell-edit" data-edit="name" aria-label="Edit full name">Ada &lt;Admin&gt;<\/button><input class="cell-input" data-input="name" value="Ada &lt;Admin&gt;"/,
+    )
+    assert.match(
+      admin,
+      /data-edit="username"[^>]*><span class="muted">—<\/span><\/button>/,
+    )
+    // One line per email, each with a red ×; Add under the last; unconfirmed tagged.
+    const emails = admin.slice(
+      admin.indexOf('<ul class="email-lines"'),
+      admin.indexOf('</td>', admin.indexOf('<ul class="email-lines"')),
+    )
+    assert.equal(emails.match(/data-remove-email/g)!.length, 2)
+    assert.match(
+      emails,
+      /<\/ul><button type="button" class="pill" data-add-email>Add<\/button>$/,
+    )
+    assert.match(
+      emails,
+      /<li data-email="ada@claimed\.example" data-unconfirmed><span class="email">ada@claimed\.example<\/span><small class="tag">unconfirmed<\/small><button type="button" class="pill" data-confirm-email>Confirm<\/button>/,
+    )
+    assert.match(
+      admin,
+      /<select data-role aria-label="Role"><option selected>admin<\/option>/,
+    )
+    assert.doesNotMatch(admin, /Set role/)
+    // Invite and Password are pills opening modals; Remove is last.
+    assert.match(
+      admin,
+      /<button type="button" class="pill" data-open="invite-1">Invite again<\/button><dialog class="modal" id="invite-1"/,
+    )
+    assert.match(admin, /Expires/)
+    assert.match(
+      admin,
+      /<button type="button" class="pill" data-open="password-1">Change password<\/button>/,
+    )
+    assert.match(
+      admin,
+      /<button type="button" class="pill" data-open="password-2">Set password<\/button>/,
+    )
+    assert.match(
+      admin,
+      /<td class="row-action"><button type="button" data-row-action class="danger">Remove<\/button><\/td><\/tr>/,
+    )
+    assert.match(
+      admin,
+      /data-original="\{&quot;name&quot;:&quot;Ada &lt;Admin&gt;&quot;/,
+    )
+    assert.match(admin, /<dialog class="modal" data-email-dialog/)
+    assert.match(admin, /<dialog class="modal" data-confirm-dialog/)
+    assert.match(
+      admin,
+      /<div class="email-fields" data-email-fields><input id="person-email" name="email" type="email" aria-label="Email address"><\/div><button type="button" class="pill" data-add-email-field>Add<\/button>/,
+    )
     assert.doesNotMatch(admin, /\/api\/v2\/groups|Tester groups/)
-    const manager = peopleView({ people, canChange: false })
-    assert.doesNotMatch(manager, /name="email"|data-path=/)
+    // A manager reads everyone, edits only their own name and emails.
+    const manager = peopleView({ people, canChange: false, viewerId: 2 })
+    assert.doesNotMatch(manager, /data-mason="person-add"|data-open=|data-role/)
     assert.match(manager, /<td>tester<\/td>/)
+    const own = manager.slice(manager.indexOf('<tr data-person="2"'))
+    assert.match(own, /data-edit="self"/)
+    assert.match(own, /data-edit="name"/)
+    assert.doesNotMatch(own, /data-edit="username"/)
+    assert.match(own, /data-add-email/)
+    assert.match(
+      own,
+      /<button type="button" data-row-action hidden>Save<\/button>/,
+    )
+    const other = manager.slice(
+      manager.indexOf('<tr data-person="1"'),
+      manager.indexOf('</tr>', manager.indexOf('<tr data-person="1"')),
+    )
+    assert.match(other, /data-edit="none"/)
+    assert.doesNotMatch(
+      other,
+      /data-edit="name"|data-remove-email|data-row-action/,
+    )
     assert.match(peopleView({ people: [], canChange: false }), /Nobody yet\./)
+  })
+
+  it('M4.9 Your account shows the person’s own record, editable but for the username and role, with the password and Sign out', () => {
+    const person = {
+      id: 5,
+      name: 'Tess <T>',
+      role: 'tester',
+      username: 'tess',
+      password: true,
+      emails: [
+        { email: 'tess@example.test', confirmed: true },
+        { email: 'tess@claim.test', confirmed: false },
+      ],
+    }
+    const html = accountView({
+      viewer: viewer('tester', 'host'),
+      person,
+      signOut: '<form data-mason="sign-out"><button>Sign out</button></form>',
+      editable: true,
+    })
+    assert.match(html, /<h1>Your account<\/h1>/)
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Host /',
+      'Your account /account *',
+    ])
+    assert.match(
+      html,
+      /<section class="panel account" data-person="5" data-edit="self"/,
+    )
+    assert.match(
+      html,
+      /data-edit="name" aria-label="Edit full name">Tess &lt;T&gt;</,
+    )
+    assert.doesNotMatch(
+      html,
+      /data-edit="username"|data-role|data-confirm-email/,
+    )
+    assert.match(
+      html,
+      /<dd class="person-username"><span class="mono">tess<\/span>/,
+    )
+    assert.match(html, /<dd>tester<\/dd>/)
+    assert.equal(html.match(/data-remove-email/g)!.length, 2)
+    assert.match(html, /data-add-email/)
+    assert.match(html, /data-open="password-own">Change password</)
+    assert.match(
+      html,
+      /data-path="\/api\/v2\/people\/5" data-return="\/account"/,
+    )
+    assert.match(
+      html,
+      /<button type="button" data-row-action hidden>Save<\/button><form data-mason="sign-out">/,
+    )
+    assert.match(html, /data-confirm-dialog/)
+    const offline = accountView({
+      viewer: viewer('tester'),
+      person: { ...person, password: false },
+      signOut: '',
+      editable: false,
+    })
+    assert.match(offline, /cannot reach the master/)
+    assert.deepEqual(crumbTrail(offline)[0], 'Mason Master /')
+    assert.match(offline, /data-edit="none"/)
+    assert.doesNotMatch(offline, /data-row-action|data-add-email|data-open=/)
+  })
+
+  it('M4.10 the top-right account icon is a link to Your account', () => {
+    const html = shell({
+      title: 'x',
+      body: '',
+      viewer: { name: 'ada', role: 'admin', node: 'master', signOut: '' },
+    })
+    assert.match(
+      html,
+      /<a class="account" href="\/account" aria-label="Your account" title="ada · admin · master"><span class="avatar">A<\/span><\/a>/,
+    )
+    assert.doesNotMatch(html, /<details class="account"/)
+  })
+
+  it('M8 draws every trail as pill links from Mason Master or Mason Host, the last one current', () => {
+    // The first pill names the node and opens its home; a host and a standalone server are both Mason Host.
+    for (const [node, first] of [
+      ['master', 'Mason Master'],
+      ['host', 'Mason Host'],
+      ['standalone', 'Mason Host'],
+    ] as const)
+      assert.deepEqual(crumbTrail(breadcrumbs({ node }, [])), [`${first} / *`])
+    const html = breadcrumbs({ node: 'master' }, [
+      { label: 'A <b> & "c"', href: '/x?a=1&b=<2>' },
+      { label: 'Last', href: '/y', data: { 'group-title': 'z"' } },
+    ])
+    assert.equal(
+      html,
+      '<nav class="breadcrumbs" aria-label="Breadcrumb"><ol><li><a class="crumb" href="/">Mason Master</a></li><li><span class="crumb-sep" aria-hidden="true">›</span><a class="crumb" href="/x?a=1&amp;b=&lt;2&gt;">A &lt;b&gt; &amp; &quot;c&quot;</a></li><li><span class="crumb-sep" aria-hidden="true">›</span><a class="crumb" href="/y" aria-current="page" data-group-title="z&quot;">Last</a></li></ol></nav>',
+    )
+    assert.equal(html.match(/aria-current/g)!.length, 1)
+    // The master's own pages, as the side menu lists them.
+    assert.deepEqual(
+      crumbTrail(cloudView({ accounts: [], canChange: true, now: NOW })),
+      ['Mason Master /', 'Cloud /cloud *'],
+    )
+    assert.deepEqual(
+      crumbTrail(wizardView({ owned: [], rules: [], webhook: false })),
+      ['Mason Master /', 'Projects /projects', 'New /projects/new *'],
+    )
+    assert.deepEqual(
+      crumbTrail(
+        wizardView({
+          slug: 'my app',
+          repository: 'git@github.com:a/app.git',
+          owned: [],
+          rules: [],
+          webhook: false,
+        }),
+      ),
+      [
+        'Mason Master /',
+        'Projects /projects',
+        'New /projects/new?slug=my%20app *',
+      ],
+    )
+    // Labels are escaped; so are the project's own pages' hrefs.
+    assert.deepEqual(
+      crumbTrail(
+        projectView({
+          viewer: viewer('developer', 'host'),
+          slug: 'a&b',
+          name: '<Odd> & "Co"',
+          repository: '',
+          defaultBranch: 'master',
+          format: 'pipeline',
+          apps: [],
+          rules: [],
+          webhook: false,
+          buildNumbers: [],
+          canSeed: false,
+        }),
+      ),
+      [
+        'Mason Host /',
+        'Projects /projects',
+        '&lt;Odd&gt; &amp; &quot;Co&quot; /projects/a%26b *',
+      ],
+    )
   })
 
   it('U20.2 the Groups list links one row per group and adds a group by name', () => {
@@ -2117,6 +2892,7 @@ describe('People and groups pages', () => {
       canChange: true,
     })
     assert.match(html, /<h1>Groups<\/h1>/)
+    assert.deepEqual(crumbTrail(html), ['Mason Master /', 'Groups /groups *'])
     assert.deepEqual(
       [
         ...html.matchAll(
@@ -2144,11 +2920,22 @@ describe('People and groups pages', () => {
   })
 
   it('U20.3 a group page: the name row, one row per app and member, and Remove group', () => {
-    const html = groupView({ group, apps, people, canChange: true })
+    const html = groupView({
+      group,
+      apps,
+      people: groupPeople,
+      canChange: true,
+    })
     assert.match(html, /<h1 data-group-title>Beta &quot;crew&quot;<\/h1>/)
+    // Groups › the group, its pill renamed with the title.
+    assert.deepEqual(crumbTrail(html), [
+      'Mason Master /',
+      'Groups /groups',
+      'Beta &quot;crew&quot; /groups/5 *',
+    ])
     assert.match(
       html,
-      /<span>Groups<\/span><span>\/<\/span><span data-group-title>Beta &quot;crew&quot;<\/span>/,
+      /<a class="crumb" href="\/groups\/5" aria-current="page" data-group-title="">Beta &quot;crew&quot;<\/a>/,
     )
     assert.match(html, /<div class="group-page" data-group="5">/)
     // The name row comes first, as a button, with its hidden field.
@@ -2196,7 +2983,7 @@ describe('People and groups pages', () => {
     const read = groupView({
       group: { id: 5, name: 'Beta', apps: [], members: [1] },
       apps,
-      people,
+      people: groupPeople,
       canChange: false,
     })
     assert.match(
@@ -2216,7 +3003,12 @@ describe('People and groups pages', () => {
       ...apps,
       { id: 11, name: '</script><b>x', slug: 'app.example.x', enabled: true },
     ]
-    const html = groupView({ group, apps: tricky, people, canChange: true })
+    const html = groupView({
+      group,
+      apps: tricky,
+      people: groupPeople,
+      canChange: true,
+    })
     for (const [kind, add, find] of [
       ['apps', 'Add App', 'Find an app'],
       ['members', 'Add member', 'Find a person'],
@@ -2245,12 +3037,17 @@ describe('People and groups pages', () => {
     assert(!source.includes('<'))
     assert.deepEqual(JSON.parse(source), {
       apps: tricky,
-      people,
+      people: groupPeople,
       group: { apps: [3, 7], members: [2] },
     })
     assert.equal(html.match(/<\/script>/g)!.length, 1)
     // Without groups.change: no pickers and no catalog.
-    const read = groupView({ group, apps, people, canChange: false })
+    const read = groupView({
+      group,
+      apps,
+      people: groupPeople,
+      canChange: false,
+    })
     assert.doesNotMatch(read, /data-group-add|data-group-catalog|Add App/)
   })
 

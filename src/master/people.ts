@@ -6,7 +6,7 @@ import { integer, text } from '../validation.js'
 import { Conflict, NotFound } from './api.js'
 import type { MasterDatabase } from './database.js'
 import { createPasswordRecord } from './passwords.js'
-import { allow } from './permissions.js'
+import { allow, can } from './permissions.js'
 import { asRole, type Actor, type Role } from './roles.js'
 
 /** A person on the master, as the people API shows them. */
@@ -18,15 +18,23 @@ export interface Person {
   disabled: boolean
   /** Whether the account can sign in to the master with a password. */
   password: boolean
-  /** The person's email: any enabled sign-in method that verifies it signs them in. */
-  email?: string
-  /** Addresses for single methods, for someone whose address there differs. */
-  addresses: Record<string, string>
+  /**
+   * The person's email addresses, in order. Any sign-in method that verifies
+   * a confirmed one signs them in; the method is not part of the address.
+   */
+  emails: PersonEmail[]
   groups: number[]
   permissionVersion: number
   createdAt: number
   /** An unused invitation link: when it expires. The link itself is shown once. */
   invitation?: { expiresAt: number }
+}
+
+/** One of a person's email addresses. */
+export interface PersonEmail {
+  email: string
+  /** Whether it signs the person in; one they added themselves waits for an admin. */
+  confirmed: boolean
 }
 
 /** A group: a named set of app IDs a tester sees, and its members. */
@@ -49,14 +57,22 @@ const asAddress = (value: unknown): string => {
     throw new Error('An address is an email address')
   return address
 }
-/** `{ method: address }`, with `null` removing a method's address. */
-const asAddresses = (value: unknown): Record<string, string | null> => {
-  if (value == null || typeof value !== 'object' || Array.isArray(value))
-    throw new Error('addresses maps sign-in methods to email addresses')
-  const out: Record<string, string | null> = {}
-  for (const [method, address] of Object.entries(value))
-    out[asMethod(method)] = address === null ? null : asAddress(address)
-  return out
+/** What a person may change on their own record, here and through the host. */
+export const SELF_FIELDS: ReadonlySet<string> = new Set([
+  'name',
+  'emails',
+  'password',
+])
+/** The most addresses one person keeps. */
+const MAX_EMAILS = 10
+/** A list of email addresses, lower-cased and without repeats. */
+const asEmails = (value: unknown): string[] => {
+  if (!Array.isArray(value))
+    throw new Error('emails is a list of email addresses')
+  const emails = [...new Set(value.map(asAddress))]
+  if (emails.length > MAX_EMAILS)
+    throw new Error(`A person has at most ${MAX_EMAILS} email addresses`)
+  return emails
 }
 const asPassword = asObject({
   clientHash: asClientHash,
@@ -64,16 +80,26 @@ const asPassword = asObject({
 })
 const asPersonInput = asObject({
   name: asOptional(text(120)),
-  username: asOptional(asUsername),
+  /** `null` clears it. */
+  username: (value: unknown): string | null | undefined =>
+    value === null ? null : asOptional(asUsername)(value),
   role: asOptional(asRole),
   disabled: asOptional((value: unknown): boolean => {
     if (typeof value !== 'boolean') throw new Error('disabled is true or false')
     return value
   }),
-  email: asOptional(asAddress),
-  addresses: asOptional(asAddresses),
+  emails: asOptional(asEmails),
+  confirmEmails: asOptional(asEmails),
   password: asOptional(asPassword),
 })
+/** Refuses the fields `emails` replaced. */
+function refuseOldAddressFields(value: unknown): void {
+  const input = value as { email?: unknown; addresses?: unknown } | null
+  if (input?.email !== undefined || input?.addresses !== undefined)
+    throw new Error(
+      'email and addresses are gone: send emails, a list of email addresses',
+    )
+}
 
 /** How long an invitation link lasts unless the admin chooses: a week. */
 export const INVITATION_DAYS = 7
@@ -101,8 +127,6 @@ export class InvitationRefused extends Error {
   }
 }
 
-/** The address row that matches every sign-in method. */
-const ANY_METHOD = '*'
 /** A password reaches the master only as a client hash. */
 function refuseRawPassword(value: unknown): void {
   const password = (value as { password?: unknown } | null)?.password
@@ -143,15 +167,15 @@ export class People {
       )
       .get(id)
     if (row == null) return undefined
-    const addresses: Record<string, string> = {}
-    let email: string | undefined
-    for (const entry of this.db
+    const emails = this.db
       .prepare(
-        'SELECT method,email FROM account_addresses WHERE account_id=? ORDER BY method',
+        'SELECT email,confirmed FROM account_emails WHERE account_id=? ORDER BY position,email',
       )
-      .all(id))
-      if (entry.method === ANY_METHOD) email = String(entry.email)
-      else addresses[String(entry.method)] = String(entry.email)
+      .all(id)
+      .map((entry) => ({
+        email: String(entry.email),
+        confirmed: Number(entry.confirmed) === 1,
+      }))
     return {
       id: Number(row.id),
       name: String(row.name),
@@ -159,8 +183,7 @@ export class People {
       role: asRole(row.role),
       disabled: Number(row.disabled) === 1,
       password: row.password != null,
-      ...(email == null ? {} : { email }),
-      addresses,
+      emails,
       groups: this.db
         .prepare(
           'SELECT group_id FROM group_members WHERE account_id=? ORDER BY group_id',
@@ -183,34 +206,37 @@ export class People {
   }
 
   /**
-   * The account a flagged sign-in method admits. An enabled account that
-   * already has this address is returned unchanged. A disabled one is refused.
+   * The account a flagged sign-in method admits. An enabled account with
+   * this confirmed address is returned unchanged. A disabled one is refused.
    */
   admit(method: string, identity: { name: string; email: string }): number {
     const provider = asMethod(method)
     const email = asAddress(identity.email)
     const name = identity.name.trim().slice(0, 120) || email
     try {
-      return this.insertAdmitted(provider, email, name)
+      return this.insertAdmitted(email, name, provider)
     } catch (error) {
       // Two sign-ins of a new address can insert together; the second finds the first.
       const message = error instanceof Error ? error.message : ''
       if (!message.includes('UNIQUE constraint failed')) throw error
-      return this.insertAdmitted(provider, email, name)
+      return this.insertAdmitted(email, name, provider)
     }
   }
 
   private insertAdmitted(
-    provider: string,
     email: string,
     name: string,
+    provider: string,
   ): number {
     return this.master.transaction(() => {
+      // A verified provider email belongs to whoever signs in with it: an
+      // unconfirmed claim on it goes, recorded as that sign-in's doing.
+      this.dropClaim(email, { role: 'tester', label: `${provider} sign-in` })
       const existing = this.db
         .prepare(
-          "SELECT a.id, a.disabled FROM account_addresses x JOIN accounts a ON a.id=x.account_id WHERE x.method IN (?, '*') AND lower(x.email)=lower(?) ORDER BY x.method='*' LIMIT 1",
+          'SELECT a.id, a.disabled FROM account_emails x JOIN accounts a ON a.id=x.account_id WHERE x.email=? AND x.confirmed=1 LIMIT 1',
         )
-        .get(provider, email) as { id: number; disabled: number } | undefined
+        .get(email) as { id: number; disabled: number } | undefined
       if (existing != null) {
         if (existing.disabled === 1) throw new Error('This account is disabled')
         return existing.id
@@ -224,9 +250,9 @@ export class People {
       )
       this.db
         .prepare(
-          'INSERT INTO account_addresses(account_id,method,email) VALUES(?,?,?)',
+          'INSERT INTO account_emails(account_id,email,position,confirmed) VALUES(?,?,0,1)',
         )
-        .run(id, provider, email)
+        .run(id, email)
       this.master.audit(
         { role: 'tester', label: 'sign-in' },
         'person.admit',
@@ -237,15 +263,17 @@ export class People {
     })
   }
 
-  /** Adds a person: a name, a role, and their sign-in addresses or a master password. */
+  /** Adds a person: a name, a role, and their email addresses or a master password. */
   async create(actor: Actor, value: unknown): Promise<Person> {
     allow(actor, 'people.change')
     refuseRawPassword(value)
+    refuseOldAddressFields(value)
     const input = asPersonInput(value)
     if (input.name == null && input.username == null)
       throw new Error('A person needs a name or a username')
-    const email = input.email
-    if (email == null) throw new Error('A person needs an email address')
+    const emails = input.emails ?? []
+    if (input.username == null && emails.length === 0)
+      throw new Error('A person needs a username or an email address')
     const record =
       input.password == null
         ? null
@@ -253,10 +281,8 @@ export class People {
             input.password.clientHash,
             input.password.clientParameters,
           )
-    if (record != null && input.username == null)
-      throw new Error('A master password needs a username')
     const id = this.master.transaction(() => {
-      this.usernameFree(input.username)
+      this.usernameFree(input.username ?? undefined)
       const role = input.role ?? 'tester'
       const id = Number(
         this.db
@@ -274,10 +300,7 @@ export class People {
             this.master.now(),
           ).lastInsertRowid,
       )
-      this.setAddresses(id, {
-        ...input.addresses,
-        [ANY_METHOD]: email,
-      })
+      this.setEmails(id, emails, [], true, [], actor)
       this.master.audit(actor, 'person.create', String(id))
       if (record != null)
         this.master.audit(actor, 'person.password', String(id))
@@ -292,15 +315,27 @@ export class People {
    * each bumps their permission version, which ends their sessions. The
    * last enabled admin cannot be disabled or demoted.
    */
-  async update(actor: Actor, id: number, value: unknown): Promise<Person> {
-    const selfPassword =
+  async update(
+    actor: Actor,
+    id: number,
+    value: unknown,
+    /** Forwarded by a host, which the master does not trust to confirm an address. */
+    options: { viaHost?: boolean } = {},
+  ): Promise<Person> {
+    // A person may change their own name, emails and password; everything
+    // else, and anyone else, needs people.change. An address added through a
+    // host waits for an admin on the master, whoever the host says it is.
+    const admin = can(actor, 'people.change') && options.viaHost !== true
+    const own =
       actor.accountId === id &&
-      Object.keys((value as object | null) ?? {}).every(
-        (field) => field === 'password',
+      Object.keys((value as object | null) ?? {}).every((field) =>
+        SELF_FIELDS.has(field),
       )
-    if (!selfPassword) allow(actor, 'people.change')
+    if (!own) allow(actor, 'people.change')
     refuseRawPassword(value)
+    refuseOldAddressFields(value)
     const input = asPersonInput(value)
+    if (input.confirmEmails != null) allow(actor, 'people.change')
     if (this.person(id) == null) throw new NotFound('No such person')
     const record =
       input.password == null
@@ -317,32 +352,65 @@ export class People {
       const disabled = input.disabled ?? before.disabled
       if (before.role === 'admin' && !before.disabled)
         if (role !== 'admin' || disabled) this.keepAnAdmin(id)
-      if (input.username != null && input.username !== before.username)
-        this.usernameFree(input.username, id)
-      if (record != null && (input.username ?? before.username) == null)
-        throw new Error('A master password needs a username')
+      const username =
+        input.username === undefined ? before.username : input.username
+      if (username != null && username !== before.username)
+        this.usernameFree(username, id)
+      const emails = this.setEmails(
+        id,
+        input.emails ?? before.emails.map((entry) => entry.email),
+        input.confirmEmails ?? [],
+        admin,
+        before.emails,
+        actor,
+      )
+      const confirmed = this.person(id)!.emails.filter(
+        (entry) => entry.confirmed,
+      )
+      const naming = input.username !== undefined || input.emails !== undefined
+      if (naming && username == null && this.person(id)!.emails.length === 0)
+        throw new Error('A person needs a username or an email address')
+      // A change to the username or the emails may not leave nothing to sign
+      // in with: no username and no confirmed email.
+      if (naming && username == null && confirmed.length === 0)
+        throw new Error(
+          'Keep a confirmed email or a username: a person signs in with one',
+        )
+      // Sessions end when what the person may do changes, or when someone
+      // else takes away a confirmed address, which they may have signed in
+      // with; an unconfirmed one never signed anyone in.
+      const ends =
+        role !== before.role ||
+        disabled !== before.disabled ||
+        record != null ||
+        (actor.accountId !== id &&
+          before.emails.some(
+            (entry) => entry.confirmed && emails.removed.includes(entry.email),
+          ))
       this.db
         .prepare(
-          'UPDATE accounts SET name=?,username=?,role=?,is_admin=?,is_tester=?,disabled=?,password=COALESCE(?,password),permission_version=permission_version+1 WHERE id=?',
+          'UPDATE accounts SET name=?,username=?,role=?,is_admin=?,is_tester=?,disabled=?,password=COALESCE(?,password),permission_version=permission_version+? WHERE id=?',
         )
         .run(
           input.name ?? before.name,
-          input.username ?? before.username ?? null,
+          username ?? null,
           role,
           Number(role === 'admin'),
           Number(role === 'tester'),
           Number(disabled),
           record ?? null,
+          Number(ends),
           id,
         )
-      if (input.addresses != null) this.setAddresses(id, input.addresses)
-      if (input.email != null)
-        this.setAddresses(id, { [ANY_METHOD]: input.email })
       // A disabled person's invitation link stops working, and so does one
       // a password set another way makes needless: revoked once, and
       // audited when a password ended it.
       const revoked = (disabled || record != null) && this.dropInvitation(id)
       this.master.audit(actor, 'person.update', String(id))
+      for (const email of emails.added)
+        this.master.audit(actor, 'person.email.add', `${id} ${email}`)
+      for (const email of emails.removed)
+        this.master.audit(actor, 'person.email.remove', `${id} ${email}`)
       if (record != null) {
         this.master.audit(actor, 'person.password', String(id))
         if (revoked)
@@ -363,9 +431,7 @@ export class People {
       const before = this.person(id)
       if (before == null) throw new NotFound('No such person')
       if (before.role === 'admin' && !before.disabled) this.keepAnAdmin(id)
-      this.db
-        .prepare('DELETE FROM account_addresses WHERE account_id=?')
-        .run(id)
+      this.db.prepare('DELETE FROM account_emails WHERE account_id=?').run(id)
       this.dropInvitation(id)
       const groups = this.db
         .prepare('SELECT group_id FROM group_members WHERE account_id=?')
@@ -432,19 +498,39 @@ export class People {
     })
   }
 
-  /** Whom a live invitation token is for: their name, and their username if they have one. */
-  invitation(value: unknown): { name: string; username?: string } {
+  /**
+   * Whom a live invitation token is for: their name, their username if they
+   * have one, and whether they must choose one (they have no confirmed email
+   * to sign in with instead).
+   */
+  invitation(value: unknown): {
+    name: string
+    username?: string
+    usernameRequired: boolean
+  } {
     const token = asToken(value)
     const row = this.db
       .prepare(
-        'SELECT a.name,a.username FROM person_invitations i JOIN accounts a ON a.id=i.account_id WHERE i.token_hash=? AND i.expires_at>? AND a.disabled=0 AND a.removed_at IS NULL',
+        'SELECT a.id,a.name,a.username FROM person_invitations i JOIN accounts a ON a.id=i.account_id WHERE i.token_hash=? AND i.expires_at>? AND a.disabled=0 AND a.removed_at IS NULL',
       )
       .get(tokenHash(token), this.master.now())
     if (row == null) throw new InvitationRefused()
     return {
       name: String(row.name),
       ...(row.username == null ? {} : { username: String(row.username) }),
+      usernameRequired:
+        row.username == null && !this.hasConfirmedEmail(Number(row.id)),
     }
+  }
+
+  private hasConfirmedEmail(id: number): boolean {
+    return (
+      this.db
+        .prepare(
+          'SELECT 1 FROM account_emails WHERE account_id=? AND confirmed=1',
+        )
+        .get(id) != null
+    )
   }
 
   /**
@@ -475,14 +561,15 @@ export class People {
       const id = Number(row.account_id)
       const username =
         row.username == null ? input.username : String(row.username)
-      if (username == null) throw new Error('Choose a username')
+      if (username == null && !this.hasConfirmedEmail(id))
+        throw new Error('Choose a username')
       if (row.username == null) this.usernameFree(username)
       this.dropInvitation(id)
       this.db
         .prepare(
           'UPDATE accounts SET username=?,password=?,permission_version=permission_version+1 WHERE id=?',
         )
-        .run(username, record, id)
+        .run(username ?? null, record, id)
       this.master.audit(
         { role: asRole(row.role), accountId: id, label: `account:${id}` },
         'person.invite.accept',
@@ -636,38 +723,73 @@ export class People {
     this.master.change('account', account)
   }
 
-  private setAddresses(
+  /**
+   * Replaces a person's emails with `emails`, in that order. An address they
+   * already had keeps whether it is confirmed; a new one is confirmed when
+   * an administrator adds it (`admin`), and waits for one when the person
+   * adds it themselves; `confirm` confirms addresses they have. Another
+   * person's confirmed address is refused. An administrator's write takes
+   * over an address someone else only claimed (unconfirmed).
+   */
+  private setEmails(
     id: number,
-    addresses: Record<string, string | null>,
-  ): void {
-    for (const [method, address] of Object.entries(addresses)) {
-      this.db
+    emails: string[],
+    confirm: string[],
+    admin: boolean,
+    before: PersonEmail[],
+    actor: Actor,
+  ): { added: string[]; removed: string[] } {
+    const had = new Map(before.map((entry) => [entry.email, entry.confirmed]))
+    for (const email of confirm)
+      if (!emails.includes(email))
+        throw new Error(`${email} is not one of this person's addresses`)
+    for (const email of emails) {
+      if (had.has(email)) continue
+      const holder = this.db
         .prepare(
-          'DELETE FROM account_addresses WHERE account_id=? AND method=?',
+          'SELECT account_id,confirmed FROM account_emails WHERE email=? AND account_id!=?',
         )
-        .run(id, method)
-      if (address == null) continue
-      // An email matches every method, so it may not be anyone else's address anywhere.
-      if (
-        this.db
-          .prepare(
-            method === ANY_METHOD
-              ? 'SELECT 1 FROM account_addresses WHERE ?1 IS NOT NULL AND email=?2 AND account_id!=?3'
-              : "SELECT 1 FROM account_addresses WHERE (method=?1 OR method='*') AND email=?2 AND account_id!=?3",
-          )
-          .get(method, address, id) != null
-      )
-        throw new Conflict(
-          method === ANY_METHOD
-            ? 'Another person has that email address'
-            : `Another person has that ${method} address`,
-        )
-      this.db
-        .prepare(
-          'INSERT INTO account_addresses(account_id,method,email) VALUES(?,?,?)',
-        )
-        .run(id, method, address)
+        .get(email, id) as { account_id: number; confirmed: number } | undefined
+      if (holder == null) continue
+      if (!admin || holder.confirmed === 1)
+        throw new Conflict('That email address belongs to someone else')
+      this.dropClaim(email, actor)
     }
+    this.db.prepare('DELETE FROM account_emails WHERE account_id=?').run(id)
+    const insert = this.db.prepare(
+      'INSERT INTO account_emails(account_id,email,position,confirmed) VALUES(?,?,?,?)',
+    )
+    emails.forEach((email, position) =>
+      insert.run(
+        id,
+        email,
+        position,
+        Number((had.get(email) ?? admin) || confirm.includes(email)),
+      ),
+    )
+    return {
+      added: emails.filter((email) => !had.has(email)),
+      removed: [...had.keys()].filter((email) => !emails.includes(email)),
+    }
+  }
+
+  /** Drops an unconfirmed claim on an address, which its owner takes over; audited as `actor`'s doing. */
+  private dropClaim(email: string, actor: Actor): void {
+    const claim = this.db
+      .prepare(
+        'SELECT account_id FROM account_emails WHERE email=? AND confirmed=0',
+      )
+      .get(email) as { account_id: number } | undefined
+    if (claim == null) return
+    this.db
+      .prepare('DELETE FROM account_emails WHERE email=? AND confirmed=0')
+      .run(email)
+    this.master.audit(
+      actor,
+      'person.email.remove',
+      `${claim.account_id} ${email}`,
+    )
+    this.master.change('account', claim.account_id)
   }
 
   /** Refuses a username anyone else has, ignoring case; `except` may change its own case. */

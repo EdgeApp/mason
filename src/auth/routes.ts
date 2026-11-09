@@ -1,4 +1,5 @@
 import { asObject, asOptional, asString } from 'cleaners'
+import { identifierOf } from './passwordProtocol.js'
 import express, {
   Router,
   type Request,
@@ -8,8 +9,8 @@ import express, {
 import { masterContentSecurityPolicy } from '../node/webApp.js'
 import { Store } from '../store.js'
 import { asId, integer, object, text } from '../validation.js'
-import { escape } from '../view/html.js'
-import { page, shell } from '../view/shell.js'
+import { breadcrumbs, escape, type Crumb } from '../view/html.js'
+import { page, shell, type FramedPage, type Viewer } from '../view/shell.js'
 import { Accounts, sameSecret, type Account, type Session } from './accounts.js'
 import { beginSignIn, finishSignIn } from './flow.js'
 import { Providers } from './providers.js'
@@ -52,7 +53,6 @@ export function invitationPage(): string {
   return shell({
     title: 'Choose your password',
     body: `<h1>Choose your password</h1><section class="card"><form data-mason="invite" data-lookup="/auth/invite/lookup" data-accept="/auth/invite" data-return="/"><p data-field="welcome">Choose a username and a password to sign in to Mason.</p><label for="username">Username</label><input id="username" name="username" autocomplete="username" pattern="[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}" maxlength="64" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password" required><label for="confirm">Confirm the password</label><input id="confirm" name="confirm" type="password" autocomplete="new-password" required><p><small>At least 8 characters with uppercase, lowercase and a number, or 17 characters or more.</small></p><button>Set password and sign in</button><p data-field="status" hidden></p></form></section>`,
-    phone: true,
     scripts: ['/assets/master.js'],
   })
 }
@@ -93,9 +93,37 @@ export function sessionContext(
 }
 const hidden = (session: Session): string =>
   `<input type="hidden" name="csrf" value="${escape(session.csrf)}">`
-/** The tester pages' top-bar controls; administration is never offered here. */
-export function navigation(session: Session, _account: Account): string {
-  return `<a class="button register-device" href="/devices">Register Device</a><form method="post" action="/auth/logout">${hidden(session)}<button class="secondary">Sign out</button></form>`
+/** Sign out of this server: a form posting `/auth/logout`. */
+export function signOutForm(session: Session): string {
+  return `<form method="post" action="/auth/logout">${hidden(session)}<button class="secondary">Sign out</button></form>`
+}
+/** The standalone server's viewer: its administrators, and everyone else as a tester. */
+export function standaloneViewer(context: {
+  account: Account
+  session: Session
+}): Viewer {
+  return {
+    name: context.account.name,
+    role: context.account.is_admin ? 'admin' : 'tester',
+    node: 'standalone',
+    signOut: signOutForm(context.session),
+  }
+}
+/** Draws a signed-in page in a node's shell, for the person the request is from. */
+export type Frame = (req: Request, page: FramedPage) => string
+/** The standalone server's shell: Install apps, Devices and, for administrators, People. */
+export function standaloneFrame(accounts: Accounts): Frame {
+  return (req, framed) => {
+    const context = sessionContext(req, accounts)
+    return shell({
+      title: framed.title,
+      body: framed.body,
+      ...(context == null ? {} : { viewer: standaloneViewer(context) }),
+      ...(framed.active == null ? {} : { active: framed.active }),
+      ...(framed.scripts == null ? {} : { scripts: framed.scripts }),
+      ...(framed.head == null ? {} : { head: framed.head }),
+    })
+  }
 }
 export function authLimiter(now: () => number): RequestHandler {
   const clients = new Map<string, { count: number; until: number }>()
@@ -136,6 +164,10 @@ export interface AuthOptions {
     | Promise<{ token: string; session: Session; account: Account }>
   /** Whether the People pages are served (not on a host: accounts are managed on the master). */
   people?: boolean
+  /** Whether the small Your account page is served (not on a host, which has its own). */
+  account?: boolean
+  /** How signed-in pages are drawn; the standalone server's shell by default. */
+  frame?: Frame
   /** Invitation links, checked and used by the master (a host). */
   invitation?: {
     /** Whom a token is for: `{ name, username? }`. */
@@ -149,9 +181,10 @@ export interface AuthOptions {
   }
   /** Username and password sign-in, checked by the master (a host). */
   password?: {
-    parameters: (username: unknown) => Promise<unknown>
+    /** The hashing parameters for a username or an email. */
+    parameters: (identifier: unknown) => Promise<unknown>
     signIn: (
-      value: { username?: unknown; clientHash?: unknown },
+      value: { identifier?: unknown; clientHash?: unknown },
       address: string,
       previousToken: string | undefined,
     ) => Promise<{ token: string; session: Session }>
@@ -165,6 +198,21 @@ export function authRoutes(
   options: AuthOptions = {},
 ): Router {
   const router = Router()
+  const frame = options.frame ?? standaloneFrame(accounts)
+  /** A signed-in page in this node's shell. */
+  const framed = (
+    req: Request,
+    title: string,
+    body: string,
+    active?: string,
+    /** Its breadcrumbs: the standalone server's own pages (a host serves neither). */
+    crumbs?: Crumb[],
+  ): string =>
+    frame(req, {
+      title,
+      body: `${crumbs == null ? `<h1>${escape(title)}</h1>` : `<div class="page-head"><div>${breadcrumbs({ node: 'standalone' }, crumbs)}<h1>${escape(title)}</h1></div></div>`}${body}`,
+      ...(active == null ? {} : { active }),
+    })
   const current = (): Providers =>
     typeof providersOrCurrent === 'function'
       ? providersOrCurrent()
@@ -212,8 +260,7 @@ export function authRoutes(
     res.send(
       shell({
         title: 'Sign in',
-        body: `<h1>Sign in</h1><section class="card"><p>Sign in to app builds and run logs with your Mason account.</p>${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username and password:</p>`}<form data-mason="sign-in" data-parameters="/auth/password/parameters" data-session="/auth/password" data-return="${escape(destination)}"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><button>Sign in</button><p data-field="status" hidden></p></form></section>`,
-        phone: true,
+        body: `<h1>Sign in</h1><section class="card"><p>Sign in to app builds and run logs with your Mason account.</p>${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username or email and a password:</p>`}<form data-mason="sign-in" data-parameters="/auth/password/parameters" data-session="/auth/password" data-return="${escape(destination)}"><label for="username">Username or email</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><button>Sign in</button><p data-field="status" hidden></p></form></section>`,
         scripts: ['/assets/master.js'],
       }),
     )
@@ -241,11 +288,7 @@ export function authRoutes(
     }
     router.post('/auth/password/parameters', json, async (req, res) => {
       try {
-        res.json(
-          await password.parameters(
-            (req.body as { username?: unknown } | null)?.username,
-          ),
-        )
+        res.json(await password.parameters(identifierOf(req.body)))
       } catch (error) {
         refused(res, error)
       }
@@ -253,7 +296,11 @@ export function authRoutes(
     router.post('/auth/password', json, async (req, res) => {
       try {
         const result = await password.signIn(
-          (req.body ?? {}) as { username?: unknown; clientHash?: unknown },
+          {
+            identifier: identifierOf(req.body),
+            clientHash: (req.body as { clientHash?: unknown } | null)
+              ?.clientHash,
+          },
           req.ip ?? '',
           cookie(req, SESSION_COOKIE),
         )
@@ -334,19 +381,19 @@ export function authRoutes(
     if (context != null && !confirmed) {
       if (provider.type === 'oauth2' && provider.switchParameters == null) {
         res.send(
-          page(
+          framed(
+            req,
             'Switch account unavailable',
             `<section class="card"><p>This provider does not have an account switching method configured. Ask this Mason server's administrator to configure it.</p></section>`,
-            navigation(context.session, context.account),
           ),
         )
         return
       }
       res.send(
-        page(
+        framed(
+          req,
           'Switch account',
           `<section class="card"><p>You are signed in as ${escape(context.account.name)}. Continue to choose an account with ${escape(provider.name)}.</p><form method="post" action="/auth/switch/${escape(id)}">${hidden(context.session)}<input type="hidden" name="return" value="${escape(destination)}"><button>Continue and switch account</button></form></section>`,
-          navigation(context.session, context.account),
         ),
       )
       return
@@ -406,13 +453,39 @@ export function authRoutes(
     res.clearCookie(SESSION_COOKIE, cookieOptions)
     res.redirect(303, '/auth/login?signed_out=1')
   })
+  if (options.account !== false)
+    // Your account on the standalone server: who is signed in, and Sign out.
+    router.get('/account', (req, res) => {
+      const context = sessionContext(req, accounts)
+      if (context == null) {
+        res.redirect(
+          303,
+          '/auth/login?return=' + encodeURIComponent(req.originalUrl),
+        )
+        return
+      }
+      res.send(
+        framed(
+          req,
+          'Your account',
+          `<section class="card account"><dl class="account-fields"><dt>Full name</dt><dd>${escape(context.account.name)}</dd><dt>Email</dt><dd>${escape(context.account.email ?? 'No email provided')}</dd><dt>Access</dt><dd>${context.account.is_admin ? 'Administrator' : context.account.is_tester ? 'Tester' : 'Waiting for access'}</dd></dl>${signOutForm(context.session)}</section>`,
+          'account',
+          [{ label: 'Your account', href: '/account' }],
+        ),
+      )
+    })
   if (options.people === false) return router
   router.get('/people', (req, res) => {
     const context = sessionContext(req, accounts)
     if (context == null || !context.account.is_admin) {
+      const denied = '<p>Administrator access is required.</p>'
       res
         .status(403)
-        .send(page('Access denied', '<p>Administrator access is required.</p>'))
+        .send(
+          context == null
+            ? page('Access denied', denied)
+            : framed(req, 'Access denied', denied),
+        )
       return
     }
     const rows = accounts
@@ -448,10 +521,12 @@ export function authRoutes(
       )
       .join('')
     res.send(
-      page(
+      framed(
+        req,
         'People',
         `<section class="card"><h2>Preapprove a tester</h2><p>They can sign in for the first time using a verified email address from the selected provider. This does not send an email.</p><form method="post" action="/people/invitations">${hidden(context.session)}<label for="provider">Sign-in provider</label><select id="provider" name="provider">${choices}</select><label for="email">Email address</label><input id="email" name="email" type="email" required><label for="days">Expires in days</label><input id="days" name="days" type="number" min="1" max="365" value="30" required><p><button>Preapprove tester</button></p></form></section><section class="card"><h2>Accounts</h2>${rows}</section><section class="card"><h2>Preapprovals</h2>${invites || '<p>No preapprovals yet.</p>'}</section>`,
-        navigation(context.session, context.account),
+        'people',
+        [{ label: 'People', href: '/people' }],
       ),
     )
   })
@@ -491,10 +566,11 @@ export function authRoutes(
       integer(1, 365)(Number(input.days)),
     )
     res.send(
-      page(
+      framed(
+        req,
         'Tester preapproved',
         `<section class="card"><p>The account can sign in with its verified email before the preapproval expires.</p><p>Share this sign-in link:</p><p><a href="${escape(store.config.origin + '/auth/login')}">${escape(store.config.origin + '/auth/login')}</a></p><a href="/people">Back to People</a></section>`,
-        navigation(context.session, context.account),
+        'people',
       ),
     )
   })

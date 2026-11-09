@@ -116,7 +116,7 @@ describe('Invitation links', function () {
     // Without a host or master address, the link is where the admin reached the master.
     const early = await c.api('POST', '/api/v2/people', {
       name: 'Early Bird',
-      email: 'early@example.test',
+      emails: ['early@example.test'],
       invite: true,
     })
     assert.equal(early.status, 201)
@@ -144,7 +144,7 @@ describe('Invitation links', function () {
 
     const added = await c.api('POST', '/api/v2/people', {
       name: 'Tess Tester',
-      email: 'tess@example.test',
+      emails: ['tess@example.test'],
       invite: true,
     })
     assert.equal(added.status, 201)
@@ -184,7 +184,7 @@ describe('Invitation links', function () {
       (
         await c.api('POST', '/api/v2/people', {
           name: 'X',
-          email: 'x@example.test',
+          emails: ['x@example.test'],
           invite: 'yes',
         })
       ).status,
@@ -207,7 +207,7 @@ describe('Invitation links', function () {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Dev One',
       role: 'developer',
-      email: 'dev@example.test',
+      emails: ['dev@example.test'],
       invite: true,
     })
     const token = tokenOf(made.json.invitation.url)
@@ -229,8 +229,19 @@ describe('Invitation links', function () {
     )
     assert.equal(foreign.status, 400)
     assert.equal(foreign.json.error, 'Untrusted origin')
+    // With a confirmed email they may skip the username (M2.11); without
+    // one, they must choose it.
+    assert.deepEqual(
+      (await b.send('POST', '/auth/invite/lookup', { token })).json,
+      { name: 'Dev One', usernameRequired: false },
+    )
+    master()
+      .database.db.prepare(
+        'UPDATE account_emails SET confirmed=0 WHERE account_id=?',
+      )
+      .run(made.json.id)
     const found = await b.send('POST', '/auth/invite/lookup', { token })
-    assert.deepEqual(found.json, { name: 'Dev One' })
+    assert.deepEqual(found.json, { name: 'Dev One', usernameRequired: true })
     assert.equal(
       (await b.send('POST', '/auth/invite/lookup', { token: 'short' })).status,
       404,
@@ -299,10 +310,39 @@ describe('Invitation links', function () {
     )
   })
 
+  it('M2.11 a person with a confirmed email accepts an invitation without a username and signs in by that email', async () => {
+    const made = await c.api('POST', '/api/v2/people', {
+      name: 'Mail Only',
+      emails: ['mail.only@example.test'],
+      invite: true,
+    })
+    const token = tokenOf(made.json.invitation.url)
+    const b = onMaster()
+    assert.deepEqual(
+      (await b.send('POST', '/auth/invite/lookup', { token })).json,
+      { name: 'Mail Only', usernameRequired: false },
+    )
+    const secret = await password('Mail-Horse-9', 'a1')
+    const accepted = await b.send('POST', '/auth/invite', {
+      token,
+      username: '',
+      ...secret,
+    })
+    assert.equal(accepted.status, 200, accepted.text)
+    const person = master().people.get(admin, made.json.id)
+    assert.equal(person.username, undefined)
+    assert.equal(person.password, true)
+    const signIn = await onMaster().send('POST', '/api/v2/session', {
+      identifier: 'mail.only@example.test',
+      clientHash: secret.clientHash,
+    })
+    assert.equal(signIn.status, 200, signIn.text)
+  })
+
   it('M2.6 on the host the link sets the password through the master, signs the person in there, and the password then signs in on the host', async () => {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Hilda Host',
-      email: 'hilda@example.test',
+      emails: ['hilda@example.test'],
       username: 'hilda',
       invite: true,
     })
@@ -323,7 +363,11 @@ describe('Invitation links', function () {
     )
     assert.equal(foreign.json.error, 'Untrusted origin')
     const found = await b.send('POST', '/auth/invite/lookup', { token })
-    assert.deepEqual(found.json, { name: 'Hilda Host', username: 'hilda' })
+    assert.deepEqual(found.json, {
+      name: 'Hilda Host',
+      username: 'hilda',
+      usernameRequired: false,
+    })
     const secret = await password('Hilda-Horse-9', 'e2')
     const accepted = await b.send('POST', '/auth/invite', {
       token,
@@ -335,7 +379,7 @@ describe('Invitation links', function () {
     assert(b.cookies.has('__Host-mason-session'))
     const home = await b.send('GET', '/')
     assert.equal(home.status, 200)
-    assert.match(home.text, /Sign out/)
+    assert.match(home.text, /aria-label="Your account"/)
     assert.equal(master().people.get(admin, made.json.id).username, 'hilda')
     const reused = await onHost().send('POST', '/auth/invite', {
       token,
@@ -359,7 +403,7 @@ describe('Invitation links', function () {
   it('M2.7 a new link replaces the old; an expired, revoked, disabled or removed person’s link is refused', async () => {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Rita Revoked',
-      email: 'rita@example.test',
+      emails: ['rita@example.test'],
       invite: true,
     })
     const id = made.json.id as number
@@ -454,7 +498,7 @@ describe('Invitation links', function () {
     const before = master().people.list(admin).length
     const refused = await c.api('POST', '/api/v2/people', {
       name: 'Dora Disabled',
-      email: 'dora@example.test',
+      emails: ['dora@example.test'],
       disabled: true,
       invite: true,
     })
@@ -512,7 +556,7 @@ describe('Invitation links', function () {
   it('M2.8 the People page offers Invite, shows a pending link’s expiry, and the Add form can invite at once', async () => {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Paula Page',
-      email: 'paula@example.test',
+      emails: ['paula@example.test'],
       invite: true,
     })
     const b = onMaster()
@@ -528,7 +572,8 @@ describe('Invitation links', function () {
     )
     const page = await b.send('GET', '/people')
     assert.equal(page.status, 200)
-    assert.match(page.text, /Invited · the link expires <time/)
+    assert.match(page.text, />Invite again<\/button>/)
+    assert.match(page.text, /<small class="hint">Expires <time/)
     assert(
       page.text.includes(
         `data-path="/api/v2/people/${made.json.id}/invitation" data-method="DELETE"`,
@@ -554,7 +599,7 @@ describe('Invitation links', function () {
   it('M4.3 an administrator sets a person’s password and username: their sessions end, it is audited, and it signs them in on the master and the host', async () => {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Sam Set',
-      email: 'sam@example.test',
+      emails: ['sam@example.test'],
       invite: true,
     })
     const id = made.json.id as number
@@ -625,16 +670,66 @@ describe('Invitation links', function () {
     assert.equal(host1.status, 200, host1.text)
   })
 
+  it('M2.13 a password signs in on the host by email, through its form and the link, and a page sending username still works', async () => {
+    const chosen = await password('Ivy-Horse-9', 'e7')
+    const made = await c.api('POST', '/api/v2/people', {
+      name: 'Ivy Email',
+      emails: ['ivy.mail@example.test', 'ivy.two@example.test'],
+      password: chosen,
+    })
+    assert.equal(made.status, 201, made.text)
+    await c.until(
+      () =>
+        host
+          .host!.cache.db.prepare('SELECT 1 FROM accounts WHERE id=?')
+          .get(made.json.id) != null,
+    )
+    const parameters = await onHost().send(
+      'POST',
+      '/auth/password/parameters',
+      { identifier: 'IVY.TWO@example.test' },
+    )
+    assert.equal(parameters.status, 200, parameters.text)
+    assert.deepEqual(parameters.json, chosen.clientParameters)
+    for (const body of [
+      { identifier: 'ivy.mail@example.test', clientHash: chosen.clientHash },
+      { identifier: 'Ivy.Two@example.test', clientHash: chosen.clientHash },
+      { username: 'ivy.mail@example.test', clientHash: chosen.clientHash },
+    ]) {
+      const signedIn = await onHost().send('POST', '/auth/password', body)
+      assert.equal(
+        signedIn.status,
+        200,
+        `${JSON.stringify(body)} ${signedIn.text}`,
+      )
+    }
+    // Her account page on the host knows she has a password (M4).
+    const ivy = onHost()
+    await ivy.send('POST', '/auth/password', {
+      identifier: 'ivy.mail@example.test',
+      clientHash: chosen.clientHash,
+    })
+    assert.match(
+      (await ivy.send('GET', '/account')).text,
+      /data-open="password-own">Change password</,
+    )
+    const wrong = await onHost().send('POST', '/auth/password', {
+      identifier: 'ivy.mail@example.test',
+      clientHash: '0'.repeat(64),
+    })
+    assert.equal(wrong.status, 401)
+  })
+
   it('M4.4 only an administrator sets another’s password, a person only their own, and a new password must meet the minimum costs', async () => {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Morgan Manager',
       username: 'morgan',
       role: 'manager',
-      email: 'morgan@example.test',
+      emails: ['morgan@example.test'],
     })
     const target = await c.api('POST', '/api/v2/people', {
       name: 'Nobody Yet',
-      email: 'nobody@example.test',
+      emails: ['nobody@example.test'],
     })
     const chosen = await password('Morgan-Horse-9', 'c5')
     const manager = master().keys.create(admin, {
@@ -673,13 +768,14 @@ describe('Invitation links', function () {
     })
     assert.equal(low.status, 400)
     assert.match(low.json.error, /at least 32 MiB, 6 iterations and 4 lanes/)
+    // A person with an email needs no username for a password.
     assert.equal(
       (
         await c.api('PUT', `/api/v2/people/${target.json.id}`, {
           password: chosen,
         })
-      ).json.error,
-      'A master password needs a username',
+      ).status,
+      200,
     )
     assert.equal(
       (
@@ -690,7 +786,7 @@ describe('Invitation links', function () {
       ).status,
       400,
     )
-    assert.equal(master().people.get(admin, target.json.id).password, false)
+    assert.equal(master().people.get(admin, target.json.id).password, true)
   })
 
   it('M4.5 the People page lets an administrator set a password, and loads the password hashing it needs', async () => {
@@ -713,7 +809,7 @@ describe('Invitation links', function () {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Ivy Invited',
       username: 'ivy',
-      email: 'ivy@example.test',
+      emails: ['ivy@example.test'],
       invite: true,
     })
     const id = made.json.id as number
@@ -761,7 +857,7 @@ describe('Invitation links', function () {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Della Both',
       username: 'della',
-      email: 'della@example.test',
+      emails: ['della@example.test'],
       invite: true,
     })
     const id = made.json.id as number
@@ -791,7 +887,7 @@ describe('Invitation links', function () {
     const made = await c.api('POST', '/api/v2/people', {
       name: 'Sam Case',
       username: 'SamCase',
-      email: 'samcase@example.test',
+      emails: ['samcase@example.test'],
     })
     const lower = await c.api('PUT', `/api/v2/people/${made.json.id}`, {
       username: 'samcase',

@@ -110,7 +110,6 @@ const body = (init: RequestInit): unknown => JSON.parse(String(init.body))
 describe('Master page script', () => {
   it('M4.1 an administrator sets a person’s password: typed twice, checked, and only its new client hash is sent', async () => {
     const fields = {
-      username: { value: 'tess' },
       password: { value: 'Tess-Horse-9' },
       confirm: { value: 'Tess-Horse-0' },
     }
@@ -132,7 +131,6 @@ describe('Master page script', () => {
     await settle()
     assert.equal(calls[0]!.init.method, 'PUT')
     assert.deepEqual(body(calls[0]!.init), {
-      username: 'tess',
       password: {
         clientHash: 'hash-of-Tess-Horse-9',
         clientParameters: { p: 1 },
@@ -189,17 +187,28 @@ describe('Master page script', () => {
         body: { id: 9, invitation: { url: link } },
       },
     })
+    // Neither an email nor a username: nothing is sent.
+    fields.email.value = ''
     add.submit()
     await settle()
-    assert.equal(add.outputs.status!.textContent, 'A password needs a username')
+    assert.equal(
+      add.outputs.status!.textContent,
+      'Give them an email address, a username, or both',
+    )
     assert.equal(calls.length, 0)
+    fields.email.value = 'tess@example.test'
     fields.username.value = 'tess'
+    // A second field from Add, and a blank third one, which is skipped.
+    add.querySelectorAll = (selector: string): unknown[] =>
+      selector === 'input[name="email"]'
+        ? [fields.email, { value: ' Tess@Work.test ' }, { value: '' }]
+        : []
     add.submit()
     await settle()
     assert.deepEqual(body(calls[0]!.init), {
       name: 'Tess',
       role: 'tester',
-      email: 'tess@example.test',
+      emails: ['tess@example.test', 'Tess@Work.test'],
       invite: true,
       username: 'tess',
       password: {
@@ -226,7 +235,7 @@ describe('Master page script', () => {
     assert.deepEqual(body(second.calls[0]!.init), {
       name: 'Tess',
       role: 'tester',
-      email: 'tess@example.test',
+      emails: ['tess@example.test'],
       invite: false,
     })
     assert.deepEqual(second.visits, ['/people'])
@@ -292,6 +301,36 @@ describe('Master page script', () => {
     // Read once on load, then taken out of the address bar and history.
     assert.deepEqual(reads, [token])
     assert.deepEqual(forgotten, [token])
+  })
+
+  it('M2.12 an invitation for a person with a confirmed email makes the username optional', async () => {
+    const fields = {
+      username: { value: '', required: true },
+      password: { value: 'Tess-Horse-9' },
+      confirm: { value: 'Tess-Horse-9' },
+    }
+    const invite = form('invite', fields)
+    Object.assign(invite.dataset, {
+      lookup: '/auth/invite/lookup',
+      accept: '/auth/invite',
+    })
+    page(
+      [invite],
+      {
+        'POST /auth/invite/lookup': {
+          status: 200,
+          body: { name: 'Mail', usernameRequired: false },
+        },
+      },
+      'proof',
+      'x'.repeat(43),
+    )
+    await settle()
+    assert.equal(
+      invite.outputs.welcome!.textContent,
+      'Welcome, Mail. Choose a password (and a username, if you want one) to sign in to Mason.',
+    )
+    assert.equal(fields.username.required, false)
   })
 
   it('M2.2 an invitation refuses mismatched or weak passwords before hashing, and shows a refused or incomplete link', async () => {
@@ -382,7 +421,7 @@ describe('Master page script', () => {
     assert.equal(signIn.outputs.status!.textContent, 'Working…')
     await settle()
     assert.deepEqual(body(calls[1]!.init), {
-      username: 'paul',
+      identifier: 'paul',
       clientHash: 'hash-of-Correct-Horse-9',
     })
     assert(!JSON.stringify(calls).includes('"Correct-Horse-9"'))
@@ -415,7 +454,7 @@ describe('Master page script', () => {
       ['/auth/password/parameters', '/auth/password'],
     )
     assert.deepEqual(body(calls[1]!.init), {
-      username: 'tess',
+      identifier: 'tess',
       clientHash: 'hash-of-Tess-Horse-9',
     })
     assert.deepEqual(visits, ['/apps/3'])

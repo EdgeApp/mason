@@ -14,6 +14,7 @@ import { Providers } from './providers.js'
 import { fixture } from './providers.test.js'
 import type { Request, Response as ExpressResponse } from 'express'
 import { authLimiter, csrf, returnPath, SESSION_COOKIE } from './routes.js'
+import { crumbTrail } from '../test/crumbs.js'
 
 class Browser {
   readonly cookies = new Map<string, string>()
@@ -334,7 +335,12 @@ describe('Mason login routes and administrator controls', () => {
     const csrf = context().session.csrf
     const people = await browser.get('/people')
     assert.equal(people.status, 200)
-    assert.match(await people.text(), /Preapprove a tester/)
+    const peopleHtml = await people.text()
+    assert.match(peopleHtml, /Preapprove a tester/)
+    assert.deepEqual(crumbTrail(peopleHtml), [
+      'Mason Host /',
+      'People /people *',
+    ])
     assert.equal(
       (
         await browser.post('/people/invitations', {
@@ -416,6 +422,87 @@ describe('Mason login routes and administrator controls', () => {
     )
     assert.match(await (await browser.get('/people')).text(), /Revoked/)
     assert.match(await (await browser.get('/people')).text(), /Claimed/)
+  })
+  it('M7 the standalone server draws its pages in the shell: Install apps, Devices, People for its administrators, and Your account with Sign out', async () => {
+    /** The side menu's links on a page, in order; the current one starred. */
+    const rail = (html: string): string[] =>
+      [
+        ...(
+          /<nav class="rail"[^>]*>(.*?)<\/nav>/.exec(html)?.[1] ?? ''
+        ).matchAll(/<a href="([^"]+)"( aria-current="page")?/g),
+      ].map((match) => match[1]! + (match[2] == null ? '' : '*'))
+    // Signed out: the sign-in page has no side menu and no account link.
+    const signedOut = await (await browser.get('/auth/login')).text()
+    assert.doesNotMatch(signedOut, /class="rail"|aria-label="Your account"/)
+    assert.equal(
+      (await browser.get('/account')).headers.get('location'),
+      '/auth/login?return=%2Faccount',
+    )
+    await admin()
+    const people = await (await browser.get('/people')).text()
+    // People is the administrator's own rail entry, current here.
+    assert.deepEqual(rail(people), ['/apps', '/devices', '/people*'])
+    assert.match(people, /<div class="section">Host<\/div>/)
+    // The standalone server serves neither search nor notifications.
+    assert.doesNotMatch(people, /data-search|shell\.js|class="notifications"/)
+    assert.equal((await browser.get('/assets/shell.js')).status, 404)
+    // It serves the shell's icon font and logo, which its policy allows.
+    const font = await browser.get(
+      '/assets/fonts/material-symbols-outlined-subset.woff2',
+    )
+    assert.equal(font.status, 200)
+    assert.match(
+      font.headers.get('content-security-policy')!,
+      /font-src 'self'/,
+    )
+    assert.equal(
+      (await browser.get('/assets/logo/mason-logo-64.png')).status,
+      200,
+    )
+    assert.equal((await browser.get('/search?q=x')).status, 404)
+    const preapproved = await (
+      await browser.post('/people/invitations', {
+        csrf: context().session.csrf,
+        provider: 'plain',
+        email: 'jordan@example.test',
+        days: '30',
+      })
+    ).text()
+    assert.match(preapproved, /<a href="\/people" aria-current="page"/)
+    // Your account: who is signed in, and Sign out.
+    const account = await browser.get('/account')
+    assert.equal(account.status, 200)
+    const mine = await account.text()
+    assert.match(mine, /<h1>Your account<\/h1>/)
+    // The standalone server's own pages start from Mason Host.
+    assert.deepEqual(crumbTrail(mine), [
+      'Mason Host /',
+      'Your account /account *',
+    ])
+    assert.match(mine, /Administrator/)
+    assert.match(mine, /href="\/account" aria-label="Your account"/)
+    assert.match(
+      mine,
+      /<form method="post" action="\/auth\/logout"><input type="hidden" name="csrf" value="[^"]+"><button class="secondary">Sign out<\/button><\/form>/,
+    )
+    // A tester has only Install apps and Devices, and no People page.
+    const tester = new Browser(browser.origin)
+    await login(tester, 'plain')
+    const home = await (await tester.get('/')).text()
+    assert.deepEqual(rail(home), ['/apps*', '/devices'])
+    assert.doesNotMatch(home, /Sign out/)
+    const denied = await tester.get('/people')
+    assert.equal(denied.status, 403)
+    assert.match(await denied.text(), /class="rail"/)
+    const testerAccount = await (await tester.get('/account')).text()
+    assert.match(testerAccount, /Tester/)
+    assert.match(testerAccount, /jordan@example\.test/)
+    // Sign out from Your account ends the session.
+    const csrf = /name="csrf" value="([^"]+)"/.exec(testerAccount)![1]!
+    const out = await tester.post('/auth/logout', { csrf })
+    assert.equal(out.status, 303)
+    assert.equal(out.headers.get('location'), '/auth/login?signed_out=1')
+    assert.equal((await tester.get('/account')).status, 303)
   })
   it('distinguishes provider identities and unverified email claims before granting access', async () => {
     await admin()

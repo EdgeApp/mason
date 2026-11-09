@@ -17,6 +17,7 @@ import { MASTER_SESSION_COOKIE } from './auth.js'
 import { localOperator } from './roles.js'
 import { declaredApps, slugFor } from './wizard.js'
 import { seedSecret } from '../test/secrets.js'
+import { crumbTrail } from '../test/crumbs.js'
 
 // Rows and replies are read field by field.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -210,10 +211,9 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     for (const role of ['admin', 'manager', 'developer', 'tester'] as const)
       people[role] = (
         await master.people.create(localOperator, {
-          email: `${role}.person@example.test`,
+          emails: [`${role}.person@example.test`, `${role}@example.test`],
           name: `${role} person`,
           role,
-          addresses: { google: `${role}@example.test` },
         })
       ).id
     await c.until(
@@ -377,13 +377,18 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.match(third.text, /Branches and triggers/)
     assert.match(third.text, /The project has a webhook secret/)
+    // Done opens the new project on Projects & apps, at /projects.
+    assert.match(
+      third.text,
+      /<a class="button" href="\/projects\?project=wizard">Done<\/a>/,
+    )
     assert.match(
       third.text,
       /<span class="mono">release<\/span> <small class="mono">\[\{&quot;request&quot;:true\}\]<\/small>/,
     )
     // The discovery run never shows among the project's runs.
     assert.doesNotMatch(
-      (await request(c.master, 'GET', '/', manager)).text,
+      (await request(c.master, 'GET', '/projects', manager)).text,
       /@discover/,
     )
     assert.equal(slugFor('git@github.com:Owner/My_App.git'), 'my-app')
@@ -829,12 +834,18 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.match(
       step.text,
-      /data-src="\/api\/v2\/runs\/[^"]+\/logs\?stage=test&amp;step=1"/,
+      /data-lines="\/api\/v2\/runs\/[^"]+\/logs\?stage=test&amp;step=1"/,
     )
-    assert.match(
-      (await request(host, 'GET', `/runs/${run}`, developer)).text,
-      /The whole run’s log is on the master/,
-    )
+    // A finished run's whole log is fetched through the host, over its link;
+    // a running one's waits for the run to end.
+    const whole = (await request(host, 'GET', `/runs/${run}`, developer)).text
+    if ((c.master.master!.run(run) as Json).finished == null)
+      assert.match(whole, /The whole run’s log is shown once the run ends/)
+    else
+      assert.match(
+        whole,
+        new RegExp(`<div data-log data-lines="/api/v2/runs/${run}/logs">`),
+      )
     assert.equal(
       (await request(host, 'GET', `/runs/${run}`, onHost('tester'))).status,
       403,
@@ -852,6 +863,30 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.equal(log.status, 200, log.text)
     assert.match(log.text, /second line/)
+    // A page's lines by number, forwarded over the host's link as JSON.
+    const tail = await request(
+      host,
+      'GET',
+      `/api/v2/runs/${run}/logs?stage=test&last=1&count=1`,
+      { cookie: developer.cookie },
+    )
+    assert.equal(tail.status, 200, tail.text)
+    assert.equal(tail.json.start, 1)
+    assert(tail.json.total >= 2, tail.text)
+    assert.equal(tail.json.first, tail.json.total)
+    assert.match(tail.json.text, /second line\n$/)
+    const top = await request(
+      host,
+      'GET',
+      `/api/v2/runs/${run}/logs?stage=test&from=1&count=500`,
+      { cookie: developer.cookie },
+    )
+    assert.equal(top.json.first, 1)
+    assert.equal(
+      top.json.text.split('\n').length - 1,
+      tail.json.total,
+      top.text,
+    )
     // Live updates are not forwarded requests: they come over the host's live stream.
     assert.equal(
       (
@@ -963,6 +998,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
   it('U18.8 every master page shows each role only the controls it may use', async () => {
     const pages = [
       '/',
+      '/projects',
       '/nodes',
       '/settings',
       '/people',
@@ -971,10 +1007,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       `/runs/${run}`,
     ]
     const expected: Record<string, number[]> = {
-      admin: [200, 200, 200, 200, 200, 200, 200],
-      manager: [200, 200, 200, 200, 200, 200, 200],
-      developer: [200, 403, 403, 403, 403, 403, 200],
-      tester: [200, 403, 403, 403, 403, 403, 403],
+      admin: [200, 200, 200, 200, 200, 200, 200, 200],
+      manager: [200, 200, 200, 200, 200, 200, 200, 200],
+      developer: [200, 200, 403, 403, 403, 403, 403, 200],
+      // Everyone's home is Install apps; to a tester projects do not exist.
+      tester: [200, 404, 403, 403, 403, 403, 403, 403],
     }
     for (const [role, statuses] of Object.entries(expected)) {
       const session = signIn(role)
@@ -983,14 +1020,33 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
         got.push((await request(c.master, 'GET', route, session)).status)
       assert.deepEqual(got, statuses, role)
     }
-    const developer = (await request(c.master, 'GET', '/', signIn('developer')))
-      .text
+    // Backups is top-level, as the side menu has it; the run page goes
+    // through its project's Runs and builds and its branch.
+    const admin = signIn('admin')
+    assert.deepEqual(
+      crumbTrail((await request(c.master, 'GET', '/backups', admin)).text),
+      ['Mason Master /', 'Backups /backups *'],
+    )
+    const runTrail = crumbTrail(
+      (await request(c.master, 'GET', `/runs/${run}`, admin)).text,
+    )
+    assert.deepEqual(runTrail.slice(0, 4), [
+      'Mason Master /',
+      'Projects /projects',
+      'wizard /projects/wizard',
+      'Runs and builds /projects/wizard/runs',
+    ])
+    assert.match(runTrail.at(-1)!, new RegExp(`^Run \\d+ /runs/${run} \\*$`))
+    const developer = (
+      await request(c.master, 'GET', '/projects', signIn('developer'))
+    ).text
     assert.doesNotMatch(
       developer,
       /href="\/(nodes|settings|people|groups|backups)"|Add project/,
     )
-    const manager = (await request(c.master, 'GET', '/', signIn('manager')))
-      .text
+    const manager = (
+      await request(c.master, 'GET', '/projects', signIn('manager'))
+    ).text
     assert.match(manager, /href="\/nodes"/)
     assert.match(manager, /Add project/)
     // Only administrators change people; the form asks for an email, which
@@ -999,7 +1055,10 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       await request(c.master, 'GET', '/people', signIn('admin'))
     ).text
     assert.match(adminPeople, /<form data-mason="person-add">/)
-    assert.match(adminPeople, /name="email" type="email" required/)
+    assert.match(
+      adminPeople,
+      /data-email-fields><input id="person-email" name="email"/,
+    )
     assert.doesNotMatch(adminPeople, /addresses\./)
     const managerPeople = (
       await request(c.master, 'GET', '/people', signIn('manager'))
@@ -1056,10 +1115,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       developerProject,
       /data-path="\/api\/v2\/projects\/wizard\/secrets"/,
     )
+    // To a tester projects do not exist.
     assert.equal(
       (await request(c.master, 'GET', '/projects/wizard', signIn('tester')))
         .status,
-      403,
+      404,
     )
     // The Secrets tab: names and configs for developers, controls and the audit for managers.
     const managerSecrets = await request(
@@ -1097,7 +1157,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
           signIn('tester'),
         )
       ).status,
-      403,
+      404,
     )
     assert.equal(
       (await request(c.master, 'GET', '/projects/nope/secrets', manager2))
@@ -1182,6 +1242,22 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       ).text,
       /<td class="mono">26110201<\/td>/,
     )
+    assert.deepEqual(
+      crumbTrail(
+        (
+          await request(
+            c.master,
+            'GET',
+            '/projects/wizard/runs?branch=release%2F1',
+            signIn('developer'),
+          )
+        ).text,
+      ).slice(-2),
+      [
+        'Runs and builds /projects/wizard/runs',
+        'release/1 /projects/wizard/runs?branch=release%2F1 *',
+      ],
+    )
     db.prepare("DELETE FROM jobs WHERE id IN ('m2-a','m2-b')").run()
     db.prepare('DELETE FROM push_triggers WHERE project_id=?').run(project.id)
     assert.match(
@@ -1204,7 +1280,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
           signIn('tester'),
         )
       ).status,
-      403,
+      404,
     )
     assert.equal(
       (await request(c.master, 'GET', '/projects/nope/runs', manager2)).status,
@@ -1224,16 +1300,10 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       404,
     )
     // A developer may not cancel others' runs from a page without the controls of a manager either way; testers see no runs.
-    assert.match(
-      (await request(c.master, 'GET', '/', signIn('tester'))).text,
-      /Your apps/,
-    )
-    c.master.master!.database.db
-      .prepare("UPDATE accounts SET open_admission=1 WHERE role='tester'")
-      .run()
-    assert.match(
-      (await request(c.master, 'GET', '/', signIn('tester'))).text,
-      /Your apps/,
+    // A tester's home is Install apps (catalogRelay.test.ts follows it).
+    assert.equal(
+      (await request(c.master, 'GET', '/', signIn('tester'))).status,
+      200,
     )
   })
 
@@ -1241,11 +1311,17 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     const admin = signIn('admin')
     const manager = signIn('manager')
     const adminPeople = (await request(c.master, 'GET', '/people', admin)).text
-    assert.match(adminPeople, /name="email" type="email" required/)
+    assert.match(
+      adminPeople,
+      /data-email-fields><input id="person-email" name="email"/,
+    )
     assert.doesNotMatch(adminPeople, /\/api\/v2\/groups/)
     const managerPeople = (await request(c.master, 'GET', '/people', manager))
       .text
-    assert.doesNotMatch(managerPeople, /name="email"|\/api\/v2\/groups/)
+    assert.doesNotMatch(
+      managerPeople,
+      /data-mason="person-add"|\/api\/v2\/groups/,
+    )
     assert.match(
       (await request(c.master, 'GET', '/', admin)).text,
       /<a href="\/people"[^>]*>.*?<span class="label">People<\/span><\/a><a href="\/groups"[^>]*>.*?<span class="label">Groups<\/span>/,
@@ -1304,7 +1380,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       catalog.people.some(
         (person: Json) =>
           person.id === people.tester &&
-          person.email === 'tester.person@example.test',
+          person.emails[0] === 'tester.person@example.test',
       ),
     )
     assert.deepEqual(catalog.group, {

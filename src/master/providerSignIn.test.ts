@@ -5,6 +5,7 @@ import { after, before, describe, it } from 'mocha'
 import { fixture } from '../auth/providers.test.js'
 import { pinnedFetch } from '../node/pinnedFetch.js'
 import { cluster, type Cluster } from '../test/cluster.js'
+import { proofLog } from '../test/proofLog.js'
 import { localOperator } from './roles.js'
 
 const admin = localOperator
@@ -87,16 +88,15 @@ describe('Provider sign-in on the master', function () {
     await master.people.create(admin, {
       name: 'Alex Lee',
       role: 'developer',
-      email: 'alex@example.test',
+      emails: ['alex@example.test'],
     })
     await master.people.create(admin, {
       name: 'Jordan Lee',
-      email: 'someone@example.test',
-      addresses: { plain: 'jordan@example.test' },
+      emails: ['someone@example.test', 'jordan@example.test'],
     })
     await master.people.create(admin, {
       name: 'Dana Off',
-      email: 'dana@example.test',
+      emails: ['dana@example.test'],
       disabled: true,
     })
   })
@@ -115,8 +115,11 @@ describe('Provider sign-in on the master', function () {
     const start = await b.get(`/auth/start/${provider}?return=/nodes`)
     assert.equal(start.status, 303, await start.text())
     const callback = await env.authorize(start.headers.get('location')!)
+    lastCallback = `GET ${callback.pathname}?code=<code>&state=<state>`
     return await b.get(callback.pathname + callback.search)
   }
+  /** The last provider callback signIn opened, for the proof log. */
+  let lastCallback = ''
 
   it('M1.1 without the master address the sign-in page offers only a password, and the provider routes are unavailable', async () => {
     const b = new Browser(c)
@@ -166,7 +169,7 @@ describe('Provider sign-in on the master', function () {
     await c.master.master!.people.create(admin, {
       name: 'Ada Admin',
       role: 'admin',
-      email: 'ada@example.test',
+      emails: ['ada@example.test'],
     })
     const ada = new Browser(c)
     assert.equal(
@@ -300,7 +303,7 @@ describe('Provider sign-in on the master', function () {
     )
   })
 
-  it('M1.6 a verified email matches whatever its case, and a person’s address for the method wins over another’s email', async () => {
+  it('M1.6 a verified email matches whatever its case, and any of a person’s confirmed emails signs them in through any method', async () => {
     const b = new Browser(c)
     assert.equal(
       (await signIn(b, 'first', { email: 'ALEX@Example.TEST' })).status,
@@ -311,36 +314,39 @@ describe('Provider sign-in on the master', function () {
         .name,
       'Alex Lee',
     )
-    // Rows the API would refuse as a conflict, as an older master might hold.
     const master = c.master.master!
-    const everywhere = await master.people.create(admin, {
-      name: 'Email Everywhere',
-      email: 'shared@example.test',
+    const both = await master.people.create(admin, {
+      name: 'Two Addresses',
+      emails: ['first-address@example.test', 'second-address@example.test'],
     })
-    const second = await master.people.create(admin, {
-      name: 'Second Only',
-      email: 'second-only@example.test',
-    })
+    const whom = async (provider: string, email: string): Promise<string> => {
+      const browser = new Browser(c)
+      const reply = await signIn(browser, provider, { email })
+      assert.equal(reply.status, 200)
+      const session = await browser.get('/api/v2/session')
+      const name = ((await session.json()) as { name: string }).name
+      proofLog(
+        `${lastCallback}    # on the master, ${provider} verified ${email}`,
+        `HTTP ${reply.status}\nSet-Cookie: ${(reply.headers.get('set-cookie') ?? '(none)').replace(/(__Host-[\w-]+)=([^;]+)/g, '$1=<redacted>')}\n$ GET /api/v2/session\nHTTP ${session.status} {"name":"${name}"}`,
+      )
+      return name
+    }
+    for (const provider of ['first', 'second'])
+      for (const email of [
+        'first-address@example.test',
+        'Second-Address@example.test',
+      ])
+        assert.equal(await whom(provider, email), both.name)
+    // An unconfirmed address signs nobody in.
     master.database.db
       .prepare(
-        "INSERT INTO account_addresses(account_id,method,email) VALUES(?,'second','shared@example.test')",
+        'INSERT INTO account_emails(account_id,email,position,confirmed) VALUES(?,?,2,0)',
       )
-      .run(second.id)
-    const whom = async (provider: string): Promise<string> => {
-      const browser = new Browser(c)
-      assert.equal(
-        (await signIn(browser, provider, { email: 'Shared@example.test' }))
-          .status,
-        200,
-      )
-      return (
-        (await (await browser.get('/api/v2/session')).json()) as {
-          name: string
-        }
-      ).name
-    }
-    assert.equal(await whom('second'), 'Second Only')
-    assert.equal(await whom('first'), everywhere.name)
+      .run(both.id, 'claimed@example.test')
+    const refused = await signIn(new Browser(c), 'first', {
+      email: 'claimed@example.test',
+    })
+    assert.notEqual(refused.status, 200)
     env.setClaims({})
   })
 
@@ -403,7 +409,7 @@ describe('Provider sign-in on the master', function () {
     await master.people.create(admin, {
       name: 'Mona Manager',
       role: 'manager',
-      email: 'mona@example.test',
+      emails: ['mona@example.test'],
     })
     const mona = new Browser(c)
     assert.equal(

@@ -13,7 +13,7 @@ import { Accounts } from '../auth/accounts.js'
 import { Providers } from '../auth/providers.js'
 import { backoffDelay } from '../link/backoff.js'
 import type { Link, MethodTable, Stream } from '../link/link.js'
-import type { Sync } from '../master/changes.js'
+import type { Change, Sync } from '../master/changes.js'
 import { HostCache } from './cache.js'
 import { Outbox } from './outbox.js'
 import type { HostStatus } from '../master/clusterCheck.js'
@@ -21,6 +21,7 @@ import { version } from '../version.js'
 import { Webhooks } from './webhooks.js'
 import { HostArtifacts, HostObjects } from './artifacts.js'
 import { HostBuilds } from './builds.js'
+import { HostCatalog } from './catalog.js'
 import type { DeviceRelay } from '../devices/store.js'
 
 export interface HostOptions {
@@ -69,6 +70,8 @@ export class HostRuntime {
   readonly artifacts: HostArtifacts
   /** The builds API the host serves itself, and relays for the master. */
   readonly builds: HostBuilds
+  /** Install apps and Devices, answered for the master's pages. */
+  readonly catalog: HostCatalog
   private synced: Link | undefined
   private offset = 0
   private timer: NodeJS.Timeout | undefined
@@ -120,6 +123,13 @@ export class HostRuntime {
       now: (): number => this.now(),
       maintenance: (): boolean => this.maintenance(),
       log: (line): void => this.options.log?.(line),
+    })
+    this.catalog = new HostCatalog({
+      cache: this.cache,
+      accounts: this.accounts,
+      devices: this.devices,
+      ready: (): void => this.builds.ready(),
+      catchUp: async (): Promise<void> => await this.catchUp(),
     })
     this.webhooks = new Webhooks({
       db: this.cache.db,
@@ -274,10 +284,11 @@ export class HostRuntime {
           this.synced = link
           await this.outbox.flush(link)
           // A link that arrived while a flush ran still needs its own sync,
-          // before the webhooks that waited go out over it.
-          if (this.replaced(link)) continue
+          // before the webhooks that waited go out over it; so does this one
+          // when an on-demand sync failed meanwhile (`syncNow`).
+          if (this.replaced(link) || this.synced !== link) continue
           await this.webhooks.flush()
-          if (this.replaced(link)) continue
+          if (this.replaced(link) || this.synced !== link) continue
           return
         } catch (error) {
           if (this.stopped) return
@@ -320,12 +331,94 @@ export class HostRuntime {
     })
   }
 
+  /** The catch-up in flight, and the one queued after it for callers since. */
+  private catching: Promise<void> | undefined
+  private trailing: Promise<void> | undefined
+
+  /**
+   * Brings the cache up to the master's latest revision now, as a link open
+   * does. One sync runs at a time; a caller arriving while one runs waits for
+   * it and then for one more, started after it and shared by every such
+   * caller, so each sees a revision at least as new as when it called.
+   */
+  async catchUp(): Promise<void> {
+    if (this.catching == null) {
+      this.catching = this.syncNow().finally(() => {
+        this.catching = undefined
+      })
+      return await this.catching
+    }
+    this.trailing ??= this.catching
+      .catch(() => undefined)
+      .then(async () => {
+        this.trailing = undefined
+        await this.catchUp()
+      })
+    await this.trailing
+  }
+
+  /** One on-demand sync, applied only for what is newer than the cache. */
+  private async syncNow(): Promise<void> {
+    const link = this.options.link()
+    if (link == null || link.closed || this.stopped) return
+    const from = this.cache.revision()
+    try {
+      const sync = newerPart(
+        (await link.request('host.sync', { revision: from }, 30_000)) as Sync,
+        this.cache.revision(),
+      )
+      if (sync != null) this.apply(sync)
+    } catch (error) {
+      // The master counts an answer as sent even when it never arrives, and
+      // pushes what follows it: hand the range to the opening sync, which
+      // asks again from it on this link.
+      this.cache.holdSyncFrom(from)
+      if (this.synced === link) this.synced = undefined
+      void this.connected()
+      throw error
+    }
+  }
+
   apply(sync: Sync, opening = false): void {
     if (this.stopped) return
     this.cache.apply(sync, opening)
+    void this.fillMasonfiles()
     void this.artifacts.cleanup().catch((error: unknown) => {
       this.options.log?.(`Artifact cleanup failed: ${(error as Error).message}`)
     })
+  }
+
+  /** The texts of kept Masonfiles a sync brought without them, fetched one request each. */
+  private filling: Promise<void> | undefined
+  async fillMasonfiles(): Promise<void> {
+    this.filling ??= (async (): Promise<void> => {
+      for (;;) {
+        const link = this.options.link()
+        if (link == null || link.closed || this.stopped) return
+        const missing = this.cache.db
+          .prepare('SELECT key FROM masonfiles WHERE text IS NULL LIMIT 20')
+          .all() as Array<{ key: string }>
+        if (missing.length === 0) return
+        for (const { key } of missing) {
+          const { text } = (await link.request('masonfile.text', { key })) as {
+            text: string | null
+          }
+          // Gone on the master: its delete is on its way.
+          this.cache.db
+            .prepare('UPDATE masonfiles SET text=? WHERE key=?')
+            .run(text ?? '', key)
+        }
+      }
+    })()
+      .catch((error: unknown) => {
+        this.options.log?.(
+          `Fetching Masonfiles failed: ${(error as Error).message}`,
+        )
+      })
+      .finally(() => {
+        this.filling = undefined
+      })
+    await this.filling
   }
 
   methods(): MethodTable {
@@ -342,6 +435,8 @@ export class HostRuntime {
         }),
         /** A list or one build, for a caller the master authenticated. */
         'builds.request': (params): unknown => this.builds.request(params),
+        /** Install apps and Devices for a person signed in on the master. */
+        ...this.catalog.requests(),
         /** For `mason cluster check`: the cache revision applied, and what the outbox holds. */
         'host.status': (): HostStatus => ({
           revision: this.cache.revision(),
@@ -363,6 +458,10 @@ export class HostRuntime {
         /** A build's file, or its redirect, for a caller the master authenticated. */
         'builds.download': async (stream, params): Promise<void> => {
           await this.builds.stream(stream, params)
+        },
+        /** A grant's manifest or package, for an install from the master's pages. */
+        'catalog.installFile': async (stream, params): Promise<void> => {
+          await this.catalog.stream(stream, params)
         },
         /** An Xcode a node downloaded first, relayed by the master into the host's storage. */
         'mirror.put': async (stream, params): Promise<void> => {
@@ -451,5 +550,22 @@ export class HostRuntime {
     } catch {
       return false
     }
+  }
+}
+
+/**
+ * What of an on-demand sync is newer than the cache's revision: change
+ * events may have applied later revisions while it was in flight. Undefined
+ * when nothing is.
+ */
+export function newerPart(sync: Sync, current: number): Sync | undefined {
+  if (sync.kind === 'snapshot')
+    return sync.revision < current ? undefined : sync
+  if (sync.revision <= current) return undefined
+  return {
+    ...sync,
+    changes: (sync.changes as Change[]).filter(
+      (change) => change.revision > current,
+    ),
   }
 }

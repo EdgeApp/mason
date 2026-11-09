@@ -76,8 +76,8 @@ export class ProviderSignIn {
 
   /**
    * Whom an identity signs in as: the provider must be enabled and assert a
-   * verified email that is, ignoring case, an enabled person's email or
-   * their address for that method. Nothing about the identity is stored.
+   * verified email that is, ignoring case, one of an enabled person's
+   * confirmed emails. Nothing about the identity is stored.
    */
   account(identity: Identity): number {
     if (!this.methods().some((method) => method.id === identity.provider))
@@ -86,11 +86,9 @@ export class ProviderSignIn {
       throw new ProviderRefused('The provider did not confirm a verified email')
     const found = this.options.database.db
       .prepare(
-        "SELECT a.id,a.role FROM account_addresses x JOIN accounts a ON a.id=x.account_id WHERE x.method IN (?, '*') AND lower(x.email)=lower(?) AND a.disabled=0 AND a.removed_at IS NULL ORDER BY x.method='*' LIMIT 1",
+        'SELECT a.id,a.role FROM account_emails x JOIN accounts a ON a.id=x.account_id WHERE x.email=? AND x.confirmed=1 AND a.disabled=0 AND a.removed_at IS NULL LIMIT 1',
       )
-      .get(identity.provider, identity.email) as
-      | { id: number; role: string }
-      | undefined
+      .get(identity.email) as { id: number; role: string } | undefined
     if (found == null)
       throw new ProviderRefused(
         `No Mason account has ${identity.email} for ${identity.provider}`,
@@ -118,7 +116,6 @@ function flowPage(
       title,
       body: `<h1>${escape(title)}</h1>${body}`,
       head,
-      phone: true,
     }),
   )
 }

@@ -9,6 +9,7 @@ await build({
     groups: 'src/browser/groups.ts',
     'password-worker': 'src/browser/passwordWorker.ts',
     master: 'src/browser/master.ts',
+    people: 'src/browser/personEditor.ts',
     run: 'src/browser/run.ts',
     secrets: 'src/browser/secrets.ts',
   },

@@ -1,5 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { ago, duration, escape, runName } from './html.js'
+import { isGlob, matches } from '../master/rules.js'
+import { ago, appPath, breadcrumbs, duration, escape, runName } from './html.js'
 import { icon, type IconName } from './icons.js'
 import type { Viewer } from './shell.js'
 
@@ -38,6 +39,25 @@ export function platformChip(platform: string): string {
   return `<span class="platform">${known == null ? '' : icon(platformIcons[known])}${escape(known == null ? platform : platformNames[known])}</span>`
 }
 
+/** An app ID's platforms as chips, left-justified and back to back. */
+export function platformChips(list: readonly string[]): string {
+  return `<span class="app-platforms">${list.map(platformChip).join('')}</span>`
+}
+
+/**
+ * One row of an `app-grid`, whose columns line up across its rows: the app
+ * ID, linking to its page over the whole row, with `under` below it, then
+ * `cells`. Links inside the cells sit above the row's link.
+ */
+export function appGridRow(
+  href: string,
+  appId: string,
+  under: string,
+  cells: readonly string[],
+): string {
+  return `<div class="app-grid-row" role="row"><div role="cell"><a class="row-link" href="${escape(href)}">${escape(appId)}</a>${under}</div>${cells.map((cell) => `<div role="cell">${cell}</div>`).join('')}</div>`
+}
+
 /** A run status as a dot and its word. */
 export function statusDot(status: string): string {
   return `<span class="dot ${escape(status)}" aria-hidden="true"></span>`
@@ -56,8 +76,10 @@ export interface DashboardSource {
     status: 'idle' | 'busy' | 'offline'
     detail: string
   }>
-  /** Projects' repositories and webhooks, which only the master keeps. */
+  /** Projects' repositories and webhooks: the master's, or the host's copy of them. */
   repositories?: Map<number, { repository: string; webhook: boolean }>
+  /** Each project's push branches (or patterns), whose builds its card lists first. */
+  pinned?: Map<number, readonly string[]>
 }
 
 export interface DashboardFilter {
@@ -85,9 +107,24 @@ interface ProjectCard {
     slug: string
     name: string
     platforms: string[]
-    builds: Array<{ branch: string; buildNumber: string; at: number }>
+    /** The latest build of each branch: push branches first, then the newest. */
+    builds: Array<{
+      branch: string
+      buildNumber: string
+      at: number
+      /** The run that published it, and that run's status. */
+      run?: string
+      status?: string
+    }>
+    /** How many branches have a build: more than `builds` holds for an app built on very many. */
+    branches: number
   }>
 }
+
+/** How many branches' builds an app ID's row shows before "+N more". */
+export const BRANCH_CHIPS = 6
+/** How many of an app's most recently built branches the card reads to rank its chips. */
+const BRANCHES_READ = 100
 
 export interface DashboardData {
   tiles: {
@@ -200,8 +237,11 @@ export function dashboardData(
     'SELECT DISTINCT platform FROM channels WHERE app_id=? AND enabled=1 ORDER BY platform',
   )
   const buildsOf = db.prepare(
-    // One row per build: a build's other variants never displace it.
-    `SELECT branch,build_number,published_at FROM builds WHERE app_id=? AND state='ready' AND deleted_at IS NULL AND id IN (SELECT MAX(h.id) FROM builds h WHERE h.app_id=? AND h.state='ready' AND h.deleted_at IS NULL AND ${leadsItsBuild('h')} GROUP BY h.branch) ORDER BY published_at DESC LIMIT 3`,
+    // Each branch's latest build, and its run: a build's other variants never displace it.
+    `SELECT b.branch,b.build_number,b.published_at,b.run,j.status FROM builds b LEFT JOIN jobs j ON j.id=b.run WHERE b.app_id=? AND b.state='ready' AND b.deleted_at IS NULL AND b.id IN (SELECT MAX(h.id) FROM builds h WHERE h.app_id=? AND h.state='ready' AND h.deleted_at IS NULL AND ${leadsItsBuild('h')} GROUP BY h.branch) ORDER BY b.published_at DESC,b.id DESC LIMIT ${BRANCHES_READ}`,
+  )
+  const branchesOf = db.prepare(
+    "SELECT COUNT(DISTINCT branch) AS n FROM builds WHERE app_id=? AND state='ready' AND deleted_at IS NULL",
   )
   const runsOf = db.prepare(
     "SELECT id,branch,number,status,workflow,commit_sha,description,created FROM (SELECT *,ROW_NUMBER() OVER (PARTITION BY branch ORDER BY created DESC) AS place FROM jobs WHERE project_id=? AND workflow NOT LIKE '@%') WHERE place=1 ORDER BY created DESC LIMIT 4",
@@ -217,6 +257,14 @@ export function dashboardData(
   const cards: ProjectCard[] = []
   let appTotal = 0
   for (const project of projects) {
+    // Push branches first, in the trigger's order; the rest stay newest first.
+    const pinned = source.pinned?.get(project.id) ?? []
+    const rank = (branch: string): number => {
+      const place = pinned.findIndex((pattern) =>
+        isGlob(pattern) ? matches(pattern, branch) : pattern === branch,
+      )
+      return place === -1 ? pinned.length : place
+    }
     const apps = (
       appsOf.all(project.id) as Array<{
         id: number
@@ -235,12 +283,21 @@ export function dashboardData(
             branch: string
             build_number: string
             published_at: number
+            run: string | null
+            status: string | null
           }>
-        ).map((row) => ({
-          branch: row.branch,
-          buildNumber: row.build_number,
-          at: row.published_at,
-        })),
+        )
+          .map((row) => ({
+            branch: row.branch,
+            buildNumber: row.build_number,
+            at: row.published_at,
+            ...(row.run == null ? {} : { run: row.run }),
+            ...(row.status == null ? {} : { status: row.status }),
+          }))
+          .sort((a, b) => rank(a.branch) - rank(b.branch)),
+        branches: Number(
+          (branchesOf.get(app.id) as { n: number } | undefined)?.n ?? 0,
+        ),
       }))
     appTotal += apps.length
     for (const app of apps) {
@@ -392,7 +449,7 @@ function query(filter: DashboardFilter, change: DashboardFilter): string {
   if (merged.project != null) params.set('project', merged.project)
   if (merged.platform != null) params.set('platform', merged.platform)
   const text = params.toString()
-  return text === '' ? '/' : `/?${text}`
+  return text === '' ? '/projects' : `/projects?${text}`
 }
 
 /** A run's page. */
@@ -419,21 +476,44 @@ export function queueItems(entries: readonly QueueEntry[]): string {
   )
 }
 
-/** A project's card; all of it opens the project's page, but for its run chips, which open their runs. */
+/**
+ * A branch's latest build of an app ID: branch, build number, its run's
+ * status and age, opening that run. The page's socket keeps the status.
+ */
+function buildChip(
+  build: ProjectCard['apps'][number]['builds'][number],
+  now: number,
+): string {
+  const text = `${escape(build.branch)} <span>${escape(build.buildNumber)}</span>${build.status == null ? '' : statusDot(build.status)}<small>${escape(ago(build.at, now))}</small>`
+  return build.run == null
+    ? `<span class="run-chip">${text}</span>`
+    : `<a class="run-chip" href="${runHref(build.run)}" title="${escape(build.branch)} ${escape(build.buildNumber)} ${escape(build.status ?? '')}" data-run-id="${escape(build.run)}" data-status="${escape(build.status ?? '')}">${text}</a>`
+}
+
+/**
+ * A project's card. Its header opens the project's page, but for its run
+ * chips, which open their runs; each app ID's row opens that app ID's
+ * page, but for its build chips, which open their runs.
+ */
 function projectCard(card: ProjectCard, now: number): string {
   const runs = card.runs.map(runChip).join('')
   const apps = card.apps
-    .map(
-      (app) =>
-        `<div class="app-row"><div><span class="mono">${escape(app.slug)}</span> ${app.platforms.map(platformChip).join(' ')}<small>${escape(app.name)}</small></div><div class="runs">${
-          app.builds
-            .map(
-              (build) =>
-                `<span class="run-chip">${escape(build.branch)} <span>${escape(build.buildNumber)}</span> <small>${escape(ago(build.at, now))}</small></span>`,
-            )
-            .join('') || '<small>No builds yet</small>'
-        }</div></div>`,
-    )
+    .map((app) => {
+      const href = appPath(card.slug, app.slug)
+      const more = Math.max(app.builds.length, app.branches) - BRANCH_CHIPS
+      const builds =
+        app.builds
+          .slice(0, BRANCH_CHIPS)
+          .map((build) => buildChip(build, now))
+          .join('') +
+        (more > 0
+          ? `<a class="run-chip more" href="${escape(href)}">+${more} more</a>`
+          : '')
+      return appGridRow(href, app.slug, `<small>${escape(app.name)}</small>`, [
+        platformChips(app.platforms),
+        `<span class="app-builds">${builds || '<small>No builds yet</small>'}</span>`,
+      ])
+    })
     .join('')
   return `<article class="project" id="project-${escape(card.slug)}"><header>${icon('folder')}<div><h2><a class="card-link" href="/projects/${encodeURIComponent(card.slug)}">${escape(card.name)}</a></h2>${
     card.repository == null
@@ -447,7 +527,7 @@ function projectCard(card: ProjectCard, now: number): string {
     card.latest == null
       ? ''
       : `<span>${icon('commit')} <span class="mono">${escape(card.latest.commit.slice(0, 8))}</span> ${escape(card.latest.description)} · ${escape(ago(card.latest.at, now))}</span>`
-  }</div></div><div class="runs" data-project-runs="${escape(card.slug)}">${runs}</div></header><div class="apps"><h3>App IDs (${card.apps.length})</h3>${apps || '<p>No app IDs.</p>'}</div></article>`
+  }</div></div><div class="runs" data-project-runs="${escape(card.slug)}">${runs}</div></header><div class="apps"><h3>App IDs (${card.apps.length})</h3>${apps === '' ? '<p>No app IDs.</p>' : `<div class="app-grid" role="table" aria-label="App IDs">${apps}</div>`}</div></article>`
 }
 
 /** The projects-and-apps dashboard for developers and up. */
@@ -490,7 +570,7 @@ export function dashboardView(
         `<li><div><span class="mono">${escape(build.app)} ${escape(build.version)} (${escape(build.buildNumber)})</span><small>${platformChip(build.platform)} <span class="mono">${escape(build.branch)}</span> · ${escape(bytes(build.size))} · ${escape(ago(build.at, now))}</small></div></li>`,
     )
     .join('')
-  return `<div class="page-head"><div><div class="breadcrumbs"><span>Mason</span><span>/</span><span>${viewer.node === 'master' ? 'Master' : 'Builds'}</span></div><h1>Projects &amp; apps</h1><p>Every project's app IDs, their latest builds and runs.</p></div>${viewer.node === 'master' && (viewer.role === 'admin' || viewer.role === 'manager') ? `<a class="button" href="/projects/new">${icon('add')} Add project</a>` : ''}</div><div class="tiles">${tile('folder', 'Projects', String(data.tiles.projects))}${tile('apps', 'App IDs', String(data.tiles.apps))}${tile('speed', 'Success rate', rate, data.tiles.finished === 0 ? 'No finished runs in 30 days' : `${data.tiles.finished} runs in 30 days`)}${tile('storage', 'Artifact storage', bytes(data.tiles.storage))}</div><nav class="chips" aria-label="Platforms">${chips}</nav><div class="columns"><div>${
+  return `<div class="page-head"><div>${breadcrumbs(viewer, [{ label: 'Projects', href: '/projects' }])}<h1>Projects &amp; apps</h1><p>Every project's app IDs, their latest builds and runs.</p></div>${viewer.node === 'master' && (viewer.role === 'admin' || viewer.role === 'manager') ? `<a class="button" href="/projects/new">${icon('add')} Add project</a>` : ''}</div><div class="tiles">${tile('folder', 'Projects', String(data.tiles.projects))}${tile('apps', 'App IDs', String(data.tiles.apps))}${tile('speed', 'Success rate', rate, data.tiles.finished === 0 ? 'No finished runs in 30 days' : `${data.tiles.finished} runs in 30 days`)}${tile('storage', 'Artifact storage', bytes(data.tiles.storage))}</div><nav class="chips" aria-label="Platforms">${chips}</nav><div class="columns"><div>${
     data.projects.map((card) => projectCard(card, now)).join('') ||
     '<p class="empty-state">No projects match.</p>'
   }</div><aside><section class="panel" data-queue><h2>${icon('hourglass_top')}Queue</h2><ul>${queueItems(data.queue)}</ul></section>${nodes}<section class="panel"><h2>${icon('deployed_code')}Recent builds</h2><ul>${builds || '<li>No builds yet.</li>'}</ul></section></aside></div>`

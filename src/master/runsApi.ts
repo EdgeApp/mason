@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import express, { Router } from 'express'
 import { lineAt, plainLog } from '../view/log.js'
 import { AUTOMATIC_POLL_MS } from '../builder/automatic.js'
@@ -6,6 +6,13 @@ import { branchName } from '../builder/config.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
 import { BranchRefused, IdempotencyConflict, QueueFull } from './jobs.js'
 import { ProjectNotFound } from './projects.js'
+import {
+  fileLines,
+  lineCount,
+  lineNumber,
+  MAX_PAGE_LINES,
+  newlineBefore,
+} from './live.js'
 import { allow, allowRole, covers, type Target } from './permissions.js'
 import type { Master } from './runtime.js'
 import { isGlob } from './rules.js'
@@ -177,6 +184,109 @@ export function runLog(
     text: content.subarray(start, end).toString('utf8'),
     first: lineAt(content, start),
   }
+}
+
+/** Lines a run's page asks for at once. */
+export const PAGE_LINES = 500
+
+/** A page's lines of a run's log: a stage's, a step's, or the whole run's. */
+export interface PageLines {
+  /** The number of the log's first line: 1, or where a step's lines start in its stage's. */
+  start: number
+  /** The lines the log holds. */
+  total: number
+  /** The number of the first line returned. */
+  first: number
+  /** The lines, each ending in a newline but perhaps the log's last. */
+  text: string
+  /** The stage log's bytes up to the end of the text, so a live page follows on from there. */
+  end: number
+}
+
+/**
+ * Lines of a run's log by number, for a page that draws only those in view:
+ * `count` from line `from`, or the last `count` with `last`. A stage's log,
+ * one step's part of it, or the whole run's, its stages' logs one after
+ * another.
+ */
+export async function runLines(
+  master: Master,
+  id: string,
+  options: {
+    stage?: string
+    step?: number
+    from?: number
+    last?: boolean
+    count?: number
+  },
+): Promise<PageLines | undefined> {
+  if (master.jobs.job(id) == null) return undefined
+  const count = Math.max(
+    1,
+    Math.min(options.count ?? PAGE_LINES, MAX_PAGE_LINES),
+  )
+  const pick = (start: number, total: number): number =>
+    options.last === true
+      ? Math.max(start, start + total - count)
+      : Math.min(Math.max(options.from ?? start, start), start + total)
+  if (options.stage == null) {
+    // The whole run's log: each stage's lines, numbered on from the last.
+    const files = master.scheduler.logFiles(id)
+    const totals = await Promise.all(
+      files.map(async (file) => await lineCount(file)),
+    )
+    const total = totals.reduce((sum, lines) => sum + lines, 0)
+    const first = pick(1, total)
+    let text = ''
+    let want = count
+    let base = 1
+    for (const [index, file] of files.entries()) {
+      const lines = totals[index]!
+      if (want > 0 && first + count - want < base + lines) {
+        const from = first + count - want
+        const part = await fileLines(file, from - base + 1, want)
+        const got =
+          part.text === ''
+            ? 0
+            : part.text.split('\n').length - (part.text.endsWith('\n') ? 1 : 0)
+        text +=
+          part.text.endsWith('\n') || part.text === ''
+            ? part.text
+            : part.text + '\n'
+        want -= got
+        // Cut short by the byte limit: the next part would not follow on.
+        if (got < Math.min(want + got, base + lines - from)) break
+      }
+      base += lines
+    }
+    return { start: 1, total, first, text, end: 0 }
+  }
+  const file = master.scheduler.logFile(id, options.stage)
+  const size = statSync(file, { throwIfNoEntry: false })?.size ?? 0
+  if (options.step == null) {
+    const total = size === 0 ? 0 : await lineCount(file, size)
+    const first = pick(1, total)
+    const part = await fileLines(file, first, count)
+    return { start: 1, total, first, text: part.text, end: part.end }
+  }
+  const step = master.database.db
+    .prepare(
+      'SELECT log_start,log_end FROM job_steps WHERE job_id=? AND stage=? AND id=? ORDER BY attempt DESC LIMIT 1',
+    )
+    .get(id, options.stage, options.step) as
+    | { log_start: number | null; log_end: number | null }
+    | undefined
+  if (step == null) throw new NotFound('No such step')
+  const from = Math.min(step.log_start ?? 0, size)
+  const to = Math.min(step.log_end ?? size, size)
+  const start = await lineNumber(file, from)
+  const total =
+    to <= from
+      ? 0
+      : (await lineNumber(file, to)) - start + (newlineBefore(file, to) ? 0 : 1)
+  const first = pick(start, total)
+  const part = await fileLines(file, first, count, { from, to })
+  return { start, total, first, text: part.text, end: part.end }
 }
 
 /** The v1 job API on the master (paths and fields unchanged) and `/api/v2/runs`. */
@@ -441,6 +551,31 @@ export function runsApi(master: Master): Router {
       const id = String(req.params.id)
       allowRole(actorOf(res), 'runs.read')
       allow(actorOf(res), 'runs.read', runTarget(master, id))
+      // A page's lines, by number (?from=, or ?last=1), as JSON: a page
+      // draws only the lines in view of a log that can be tens of megabytes.
+      if (req.query.from != null || req.query.last != null) {
+        const number = (name: string): number | undefined => {
+          const value = Number(req.query[name])
+          return Number.isSafeInteger(value) ? value : undefined
+        }
+        const stage = req.query.stage
+        const step = number('step')
+        const from = number('from')
+        const count = number('count')
+        runLines(master, id, {
+          ...(typeof stage === 'string' ? { stage } : {}),
+          ...(typeof stage === 'string' && step != null ? { step } : {}),
+          ...(from == null ? {} : { from }),
+          ...(req.query.last === '1' ? { last: true } : {}),
+          ...(count == null ? {} : { count }),
+        })
+          .then((lines) => {
+            if (lines == null) throw new NotFound('Run not found')
+            res.json(lines)
+          })
+          .catch(next)
+        return
+      }
       const text = runLog(master, id, {
         ...(typeof req.query.stage === 'string'
           ? { stage: req.query.stage }

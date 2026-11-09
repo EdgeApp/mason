@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs'
 import { once } from 'node:events'
@@ -29,11 +30,16 @@ import {
   clientParameters,
   DEFAULT_PASSWORD_COSTS,
 } from '../auth/passwordProtocol.js'
-import { xcodeRoutes } from './web.js'
-import { HostRuntime } from './runtime.js'
+import { named, xcodeRoutes } from './web.js'
+import { HostRuntime, newerPart } from './runtime.js'
 import { DatabaseSync } from 'node:sqlite'
 import { LinkError, type Link } from '../link/link.js'
 import { Outbox } from './outbox.js'
+import { HostCache } from './cache.js'
+import { proofLog } from '../test/proofLog.js'
+import { crumbTrail } from '../test/crumbs.js'
+import { migrateMaster } from '../master/schema.js'
+import { entities, type Change } from '../master/changes.js'
 import { seedLegacySecrets } from '../test/secrets.js'
 
 // API responses are read field by field in assertions.
@@ -101,8 +107,8 @@ function seed(c: Cluster): void {
       (11,'Dev','dev@example.com','developer',1,${now}),
       (12,'Gone','gone@example.com','tester',1,${now});
     UPDATE accounts SET disabled=1 WHERE id=12;
-    INSERT INTO account_addresses(account_id,method,email) VALUES
-      (10,'first','Tess@Example.com'),(10,'second','tess.second@example.com'),(11,'first','dev@example.com'),(12,'first','gone@example.com');
+    INSERT INTO account_emails(account_id,email,position) VALUES
+      (10,'tess@example.com',0),(10,'tess.second@example.com',1),(11,'dev@example.com',0),(12,'gone@example.com',0);
     INSERT INTO groups(id,name,created_at) VALUES(1,'Edge testers',${now});
     INSERT INTO group_apps(group_id,app_id) VALUES(1,1);
     INSERT INTO group_members(group_id,account_id) VALUES(1,10);
@@ -323,7 +329,7 @@ describe('Host cache schema', () => {
             .prepare("SELECT value FROM host_meta WHERE key='host_schema'")
             .get() as { value: string }
         ).value,
-        '9',
+        '11',
       )
       // Schema 9: the key verifiers, kept on a replay, and a revision of 0,
       // so the next sync is a snapshot that brings every key.
@@ -466,8 +472,11 @@ describe('Host cache, sign-in and offline serving', function () {
     const start = await b.get(`/auth/start/${provider}?return=/`)
     assert.equal(start.status, 303, await start.text())
     const callback = await env.authorize(start.headers.get('location')!)
+    lastCallback = `GET ${callback.pathname}?code=<code>&state=<state>`
     return await b.get(callback.pathname + callback.search)
   }
+  /** The last provider callback signIn opened, for the proof log. */
+  let lastCallback = ''
   const session = (b: Browser): string | undefined =>
     b.cookies.get('__Host-mason-session')
 
@@ -587,7 +596,7 @@ describe('Host cache, sign-in and offline serving', function () {
     assert.equal(runtime().cache.revision(), before)
   })
 
-  it('U10.8/U10.9 signs in only a verified email matching an enabled account’s address for that provider', async () => {
+  it('U10.8/U10.9 signs in only a verified email matching one of an enabled account’s emails', async () => {
     const tess = browser()
     const accepted = await signIn(tess, 'first', { email: 'tess@example.com' })
     assert.equal(accepted.status, 303)
@@ -606,6 +615,23 @@ describe('Host cache, sign-in and offline serving', function () {
     )
     assert.equal(runtime().accounts.session(session(second))!.account.id, 10)
     assert.equal(runtime().accounts.session(session(tess))!.account.id, 10)
+    // Any of a person's confirmed emails, through any provider.
+    for (const [provider, email] of [
+      ['first', 'tess.second@example.com'],
+      ['second', 'tess.second@example.com'],
+      ['second', 'dev@example.com'],
+    ] as const) {
+      const signedIn = browser()
+      const reply = await signIn(signedIn, provider, { email })
+      assert.equal(reply.status, 303, `${provider} ${email}`)
+      const account = runtime().accounts.session(session(signedIn))!.account
+      // Tess's second address is the proof; Dev's is one more case.
+      if (account.id === 10)
+        proofLog(
+          `${lastCallback}    # on the host, ${provider} verified ${email}, Tess Tester's second email`,
+          `HTTP ${reply.status}\nLocation: ${reply.headers.get('location')}\nSet-Cookie: ${(reply.headers.get('set-cookie') ?? '(none)').replace(/(__Host-[\w-]+)=([^;]+)/g, '$1=<redacted>')}\n(the host's session belongs to account ${account.id}, ${account.name})`,
+        )
+    }
     for (const [provider, claims, reason] of [
       [
         'first',
@@ -615,8 +641,6 @@ describe('Host cache, sign-in and offline serving', function () {
       ['first', { email: 'nobody@example.com' }, /No Mason account/],
       ['first', { email: 'tess@example.com.evil' }, /No Mason account/],
       ['first', { email: 'gone@example.com' }, /No Mason account/],
-      ['first', { email: 'tess.second@example.com' }, /No Mason account/],
-      ['second', { email: 'dev@example.com' }, /No Mason account/],
     ] as const) {
       const refused = await signIn(browser(), provider, claims)
       assert.equal(refused.status, 400, `${provider} ${claims.email}`)
@@ -626,7 +650,7 @@ describe('Host cache, sign-in and offline serving', function () {
     const master = c.master.master!
     const eve = await master.people.create(admin, {
       name: 'Eve',
-      email: 'eve@example.com',
+      emails: ['eve@example.com'],
     })
     await c.until(
       () =>
@@ -724,7 +748,7 @@ describe('Host cache, sign-in and offline serving', function () {
     assert.match(page, /Zcash/)
     const row = master.database.db
       .prepare(
-        'SELECT a.role, a.open_admission, a.name FROM accounts a JOIN account_addresses x ON x.account_id=a.id WHERE lower(x.email)=lower(?)',
+        'SELECT a.role, a.open_admission, a.name FROM accounts a JOIN account_emails x ON x.account_id=a.id WHERE x.email=?',
       )
       .get('new.person@example.com') as {
       role: string
@@ -743,9 +767,7 @@ describe('Host cache, sign-in and offline serving', function () {
     assert.equal(
       (
         master.database.db
-          .prepare(
-            'SELECT COUNT(*) n FROM account_addresses WHERE lower(email)=lower(?)',
-          )
+          .prepare('SELECT COUNT(*) n FROM account_emails WHERE email=?')
           .get('new.person@example.com') as { n: number }
       ).n,
       1,
@@ -774,7 +796,7 @@ describe('Host cache, sign-in and offline serving', function () {
     )
   })
 
-  it('U10.4/U10.7 serves the catalog, project home and installs of the tester’s apps from the cache with the master link down', async () => {
+  it('U10.4/U10.7 serves the catalog and installs of the tester’s apps from the cache with the master link down', async () => {
     const tess = browser()
     await signIn(tess, 'first', { email: 'tess@example.com' })
     const online = await (await tess.get('/')).text()
@@ -797,9 +819,8 @@ describe('Host cache, sign-in and offline serving', function () {
       ).text()
       assert.match(branch, /1\.0\.100/)
       assert.equal((await tess.get('/apps/2')).status, 404)
-      const project = await tess.get('/projects/edge')
-      assert.equal(project.status, 200, 'project home')
-      assert.match(await project.text(), /Edge Wallet/)
+      // A tester has no project pages on the host; Install apps holds her apps.
+      assert.equal((await tess.get('/projects/edge')).status, 404)
       const csrf = runtime().accounts.session(session(tess))!.session.csrf
       const install = await tess.post('/builds/100/install', { csrf })
       assert.equal(install.status, 303)
@@ -812,7 +833,7 @@ describe('Host cache, sign-in and offline serving', function () {
       assert.equal(await artifact.text(), `apk ${KEY}`)
       assert.equal(
         (await tess.post('/builds/101/install', { csrf })).status,
-        400,
+        404,
         'another group’s build',
       )
       // An expired build stops at once, even offline.
@@ -827,7 +848,7 @@ describe('Host cache, sign-in and offline serving', function () {
       assert.doesNotMatch(later, /1\.0\.102/)
       assert.equal(
         (await tess.post('/builds/102/install', { csrf })).status,
-        400,
+        404,
       )
       // Sign-in keeps working from the cache.
       const again = browser()
@@ -843,11 +864,12 @@ describe('Host cache, sign-in and offline serving', function () {
     await signIn(developer, 'first', { email: 'dev@example.com' })
     const all = await (await developer.get('/')).text()
     assert.match(all, /Zcash/, 'developers see every app')
+    // The project's Overview, as on the master.
     assert.match(
       await (await developer.get('/projects/edge')).text(),
-      /Recent runs/,
+      /<nav class="tabs" aria-label="Project">/,
     )
-    // Each recent run opens its run's page on the host.
+    // Runs and builds lists each run, which opens its page on the host.
     const master = c.master.master!.database
     master.db
       .prepare(
@@ -863,14 +885,74 @@ describe('Host cache, sign-in and offline serving', function () {
       10000,
       'the run on the host',
     )
-    const home = await (await developer.get('/projects/edge')).text()
-    assert.match(
-      home,
-      /<a class="list-row" href="\/runs\/m4-run"><div><strong>Run 4242<\/strong><small>develop · /,
-    )
-    assert.equal((await developer.get('/runs/m4-run')).status, 200)
+    const runs = await (await developer.get('/projects/edge/runs')).text()
+    assert.match(runs, /href="\/runs\/m4-run"/)
+    const runPage = await developer.get('/runs/m4-run')
+    assert.equal(runPage.status, 200)
+    // The host's run page starts its breadcrumbs from Mason Host.
+    assert.deepEqual(crumbTrail(await runPage.text()), [
+      'Mason Host /',
+      'Projects /projects',
+      'Edge /projects/edge',
+      'Runs and builds /projects/edge/runs',
+      'develop /projects/edge/runs?branch=develop',
+      'Run 4242 /runs/m4-run *',
+    ])
+    const masonfile = await (
+      await developer.get('/projects/edge/masonfile')
+    ).text()
+    assert.deepEqual(crumbTrail(masonfile).slice(-2), [
+      'Edge /projects/edge',
+      'Masonfile /projects/edge/masonfile *',
+    ])
+    assert.equal(crumbTrail(masonfile)[0], 'Mason Host /')
     master.db.prepare("DELETE FROM jobs WHERE id='m4-run'").run()
     master.change('job', 'm4-run', 'delete')
+  })
+
+  it('U10.21 Masonfile copies larger than one link message reach the host after a catch-up', async () => {
+    const master = c.master.master!.database
+    const project = c.master.master!.projects.get('edge').id
+    // Three copies of 400 KiB: one sync carrying their texts would pass the link's 1 MiB cap.
+    const shas = ['a', 'b', 'c'].map((letter) => letter.repeat(40))
+    const text = (sha: string): string => `// ${sha}\n${'x'.repeat(400 * 1024)}`
+    await c.drop('host', 1000, async () => {
+      for (const sha of shas) {
+        master.db
+          .prepare(
+            "INSERT INTO masonfiles(key,project_id,commit_sha,file,text,created_at) VALUES(?,?,?,'Masonfile.ts',?,?)",
+          )
+          .run(`${project}:${sha}`, project, sha, text(sha), master.now())
+        master.change('masonfile', `${project}:${sha}`)
+      }
+    })
+    await c.until(
+      () =>
+        (
+          runtime()
+            .cache.db.prepare(
+              'SELECT count(*) AS n FROM masonfiles WHERE project_id=? AND text IS NOT NULL',
+            )
+            .get(project) as { n: number }
+        ).n === shas.length,
+      20000,
+      'the Masonfile texts on the host',
+    )
+    for (const sha of shas)
+      assert.equal(
+        (
+          runtime()
+            .cache.db.prepare('SELECT text FROM masonfiles WHERE key=?')
+            .get(`${project}:${sha}`) as { text: string }
+        ).text,
+        text(sha),
+      )
+    for (const sha of shas) {
+      master.db
+        .prepare('DELETE FROM masonfiles WHERE key=?')
+        .run(`${project}:${sha}`)
+      master.change('masonfile', `${project}:${sha}`, 'delete')
+    }
   })
 
   it('U10.10 a permission-version change ends that account’s host sessions', async () => {
@@ -1075,7 +1157,7 @@ describe('Host cache, sign-in and offline serving', function () {
     const p = clientParameters('b1'.repeat(16), DEFAULT_PASSWORD_COSTS)
     const hugo = await master.people.create(admin, {
       name: 'Hugo',
-      email: 'hugo@example.com',
+      emails: ['hugo@example.com'],
       username: 'hugo',
       role: 'developer',
       password: {
@@ -1300,7 +1382,7 @@ describe('Host cache, sign-in and offline serving', function () {
     legacy.db.exec(`
       INSERT INTO accounts(id,name,email,is_tester,permission_version,created_at) VALUES(10,'Tess Tester','tess@example.com',1,0,${now});
       INSERT INTO identities(account_id,provider,issuer,subject,email,email_verified) VALUES(10,'first','https://identity.example.test/first','tess-subject','tess@example.com',1);
-      INSERT INTO sessions VALUES('${digest(token)}',10,0,'${'c'.repeat(43)}',${now},${now + 86_400_000});
+      INSERT INTO sessions(hash,account_id,permission_version,csrf,created_at,expires_at) VALUES('${digest(token)}',10,0,'${'c'.repeat(43)}',${now},${now + 86_400_000});
     `)
     mkdirSync(path.join(storage, 'files'), { recursive: true })
     writeFileSync(
@@ -1657,5 +1739,230 @@ describe('Host cache, sign-in and offline serving', function () {
       runtime().cache.host()!.workerOrigin,
       'https://workers.example.test',
     )
+  })
+})
+
+describe('Plain emails on the host', () => {
+  it('host schema 10 drops the address table for plain emails and a username, and resyncs', () => {
+    const dir = mkdtempSync(
+      path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'host-v10-'),
+    )
+    try {
+      new HostCache(dir).close()
+      const file = path.join(dir, 'host-cache.sqlite')
+      // Back to schema 9: the per-method address table, no emails.
+      const old = new DatabaseSync(file)
+      old.exec(`DROP TABLE account_emails;
+        CREATE TABLE account_addresses(account_id INTEGER NOT NULL, method TEXT NOT NULL,
+          email TEXT NOT NULL, PRIMARY KEY(account_id, method)) STRICT;
+        UPDATE host_meta SET value='9' WHERE key='host_schema';
+        INSERT INTO host_meta(key,value) VALUES('revision','41') ON CONFLICT(key) DO UPDATE SET value=excluded.value;`)
+      old.close()
+      const cache = new HostCache(dir)
+      try {
+        const tables = cache.db
+          .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+          .all()
+          .map((row) => row.name)
+        assert.ok(tables.includes('account_emails'))
+        assert.ok(!tables.includes('account_addresses'))
+        assert.ok(
+          cache.db
+            .prepare('PRAGMA table_info(accounts)')
+            .all()
+            .some((column) => column.name === 'username'),
+        )
+        assert.ok(
+          cache.db
+            .prepare('PRAGMA table_info(accounts)')
+            .all()
+            .some((column) => column.name === 'has_password'),
+        )
+        assert.equal(cache.revision(), 0)
+      } finally {
+        cache.close()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('names a username both ways on the link, for a master on the previous release (review 3.harness-review.5)', () => {
+    assert.deepEqual(named('tess'), { identifier: 'tess', username: 'tess' })
+    assert.deepEqual(named('tess@example.test'), {
+      identifier: 'tess@example.test',
+    })
+    assert.deepEqual(named(undefined), { identifier: undefined })
+  })
+
+  it('an on-demand sync applies only what is newer than the cache (review 3.harness-review.2)', () => {
+    const change = (revision: number): Change => ({
+      revision,
+      entity: 'account',
+      key: String(revision),
+      operation: 'delete',
+    })
+    assert.equal(
+      newerPart({ kind: 'changes', revision: 2, changes: [change(2)] }, 3),
+      undefined,
+    )
+    assert.equal(
+      newerPart({ kind: 'changes', revision: 3, changes: [change(3)] }, 3),
+      undefined,
+    )
+    assert.deepEqual(
+      newerPart(
+        {
+          kind: 'changes',
+          revision: 5,
+          changes: [change(3), change(4), change(5)],
+        },
+        3,
+      ),
+      { kind: 'changes', revision: 5, changes: [change(4), change(5)] },
+    )
+    const snapshot = { kind: 'snapshot' as const, revision: 2, entities: {} }
+    assert.equal(newerPart(snapshot, 3), undefined)
+    assert.equal(newerPart({ ...snapshot, revision: 3 }, 3)?.revision, 3)
+  })
+
+  it('host schema 11 adds the project details column and the Masonfile copies, and resyncs', () => {
+    const dir = mkdtempSync(
+      path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'host-v11-'),
+    )
+    try {
+      new HostCache(dir).close()
+      const file = path.join(dir, 'host-cache.sqlite')
+      const old = new DatabaseSync(file)
+      old.exec(`DROP TABLE masonfiles;
+        ALTER TABLE projects DROP COLUMN details;
+        UPDATE host_meta SET value='10' WHERE key='host_schema';
+        UPDATE host_meta SET value='12' WHERE key='revision';`)
+      old.close()
+      const cache = new HostCache(dir)
+      try {
+        assert.ok(
+          cache.db
+            .prepare('PRAGMA table_info(projects)')
+            .all()
+            .some((column) => column.name === 'details'),
+        )
+        assert.ok(
+          cache.db
+            .prepare("SELECT 1 FROM sqlite_master WHERE name='masonfiles'")
+            .get(),
+        )
+        assert.equal(cache.revision(), 0)
+      } finally {
+        cache.close()
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('a provider subject stops mapping to an account once the email it came with is taken away', () => {
+    const dir = mkdtempSync(
+      path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'host-ident-'),
+    )
+    const cache = new HostCache(dir)
+    try {
+      const account = (emails: string[]): Change => ({
+        revision: 0,
+        entity: 'account',
+        key: '7',
+        operation: 'put',
+        value: {
+          row: {
+            id: 7,
+            name: 'Ida',
+            role: 'tester',
+            permission_version: 1,
+            created_at: 0,
+          },
+          children: {
+            account_emails: emails.map((email, position) => ({
+              account_id: 7,
+              email,
+              position,
+              confirmed: 1,
+            })),
+          },
+        },
+      })
+      cache.apply({
+        kind: 'changes',
+        revision: 1,
+        changes: [account(['ida@example.test', 'ida@work.test'])],
+      })
+      const identity = cache.db.prepare(
+        "INSERT INTO identities(account_id,provider,issuer,subject,email,email_verified) VALUES(7,?,'https://idp.example.test',?,?,1)",
+      )
+      identity.run('first', 'ida-1', 'Ida@Example.test')
+      identity.run('second', 'ida-2', 'ida@work.test')
+      cache.apply({
+        kind: 'changes',
+        revision: 2,
+        changes: [account(['ida@example.test'])],
+      })
+      assert.deepEqual(
+        cache.db
+          .prepare('SELECT subject FROM identities WHERE account_id=7')
+          .all()
+          .map((row) => row.subject),
+        ['ida-1'],
+      )
+    } finally {
+      cache.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('the master sends every email, and for an older host the first confirmed one as its any-method address', () => {
+    const db = new DatabaseSync(':memory:', {
+      enableForeignKeyConstraints: true,
+    })
+    migrateMaster(db)
+    const id = Number(
+      db
+        .prepare(
+          "INSERT INTO accounts(name,username,role,created_at) VALUES('Ada','ada','tester',0)",
+        )
+        .run().lastInsertRowid,
+    )
+    const insert = db.prepare(
+      'INSERT INTO account_emails(account_id,email,position,confirmed) VALUES(?,?,?,?)',
+    )
+    insert.run(id, 'claimed@example.test', 0, 0)
+    insert.run(id, 'ada@example.test', 1, 1)
+    insert.run(id, 'ada@work.test', 2, 1)
+    const projected = entities(() => ({})).account!.project(db, String(id))!
+    assert.equal(projected.row.username, 'ada')
+    // Whether she has a password travels, never the password.
+    assert.equal(projected.row.has_password, 0)
+    assert.equal(projected.row.password, undefined)
+    assert.deepEqual(
+      projected.children!.account_emails!.map((row) => [
+        row.email,
+        row.confirmed,
+      ]),
+      [
+        ['claimed@example.test', 0],
+        ['ada@example.test', 1],
+        ['ada@work.test', 1],
+      ],
+    )
+    assert.deepEqual(
+      projected.children!.account_addresses!.map((row) => ({ ...row })),
+      [{ account_id: id, method: '*', email: 'ada@example.test' }],
+    )
+    // Nobody confirmed: nothing for the older host.
+    db.prepare('UPDATE account_emails SET confirmed=0').run()
+    assert.deepEqual(
+      entities(() => ({})).account!.project(db, String(id))!.children!
+        .account_addresses,
+      [],
+    )
+    db.close()
   })
 })

@@ -96,7 +96,7 @@ describe('The host’s builds API', function () {
       open_admission: 0,
       ...fields,
     },
-    children: { account_addresses: [], account_devices: [] },
+    children: { account_emails: [], account_devices: [] },
   })
   const hostKey = (
     id: string,

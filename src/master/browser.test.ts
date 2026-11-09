@@ -92,10 +92,12 @@ describe('Master sign-in in a real browser', () => {
           css: 'form[data-mason="setup"] button',
         })
         // The worker computed the client hash in the page's CSP; the account exists.
-        await visible('^Backups$')
+        await visible('Every hour the master encrypts a snapshot')
         await screenshot('master-backup-prompt.png')
         assert.equal(node.master!.configured(), true)
-        await device.command('tapOn', { css: 'summary[aria-label="Account"]' })
+        // The account icon opens Your account, which holds Sign out.
+        await device.command('tapOn', { css: 'a[aria-label="Your account"]' })
+        await visible('^Your account$')
         await device.command('tapOn', {
           css: 'form[data-mason="sign-out"] button',
         })
@@ -105,8 +107,13 @@ describe('Master sign-in in a real browser', () => {
         await device.command('tapOn', {
           css: 'form[data-mason="sign-in"] button',
         })
-        // The browser's hash matches the one the server stored at setup.
-        await visible('^Projects & apps$')
+        // The browser's hash matches the one the server stored at setup. A
+        // master with no host yet opens on Projects & apps.
+        await visible('their latest builds and runs')
+        await device.command('evalBrowserScript', {
+          script:
+            "if (location.pathname !== '/' || document.querySelector('nav.rail a[aria-current=page]').getAttribute('href') !== '/projects') throw new Error('Not the lone master home')",
+        })
         await screenshot('master-signed-in.png')
       } finally {
         await daemon

@@ -1,6 +1,6 @@
 // The run view and the actions on it: forms that call the API as JSON, the
 // run's status, stages, steps and log lines live from the page's socket, the
-// log's follow and Jump to latest, its wrap toggle, the stage list's
+// log's follow and its button to the end, its wrap toggle, the stage list's
 // filters, the graph's zoom and its highlighted rails, and the dashboard's
 // queue and run statuses, live from the same socket.
 import {
@@ -10,7 +10,15 @@ import {
   type QueueEntry,
 } from '../view/dashboard.js'
 import { escape, since, stamp } from '../view/html.js'
-import { ansiLine } from '../view/log.js'
+import { logLines } from '../view/log.js'
+import {
+  CHUNK,
+  LogViewer,
+  type FetchLines,
+  type LinesAnswer,
+  type LogStart,
+} from './logViewer.js'
+export { logLines }
 import { stepItems, type StepRow } from '../view/steps.js'
 import {
   LiveClient,
@@ -37,18 +45,6 @@ export function actionBody(
   return body
 }
 
-/** Lines of a log as HTML, numbered from `first`, as the server renders them. */
-export function logLines(text: string, first: number): string[] {
-  const lines = text.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n')
-  if (text === '') return []
-  let style = { bold: false, underline: false }
-  return lines.map((line, index) => {
-    const rendered = ansiLine(line, style)
-    style = rendered.style
-    return `<span class="line" data-line="${first + index}">${rendered.html}</span>`
-  })
-}
-
 /** The page parts the script changes, so a test can supply them. */
 export interface RunPage {
   /** Whether the page draws a stage; setup adds stages after a page may have loaded. */
@@ -59,7 +55,8 @@ export interface RunPage {
   /** Shows a stage the log panel follows under its name, its log emptied. */
   follow(stage: string): void
   setSteps(stage: string, steps: StepRow[]): void
-  appendLog(html: string[]): void
+  /** Lines that arrived, numbered from `first`. */
+  appendLog(html: string[], first: number): void
   ended(): void
 }
 
@@ -135,7 +132,7 @@ export class RunLive {
         return
       }
       this.carry = undefined
-      this.page.appendLog(logLines(text, first))
+      this.page.appendLog(logLines(text, first), first)
     } else if (frame.event === 'end' || frame.event === 'gone')
       this.page.ended()
   }
@@ -350,31 +347,38 @@ export async function submitAction(
 /** How near the bottom a viewer must be for the log to keep following. */
 export const FOLLOW_PX = 80
 
+/** The log box's scrolling and its button to the end, shared by live and finished logs. */
+export interface LogScroller {
+  /** Lines were added below: a log at its end stays there, one scrolled up shows the button. */
+  appended(): void
+  /** The log was replaced (a stage to follow, a fetched log): `atEnd` opens it at its end. */
+  reset(atEnd: boolean): void
+}
+
 /**
- * The real page's parts. A live log opens at its end and follows new lines
- * while the viewer is within 80px of its bottom; scrolling up stops it and
- * shows Jump to latest, which scrolls back down and follows again, as does
- * scrolling back within 80px of the bottom.
+ * The log box's scrolling. The round button at its bottom right shows while
+ * the log is not at its end and goes there; at the end, the log follows the
+ * lines that arrive, until the viewer scrolls up. Any move up stops it, even
+ * within 80px of the bottom, so lines arriving mid-scroll never pull the
+ * viewer back down; back within 80px of the bottom, it follows again. A
+ * live log opens at its end, a finished one at its start.
  */
-export function domRunPage(
-  doc: Document,
-  reload: () => void = (): void => undefined,
-): RunPage {
+export function logScroller(doc: Document, atEnd: boolean): LogScroller {
   const pre = (): HTMLElement | null =>
     doc.querySelector<HTMLElement>('[data-log] pre')
   const jump = doc.querySelector<HTMLElement>('[data-jump]')
   let following = true
   /** Where the log was scrolled to last, so a move up is told from new lines below. */
   let lastTop = 0
+  const show = (): void => {
+    if (jump != null) jump.hidden = following
+  }
   const toEnd = (): void => {
     const log = pre()
     if (log == null) return
     log.scrollTop = log.scrollHeight
     lastTop = log.scrollTop
   }
-  // Any move up stops following, even within 80px of the bottom, so lines
-  // arriving mid-scroll never pull the viewer back down; back within 80px
-  // of the bottom, it follows again.
   const scrolled = (): void => {
     const log = pre()
     if (log == null) return
@@ -384,7 +388,7 @@ export function domRunPage(
     if (distance > 1 && log.scrollTop < lastTop) following = false
     else if (distance < FOLLOW_PX) following = true
     lastTop = log.scrollTop
-    if (jump != null) jump.hidden = following
+    show()
   }
   let watched: HTMLElement | null = null
   const watch = (): void => {
@@ -393,13 +397,48 @@ export function domRunPage(
     watched = log
     log.addEventListener('scroll', scrolled)
   }
-  toEnd()
-  watch()
+  const reset = (end: boolean): void => {
+    watch()
+    const log = pre()
+    if (end) {
+      toEnd()
+      following = true
+    } else {
+      lastTop = log?.scrollTop ?? 0
+      following =
+        log == null ||
+        log.scrollHeight - log.scrollTop - log.clientHeight < FOLLOW_PX
+    }
+    show()
+  }
+  reset(atEnd)
   jump?.addEventListener('click', () => {
     toEnd()
     following = true
-    jump.hidden = true
+    show()
   })
+  return {
+    appended: (): void => {
+      if (following) toEnd()
+      else show()
+    },
+    reset,
+  }
+}
+
+/** The real page's parts; its log scrolls as `logScroller` says, opening at its end. */
+/** The log box's viewer, and how to make one for a stage the page starts to follow. */
+export interface LogBox {
+  viewer?: LogViewer
+  make?: (stage: string) => LogViewer | undefined
+}
+
+export function domRunPage(
+  doc: Document,
+  reload: () => void = (): void => undefined,
+  scroller: LogScroller = logScroller(doc, true),
+  box: LogBox = {},
+): RunPage {
   return {
     hasStage: (name): boolean =>
       doc.querySelector(`.stage-list li[data-name="${quoted(name)}"]`) != null,
@@ -464,21 +503,25 @@ export function domRunPage(
             '<pre class="log"><code></code></pre>',
           )
       doc.querySelector<HTMLElement>('[data-log] .empty-state')?.remove()
-      watch()
-      following = true
-      lastTop = pre()?.scrollTop ?? 0
-      if (jump != null) jump.hidden = true
+      if (box.make != null) {
+        box.viewer?.destroy()
+        box.viewer = box.make(stage)
+      }
+      scroller.reset(true)
     },
     setSteps: (stage, steps): void => {
       const list = doc.querySelector('[data-steps]')
       if (list != null) list.innerHTML = stepItems(stage, steps)
     },
-    appendLog: (html): void => {
-      const code = doc.querySelector('[data-log] code')
-      if (code == null || html.length === 0) return
-      code.insertAdjacentHTML('beforeend', html.join(''))
-      if (following) toEnd()
-      else if (jump != null) jump.hidden = false
+    appendLog: (html, first): void => {
+      if (html.length === 0) return
+      if (box.viewer != null) box.viewer.append(html, first)
+      else {
+        const code = doc.querySelector('[data-log] code')
+        if (code == null) return
+        code.insertAdjacentHTML('beforeend', html.join(''))
+      }
+      scroller.appended()
     },
     ended: (): void => {
       doc
@@ -557,6 +600,8 @@ export function localTimes(
 
 /** Wires the run view, the action forms and the dashboard's queue on a page. */
 export function start(doc: Document, win: RunWindow): void {
+  /** The run log's box: drawn a window of lines at a time. */
+  const logBox: LogBox = {}
   const times = (): void => {
     if (localTimes(doc, Date.now())) win.live.setTimeout(times, 30_000)
   }
@@ -588,10 +633,11 @@ export function start(doc: Document, win: RunWindow): void {
         },
       )
     })
-  for (const box of doc.querySelectorAll<HTMLInputElement>('[data-wrap]'))
-    box.addEventListener('change', () => {
+  for (const toggle of doc.querySelectorAll<HTMLInputElement>('[data-wrap]'))
+    toggle.addEventListener('change', () => {
       for (const log of doc.querySelectorAll('.log'))
-        log.classList.toggle('wrap', box.checked)
+        log.classList.toggle('wrap', toggle.checked)
+      logBox.viewer?.wrap(toggle.checked)
     })
   const filter = doc.querySelector<HTMLInputElement>('[data-stage-filter]')
   const status = doc.querySelector<HTMLSelectElement>('[data-status-filter]')
@@ -650,17 +696,55 @@ export function start(doc: Document, win: RunWindow): void {
         undefined,
     )
   }
-  // A log this node does not hold (a step's lines on the host) is fetched through it.
-  const source = doc.querySelector<HTMLElement>('[data-log][data-src]')
-  if (source != null)
-    void win
-      .fetch(source.dataset.src ?? '', { credentials: 'same-origin' })
-      .then(async (response) => (response.ok ? await response.text() : ''))
-      .then((text) => {
-        const code = source.querySelector('code')
-        if (code != null) code.innerHTML = logLines(text, 1).join('')
-      })
   const head = doc.querySelector<HTMLElement>('.run-head')
+  // The log box scrolls through every line of the log and draws those in
+  // view, asking the server (on the host, through it) for the rest by
+  // number. A live stage's log opens at its end; a finished one, or a
+  // step's lines, at the start.
+  const box = doc.querySelector<HTMLElement>('[data-log]')
+  const atEnd = head?.dataset.live === '1' && box?.dataset.offset !== '-1'
+  const fetcher =
+    (src: string): FetchLines =>
+    async (from) => {
+      const response = await win.fetch(
+        `${src}${src.includes('?') ? '&' : '?'}${from === 'last' ? 'last=1' : `from=${from}`}&count=${CHUNK}`,
+        { credentials: 'same-origin' },
+      )
+      if (!response.ok) throw new Error(`Lines failed (${response.status})`)
+      return (await response.json()) as LinesAnswer
+    }
+  const viewerAt = (src: string, begin: LogStart): LogViewer | undefined => {
+    const pre = doc.querySelector<HTMLElement>('[data-log] pre')
+    const code = pre?.querySelector<HTMLElement>('code')
+    if (pre == null || code == null) return undefined
+    const viewer = new LogViewer(pre, code, fetcher(src), begin)
+    if (doc.querySelector<HTMLInputElement>('[data-wrap]')?.checked === true)
+      viewer.wrap(true)
+    return viewer
+  }
+  const src = box?.dataset.lines
+  if (box != null && src != null) {
+    const drawn = [...box.querySelectorAll<HTMLElement>('pre code .line')]
+    logBox.viewer = viewerAt(src, {
+      start: Number(box.dataset.start ?? 1),
+      total: Number(box.dataset.total ?? 0),
+      first: Number(drawn[0]?.dataset.line ?? box.dataset.start ?? 1),
+      lines: drawn.map((line) => line.outerHTML),
+    })
+  }
+  // A stage the page starts to follow gets a box of its own.
+  const run = head?.dataset.run ?? ''
+  logBox.make = (stage): LogViewer | undefined =>
+    viewerAt(
+      `/api/v2/runs/${encodeURIComponent(run)}/logs?stage=${encodeURIComponent(stage)}`,
+      { start: 1, total: 0, first: 1, lines: [] },
+    )
+  const scroller = logScroller(doc, atEnd)
+  // The host's page draws none of the log: it asks for its end or start.
+  if (logBox.viewer != null && box?.dataset.total == null)
+    void logBox.viewer
+      .open(atEnd ? 'last' : 0)
+      .then(() => scroller.reset(atEnd))
   // One socket for the page, opened when something subscribes.
   const state = doc.querySelector<HTMLElement>('[data-live-state]')
   let client: LiveClient | undefined
@@ -684,7 +768,12 @@ export function start(doc: Document, win: RunWindow): void {
       doc.querySelector<HTMLElement>('.stage-panel')?.dataset.stage ?? ''
     const start = doc.querySelector<HTMLElement>('[data-log]')?.dataset.offset
     const offset = start === 'tail' ? 'tail' : Number(start ?? -1)
-    const page = domRunPage(doc, () => win.location.assign(win.location.href))
+    const page = domRunPage(
+      doc,
+      () => win.location.assign(win.location.href),
+      scroller,
+      logBox,
+    )
     const run = new RunLive(
       page,
       head.dataset.run ?? '',
@@ -751,12 +840,15 @@ export function liveRuns(doc: Document, live: () => LiveClient): void {
       const entries = frame.data as QueueEntry[]
       list.innerHTML = queueItems(entries)
       for (const entry of entries) {
-        if (doc.querySelector(`[data-run-id="${quoted(entry.job)}"]`) != null)
-          continue
         const runs = doc.querySelector(
           `[data-project-runs="${quoted(entry.project)}"]`,
         )
-        if (runs == null) continue
+        // A build chip of the run, in an app ID's row, is not the header's run chip.
+        if (
+          runs == null ||
+          runs.querySelector(`[data-run-id="${quoted(entry.job)}"]`) != null
+        )
+          continue
         runs.querySelector(`[data-branch="${quoted(entry.branch)}"]`)?.remove()
         const status = entry.status === 'queued' ? 'queued' : 'running'
         runs.insertAdjacentHTML(

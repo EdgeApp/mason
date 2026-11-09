@@ -7,7 +7,7 @@ import { migrate } from '../schema.js'
  * The master's own tables, versioned in `meta` under `master_schema` so the
  * distribution tables can keep their `PRAGMA user_version` migrations.
  */
-export const MASTER_SCHEMA = 33
+export const MASTER_SCHEMA = 35
 
 const migrations: Array<(db: DatabaseSync) => void> = [
   (db): void =>
@@ -803,7 +803,69 @@ const migrations: Array<(db: DatabaseSync) => void> = [
       "INSERT INTO change_log(entity,key,operation,at) VALUES('key','*','delete',?)",
     ).run(Date.now())
   },
+  // 34: a person's addresses are plain emails, any number of them, with no
+  // sign-in method. Each old row becomes an email of its person, the
+  // any-method one first; an address two people held stays with the
+  // any-method holder, else the lower account id, and the drop is audited.
+  (db): void => migrateEmails(db),
+  // 35: each run's Masonfile, as the master read it when it pinned the
+  // commit, so a host can show it without the repository.
+  (db): void =>
+    db.exec(`CREATE TABLE IF NOT EXISTS masonfiles (
+      key TEXT PRIMARY KEY, project_id INTEGER NOT NULL, commit_sha TEXT NOT NULL,
+      file TEXT NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL
+    ) STRICT;`),
 ]
+
+/** Moves `account_addresses` into `account_emails` (migration 34). */
+function migrateEmails(db: DatabaseSync): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS account_emails (
+      account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      email TEXT NOT NULL COLLATE NOCASE,
+      position INTEGER NOT NULL,
+      confirmed INTEGER NOT NULL DEFAULT 1 CHECK(confirmed IN (0,1)),
+      PRIMARY KEY(account_id, email), UNIQUE(email)
+    ) STRICT;`)
+  // Replaying an older schema number finds the table already moved.
+  if (
+    db
+      .prepare("SELECT 1 FROM sqlite_master WHERE name='account_addresses'")
+      .get() == null
+  )
+    return
+  const rows = db
+    .prepare(
+      "SELECT account_id,method,email FROM account_addresses ORDER BY method<>'*', account_id, method",
+    )
+    .all() as Array<{ account_id: number; method: string; email: string }>
+  const owner = new Map<string, number>()
+  const positions = new Map<number, number>()
+  const insert = db.prepare(
+    'INSERT INTO account_emails(account_id,email,position,confirmed) VALUES(?,?,?,1)',
+  )
+  const dropped = db.prepare(
+    "INSERT INTO audit(actor,action,target,at,via) VALUES(NULL,'person.email.dropped',?,?,'migration')",
+  )
+  // Any-method rows come first, so their holders keep a shared address.
+  for (const row of rows) {
+    const email = row.email.toLowerCase()
+    const held = owner.get(email)
+    if (held === row.account_id) continue
+    if (held != null) {
+      dropped.run(`${row.account_id} ${email}`, Date.now())
+      continue
+    }
+    owner.set(email, row.account_id)
+    const position = positions.get(row.account_id) ?? 0
+    positions.set(row.account_id, position + 1)
+    insert.run(row.account_id, email, position)
+  }
+  db.exec('DROP TABLE account_addresses')
+  for (const account of positions.keys())
+    db.prepare(
+      "INSERT INTO change_log(entity,key,operation,at) VALUES('account',?,'put',?)",
+    ).run(String(account), Date.now())
+}
 
 /**
  * The Spaces a master knew before storage locations: the storage setting's

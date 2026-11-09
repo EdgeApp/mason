@@ -150,10 +150,9 @@ describe('Cloud accounts', function () {
     for (const role of ['admin', 'manager', 'developer'] as const)
       people[role] = (
         await c.master.master!.people.create(localOperator, {
-          email: `${role}@example.test`,
+          emails: [`${role}@example.test`, `${role}@example.test`],
           name: `${role} person`,
           role,
-          addresses: { google: `${role}@example.test` },
         })
       ).id
   })

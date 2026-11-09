@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { ProjectDetails } from './projectDetails.js'
 import type { DatabaseSync } from 'node:sqlite'
 import { reservedBuildNumber } from './buildNumbers.js'
 import type { MasterDatabase } from './database.js'
@@ -62,7 +63,13 @@ interface Entity {
 /** The master's view of a setting as the host may hold it (a hook strips what the host must not see). */
 export type SettingProjection = (area: string, value: Row) => Row
 
-export function entities(setting: SettingProjection): Record<string, Entity> {
+/** A project's details for its pages on the host, by slug; undefined when unknown. */
+export type DetailsProjection = (slug: string) => ProjectDetails | undefined
+
+export function entities(
+  setting: SettingProjection,
+  details: DetailsProjection = () => undefined,
+): Record<string, Entity> {
   return {
     project: {
       keys: (db): string[] =>
@@ -74,8 +81,12 @@ export function entities(setting: SettingProjection): Record<string, Entity> {
           slug,
         )
         if (row == null) return undefined
+        const shown = details(slug)
         return {
-          row,
+          row: {
+            ...row,
+            ...(shown == null ? {} : { details: JSON.stringify(shown) }),
+          },
           children: {
             project_apps: all(
               db,
@@ -84,6 +95,21 @@ export function entities(setting: SettingProjection): Record<string, Entity> {
             ),
           },
         }
+      },
+    },
+    // Each run's Masonfile as the master read it, for the host's Masonfile
+    // tab: without its text, which can be large; the host fetches each text
+    // in its own request (`masonfile.text`), so a sync stays one small message.
+    masonfile: {
+      keys: (db): string[] =>
+        all(db, 'SELECT key FROM masonfiles').map((row) => String(row.key)),
+      project: (db, key): Projected | undefined => {
+        const row = one(
+          db,
+          'SELECT key,project_id,commit_sha,file,length(text) AS size FROM masonfiles WHERE key=?',
+          key,
+        )
+        return row == null ? undefined : { row }
       },
     },
     app: {
@@ -134,16 +160,25 @@ export function entities(setting: SettingProjection): Record<string, Entity> {
       project: (db, id): Projected | undefined => {
         const row = one(
           db,
-          'SELECT id,name,email,is_admin,is_tester,disabled,permission_version,created_at,role,open_admission FROM accounts WHERE id=?',
+          // Whether they have a password, never the password itself.
+          'SELECT id,name,username,email,is_admin,is_tester,disabled,permission_version,created_at,role,open_admission,(password IS NOT NULL) AS has_password FROM accounts WHERE id=?',
           Number(id),
         )
         if (row == null) return undefined
         return {
           row,
           children: {
+            account_emails: all(
+              db,
+              'SELECT account_id,email,position,confirmed FROM account_emails WHERE account_id=? ORDER BY position',
+              Number(id),
+            ),
+            // For this release only: a host still on the previous one reads
+            // its any-method address from here, so it keeps provider sign-in
+            // for the person's first confirmed email until it updates.
             account_addresses: all(
               db,
-              'SELECT account_id,method,email FROM account_addresses WHERE account_id=?',
+              "SELECT account_id,'*' AS method,email FROM account_emails WHERE account_id=? AND confirmed=1 ORDER BY position LIMIT 1",
               Number(id),
             ),
             account_devices: all(
@@ -291,8 +326,9 @@ export class Changes {
   constructor(
     private readonly master: MasterDatabase,
     setting: SettingProjection,
+    details?: DetailsProjection,
   ) {
-    this.entities = entities(setting)
+    this.entities = entities(setting, details)
   }
 
   revision(): number {

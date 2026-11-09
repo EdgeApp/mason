@@ -37,7 +37,7 @@ const tables: Record<
     table: 'accounts',
     key: 'id',
     children: {
-      account_addresses: { column: 'account_id', field: 'id' },
+      account_emails: { column: 'account_id', field: 'id' },
       account_devices: { column: 'account_id', field: 'id' },
     },
   },
@@ -63,6 +63,8 @@ const tables: Record<
   setting: { table: 'host_settings', key: 'area' },
   /** API key verifiers, for the builds API: digests, never tokens. */
   key: { table: 'host_keys', key: 'id' },
+  /** Each run's Masonfile, as the master read it. */
+  masonfile: { table: 'masonfiles', key: 'key' },
 }
 
 /** Deleting in this order keeps foreign keys satisfied; applying uses the reverse. */
@@ -76,9 +78,10 @@ const order = [
   'build',
   'job',
   'key',
+  'masonfile',
 ]
 
-const HOST_SCHEMA = 9
+const HOST_SCHEMA = 11
 
 /** The host's own tables beside the distribution tables a `Store` creates. */
 function migrateHost(db: DatabaseSync): void {
@@ -147,6 +150,35 @@ function migrateHost(db: DatabaseSync): void {
     INSERT INTO host_meta(key,value) VALUES('keys_synced','0') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     INSERT INTO host_meta(key,value) VALUES('host_schema','9') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
     COMMIT;`)
+  // A person's addresses are plain emails, and their username and whether
+  // they have a password show on their account page. The next sync is a snapshot that refills both.
+  if (current < 10) {
+    const accounts = db.prepare('PRAGMA table_info(accounts)').all()
+    db.exec(`BEGIN IMMEDIATE;
+    DROP TABLE IF EXISTS account_addresses;
+    CREATE TABLE IF NOT EXISTS account_emails(
+      account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+      email TEXT NOT NULL COLLATE NOCASE, position INTEGER NOT NULL,
+      confirmed INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(account_id, email)) STRICT;
+    CREATE INDEX IF NOT EXISTS account_email ON account_emails(email);
+    ${accounts.some((column) => column.name === 'username') ? '' : 'ALTER TABLE accounts ADD COLUMN username TEXT;'}
+    ${accounts.some((column) => column.name === 'has_password') ? '' : 'ALTER TABLE accounts ADD COLUMN has_password INTEGER NOT NULL DEFAULT 0;'}
+    INSERT INTO host_meta(key,value) VALUES('revision','0') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    INSERT INTO host_meta(key,value) VALUES('host_schema','10') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  }
+  // The project pages' details and each run's Masonfile, kept here so the
+  // host shows them without the master. A snapshot fills both.
+  if (current < 11) {
+    const projects = db.prepare('PRAGMA table_info(projects)').all()
+    db.exec(`BEGIN IMMEDIATE;
+    ${projects.some((column) => column.name === 'details') ? '' : 'ALTER TABLE projects ADD COLUMN details TEXT;'}
+    CREATE TABLE IF NOT EXISTS masonfiles(key TEXT PRIMARY KEY, project_id INTEGER NOT NULL,
+      commit_sha TEXT NOT NULL, file TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0, text TEXT) STRICT;
+    INSERT INTO host_meta(key,value) VALUES('revision','0') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    INSERT INTO host_meta(key,value) VALUES('host_schema','11') ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+    COMMIT;`)
+  }
 }
 
 function migrateHostV2(db: DatabaseSync): void {
@@ -284,6 +316,12 @@ export class HostCache {
     this.setMeta('sync_from', revision)
     return revision
   }
+  /** Makes the next opening sync ask from `revision` at the latest: a sync from it never arrived. */
+  holdSyncFrom(revision: number): void {
+    const saved = this.meta('sync_from')
+    if (saved == null || Number(saved) > revision)
+      this.setMeta('sync_from', revision)
+  }
   /** Whether a sync has brought the keys since this cache began keeping them (schema 9). */
   keysSynced(): boolean {
     return this.meta('keys_synced') !== '0'
@@ -411,6 +449,19 @@ export class HostCache {
     const spec = tables[entity]!
     let row = value.row
     if (entity === 'account') row = { ...row, is_admin: 0, is_tester: 1 }
+    // A sync leaves out a Masonfile's text, which the host fetches; a row
+    // the master replaced under the same key (another size or file) drops
+    // the text it had, so it is fetched again.
+    if (entity === 'masonfile') {
+      const cached = this.db
+        .prepare('SELECT size,file FROM masonfiles WHERE key=?')
+        .get(row.key as string) as { size: number; file: string } | undefined
+      if (
+        cached != null &&
+        (cached.size !== row.size || cached.file !== row.file)
+      )
+        row = { ...row, text: null }
+    }
     this.insert(spec.table, row, spec.key)
     for (const [child, link] of Object.entries(spec.children ?? {})) {
       this.db
@@ -419,6 +470,14 @@ export class HostCache {
       for (const entry of value.children?.[child] ?? [])
         this.insertChild(child, entry)
     }
+    // A provider subject maps to an account only through one of its
+    // confirmed emails: one taken away no longer signs that subject in.
+    if (entity === 'account')
+      this.db
+        .prepare(
+          'DELETE FROM identities WHERE account_id=?1 AND (email IS NULL OR lower(email) NOT IN (SELECT email FROM account_emails WHERE account_id=?1 AND confirmed=1))',
+        )
+        .run(row.id as number)
   }
   private insertChild(table: string, row: Row): void {
     const known = this.tableColumns(table)

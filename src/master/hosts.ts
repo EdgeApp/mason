@@ -1,4 +1,5 @@
 import { createHmac, sign, timingSafeEqual, type KeyObject } from 'node:crypto'
+import { identifierOf } from '../auth/passwordProtocol.js'
 import {
   LinkError,
   type Link,
@@ -21,6 +22,9 @@ import { ruleFor } from './rules.js'
 
 /** The cluster has a host, and it is not connected now. */
 export class HostNotConnected extends Error {}
+
+/** Live master sessions per `catalog.liveSessions` message: about 280 KiB, well under the link's cap. */
+const LIVE_SESSIONS_PAGE = 4096
 
 /** The only writes a host makes to the master. */
 export const outboxKinds = ['device', 'prepare', 'artifact'] as const
@@ -381,6 +385,40 @@ export class HostLinks {
     return (await host.link.request(method, params, timeoutMs)) as T
   }
 
+  /**
+   * Tells the connected host a master session ended, so the relay session
+   * standing for it (its install grants and registration requests) ends
+   * too. A host that is away, or misses this, drops it at its next sync,
+   * which lists the live sessions (`liveSessions`).
+   */
+  endSession(id: string): void {
+    this.connectedHost()
+      ?.link.request('catalog.endSession', { session: id })
+      .catch(() => undefined)
+  }
+
+  /** Links the live sessions were sent on. */
+  private readonly listed = new WeakSet<Link>()
+
+  /**
+   * Sends a host every live master session, in pages, so it ends the relay
+   * sessions of any that ended while it was away, or before the master
+   * restarted.
+   */
+  private async liveSessions(link: Link): Promise<void> {
+    const ids = (
+      this.options.master.db
+        .prepare('SELECT hash FROM master_sessions WHERE expires_at>?')
+        .all(this.options.master.now()) as Array<{ hash: string }>
+    ).map((row) => row.hash)
+    for (let at = 0; at === 0 || at < ids.length; at += LIVE_SESSIONS_PAGE)
+      await link.request('catalog.liveSessions', {
+        sessions: ids.slice(at, at + LIVE_SESSIONS_PAGE),
+        first: at === 0,
+        last: at + LIVE_SESSIONS_PAGE >= ids.length,
+      })
+  }
+
   /** Opens a stream to the connected host, for a relay of a node's; with none connected it throws. */
   openHostStream(method: string, params: unknown): Stream {
     const host = this.connectedHost()
@@ -555,20 +593,34 @@ export class HostLinks {
             Number.isSafeInteger(revision) ? revision : 0,
           )
           this.sent.set(fingerprint, sync.revision)
+          // Once per link, at its first sync: on-demand syncs follow back
+          // to back, and one list at a time keeps the host's pages in order.
+          if (!this.listed.has(link)) {
+            this.listed.add(link)
+            this.liveSessions(link).catch(() => undefined)
+          }
           return sync
+        },
+        /** A kept Masonfile's text, which a sync leaves out. */
+        'masonfile.text': (params, link): { text: string | null } => {
+          this.host(link)
+          const row = this.options.master.db
+            .prepare('SELECT text FROM masonfiles WHERE key=?')
+            .get(String((params as { key?: unknown } | null)?.key ?? '')) as
+            | { text: string }
+            | undefined
+          return { text: row?.text ?? null }
         },
         'webhook.github': (params, link): WebhookResult => {
           this.host(link)
           return this.webhook(params)
         },
-        /** A username's hashing parameters, for the host's sign-in page. */
+        /** A username's or email's hashing parameters, for the host's sign-in page. */
         'auth.parameters': (params, link): unknown => {
           this.host(link)
           if (this.options.password == null)
             throw new LinkError('Password sign-in is unavailable', 'failed')
-          return this.options.password.parameters(
-            (params as { username?: unknown } | null)?.username,
-          )
+          return this.options.password.parameters(identifierOf(params))
         },
         /** Checks a password the host received; answers only whose it is. */
         'auth.password': async (
@@ -578,14 +630,14 @@ export class HostLinks {
           this.host(link)
           if (this.options.password == null)
             throw new LinkError('Password sign-in is unavailable', 'failed')
-          const { username, clientHash, address } = (params ?? {}) as Record<
+          const { clientHash, address } = (params ?? {}) as Record<
             string,
             unknown
           >
           try {
             return {
               accountId: await this.options.password.verify(
-                { username, clientHash },
+                { identifier: identifierOf(params), clientHash },
                 `host:${String(address ?? '')}`,
               ),
             }

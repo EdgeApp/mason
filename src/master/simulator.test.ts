@@ -157,10 +157,9 @@ describe('iPhone Simulator and tvOS builds', function () {
       apps: [{ bundleId: TV, name: 'Television', platforms: ['tvos'] }],
     })
     tester = await master.people.create(localOperator, {
-      email: 'simulator@example.test',
+      emails: ['simulator@example.test', 'sam@example.test'],
       name: 'Sam',
       role: 'admin',
-      addresses: { google: 'sam@example.test' },
     })
   })
   after(async () => {

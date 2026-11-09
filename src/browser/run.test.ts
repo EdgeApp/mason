@@ -4,6 +4,7 @@ import { FakeLiveWindow } from '../test/fakeLiveSocket.js'
 import {
   actionBody,
   domRunPage,
+  logScroller,
   formFields,
   formPath,
   highlight,
@@ -545,10 +546,10 @@ describe('Run view script', () => {
     assert.match(steps.innerHTML, /exec · 4s/)
     // The log opened at its end, and follows new lines there.
     assert.equal(pre.scrollTop, 100)
-    real.appendLog([])
+    real.appendLog([], 1)
     pre.scrollHeight = 300
-    real.appendLog(['<span>one</span>'])
-    real.appendLog(['<span>two</span>'])
+    real.appendLog(['<span>one</span>'], 1)
+    real.appendLog(['<span>two</span>'], 1)
     assert.equal(code.innerHTML, '<span>one</span><span>two</span>')
     assert.equal(pre.scrollTop, 300)
     // Scrolled up, it holds still and offers Jump to latest.
@@ -556,7 +557,7 @@ describe('Run view script', () => {
     pre.scrollTop = 100
     pre.fire('scroll')
     assert.equal(jump.hidden, false)
-    real.appendLog(['<span>three</span>'])
+    real.appendLog(['<span>three</span>'], 1)
     assert.equal(pre.scrollTop, 100)
     // A small move up stops it too, though still near the bottom.
     pre.scrollTop = 900
@@ -564,7 +565,7 @@ describe('Run view script', () => {
     pre.scrollTop = 880
     pre.fire('scroll')
     assert.equal(jump.hidden, false)
-    real.appendLog(['<span>late</span>'])
+    real.appendLog(['<span>late</span>'], 1)
     assert.equal(pre.scrollTop, 880)
     pre.scrollTop = 100
     pre.fire('scroll')
@@ -583,14 +584,14 @@ describe('Run view script', () => {
     pre.fire('scroll')
     assert.equal(jump.hidden, true)
     pre.scrollHeight = 1200
-    real.appendLog(['<span>four</span>'])
+    real.appendLog(['<span>four</span>'], 1)
     assert.equal(pre.scrollTop, 1200)
     pre.scrollTop = 0
     pre.fire('scroll')
     jump.fire('click')
     assert.deepEqual([pre.scrollTop, jump.hidden], [1200, true])
     pre.scrollHeight = 1300
-    real.appendLog(['<span>five</span>'])
+    real.appendLog(['<span>five</span>'], 1)
     assert.equal(pre.scrollTop, 1300)
     // Following a stage relabels the panel and starts its log afresh.
     pre.scrollTop = 0
@@ -624,8 +625,38 @@ describe('Run view script', () => {
     empty.setRunStatus('x')
     empty.setSteps('x', [])
     empty.follow('x')
-    empty.appendLog(['x'])
+    empty.appendLog(['x'], 1)
     empty.ended()
+  })
+
+  it('opens a finished log at its start, with the button to its end until the viewer is there', () => {
+    const pre = new El()
+    pre.scrollHeight = 1000
+    pre.clientHeight = 200
+    const jump = new El()
+    const doc = new El()
+      .set('[data-log] pre', pre)
+      .set('[data-jump]', jump) as unknown as Document
+    const scroller = logScroller(doc, false)
+    assert.deepEqual([pre.scrollTop, jump.hidden], [0, false])
+    // Scrolled to the end by hand, the button goes; back up, it returns.
+    pre.scrollTop = 790
+    pre.fire('scroll')
+    assert.equal(jump.hidden, true)
+    pre.scrollTop = 300
+    pre.fire('scroll')
+    assert.equal(jump.hidden, false)
+    jump.fire('click')
+    assert.deepEqual([pre.scrollTop, jump.hidden], [1000, true])
+    // A short log needs no button.
+    pre.scrollHeight = 150
+    pre.scrollTop = 0
+    scroller.reset(false)
+    assert.equal(jump.hidden, true)
+    // A log fetched later (the host's) is measured again once it is in.
+    pre.scrollHeight = 5000
+    scroller.reset(false)
+    assert.equal(jump.hidden, false)
   })
 
   it('highlights a bubble’s inputs, dependents and rails', () => {
@@ -663,7 +694,7 @@ describe('Run view script', () => {
     assert(!a.classes.has('related'))
   })
 
-  it('wires forms, the log wrap, the stage filters, zoom, hover, a fetched log, the live stream and the queue', async () => {
+  it('wires forms, the log wrap, the stage filters, zoom, hover, the live stream and the queue', async () => {
     const action = form('/api/v2/runs/r/cancel', {}, { then: 'reload' })
     const failing = form('/x', {})
     const wrap = new El()
@@ -694,15 +725,15 @@ describe('Run view script', () => {
     }
     const buttons = ['in', 'out', 'reset', 'full'].map(zoom)
     const graphPanel = new El()
-    const sourceCode = new El()
-    const source = new El().set('code', sourceCode)
-    source.dataset.src = '/api/v2/runs/r/logs?stage=test&step=1'
     const head = new El()
     head.dataset = { live: '1', run: 'r' }
     const panel = new El()
     panel.dataset.stage = 'test'
     const logBox = new El()
     logBox.dataset.offset = '12'
+    // A box with no log drawn yet asks for no lines: the viewer needs a
+    // real page, and the browser scenarios drive it.
+    logBox.dataset.lines = '/api/v2/runs/r/logs?stage=test'
     const runStatus = new El()
     const liveState = new El()
     const csrf = new El()
@@ -718,7 +749,6 @@ describe('Run view script', () => {
       .set('.pipeline-graph', svg)
       .set('[data-zoom]', ...buttons)
       .set('.graph-panel', graphPanel)
-      .set('[data-log][data-src]', source)
       .set('.run-head', head)
       .set('.stage-panel', panel)
       .set('[data-log]', logBox)
@@ -731,7 +761,6 @@ describe('Run view script', () => {
       fetch: (async (url: string) => {
         fetched.push(url)
         if (url === '/x') throw new Error('offline')
-        if (url.includes('/logs')) return reply(200, 'line one\nline two\n')
         return reply(200, {})
       }) as typeof fetch,
       location: {
@@ -769,10 +798,7 @@ describe('Run view script', () => {
     bubble.fire('mouseenter')
     bubble.fire('mouseleave')
     assert(bubble.classes.has('related'))
-    assert.equal(
-      sourceCode.innerHTML,
-      '<span class="line" data-line="1">line one</span><span class="line" data-line="2">line two</span>',
-    )
+    assert(!fetched.some((url) => url.includes('/logs')))
     // The run's socket resumes the log after the offset the page has.
     const socket = live.socket
     assert.equal(socket.url, 'wss://mason.example/live')
@@ -808,11 +834,22 @@ describe('Run view script', () => {
     row.set('[data-status-text]', rowText)
     const done = new El()
     done.dataset = { runId: 'r0', status: 'succeeded' }
+    // An app ID's build chips carry their run too: r1's, and r2's, a run
+    // that published a build before the card's header had its chip.
+    const buildDot = new El({ class: 'dot running' })
+    const build = new El({ title: 'feature 41 running' })
+    build.dataset = { runId: 'r1', status: 'running' }
+    build.set('.dot', buildDot)
+    const early = new El()
+    early.dataset = { runId: 'r2', status: 'running' }
     const old = new El()
-    const cards = new El().set('[data-branch="feature"]', old)
+    const cards = new El()
+      .set('[data-branch="feature"]', old)
+      .set('[data-run-id="r1"]', running)
     const dashboard = new El()
-      .set('[data-run-id]', running, row, done)
-      .set('[data-run-id="r1"]', running, row)
+      .set('[data-run-id]', running, row, done, build, early)
+      .set('[data-run-id="r1"]', running, row, build)
+      .set('[data-run-id="r2"]', early)
       .set('[data-queue] ul', list)
       .set('[data-project-runs="app"]', cards)
     start(dashboard as unknown as Document, win)
@@ -820,6 +857,7 @@ describe('Run view script', () => {
     board.accept()
     assert.deepEqual(board.sent, [
       { subscribe: 'status', run: 'r1', key: 'status:r1' },
+      { subscribe: 'status', run: 'r2', key: 'status:r2' },
       { subscribe: 'queue', key: 'queue' },
     ])
     board.frame({ key: 'status:r1', event: 'run', data: { status: 'failed' } })
@@ -828,8 +866,15 @@ describe('Run view script', () => {
       ['failed', 'dot failed', 'failed'],
     )
     assert.equal(running.getAttribute('title'), 'build failed')
+    // The build chip's dot follows its run as well.
+    assert.deepEqual(
+      [build.dataset.status, buildDot.className, build.getAttribute('title')],
+      ['failed', 'dot failed', 'feature 41 failed'],
+    )
     board.frame({ key: 'status:r1', event: 'end' })
-    // A queued run the card has no chip for gets one, in place of its branch's.
+    // A queued run the card's header has no chip for gets one, in place of
+    // its branch's, though a build chip of it is on the page; a run the
+    // header has a chip for gets none.
     const entry = {
       job: 'r2',
       project: 'app',
@@ -846,19 +891,20 @@ describe('Run view script', () => {
         entry,
         { ...entry, job: 'r1' },
         { ...entry, job: 'r3', project: 'gone' },
+        { ...entry, job: 'r4', branch: 'other' },
       ],
     })
     assert.match(list.innerHTML, /app · test/)
     assert(old.removed)
     assert.match(
       cards.innerHTML,
-      /data-run-id="r2" data-branch="feature" data-status="queued"/,
+      /^<a class="run-chip" [^>]*data-run-id="r2" data-branch="feature" data-status="queued">.*<\/a><a class="run-chip" [^>]*data-run-id="r4" data-branch="other" data-status="queued">.*<\/a>$/,
     )
-    assert.deepEqual(board.sent.at(-1), {
-      subscribe: 'status',
-      run: 'r2',
-      key: 'status:r2',
-    })
+    assert.doesNotMatch(cards.innerHTML, /data-run-id="r1"/)
+    // r2 is followed already, from its build chip; r4 from its new chip.
+    assert.deepEqual(board.sent.slice(3), [
+      { subscribe: 'status', run: 'r4', key: 'status:r4' },
+    ])
     board.frame({ key: 'queue', event: 'other' })
     board.frame({ key: 'queue', event: 'queue', data: [] })
     assert.match(list.innerHTML, /Nothing is running/)

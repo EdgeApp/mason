@@ -5,6 +5,7 @@ import type { WorkerRequest, WorkerResponse } from './passwordWorker.js'
 export interface Field {
   value: string
   readOnly?: boolean
+  required?: boolean
   checked?: boolean
   files?: { length: number; 0?: { text: () => Promise<string> } } | null
 }
@@ -31,6 +32,7 @@ export interface Form {
   ) => void
   elements: { namedItem: (name: string) => unknown }
   querySelector: (selector: string) => unknown
+  querySelectorAll?: (selector: string) => Iterable<unknown>
 }
 /** A button that copies the command beside it (`data-copy`). */
 export interface CopyButton {
@@ -127,11 +129,11 @@ export function start(doc: PageDocument, deps: PageDeps): void {
   }
   const actions: Record<string, (form: Form) => Promise<void>> = {
     'sign-in': async (form) => {
-      const username = field(form, 'username')
+      const identifier = field(form, 'username')
       const parameters = await call(
         'POST',
         form.dataset.parameters ?? '/api/v2/session/parameters',
-        { username },
+        { identifier },
       )
       if (!parameters.ok) throw new Error(await failure(parameters))
       const { clientHash } = await hashed({
@@ -142,7 +144,7 @@ export function start(doc: PageDocument, deps: PageDeps): void {
       const signedIn = await call(
         'POST',
         form.dataset.session ?? '/api/v2/session',
-        { username, clientHash },
+        { identifier, clientHash },
       )
       if (!signedIn.ok) throw new Error(await failure(signedIn))
       deps.assign(form.dataset.return ?? '/')
@@ -209,19 +211,27 @@ export function start(doc: PageDocument, deps: PageDeps): void {
         kind: 'new',
         password,
       })
+      // Only the password: a username is changed in the person's row.
       const saved = await call('PUT', form.dataset.path ?? '', {
-        username: field(form, 'username'),
         password: { clientHash, clientParameters },
       })
       if (!saved.ok) throw new Error(await failure(saved))
-      deps.assign('/people')
+      deps.assign(form.dataset.return ?? '/people')
     },
     // Adds a person, with a password or an invitation link when asked.
     'person-add': async (form) => {
       const username = field(form, 'username')
+      // Every email field the form has: Add puts more under the first.
+      const emails = [
+        ...((form.querySelectorAll?.('input[name="email"]') as
+          | Iterable<Field>
+          | undefined) ?? [{ value: field(form, 'email') }]),
+      ]
+        .map((input) => input.value.trim())
+        .filter((value) => value !== '')
       const typed = field(form, 'password') !== ''
-      if (typed && username === '')
-        throw new Error('A password needs a username')
+      if (username === '' && emails.length === 0)
+        throw new Error('Give them an email address, a username, or both')
       const password = typed
         ? await hashed({ kind: 'new', password: newPassword(form) })
         : undefined
@@ -230,7 +240,7 @@ export function start(doc: PageDocument, deps: PageDeps): void {
       const added = await call('POST', '/api/v2/people', {
         name: field(form, 'name'),
         role: field(form, 'role'),
-        email: field(form, 'email'),
+        emails,
         invite,
         ...(username === '' ? {} : { username }),
         ...(password == null
@@ -283,14 +293,22 @@ export function start(doc: PageDocument, deps: PageDeps): void {
       token: invitationToken(),
     })
     if (!found.ok) throw new Error(await failure(found))
-    const person = (await found.json()) as { name: string; username?: string }
+    const person = (await found.json()) as {
+      name: string
+      username?: string
+      usernameRequired?: boolean
+    }
+    // Someone with a confirmed email may sign in with it instead.
+    const optional =
+      person.username == null && person.usernameRequired === false
     if (shown != null)
-      shown.textContent = `Welcome, ${person.name}. Choose a password${person.username == null ? ' and a username' : ''} to sign in to Mason.`
+      shown.textContent = `Welcome, ${person.name}. Choose a password${person.username != null ? '' : optional ? ' (and a username, if you want one)' : ' and a username'} to sign in to Mason.`
     const username = form.elements.namedItem('username') as Field | null
     if (username != null && person.username != null) {
       username.value = person.username
       username.readOnly = true
     }
+    if (username != null && optional) username.required = false
   }
   for (const button of doc.querySelectorAll(
     'button[data-copy]',

@@ -10,7 +10,9 @@ each the same `mason` program:
   the master tells each one which tools its node type needs.
 - the **host** serves the catalog, installs, device registration and sign-in
   from a replicated cache, and keeps serving builds while the master is away.
-  It holds no secrets.
+  It holds no secrets. The master serves the same Install apps and Devices
+  pages to people signed in on it, getting their data and files from the
+  host over its link.
 
 The Masonfile reference, with every option and the stage API, is
 [docs/masonfile.md](docs/masonfile.md). The master's HTTP API is
@@ -181,6 +183,50 @@ password that then sign them in on the host and the master.
 An administrator can instead set a person's username and password on the
 People page (**Set password**, or the Add form), and tell them; setting it
 ends the person's sessions.
+
+## The pages
+
+Every signed-in page on the master and the host has the same side menu,
+showing each person what their role reaches: **Install apps** and
+**Devices** for everyone; **Projects & apps** (`/projects`) and
+**Artifacts** for developers and up; and, on the master only, **Nodes**,
+**Cloud**, **People**, **Groups**, **Settings** and **Backups** for managers
+and administrators. Both nodes open on Install apps, developers too; to a
+tester `/projects` and everything under it do not exist (404). A master
+with no host yet opens on Projects & apps instead, and its Install apps and
+Devices say that installs come from a host. On a phone the side menu is a
+bar above the page. The top-right account icon opens **Your account**,
+which holds Sign out.
+
+Above each page's title, its breadcrumbs say where it is, as a row of pill
+links that wraps on a phone. The first is **Mason Master** on the master and
+**Mason Host** on the host (and on the standalone server), and opens that
+node's home; the last is the page itself. A project's pages go Projects ›
+the project › Runs and builds (or Masonfile, or Secrets) › a branch picked
+there, and a run's page Projects › the project › Runs and builds › its
+branch › Run N, so Runs and builds returns to all branches. An app ID's
+pages go Projects › the project › the app ID › Runs and builds (or Build
+numbers) › a branch. Install apps
+goes Install apps › the app › the branch, and Artifacts › the project ›
+Run N; Devices, Your account and the master's Nodes, Cloud, People,
+Groups › a group, Settings and Backups are one level each, as the side menu
+lists them.
+
+Each app ID of a project has its own pages on both nodes, for developers
+and up: `/projects/<project>/apps/<app ID>` is its **Runs and builds**, the
+runs whose workflow publishes that app ID (from a stage or a post stage)
+and only the branches that have one, with `?branch=` as on the project; and
+`…/build-numbers` is its **Build numbers**: the sequence it takes its
+numbers from (its own key, or a shared one, saying which app IDs it is
+shared with), else the default scheme (`N`, across branches). On the master
+a manager can set where that sequence stands there; the host shows it read
+only. An app ID the project does not have answers 404 under the project.
+⌘K search opens an app ID's page for developers and up, and a tester's
+Install apps page for testers.
+
+The standalone distribution server (below) draws its pages the same way,
+with Install apps and Devices, **People** for its administrators, and a
+Your account page with Sign out; it has no search or notifications.
 
 ## Projects
 
@@ -489,8 +535,11 @@ stopping at 4 MiB.
 
 ### Registering iOS test devices
 
-The green **Register Device** button beside **Sign out** opens a temporary
-Profile Service download. In Safari on an iPhone or iPad, download the profile,
+**Devices** in the side menu offers a temporary Profile Service download
+(**Install Registration Profile**). On the master a registration started
+there returns to the master once the device is registered, and needs the
+master's public address (its `master` setting): without one, Devices and
+iOS installs link to the host. In Safari on an iPhone or iPad, download the profile,
 then open Settings → Profile Downloaded → Install. The device sends a signed
 UDID/model/OS response to Mason. The registration is saved to the signed-in
 tester's account. Model names default to `iPhone13 of mark@example` and can be

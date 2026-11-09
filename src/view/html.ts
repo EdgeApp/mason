@@ -1,3 +1,5 @@
+import type { ViewerNode } from './shell.js'
+
 /** Escapes text for HTML content and attribute values. */
 export function escape(value: string | number): string {
   return String(value).replace(
@@ -99,4 +101,108 @@ export function ago(at: number, now: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`
   return `${Math.floor(seconds / 86400)}d ago`
+}
+
+/** One level of a page's breadcrumb trail. */
+export interface Crumb {
+  label: string
+  href: string
+  /** `data-*` attributes, for a script that keeps the label current (`group-title`). */
+  data?: Record<string, string>
+}
+
+/**
+ * Where the page is, as a row of pill links: Mason Master (on the master)
+ * or Mason Host (on a host or a standalone server), linking to `/`, then
+ * each level down to this page, the last one current. Every page draws its
+ * trail with this.
+ */
+export function breadcrumbs(
+  viewer: { node: ViewerNode },
+  items: Crumb[],
+): string {
+  const trail: Crumb[] = [
+    {
+      label: viewer.node === 'master' ? 'Mason Master' : 'Mason Host',
+      href: '/',
+    },
+    ...items,
+  ]
+  return `<nav class="breadcrumbs" aria-label="Breadcrumb"><ol>${trail
+    .map(
+      (item, index) =>
+        `<li>${index === 0 ? '' : '<span class="crumb-sep" aria-hidden="true">›</span>'}<a class="crumb" href="${escape(item.href)}"${index === trail.length - 1 ? ' aria-current="page"' : ''}${Object.entries(
+          item.data ?? {},
+        )
+          .map(([key, value]) => ` data-${key}="${escape(value)}"`)
+          .join('')}>${escape(item.label)}</a></li>`,
+    )
+    .join('')}</ol></nav>`
+}
+
+/** The first levels of every project page: Projects, then the project. */
+export function projectCrumbs(slug: string, name: string): Crumb[] {
+  return [
+    { label: 'Projects', href: '/projects' },
+    { label: name, href: `/projects/${encodeURIComponent(slug)}` },
+  ]
+}
+
+/**
+ * A project's Runs and builds, then the branch picked there: the branch's
+ * runs are `?branch=`, and Runs and builds itself is All branches.
+ */
+export function runsCrumbs(
+  slug: string,
+  name: string,
+  branch?: string,
+): Crumb[] {
+  const runs = `/projects/${encodeURIComponent(slug)}/runs`
+  return [
+    ...projectCrumbs(slug, name),
+    { label: 'Runs and builds', href: runs },
+    ...(branch == null
+      ? []
+      : [
+          {
+            label: branch,
+            href: `${runs}?branch=${encodeURIComponent(branch)}`,
+          },
+        ]),
+  ]
+}
+
+/** Where an app ID's pages are: `/projects/:slug/apps/:appId`, its Runs and builds. */
+export function appPath(slug: string, appId: string): string {
+  return `/projects/${encodeURIComponent(slug)}/apps/${encodeURIComponent(appId)}`
+}
+
+/**
+ * An app ID's pages, one level below its project: the app ID, then its tab
+ * (Runs and builds, which is the app ID's own page, or Build numbers), then
+ * the branch picked on Runs and builds.
+ */
+export function appCrumbs(
+  slug: string,
+  name: string,
+  appId: string,
+  tab: 'runs' | 'build-numbers',
+  branch?: string,
+): Crumb[] {
+  const base = appPath(slug, appId)
+  return [
+    ...projectCrumbs(slug, name),
+    { label: appId, href: base },
+    tab === 'runs'
+      ? { label: 'Runs and builds', href: base }
+      : { label: 'Build numbers', href: `${base}/build-numbers` },
+    ...(tab === 'runs' && branch != null
+      ? [
+          {
+            label: branch,
+            href: `${base}?branch=${encodeURIComponent(branch)}`,
+          },
+        ]
+      : []),
+  ]
 }

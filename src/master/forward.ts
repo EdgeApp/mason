@@ -109,6 +109,16 @@ export function isRunAction(method: string, target: string): boolean {
   return method === 'POST' && RUN_ACTIONS.some((rule) => rule.test(pathname))
 }
 
+/**
+ * Whether this is a host session changing a person's record: only their own
+ * name, emails and password, which the master checks against the account
+ * the host asserts.
+ */
+export function isAccountChange(method: string, target: string): boolean {
+  const pathname = target.split('?')[0]!
+  return method === 'PUT' && /^\/api\/v2\/people\/\d+$/.test(pathname)
+}
+
 /** Whether a host session may make this read, which needs no request proof. */
 export function isRunRead(method: string, target: string): boolean {
   const pathname = target.split('?')[0]!
@@ -194,10 +204,11 @@ export class Forwarder {
       if (
         request.account != null &&
         !isRunAction(request.method, request.path) &&
-        !isRunRead(request.method, request.path)
+        !isRunRead(request.method, request.path) &&
+        !isAccountChange(request.method, request.path)
       )
         throw new Error(
-          'A host session may only request, cancel, restart or approve runs',
+          'A host session may only request, cancel, restart or approve runs, or change its own account',
         )
       const body =
         request.body == null ? undefined : Buffer.from(request.body, 'base64')

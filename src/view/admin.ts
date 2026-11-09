@@ -1,5 +1,22 @@
-import { bytes, platformChip, statusDot } from './dashboard.js'
-import { ago, escape, localTime } from './html.js'
+import {
+  appGridRow,
+  bytes,
+  platformChip,
+  platformChips,
+  statusDot,
+} from './dashboard.js'
+import {
+  ago,
+  appCrumbs,
+  appPath,
+  breadcrumbs,
+  escape,
+  localTime,
+  projectCrumbs,
+  runsCrumbs,
+  type Crumb,
+} from './html.js'
+import type { ViewerNode } from './shell.js'
 import {
   projectRunsTable,
   type BranchItem,
@@ -14,6 +31,7 @@ import {
   type GroupPerson,
 } from './groups.js'
 import { spacesRegions } from '../master/cloud/regions.js'
+import type { BuildNumberSequence } from '../master/projectDetails.js'
 import { SETUP_LABEL } from '../pipeline/graph.js'
 
 const statusLine =
@@ -70,8 +88,22 @@ export function apiForm(
   return `<form data-mason="api" data-path="${escape(path)}"${options.method == null ? '' : ` data-method="${options.method}"`} data-fields="${escape((options.fields ?? []).join(','))}"${options.json == null ? '' : ` data-json="${escape(options.json)}"`}${options.then == null ? '' : ` data-then="${escape(options.then)}"`}>${body}<button${options.className == null ? '' : ` class="${options.className}"`}>${button}</button>${statusLine}</form>`
 }
 
-function head(title: string, intro: string, crumbs: string[] = []): string {
-  return `<div class="page-head"><div><div class="breadcrumbs">${['Mason', 'Master', ...crumbs].map((part) => `<span>${escape(part)}</span>`).join('<span>/</span>')}</div><h1>${escape(title)}</h1><p>${escape(intro)}</p></div></div>`
+/** Who a page is drawn for, as far as its breadcrumbs care: the node it is on. */
+export interface CrumbViewer {
+  node: ViewerNode
+}
+
+/** The master's own pages, which no other node serves. */
+const MASTER: CrumbViewer = { node: 'master' }
+
+/** A page's heading: its breadcrumbs, title and one line about it, text or `{ html }`. */
+export function head(
+  viewer: CrumbViewer,
+  title: string,
+  intro: string | { html: string },
+  crumbs: Crumb[],
+): string {
+  return `<div class="page-head"><div>${breadcrumbs(viewer, crumbs)}<h1>${escape(title)}</h1><p>${typeof intro === 'string' ? escape(intro) : intro.html}</p></div></div>`
 }
 
 export interface NodeRow {
@@ -800,7 +832,7 @@ export function nodesView(data: {
           )
           .join('')
   const poolsPanel = `<section class="panel" id="pools"><h2>${icon('cloud')}Cloud pools</h2><p>Machines made on demand for a node type, reused like your own computers and retired when idle. Monthly budget: $${data.budget.monthly}.</p>${data.budget.notice == null ? '' : `<p class="notice">${escape(data.budget.notice)}</p>`}${pools || '<p>None yet.</p>'}${addPool}</section>`
-  return `${head('Nodes', 'Workers and the host, their software, and what each still needs from a person.', ['Nodes'])}${rows || '<p class="empty-state">No nodes are paired.</p>'}<div class="columns"><div>${hostPanel}${add}${poolsPanel}</div><aside><section class="panel"><h2>${icon('tune')}Node types</h2><ul class="plain">${types || '<li>None yet.</li>'}</ul><p><a href="/settings#nodeTypes">Edit in Settings</a></p></section></aside></div>`
+  return `${head(MASTER, 'Nodes', 'Workers and the host, their software, and what each still needs from a person.', [{ label: 'Nodes', href: '/nodes' }])}${rows || '<p class="empty-state">No nodes are paired.</p>'}<div class="columns"><div>${hostPanel}${add}${poolsPanel}</div><aside><section class="panel"><h2>${icon('tune')}Node types</h2><ul class="plain">${types || '<li>None yet.</li>'}</ul><p><a href="/settings#nodeTypes">Edit in Settings</a></p></section></aside></div>`
 }
 
 /** Settings: every area the master keeps, edited as JSON with secrets write-only, plus the Apple ID session. */
@@ -946,11 +978,12 @@ export function settingsView(data: {
     const two = (n: number): string => String(n).padStart(2, '0')
     return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}`
   }
-  // A v1 token is mason_v1_<id>.<secret>: its id's first characters name it without the secret.
+  // A v1 token is mason_v1_<id>.<secret>: its id's first characters name it
+  // without the secret. Only that prefix is shown, so there is nothing to copy:
+  // the whole key is copyable once, when it is created.
   const keyPrefix = (key: (typeof data.keys)[number]): string => {
     if (key.format === 'builder') return '<small>builder key</small>'
-    const prefix = `mason_v1_${key.id.slice(0, 5)}…`
-    return `<button type="button" class="secondary copy icon-only" data-copy="${escape(prefix)}" aria-label="Copy ${escape(prefix)}">${icon('content_copy')}<span data-copy-label hidden>Copy</span></button><span class="mono">${escape(prefix)}</span>`
+    return `<span class="mono">${escape(`mason_v1_${key.id.slice(0, 5)}…`)}</span>`
   }
   const roles = ['developer', 'tester', 'manager', 'admin']
   const createKey = data.canCreate
@@ -974,7 +1007,7 @@ export function settingsView(data: {
       .join('') || '<tr><td colspan="6">No keys.</td></tr>'
   }</tbody></table></section>`
   const cards = data.canChange ? settingsCards(data) : ''
-  return `${head('Settings', 'How this master signs people in, reaches GitHub and Apple, keeps its backups and runs its nodes.', ['Settings'])}<p><a href="/people">People</a> · <a href="/groups">Groups</a> · <a href="/backups">Backups</a> · <a href="/nodes">Nodes</a></p>${apple}${keys}${cards}`
+  return `${head(MASTER, 'Settings', 'How this master signs people in, reaches GitHub and Apple, keeps its backups and runs its nodes.', [{ label: 'Settings', href: '/settings' }])}<p><a href="/people">People</a> · <a href="/groups">Groups</a> · <a href="/backups">Backups</a> · <a href="/nodes">Nodes</a></p>${apple}${keys}${cards}`
 }
 
 /** A sign-in method as Settings shows it: every field but the client secret. */
@@ -1494,92 +1527,200 @@ function nodeTypesCard(types: Record<string, NodeTypeView>): string {
 /** The box an invitation link appears in, once, with Copy. */
 const linkBox = `<div data-field="token" hidden><p class="notice">Copy this link to them now: Mason sends no email, keeps only a hash of it and cannot show it again. It works once.</p><div class="command"><pre class="mono"></pre><button type="button" class="secondary copy" data-copy="">${icon('content_copy')}<span data-copy-label>Copy</span></button></div><p><a href="/people">Done</a></p></div>`
 
-/** People: roles and per-method addresses; administrators change them. */
+/** One person as the People page and Your account show them. */
+export interface PersonRow {
+  id: number
+  name: string
+  role: string
+  emails: Array<{ email: string; confirmed: boolean }>
+  username?: string
+  disabled?: boolean
+  /** Whether they have a password. */
+  password?: boolean
+  /** An unused invitation link: when it expires. */
+  invitation?: { expiresAt: number }
+}
+
+const roles = ['admin', 'manager', 'developer', 'tester']
+
+const passwordFields = (prefix: string, required: boolean): string =>
+  `<label for="${prefix}-password">${required ? 'Password' : 'Password (optional)'}</label><input id="${prefix}-password" name="password" type="password" autocomplete="new-password"${required ? ' required' : ''}><label for="${prefix}-confirm">Confirm the password</label><input id="${prefix}-confirm" name="confirm" type="password" autocomplete="new-password"${required ? ' required' : ''}><small class="hint">At least 8 characters with uppercase, lowercase and a number, or 17 characters or more. The browser hashes it; Mason never sees it.</small>`
+const usernameField = (
+  prefix: string,
+  value: string | undefined,
+  required: boolean,
+): string =>
+  `<label for="${prefix}-username">${required ? 'Username' : 'Username (optional)'}</label><input id="${prefix}-username" name="username" autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}" maxlength="64" value="${escape(value ?? '')}"${required ? ' required' : ''}>`
+
+/** A small pill button that opens a modal holding `body`. */
+function modalPill(
+  id: string,
+  label: string,
+  title: string,
+  body: string,
+): string {
+  return `<button type="button" class="pill" data-open="${escape(id)}">${label}</button><dialog class="modal" id="${escape(id)}" aria-label="${escape(title)}"><div class="modal-head"><h2>${escape(title)}</h2><button type="button" class="icon-button" data-close aria-label="Close">${icon('close')}</button></div>${body}</dialog>`
+}
+
+/**
+ * A person's editable record: the name and username cells turn into
+ * fields when tapped, each email is a line with a red × to take it away,
+ * and Add opens a modal. Nothing is stored until Save, which asks first.
+ * `edit` says what the viewer may change: everything, their own name and
+ * emails, or nothing.
+ */
+function personCells(
+  person: PersonRow,
+  edit: 'all' | 'self' | 'none',
+): { name: string; username: string; emails: string; role: string } {
+  const text = (
+    field: string,
+    value: string,
+    label: string,
+    editable: boolean,
+  ): string =>
+    editable
+      ? `<button type="button" class="cell-edit" data-edit="${field}" aria-label="Edit ${label}">${value === '' ? '<span class="muted">—</span>' : escape(value)}</button><input class="cell-input" data-input="${field}" value="${escape(value)}" aria-label="${label}"${field === 'username' ? ' pattern="[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}" maxlength="64" autocomplete="off"' : ' maxlength="120"'} hidden>`
+      : value === ''
+        ? '<span class="muted">—</span>'
+        : `<span${field === 'username' ? ' class="mono"' : ''}>${escape(value)}</span>`
+  const emails = person.emails
+    .map(
+      (entry) =>
+        `<li data-email="${escape(entry.email)}"${entry.confirmed ? '' : ' data-unconfirmed'}><span class="email">${escape(entry.email)}</span>${entry.confirmed ? '' : `<small class="tag">unconfirmed</small>${edit === 'all' ? '<button type="button" class="pill" data-confirm-email>Confirm</button>' : ''}`}${edit === 'none' ? '' : `<button type="button" class="remove-email" data-remove-email aria-label="Remove ${escape(entry.email)}">${icon('close')}</button>`}</li>`,
+    )
+    .join('')
+  return {
+    name: text('name', person.name, 'full name', edit !== 'none'),
+    username: text(
+      'username',
+      person.username ?? '',
+      'username',
+      edit === 'all',
+    ),
+    emails: `<ul class="email-lines" data-emails>${emails}</ul>${edit === 'none' ? '' : '<button type="button" class="pill" data-add-email>Add</button>'}`,
+    role:
+      edit === 'all'
+        ? `<select data-role aria-label="Role">${roles.map((role) => `<option${role === person.role ? ' selected' : ''}>${role}</option>`).join('')}</select>`
+        : escape(person.role),
+  }
+}
+
+/** The modal Add opens, and the one Save and Remove ask in: one of each per page. */
+const personDialogs = `<dialog class="modal" data-email-dialog aria-label="Add an email address"><form method="dialog" data-email-form><div class="modal-head"><h2>Add an email address</h2></div><label for="new-email">Email address</label><input id="new-email" name="email" type="email" maxlength="320" required><p class="notice" role="alert" data-email-error hidden></p><div class="actions"><button value="add">${icon('add')} Add</button><button type="button" class="secondary" data-close>Cancel</button></div></form></dialog><dialog class="modal" data-confirm-dialog aria-labelledby="confirm-title"><div class="modal-head"><h2 id="confirm-title" data-confirm-title></h2></div><ul class="changes" data-confirm-list></ul><p class="notice" role="alert" data-confirm-error hidden></p><div class="actions"><button type="button" data-confirm-accept></button><button type="button" class="secondary" data-close>Cancel</button></div></dialog>`
+
+/** People: one compact, editable row each. */
 export function peopleView(data: {
-  people: Array<{
-    id: number
-    name: string
-    role: string
-    email?: string
-    addresses: Record<string, string>
-    username?: string
-    disabled?: boolean
-    /** Whether they have a password. */
-    password?: boolean
-    /** An unused invitation link: when it expires. */
-    invitation?: { expiresAt: number }
-  }>
+  people: PersonRow[]
+  /** An administrator: changes anyone. */
   canChange: boolean
+  /** The viewer, who may change their own name and emails. */
+  viewerId?: number
   /** Now, for when invitations expire. */
   now?: number
 }): string {
-  const roles = ['admin', 'manager', 'developer', 'tester']
   const now = data.now ?? Date.now()
-  const invitation = (person: (typeof data.people)[number]): string => {
+  const invite = (person: PersonRow): string => {
     if (!data.canChange || person.disabled === true) return ''
-    const status =
+    const pending =
       person.invitation == null
         ? ''
-        : `<p><small>Invited · the link expires ${localTime(person.invitation.expiresAt, now, 'date')}</small></p>${apiForm(`/api/v2/people/${person.id}/invitation`, '', 'Revoke invitation', { method: 'DELETE', then: 'reload', className: 'secondary' })}`
-    return `${status}${action(
+        : `<small class="hint">Expires ${localTime(person.invitation.expiresAt, now, 'date')}</small>`
+    const revoke =
+      person.invitation == null
+        ? ''
+        : apiForm(
+            `/api/v2/people/${person.id}/invitation`,
+            '',
+            'Revoke invitation',
+            { method: 'DELETE', then: 'reload', className: 'secondary' },
+          )
+    return `${modalPill(
+      `invite-${person.id}`,
       person.invitation == null ? 'Invite' : 'Invite again',
-      apiForm(
+      `Invite ${person.name}`,
+      `${apiForm(
         `/api/v2/people/${person.id}/invitation`,
-        `<p>A link, valid for a week, where ${escape(person.name)} chooses ${person.username == null ? 'a username and ' : ''}a password.${person.invitation == null ? '' : ' The earlier link stops working.'}</p>${linkBox}`,
+        `<p>A link, valid for a week, where ${escape(person.name)} chooses ${person.username == null ? 'a password (and a username if they have no confirmed email)' : 'a password'}.${person.invitation == null ? '' : ' The earlier link stops working.'}</p>${linkBox}`,
         `${icon('link')} Make the link`,
         { then: 'link' },
-      ),
-      { kind: 'secondary' },
-    )}`
+      )}${revoke}`,
+    )}${pending}`
   }
-  const passwordFields = (prefix: string, required: boolean): string =>
-    `<label for="${prefix}-password">${required ? 'Password' : 'Password (optional)'}</label><input id="${prefix}-password" name="password" type="password" autocomplete="new-password"${required ? ' required' : ''}><label for="${prefix}-confirm">Confirm the password</label><input id="${prefix}-confirm" name="confirm" type="password" autocomplete="new-password"${required ? ' required' : ''}><small class="hint">At least 8 characters with uppercase, lowercase and a number, or 17 characters or more. The browser hashes it; Mason never sees it.</small>`
-  const usernameField = (
-    prefix: string,
-    value: string | undefined,
-    required: boolean,
-  ): string =>
-    `<label for="${prefix}-username">${required ? 'Username' : 'Username (needed for a password)'}</label><input id="${prefix}-username" name="username" autocomplete="off" pattern="[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}" maxlength="64" value="${escape(value ?? '')}"${required ? ' required' : ''}>`
-  // Setting it ends the person's sessions; they sign in with it on the host and the master.
-  const password = (person: (typeof data.people)[number]): string =>
+  const password = (person: PersonRow): string =>
     !data.canChange || person.disabled === true
       ? ''
-      : action(
+      : modalPill(
+          `password-${person.id}`,
           person.password === true ? 'Change password' : 'Set password',
-          `<form data-mason="person-password" data-path="/api/v2/people/${person.id}"><p>${escape(person.name)} signs in with this username and password on the host and the master. Their sessions end.</p>${usernameField(`person-${person.id}`, person.username, true)}${passwordFields(`person-${person.id}`, true)}<button>${icon('key')} Set password</button>${statusLine}</form>`,
-          { kind: 'secondary' },
+          `${person.password === true ? 'Change' : 'Set'} ${person.name}’s password`,
+          `<form data-mason="person-password" data-path="/api/v2/people/${person.id}"><p>${escape(person.name)} signs in with it and their username or a confirmed email, on the host and the master. Their sessions end.</p>${passwordFields(`person-${person.id}`, true)}<button>${icon('key')} Set password</button>${statusLine}</form>`,
         )
   const people = data.people
-    .map(
-      (person) =>
-        `<tr><td><strong>${escape(person.name)}</strong>${person.username == null ? '' : ` <small class="mono">${escape(person.username)}</small>`}</td><td>${person.email == null ? '' : `<small>${escape(person.email)}</small>`}${Object.entries(
-          person.addresses,
-        )
-          .map(
-            ([method, address]) =>
-              `<small>${escape(method)}: ${escape(address)}</small>`,
-          )
-          .join('')}</td><td>${
-          data.canChange
-            ? apiForm(
-                `/api/v2/people/${person.id}`,
-                `<select name="role" aria-label="Role">${roles.map((role) => `<option${role === person.role ? ' selected' : ''}>${role}</option>`).join('')}</select>`,
-                'Set role',
-                {
-                  method: 'PUT',
-                  fields: ['role'],
-                  then: 'reload',
-                  className: 'secondary',
-                },
-              )
-            : escape(person.role)
-        }</td><td>${invitation(person)}${password(person)}${data.canChange ? apiForm(`/api/v2/people/${person.id}`, '', 'Remove', { method: 'DELETE', then: 'reload', className: 'danger' }) : ''}</td></tr>`,
-    )
+    .map((person) => {
+      const edit = data.canChange
+        ? 'all'
+        : person.id === data.viewerId
+          ? 'self'
+          : 'none'
+      const cells = personCells(person, edit)
+      return `<tr data-person="${person.id}" data-edit="${edit}" data-original="${escape(
+        JSON.stringify({
+          name: person.name,
+          username: person.username ?? '',
+          role: person.role,
+          emails: person.emails,
+        }),
+      )}"><td class="person-name">${cells.name}</td><td class="person-username">${cells.username}</td><td class="person-emails">${cells.emails}</td><td>${cells.role}</td><td>${invite(person)}</td><td>${password(person)}</td><td class="row-action">${edit === 'none' ? '' : `<button type="button" data-row-action${data.canChange ? ' class="danger"' : ' hidden'}>${data.canChange ? 'Remove' : 'Save'}</button>`}</td></tr>`
+    })
     .join('')
   const add = data.canChange
-    ? `<section class="panel"><h2>${icon('add')}Add a person</h2><form data-mason="person-add"><label for="person-name">Name</label><input id="person-name" name="name" required><label for="person-role">Role</label><select id="person-role" name="role">${roles.map((role) => `<option${role === 'tester' ? ' selected' : ''}>${role}</option>`).join('')}</select><label for="person-email">Email</label><input id="person-email" name="email" type="email" required><p>They sign in with any enabled sign-in method that confirms this address, with a password you set here, or with one they choose from an invitation link.</p>${usernameField('person-new', undefined, false)}${passwordFields('person-new', false)}${field('person-invite', 'Make an invitation link', '<input id="person-invite" name="invite" type="checkbox">', 'A link, valid for a week, where they choose a username and password. Mason sends no email: copy it to them.')}${linkBox}<button>${icon('add')} Add</button>${statusLine}</form></section>`
+    ? `<section class="panel"><h2>${icon('add')}Add a person</h2><form data-mason="person-add"><label for="person-name">Name</label><input id="person-name" name="name" required><label for="person-role">Role</label><select id="person-role" name="role">${roles.map((role) => `<option${role === 'tester' ? ' selected' : ''}>${role}</option>`).join('')}</select><label for="person-email">Email addresses</label><div class="email-fields" data-email-fields><input id="person-email" name="email" type="email" aria-label="Email address"></div><button type="button" class="pill" data-add-email-field>Add</button><p>They sign in with any enabled sign-in method that confirms one of these addresses, or with an address or their username and a password you set here or they choose from an invitation link. Give them an email, a username, or both.</p>${usernameField('person-new', undefined, false)}${passwordFields('person-new', false)}${field('person-invite', 'Make an invitation link', '<input id="person-invite" name="invite" type="checkbox">', 'A link, valid for a week, where they choose a password. Mason sends no email: copy it to them.')}${linkBox}<button>${icon('add')} Add</button>${statusLine}</form></section>`
     : ''
-  return `${head('People', 'Who signs in, with which addresses, and what their role lets them do.', ['Settings', 'People'])}<table class="list"><thead><tr><th>Person</th><th>Addresses</th><th>Role</th><th></th></tr></thead><tbody>${people || '<tr><td colspan="4">Nobody yet.</td></tr>'}</tbody></table>${add}`
+  return `${head(MASTER, 'People', 'Who signs in, with which email addresses, and what their role lets them do.', [{ label: 'People', href: '/people' }])}<table class="list people"><thead><tr><th>Full name</th><th>Username</th><th>Email addresses</th><th>Role</th><th>Invite</th><th>Password</th><th><span class="sr-only">Remove or save</span></th></tr></thead><tbody>${people || '<tr><td colspan="7">Nobody yet.</td></tr>'}</tbody></table>${personDialogs}${add}`
+}
+
+/**
+ * Your account, on the master and the host: the person's own name and
+ * emails, edited as on the People page and saved through the same modal;
+ * their username and role, read-only; their password; and Sign out. While
+ * the host cannot reach the master the page is read-only.
+ */
+export function accountView(data: {
+  /** The node the page is on, which its breadcrumbs start from. */
+  viewer: CrumbViewer
+  person: PersonRow
+  /** The sign-out control, which differs between the host and the master. */
+  signOut: string
+  /** False on a host whose link to the master is down. */
+  editable: boolean
+  /** False on a host for anyone but a tester: their password is set on the master. */
+  passwordHere?: boolean
+}): string {
+  const person = data.person
+  const edit = data.editable ? 'self' : 'none'
+  const cells = personCells(person, edit)
+  const notice = data.editable
+    ? ''
+    : '<p class="notice">The host cannot reach the master right now, so your account cannot be changed here. Try again shortly.</p>'
+  const password = !data.editable
+    ? ''
+    : data.passwordHere === false
+      ? '<small class="hint">Change your password on the master.</small>'
+      : modalPill(
+          'password-own',
+          person.password === true ? 'Change password' : 'Set password',
+          'Your password',
+          `<form data-mason="person-password" data-path="/api/v2/people/${person.id}" data-return="/account"><p>You sign in with it and your username or a confirmed email, on the host and the master. Your other sessions end, and you sign in again.</p>${passwordFields('own', true)}<button>${icon('key')} Set password</button>${statusLine}</form>`,
+        )
+  return `${head(data.viewer, 'Your account', 'Your name and email addresses, and how you sign in.', [{ label: 'Your account', href: '/account' }])}${notice}<section class="panel account" data-person="${person.id}" data-edit="${edit}" data-original="${escape(
+    JSON.stringify({
+      name: person.name,
+      username: person.username ?? '',
+      role: person.role,
+      emails: person.emails,
+    }),
+  )}"><dl class="account-fields"><dt>Full name</dt><dd class="person-name">${cells.name}</dd><dt>Username</dt><dd class="person-username">${person.username == null ? '<span class="muted">—</span>' : `<span class="mono">${escape(person.username)}</span>`}</dd><dt>Email addresses</dt><dd class="person-emails">${cells.emails}<small class="hint">An address you add signs you in once an administrator confirms it.</small></dd><dt>Role</dt><dd>${escape(person.role)}</dd><dt>Password</dt><dd>${password}</dd></dl><div class="actions">${edit === 'none' ? '' : '<button type="button" data-row-action hidden>Save</button>'}${data.signOut}</div></section>${personDialogs}`
 }
 
 /** The add-project wizard: repository, then the Masonfile's app IDs, then branches and triggers. */
@@ -1603,9 +1744,19 @@ export function wizardView(data: {
 }): string {
   const steps = ['Repository', 'Apps', 'Branches and triggers']
   const step = data.slug == null ? 1 : data.owned.length === 0 ? 2 : 3
+  const newProject: Crumb[] = [
+    { label: 'Projects', href: '/projects' },
+    {
+      label: 'New',
+      href:
+        data.slug == null
+          ? '/projects/new'
+          : `/projects/new?slug=${encodeURIComponent(data.slug)}`,
+    },
+  ]
   const progress = `<ol class="chips wizard-steps">${steps.map((name, index) => `<li class="chip"${index + 1 === step ? ' aria-current="true"' : ''}>${index + 1}. ${escape(name)}</li>`).join('')}</ol>`
   if (data.slug == null)
-    return `${head('Add a project', 'A GitHub repository with a Masonfile.', ['Projects', 'New'])}${progress}<section class="panel">${apiForm('/api/v2/projects/check', '<label for="repository">GitHub repository</label><input id="repository" name="repository" placeholder="git@github.com:owner/repo.git" required>', `${icon('search')} Check with the master's GitHub credentials`, { fields: ['repository'], then: 'wizard' })}</section>`
+    return `${head(MASTER, 'Add a project', 'A GitHub repository with a Masonfile.', newProject)}${progress}<section class="panel">${apiForm('/api/v2/projects/check', '<label for="repository">GitHub repository</label><input id="repository" name="repository" placeholder="git@github.com:owner/repo.git" required>', `${icon('search')} Check with the master's GitHub credentials`, { fields: ['repository'], then: 'wizard' })}</section>`
   const discovery = data.discovery
   const apps =
     discovery == null
@@ -1652,12 +1803,14 @@ export function wizardView(data: {
           )}</textarea>`,
           `${icon('check')} Save rules`,
           { fields: ['rules'], then: 'reload' },
-        )}<h3>Webhook</h3><p>${data.webhook ? 'The project has a webhook secret.' : 'No webhook yet.'}</p>${apiForm(`/api/v2/projects/${data.slug}/webhook`, '', `${icon('link')} Create the GitHub webhook`, { then: 'reload', className: 'secondary' })}<h3>Triggers (from the Masonfile, read only)</h3><ul class="plain">${triggers || '<li>Read the Masonfile first.</li>'}</ul><p><a class="button" href="/?project=${encodeURIComponent(data.slug)}">Done</a></p></section>`
-  return `${head('Add a project', data.repository ?? '', ['Projects', data.slug])}${progress}<section class="panel"><h2>${icon('apps')}Apps</h2>${apps}</section>${branches}`
+        )}<h3>Webhook</h3><p>${data.webhook ? 'The project has a webhook secret.' : 'No webhook yet.'}</p>${apiForm(`/api/v2/projects/${data.slug}/webhook`, '', `${icon('link')} Create the GitHub webhook`, { then: 'reload', className: 'secondary' })}<h3>Triggers (from the Masonfile, read only)</h3><ul class="plain">${triggers || '<li>Read the Masonfile first.</li>'}</ul><p><a class="button" href="/projects?project=${encodeURIComponent(data.slug)}">Done</a></p></section>`
+  return `${head(MASTER, 'Add a project', data.repository ?? '', newProject)}${progress}<section class="panel"><h2>${icon('apps')}Apps</h2>${apps}</section>${branches}`
 }
 
 /** A project's Masonfile at a commit, read only. */
 export function masonfileView(data: {
+  /** The node the page is on, which its breadcrumbs start from. */
+  viewer: CrumbViewer
   slug: string
   name: string
   commits: Array<{ sha: string; branch: string }>
@@ -1665,9 +1818,11 @@ export function masonfileView(data: {
   file?: string
   text?: string
   error?: string
+  /** False on the host, which has no Secrets tab. */
+  secrets?: boolean
 }): string {
   const lines = (data.text ?? '').split('\n')
-  return `${head(`${data.name} · Masonfile`, 'The Masonfile is the project’s configuration; it changes with the code.', [data.name, 'Masonfile'])}${projectTabs(data.slug, 'masonfile')}<form method="get" class="actions"><label for="commit" class="sr-only">Commit</label><select id="commit" name="commit">${data.commits.map((entry) => `<option value="${escape(entry.sha)}"${entry.sha === data.commit ? ' selected' : ''}>${escape(entry.sha.slice(0, 12))} · ${escape(entry.branch)}</option>`).join('')}</select><button class="secondary">Show</button></form>${
+  return `${head(data.viewer, `${data.name} · Masonfile`, 'The Masonfile is the project’s configuration; it changes with the code.', [...projectCrumbs(data.slug, data.name), { label: 'Masonfile', href: `/projects/${encodeURIComponent(data.slug)}/masonfile` }])}${projectTabs(data.slug, 'masonfile', data.secrets)}<form method="get" class="actions"><label for="commit" class="sr-only">Commit</label><select id="commit" name="commit">${data.commits.map((entry) => `<option value="${escape(entry.sha)}"${entry.sha === data.commit ? ' selected' : ''}>${escape(entry.sha.slice(0, 12))} · ${escape(entry.branch)}</option>`).join('')}</select><button class="secondary">Show</button></form>${
     data.error != null
       ? `<p class="empty-state">${escape(data.error)}</p>`
       : data.text == null
@@ -1680,6 +1835,8 @@ export function masonfileView(data: {
 export function projectTabs(
   slug: string,
   current: 'overview' | 'runs' | 'masonfile' | 'secrets',
+  /** The host has no Secrets tab. */
+  secrets = true,
 ): string {
   const path = `/projects/${encodeURIComponent(slug)}`
   const tab = (key: string, href: string, label: string): string =>
@@ -1688,8 +1845,39 @@ export function projectTabs(
     tab('overview', path, 'Overview'),
     tab('runs', `${path}/runs`, 'Runs and builds'),
     tab('masonfile', `${path}/masonfile`, 'Masonfile'),
-    tab('secrets', `${path}/secrets`, 'Secrets'),
+    ...(secrets ? [tab('secrets', `${path}/secrets`, 'Secrets')] : []),
   ].join('')}</nav>`
+}
+
+/** The two tabs of an app ID's pages: Runs and builds (its own page) and Build numbers. */
+export function appTabs(
+  slug: string,
+  appId: string,
+  current: 'runs' | 'build-numbers',
+): string {
+  const path = appPath(slug, appId)
+  const tab = (key: string, href: string, label: string): string =>
+    `<a href="${escape(href)}"${key === current ? ' aria-current="page"' : ''}>${label}</a>`
+  return `<nav class="tabs" aria-label="App ID">${tab('runs', path, 'Runs and builds')}${tab('build-numbers', `${path}/build-numbers`, 'Build numbers')}</nav>`
+}
+
+/** An app ID as its pages head it: the ID, its name and its platforms. */
+export interface AppHeading {
+  bundleId: string
+  name: string
+  platforms: string[]
+}
+
+/** An app ID page's heading: the app ID, then its name and platform chips. */
+function appHead(
+  viewer: CrumbViewer,
+  slug: string,
+  name: string,
+  app: AppHeading,
+  tab: 'runs' | 'build-numbers',
+  branch?: string,
+): string {
+  return `${head(viewer, app.bundleId, { html: `${escape(app.name)} · ${app.platforms.map(platformChip).join(' ')}` }, appCrumbs(slug, name, app.bundleId, tab, branch))}${appTabs(slug, app.bundleId, tab)}`
 }
 
 /** One secret variant as the Secrets tab lists it. */
@@ -1813,7 +2001,7 @@ export function secretsView(data: {
   const editor = manage
     ? `<div class="secret-editor" data-secret-editor hidden role="dialog" aria-modal="true" aria-labelledby="secret-editor-title"><div class="secret-editor-head"><h2 id="secret-editor-title" class="mono" data-secret-editor-title></h2><span class="pill" data-secret-editor-configs></span><span class="spacer"></span><button type="button" data-secret-editor-save>Save</button><button type="button" class="secondary" data-secret-editor-cancel>Cancel</button></div><textarea class="mono" data-secret-editor-text spellcheck="false" aria-labelledby="secret-editor-title"></textarea><output data-secret-editor-output></output></div>`
     : ''
-  return `${head(`${data.name} · Secrets`, 'Values and files the project’s stages may read, each limited to build configs.', [data.name, 'Secrets'])}${projectTabs(data.slug, 'secrets')}<section class="panel"${manage ? ` data-secrets="/api/v2/projects/${escape(encodeURIComponent(data.slug))}/secrets"` : ''}>${notice}${buttons}${help}${addValue}${addFile}${table}</section>${audit}${editor}`
+  return `${head(MASTER, `${data.name} · Secrets`, 'Values and files the project’s stages may read, each limited to build configs.', [...projectCrumbs(data.slug, data.name), { label: 'Secrets', href: `/projects/${encodeURIComponent(data.slug)}/secrets` }])}${projectTabs(data.slug, 'secrets')}<section class="panel"${manage ? ` data-secrets="/api/v2/projects/${escape(encodeURIComponent(data.slug))}/secrets"` : ''}>${notice}${buttons}${help}${addValue}${addFile}${table}</section>${audit}${editor}`
 }
 
 /** A project's build-number sequences, and where a manager sets one's last number. */
@@ -1867,15 +2055,24 @@ function buildNumbersPanel(data: {
  */
 export function projectRunsView(
   data: {
+    /** The node the page is on, which its breadcrumbs start from. */
+    viewer: CrumbViewer
     slug: string
     name: string
     branch?: string
     branches: BranchItem[]
     runs: ProjectRunRow[]
+    /** False on the host, which has no Secrets tab. */
+    secrets?: boolean
+    /** An app ID's Runs and builds: only the runs that publish it, under its own heading and tabs. */
+    app?: AppHeading
   },
   now: number,
 ): string {
-  const base = `/projects/${encodeURIComponent(data.slug)}/runs`
+  const base =
+    data.app == null
+      ? `/projects/${encodeURIComponent(data.slug)}/runs`
+      : appPath(data.slug, data.app.bundleId)
   const item = (
     label: string,
     href: string,
@@ -1899,11 +2096,24 @@ export function projectRunsView(
       ? '<li class="divider" role="separator"></li>'
       : ''
   }${others.map(branch).join('')}</ul></nav>`
-  return `${head(`${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch.' : `The latest runs on ${data.branch}.`, [data.name, 'Runs and builds'])}${projectTabs(data.slug, 'runs')}<div class="runs-columns">${list}<section class="panel"><h2>${data.branch == null ? 'All branches' : `<span class="mono">${escape(data.branch)}</span>`}</h2>${projectRunsTable(data.runs, now, data.branch == null)}</section></div>`
+  const heading =
+    data.app == null
+      ? `${head(data.viewer, `${data.name} · Runs and builds`, data.branch == null ? 'The latest runs on every branch.' : `The latest runs on ${data.branch}.`, runsCrumbs(data.slug, data.name, data.branch))}${projectTabs(data.slug, 'runs', data.secrets)}`
+      : appHead(
+          data.viewer,
+          data.slug,
+          data.name,
+          data.app,
+          'runs',
+          data.branch,
+        )
+  return `${heading}<div class="runs-columns">${list}<section class="panel"><h2>${data.branch == null ? 'All branches' : `<span class="mono">${escape(data.branch)}</span>`}</h2>${projectRunsTable(data.runs, now, data.branch == null)}</section></div>`
 }
 
 /** A project on the master: repository, app IDs, branch rules, build numbers, and its tabs. */
 export function projectView(data: {
+  /** The node the page is on, which its breadcrumbs start from. */
+  viewer: CrumbViewer
   slug: string
   name: string
   repository: string
@@ -1924,15 +2134,24 @@ export function projectView(data: {
     last: Array<{ branch: string; value: string }>
   }>
   canSeed: boolean
+  /** False on the host, which has no Secrets tab. */
+  secrets?: boolean
 }): string {
-  return `${head(data.name, data.repository, ['Projects', data.slug])}${projectTabs(data.slug, 'overview')}<section class="panel"><h2>${icon('apps')}App IDs</h2><ul class="plain">${
-    data.apps
-      .map(
-        (app) =>
-          `<li><span class="mono">${escape(app.bundleId)}</span> ${app.platforms.map(platformChip).join(' ')}${app.apple == null ? '' : ` <small>Apple team <span class="mono">${escape(app.apple.team)}</span></small>`}</li>`,
-      )
-      .join('') || '<li>None.</li>'
-  }</ul></section><section class="panel"><h2>${icon('fork_right')}Branch rules</h2><table class="list"><tbody>${
+  // The Platforms column starts at one edge whatever each app ID's length.
+  const apps =
+    data.apps.length === 0
+      ? '<p>None.</p>'
+      : `<div class="app-grid" role="table" aria-label="App IDs"><div class="app-grid-row app-grid-head" role="row"><span role="columnheader">App ID</span><span role="columnheader">Platforms</span><span role="columnheader">Apple team</span></div>${data.apps
+          .map((app) =>
+            appGridRow(appPath(data.slug, app.bundleId), app.bundleId, '', [
+              platformChips(app.platforms),
+              app.apple == null
+                ? ''
+                : `<span class="mono">${escape(app.apple.team)}</span>`,
+            ]),
+          )
+          .join('')}</div>`
+  return `${head(data.viewer, data.name, data.repository, projectCrumbs(data.slug, data.name))}${projectTabs(data.slug, 'overview', data.secrets)}<section class="panel"><h2>${icon('apps')}App IDs</h2>${apps}</section><section class="panel"><h2>${icon('fork_right')}Branch rules</h2><table class="list"><tbody>${
     data.rules
       .map(
         (rule) =>
@@ -1940,6 +2159,96 @@ export function projectView(data: {
       )
       .join('') || '<tr><td>No rules: nothing builds.</td></tr>'
   }</tbody></table><p>Default branch <span class="mono">${escape(data.defaultBranch)}</span> · ${escape(data.format)} Masonfile · webhook ${data.webhook ? 'set' : 'not set'}${data.signingLabel == null ? '' : ` · signs on nodes labelled <span class="mono">${escape(data.signingLabel)}</span>`}</p></section>${buildNumbersPanel(data)}`
+}
+
+/** An app ID page for one the project does not have, or the viewer may not see: 404 under the project. */
+export function appMissingView(
+  viewer: CrumbViewer,
+  slug: string,
+  name: string,
+): string {
+  return `${head(viewer, 'App ID unavailable', `${name} has no such app ID.`, projectCrumbs(slug, name))}<p class="empty-state">There is no such app ID in this project.</p>`
+}
+
+/**
+ * The sequence an app ID takes its build numbers from, as the scheduler
+ * picks it: a shared sequence whose `apps` lists it, else its own key;
+ * undefined for the default scheme.
+ */
+export function appSequence(
+  sequences: BuildNumberSequence[],
+  appId: string,
+): BuildNumberSequence | undefined {
+  return (
+    sequences.find((sequence) => sequence.apps.includes(appId)) ??
+    sequences.find((sequence) => sequence.key === appId)
+  )
+}
+
+/**
+ * An app ID's Build numbers tab: the sequence it takes its numbers from
+ * (its own key, or a shared one, naming the app IDs it is shared with), else
+ * the default scheme; and, for a manager on the master, a form preset to
+ * that sequence that sets where it stands.
+ */
+export function appBuildNumbersView(data: {
+  /** The node the page is on, which its breadcrumbs start from. */
+  viewer: CrumbViewer
+  slug: string
+  name: string
+  app: AppHeading
+  /** The project's app IDs: a shared sequence's key is one of them, or a name of its own. */
+  projectApps: string[]
+  buildNumbers: BuildNumberSequence[]
+  /** A manager on the master; the host is read-only. */
+  canSeed: boolean
+}): string {
+  const id = data.app.bundleId
+  const sequence = appSequence(data.buildNumbers, id)
+  const scope = (value: string): string =>
+    value === 'branch' ? 'per branch' : 'across branches'
+  let body: string
+  if (sequence == null)
+    body = `<p>No sequence in the Masonfile names <span class="mono">${escape(id)}</span>, so it takes the default scheme: <span class="mono">N</span>, ${scope('app')}.</p>`
+  else {
+    const shared = [
+      ...(sequence.key !== id && data.projectApps.includes(sequence.key)
+        ? [sequence.key]
+        : []),
+      ...sequence.apps.filter((app) => app !== id),
+    ]
+    // One line per branch (none for a sequence across branches).
+    const last =
+      sequence.last
+        .map(
+          (entry) =>
+            `${entry.branch === '' ? '' : `<span class="mono">${escape(entry.branch)}</span> `}<span class="mono">${escape(entry.value)}</span>`,
+        )
+        .join('<br>') || 'None yet.'
+    const form = data.canSeed
+      ? apiForm(
+          '/api/v2/build-numbers/seed',
+          `<input type="hidden" name="project" value="${escape(data.slug)}"><input type="hidden" name="key" value="${escape(sequence.key)}">${sequence.scope === 'branch' ? '<label for="seed-branch">Branch</label><input id="seed-branch" name="branch" required>' : ''}<label for="seed-last">Last number issued</label><input id="seed-last" name="last" class="mono" required placeholder="${escape(sequence.format)}"><p>The next build of <span class="mono">${escape(sequence.key)}</span> gets the number after it. Nothing is lowered.</p>`,
+          `${icon('edit')} Set where it stands`,
+          {
+            fields: [
+              'project',
+              'key',
+              ...(sequence.scope === 'branch' ? ['branch'] : []),
+              'last',
+            ],
+            then: 'reload',
+            className: 'secondary',
+          },
+        )
+      : ''
+    body = `<dl class="facts"><dt>Sequence</dt><dd class="mono">${escape(sequence.key)}</dd><dt>Format</dt><dd class="mono">${escape(sequence.format)}</dd><dt>Scope</dt><dd>${scope(sequence.scope)}</dd><dt>Last issued</dt><dd>${last}</dd></dl>${
+      shared.length === 0
+        ? ''
+        : `<p data-shared>Shared with: ${shared.map((app) => `<span class="mono">${escape(app)}</span>`).join(', ')}</p>`
+    }${form}`
+  }
+  return `${appHead(data.viewer, data.slug, data.name, data.app, 'build-numbers')}<section class="panel" id="build-numbers"><h2>${icon('label')}Build numbers</h2>${body}</section>`
 }
 
 /** One cloud account on the Cloud page: its provider, what its last check found, and its actions. */
@@ -2014,7 +2323,7 @@ export function cloudView(data: {
         { fields: ['provider', 'name', 'key'] },
       )}</section>`
     : ''
-  return `${head('Cloud', 'The provider accounts cloud pools and hosts are made in.', ['Cloud'])}${accounts || '<p class="empty-state">No cloud accounts yet.</p>'}${add}`
+  return `${head(MASTER, 'Cloud', 'The provider accounts cloud pools and hosts are made in.', [{ label: 'Cloud', href: '/cloud' }])}${accounts || '<p class="empty-state">No cloud accounts yet.</p>'}${add}`
 }
 
 /** Groups: one row per group, each opening its page, and a name field that adds one. */
@@ -2040,7 +2349,7 @@ export function groupsView(data: {
         { fields: ['name'], then: 'group' },
       )}</section>`
     : ''
-  return `${head('Groups', 'The apps each group’s members see in their catalog.', ['Groups'])}<div class="group-list">${rows || '<p class="empty-state">No groups.</p>'}</div>${add}`
+  return `${head(MASTER, 'Groups', 'The apps each group’s members see in their catalog.', [{ label: 'Groups', href: '/groups' }])}<div class="group-list">${rows || '<p class="empty-state">No groups.</p>'}</div>${add}`
 }
 
 /**
@@ -2056,10 +2365,15 @@ export function groupView(data: {
 }): string {
   const { group } = data
   const name = escape(group.name)
-  const crumbs = ['Mason', 'Master', 'Groups']
-    .map((part) => `<span>${escape(part)}</span>`)
-    .join('<span>/</span>')
-  const top = `<div class="page-head"><div><div class="breadcrumbs">${crumbs}<span>/</span><span data-group-title>${name}</span></div><h1 data-group-title>${name}</h1><p>Its members see its apps in their catalog.</p></div></div>`
+  const crumbs = breadcrumbs(MASTER, [
+    { label: 'Groups', href: '/groups' },
+    {
+      label: group.name,
+      href: `/groups/${group.id}`,
+      data: { 'group-title': '' },
+    },
+  ])
+  const top = `<div class="page-head"><div>${crumbs}<h1 data-group-title>${name}</h1><p>Its members see its apps in their catalog.</p></div></div>`
   const label = `<span><small>Name</small><strong data-group-name-text>${name}</strong></span>`
   const nameRow = data.canChange
     ? `<div class="group-name" data-group-name><button type="button" class="list-row" data-group-rename>${label}${icon('edit')}</button><input name="name" maxlength="120" value="${name}" aria-label="Group name" autocomplete="off" data-group-name-input hidden><p class="notice" role="alert" data-group-name-error hidden></p></div>`

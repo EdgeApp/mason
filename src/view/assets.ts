@@ -20,7 +20,12 @@ const types: Record<string, string> = {
  * favicon, and the shell's script. Names are matched strictly, so nothing
  * outside those folders is reachable.
  */
-export function assetRoutes(): express.Router {
+export function assetRoutes(
+  options: {
+    /** Whether the shell's script (search, notifications) is served: not on a standalone server. */
+    shell?: boolean
+  } = {},
+): express.Router {
   const router = express.Router()
   const send = (res: express.Response, file: string): void => {
     const type = types[path.extname(file)]
@@ -43,6 +48,7 @@ export function assetRoutes(): express.Router {
   router.get('/favicon.ico', (_req, res) => {
     send(res, path.join(assetsDir, 'logo', 'favicon.ico'))
   })
+  if (options.shell === false) return router
   router.get('/assets/shell.js', (_req, res) => {
     res
       .type('js')

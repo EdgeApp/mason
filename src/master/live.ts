@@ -357,6 +357,87 @@ function tailStart(file: string): number {
   return end < 0 ? size : from + end + 1
 }
 
+/** The most a page asks for at once, and the most text one answer carries. */
+export const MAX_PAGE_LINES = 2000
+const MAX_PAGE_BYTES = 4 * 1024 * 1024
+
+/** A log's lines from number `first`, and where they end, in bytes. */
+export interface FileLines {
+  first: number
+  text: string
+  /** The byte after the last one returned. */
+  end: number
+}
+
+/** The line number at a byte offset, waiting for the index when it must. */
+export async function lineNumber(
+  file: string,
+  offset: number,
+): Promise<number> {
+  const found = lineAt(file, offset)
+  return typeof found === 'number' ? found : await found.line
+}
+
+/** Whether the byte before `offset` of a log is a newline. */
+export function newlineBefore(file: string, offset: number): boolean {
+  return offset > 0 && read(file, offset - 1, offset)[0] === 0x0a
+}
+
+/** How many lines a log holds: one per newline, and a last one without. */
+export async function lineCount(file: string, size?: number): Promise<number> {
+  const length = size ?? statSync(file, { throwIfNoEntry: false })?.size ?? 0
+  if (length === 0) return 0
+  const line = await lineNumber(file, length)
+  return newlineBefore(file, length) ? line - 1 : line
+}
+
+/**
+ * Where line `n` of a log starts: from the index's last mark before it,
+ * reading on to the newline that ends line `n - 1`. Past the end, the end.
+ */
+export async function lineStart(file: string, n: number): Promise<number> {
+  if (n <= 1) return 0
+  const size = statSync(file, { throwIfNoEntry: false })?.size ?? 0
+  await lineNumber(file, size)
+  const marks = lineIndex(file).marks
+  // A mark is the line its byte falls on, so line n starts after the last mark below n.
+  let k = Math.min(marks.length - 1, Math.floor(size / MARK))
+  while (k > 0 && marks[k]! >= n) k--
+  let at = k * MARK
+  let line = marks[k]!
+  while (at < size) {
+    const chunk = read(file, at, Math.min(size, at + MARK))
+    for (let i = chunk.indexOf(0x0a); i >= 0; i = chunk.indexOf(0x0a, i + 1)) {
+      line++
+      if (line === n) return at + i + 1
+    }
+    at += chunk.length
+  }
+  return size
+}
+
+/**
+ * Lines `first` to `first + count - 1` of a log, within bytes `[from, to)`
+ * (a step's part of its stage's log): no more than MAX_PAGE_BYTES of them.
+ */
+export async function fileLines(
+  file: string,
+  first: number,
+  count: number,
+  bounds: { from?: number; to?: number } = {},
+): Promise<FileLines> {
+  const size = statSync(file, { throwIfNoEntry: false })?.size ?? 0
+  const floor = bounds.from ?? 0
+  const ceiling = Math.min(bounds.to ?? size, size)
+  const start = Math.min(Math.max(await lineStart(file, first), floor), ceiling)
+  const end = Math.min(
+    await lineStart(file, first + Math.min(count, MAX_PAGE_LINES)),
+    ceiling,
+    start + MAX_PAGE_BYTES,
+  )
+  return { first, text: read(file, start, end).toString('utf8'), end }
+}
+
 /** The stage a run's page follows: the running one that started last, else the one it shows. */
 export function followed(
   stages: readonly LiveStage[],

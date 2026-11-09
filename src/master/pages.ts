@@ -9,11 +9,16 @@ import {
 } from '../node/webApp.js'
 import { escape } from '../view/html.js'
 import {
+  appBuildNumbersView,
+  appMissingView,
   groupsView,
   groupView,
+  head,
   masonfileView,
   nodesView,
+  accountView,
   peopleView,
+  type PersonRow,
   projectRunsView,
   projectView,
   secretsView,
@@ -40,18 +45,40 @@ import {
 import { graphFromJson, runData, runTitle, runView } from '../view/run.js'
 import { requesterName } from './requesters.js'
 import { search } from '../view/search.js'
-import { runLog } from './runsApi.js'
+import { runLines, type PageLines } from './runsApi.js'
 import { discovery } from './wizard.js'
 import { shell, type Viewer } from '../view/shell.js'
 import type { GroupApp } from '../view/groups.js'
 import { MASTER_SESSION_COOKIE, type MasterSession } from './auth.js'
 import { can } from './permissions.js'
+import type { Person } from './people.js'
+import {
+  projectDetails,
+  pushBranches,
+  SCRIPT_PROJECT,
+} from './projectDetails.js'
+import { masonfileTooLarge } from './scheduler.js'
 import { sessionActor } from './auth.js'
 import type { Master } from './runtime.js'
 import { repository, version } from '../version.js'
 import { clientAddress } from './forward.js'
 import { ProjectNotFound } from './projects.js'
 import type { ProviderSignIn } from './providerSignIn.js'
+import { masterCatalogPages } from './catalogPages.js'
+
+/** A person as the People page and Your account draw them. */
+function personRow(person: Person): PersonRow {
+  return {
+    id: person.id,
+    name: person.name,
+    role: person.role,
+    emails: person.emails,
+    ...(person.username == null ? {} : { username: person.username }),
+    disabled: person.disabled,
+    password: person.password,
+    ...(person.invitation == null ? {} : { invitation: person.invitation }),
+  }
+}
 
 /** The signed-in person as the views see them. */
 function viewerOf(session: MasterSession): Viewer {
@@ -188,10 +215,10 @@ function signInPage(signIn: ProviderSignIn): string {
         `<a class="button" href="${escape(`${origin!}/auth/start/${encodeURIComponent(provider.id)}?return=/`)}">Sign in with ${escape(provider.name)}</a>`,
     )
     .join('')
-  return `<section class="card">${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username and password:</p>`}${passwordForm}</section>`
+  return `<section class="card">${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username or email and a password:</p>`}${passwordForm}</section>`
 }
 
-const passwordForm = `<form data-mason="sign-in"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><p><button>Sign in</button></p>${status}</form>`
+const passwordForm = `<form data-mason="sign-in"><label for="username">Username or email</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><p><button>Sign in</button></p>${status}</form>`
 
 function backupsPage(master: Master, session: MasterSession): string {
   const actor = sessionActor(session)
@@ -214,29 +241,7 @@ function backupsPage(master: Master, session: MasterSession): string {
             : '<p>You confirmed you stored this key.</p>'
         }</section>`
       : ''
-  return `<section class="card"><p>Every hour the master encrypts a snapshot of its database and pushes it to a git repository. Add the deploy key below to that repository with write access.</p>${state}<form data-mason="backup"><label for="repository">Repository</label><input id="repository" name="repository" value="${escape(value.repository ?? '')}" placeholder="git@github.com:owner/mason-backup.git" required><label for="branch">Branch</label><input id="branch" name="branch" value="${escape(value.branch ?? 'master')}" required><p><button>Save</button></p><p>Deploy key</p><pre data-field="deployKey"${value.deployKey == null ? ' hidden' : ''}>${escape(value.deployKey?.publicKey ?? '')}</pre><pre data-field="backupKey" hidden></pre>${status}</form><p><a href="/?later=backups">Skip for now</a></p></section>${key}`
-}
-
-/** A tester's apps on the master: installs happen on the host. */
-function testerApps(master: Master, session: MasterSession): string {
-  const visible = appVisible(master, session)
-  const origin = ((master.settings.value('host') ?? {}) as { origin?: string })
-    .origin
-  const apps = (
-    master.database.db
-      .prepare(
-        'SELECT id,name,slug FROM apps WHERE enabled=1 ORDER BY position,id',
-      )
-      .all() as Array<{ id: number; name: string; slug: string }>
-  ).filter((app) => visible(app.id))
-  return `<p class="intro">Install builds from ${origin == null ? 'the Mason host' : `<a href="${escape(origin)}">${escape(new URL(origin).host)}</a>`}.</p><div class="app-list">${
-    apps
-      .map(
-        (app) =>
-          `<a class="app-card" href="${escape(origin == null ? '#' : `${origin}/apps/${app.id}`)}"><div><h2>${escape(app.name)}</h2><small>${escape(app.slug)}</small></div><span aria-hidden="true">→</span></a>`,
-      )
-      .join('') || '<p class="empty-state">No apps are shared with you yet.</p>'
-  }</div>`
+  return `${head(viewerOf(session), 'Backups', 'Encrypted copies of this master, kept in a git repository.', [{ label: 'Backups', href: '/backups' }])}<section class="card"><p>Every hour the master encrypts a snapshot of its database and pushes it to a git repository. Add the deploy key below to that repository with write access.</p>${state}<form data-mason="backup"><label for="repository">Repository</label><input id="repository" name="repository" value="${escape(value.repository ?? '')}" placeholder="git@github.com:owner/mason-backup.git" required><label for="branch">Branch</label><input id="branch" name="branch" value="${escape(value.branch ?? 'master')}" required><p><button>Save</button></p><p>Deploy key</p><pre data-field="deployKey"${value.deployKey == null ? ' hidden' : ''}>${escape(value.deployKey?.publicKey ?? '')}</pre><pre data-field="backupKey" hidden></pre>${status}</form><p><a href="/?later=backups">Skip for now</a></p></section>${key}`
 }
 
 /** Set by "Skip for now": the dashboard stops sending an administrator to Backups for this browser session. */
@@ -282,7 +287,61 @@ export function masterPages(
   const hashing = (res: express.Response): void => {
     res.set('Content-Security-Policy', masterContentSecurityPolicy)
   }
-  app.get('/', (req, res) => {
+  /** Projects & apps: every project's app IDs, builds and runs. */
+  const projects = (
+    req: express.Request,
+    res: express.Response,
+    current: MasterSession,
+  ): void => {
+    const now = master.database.now()
+    const platform =
+      typeof req.query.platform === 'string' ? req.query.platform : undefined
+    const project =
+      typeof req.query.project === 'string' ? req.query.project : undefined
+    const repositories = new Map(
+      (
+        master.database.db
+          .prepare(
+            'SELECT id,repository,webhook_secret IS NOT NULL AS webhook FROM projects',
+          )
+          .all() as Array<{ id: number; repository: string; webhook: number }>
+      ).map((row) => [
+        row.id,
+        { repository: row.repository, webhook: row.webhook === 1 },
+      ]),
+    )
+    const data = dashboardData(
+      {
+        db: master.database.db,
+        viewer: viewerOf(current),
+        now,
+        appVisible: appVisible(master, current),
+        nodes: cluster(master).nodes,
+        repositories,
+        pinned: new Map(
+          master.projects
+            .list()
+            .map((project) => [
+              project.id,
+              pushBranches(project, master.pushes),
+            ]),
+        ),
+      },
+      {
+        ...(platform == null ? {} : { platform }),
+        ...(project == null ? {} : { project }),
+      },
+    )
+    send(
+      res,
+      'Projects & apps',
+      dashboardView(data, viewerOf(current), now),
+      current,
+      200,
+      'dashboard',
+    )
+  }
+  app.get('/', (req, res, next) => {
     if (!master.configured()) {
       hashing(res)
       send(res, 'Set up this master', setupPage)
@@ -321,49 +380,37 @@ export function masterPages(
       res.redirect(303, '/backups')
       return
     }
-    const now = master.database.now()
-    if (current.role === 'tester') {
-      send(res, 'Your apps', testerApps(master, current), current)
+    // The master opens on Projects & apps for developers and up; a tester's
+    // home is Install apps, from the host.
+    if (current.role !== 'tester') {
+      projects(req, res, current)
       return
     }
-    const platform =
-      typeof req.query.platform === 'string' ? req.query.platform : undefined
-    const project =
-      typeof req.query.project === 'string' ? req.query.project : undefined
-    const repositories = new Map(
-      (
-        master.database.db
-          .prepare(
-            'SELECT id,repository,webhook_secret IS NOT NULL AS webhook FROM projects',
-          )
-          .all() as Array<{ id: number; repository: string; webhook: number }>
-      ).map((row) => [
-        row.id,
-        { repository: row.repository, webhook: row.webhook === 1 },
-      ]),
-    )
-    const data = dashboardData(
-      {
-        db: master.database.db,
-        viewer: viewerOf(current),
-        now,
-        appVisible: appVisible(master, current),
-        nodes: cluster(master).nodes,
-        repositories,
-      },
-      {
-        ...(platform == null ? {} : { platform }),
-        ...(project == null ? {} : { project }),
-      },
-    )
+    next()
+  })
+  // Projects are for developers and up: to a tester they do not exist.
+  app.use('/projects', (req, res, next) => {
+    const current = session(req)
+    if (current?.role !== 'tester') {
+      next()
+      return
+    }
     send(
       res,
-      'Projects & apps',
-      dashboardView(data, viewerOf(current), now),
+      'Not found',
+      '<p class="empty-state">There is no such page.</p>',
       current,
-      200,
-      'dashboard',
+      404,
+      'catalog',
     )
+  })
+  app.get('/projects', (req, res) => {
+    const current = session(req)
+    if (current == null) {
+      res.redirect(303, master.configured() ? '/sign-in' : '/')
+      return
+    }
+    projects(req, res, current)
   })
   app.get('/artifacts', (req, res) => {
     const current = session(req)
@@ -413,103 +460,143 @@ export function masterPages(
       'artifacts',
     )
   })
-  app.get('/runs/:id', (req, res) => {
-    const current = session(req)
-    if (current == null) {
-      res.redirect(303, master.configured() ? '/sign-in' : '/')
-      return
-    }
-    const actor = sessionActor(current)
-    if (!can(actor, 'runs.read')) {
-      send(res, 'Run', '<p>Runs are for developers and up.</p>', current, 403)
-      return
-    }
-    const id = String(req.params.id)
-    const db = master.database.db
-    const run = runData(
-      db,
-      id,
-      (job) => {
-        const row = db
-          .prepare(
-            'SELECT j.workflow,g.graph FROM jobs j LEFT JOIN graphs g ON g.key=j.graph_key WHERE j.id=?',
-          )
-          .get(job) as { workflow: string; graph: string | null } | undefined
-        return row == null ? undefined : graphFromJson(row.graph, row.workflow)
-      },
-      {
-        repository: (project) =>
-          (
-            db
-              .prepare('SELECT repository FROM projects WHERE id=?')
-              .get(project) as { repository: string } | undefined
-          )?.repository,
-        nodeName: (fingerprint) => master.registry.get(fingerprint)?.name,
-        requester: (label) => requesterName(db, label),
-        buildNumber: (job) => reservedBuildNumber(db, job),
-      },
-    )
-    if (run == null) {
+  app.get('/runs/:id', (req, res, next) => {
+    void (async (): Promise<void> => {
+      const current = session(req)
+      if (current == null) {
+        res.redirect(303, master.configured() ? '/sign-in' : '/')
+        return
+      }
+      const actor = sessionActor(current)
+      if (!can(actor, 'runs.read')) {
+        send(res, 'Run', '<p>Runs are for developers and up.</p>', current, 403)
+        return
+      }
+      const id = String(req.params.id)
+      const db = master.database.db
+      const run = runData(
+        db,
+        id,
+        (job) => {
+          const row = db
+            .prepare(
+              'SELECT j.workflow,g.graph FROM jobs j LEFT JOIN graphs g ON g.key=j.graph_key WHERE j.id=?',
+            )
+            .get(job) as { workflow: string; graph: string | null } | undefined
+          return row == null
+            ? undefined
+            : graphFromJson(row.graph, row.workflow)
+        },
+        {
+          repository: (project) =>
+            (
+              db
+                .prepare('SELECT repository FROM projects WHERE id=?')
+                .get(project) as { repository: string } | undefined
+            )?.repository,
+          nodeName: (fingerprint) => master.registry.get(fingerprint)?.name,
+          requester: (label) => requesterName(db, label),
+          buildNumber: (job) => reservedBuildNumber(db, job),
+        },
+      )
+      if (run == null) {
+        send(
+          res,
+          'Run unavailable',
+          '<p class="empty-state">There is no such run.</p>',
+          current,
+          404,
+        )
+        return
+      }
+      const query = (name: string): string | undefined =>
+        typeof req.query[name] === 'string'
+          ? (req.query[name] as string)
+          : undefined
+      const stage = run.stages.some((entry) => entry.name === query('stage'))
+        ? query('stage')
+        : undefined
+      const step =
+        stage == null || query('step') == null
+          ? undefined
+          : Number(query('step'))
+      // The page draws one chunk of the log (a finished one's start, a running
+      // stage's end); it asks for the rest by number as it comes into view.
+      const live = stage != null && step == null && run.finished == null
+      let log: { text: string; first: number } | { unavailable: string }
+      let lines: PageLines | undefined
+      try {
+        lines = await runLines(master, id, {
+          ...(stage == null ? {} : { stage }),
+          ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
+          ...(live ? { last: true } : { from: 0 }),
+        })
+        log =
+          lines == null
+            ? { unavailable: 'This run has no log.' }
+            : { text: lines.text, first: lines.first }
+      } catch {
+        log = { unavailable: 'There is no such step.' }
+      }
+      // A live log's last partial line comes with the rest of it, over the socket.
+      if (
+        live &&
+        lines != null &&
+        !lines.text.endsWith('\n') &&
+        lines.text !== ''
+      ) {
+        const cut = lines.text.lastIndexOf('\n') + 1
+        lines = {
+          ...lines,
+          text: lines.text.slice(0, cut),
+          total: lines.total - 1,
+          end: lines.end - Buffer.byteLength(lines.text.slice(cut)),
+        }
+        log = { text: lines.text, first: lines.first }
+      }
+      const base = `/api/v2/runs/${encodeURIComponent(id)}/logs`
+      const requester = can(actor, 'runs.request')
       send(
         res,
-        'Run unavailable',
-        '<p class="empty-state">There is no such run.</p>',
+        runTitle(run),
+        runView(run, {
+          ...(stage == null ? {} : { selected: stage }),
+          ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
+          ...(stage != null && step == null && lines != null
+            ? { logOffset: lines.end }
+            : {}),
+          ...(lines == null
+            ? {}
+            : {
+                logLines:
+                  stage == null
+                    ? base
+                    : `${base}?stage=${encodeURIComponent(stage)}${step != null && Number.isSafeInteger(step) ? `&step=${step}` : ''}`,
+                logStart: lines.start,
+                logTotal: lines.total,
+              }),
+          tab: query('tab') === 'timeline' ? 'timeline' : 'graph',
+          now: master.database.now(),
+          log,
+          can: {
+            cancel: requester,
+            restart: requester,
+            request: requester,
+            approve: (name) =>
+              can(actor, 'runs.approve') &&
+              (current.role === 'admin' ||
+                (
+                  run.graph?.approvals[name]?.roles ?? ['admin', 'manager']
+                ).includes(current.role)),
+          },
+          base: '',
+          viewer: viewerOf(current),
+        }),
         current,
-        404,
+        200,
+        'dashboard',
       )
-      return
-    }
-    const query = (name: string): string | undefined =>
-      typeof req.query[name] === 'string'
-        ? (req.query[name] as string)
-        : undefined
-    const stage = run.stages.some((entry) => entry.name === query('stage'))
-      ? query('stage')
-      : undefined
-    const step =
-      stage == null || query('step') == null ? undefined : Number(query('step'))
-    let log: { text: string; first: number } | { unavailable: string }
-    try {
-      log = runLog(master, id, {
-        ...(stage == null ? {} : { stage }),
-        ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
-      }) ?? { unavailable: 'This run has no log.' }
-    } catch {
-      log = { unavailable: 'There is no such step.' }
-    }
-    // A live log's last partial line comes with the rest of it, over the socket.
-    if (stage != null && step == null && run.finished == null && 'text' in log)
-      log = { ...log, text: log.text.slice(0, log.text.lastIndexOf('\n') + 1) }
-    const requester = can(actor, 'runs.request')
-    send(
-      res,
-      runTitle(run),
-      runView(run, {
-        ...(stage == null ? {} : { selected: stage }),
-        ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
-        ...(stage != null && step == null && 'text' in log
-          ? { logOffset: Buffer.byteLength(log.text) }
-          : {}),
-        tab: query('tab') === 'timeline' ? 'timeline' : 'graph',
-        now: master.database.now(),
-        log,
-        can: {
-          cancel: requester,
-          restart: requester,
-          request: requester,
-          approve: (name) =>
-            can(actor, 'runs.approve') &&
-            (current.role === 'admin' ||
-              (
-                run.graph?.approvals[name]?.roles ?? ['admin', 'manager']
-              ).includes(current.role)),
-        },
-        base: '',
-      }),
-      current,
-      200,
-      'dashboard',
-    )
+    })().catch(next)
   })
   /** A page for those whose role allows an action; others get a 403 page. */
   const guarded = (
@@ -523,6 +610,8 @@ export function masterPages(
     ) => Promise<string> | string,
     /** Whether the page hashes passwords in the browser. */
     passwords = false,
+    /** The page's own scripts, beside the shell's. */
+    scripts: string[] = [],
   ): void => {
     app.get(path, (req, res) => {
       if (passwords) hashing(res)
@@ -544,7 +633,7 @@ export function masterPages(
       }
       void Promise.resolve(body(current, req)).then(
         (content) => {
-          send(res, title, content, current, 200, active)
+          send(res, title, content, current, 200, active, scripts)
         },
         (error: unknown) => {
           send(
@@ -876,6 +965,30 @@ export function masterPages(
       })
     },
   )
+  // Your account: everyone's own record, behind the top-right account icon.
+  app.get('/account', (req, res) => {
+    hashing(res)
+    const current = session(req)
+    if (current == null) {
+      res.redirect(303, master.configured() ? '/sign-in' : '/')
+      return
+    }
+    const actor = sessionActor(current)
+    send(
+      res,
+      'Your account',
+      accountView({
+        viewer: viewerOf(current),
+        person: personRow(master.people.get(actor, actor.accountId!)),
+        signOut: viewerOf(current).signOut,
+        editable: true,
+      }),
+      current,
+      200,
+      'account',
+      ['/assets/people.js'],
+    )
+  })
   guarded(
     '/people',
     'people.read',
@@ -884,24 +997,14 @@ export function masterPages(
     (current) => {
       const actor = sessionActor(current)
       return peopleView({
-        people: master.people.list(actor).map((person) => ({
-          id: person.id,
-          name: person.name,
-          role: person.role,
-          ...(person.email == null ? {} : { email: person.email }),
-          addresses: person.addresses,
-          ...(person.username == null ? {} : { username: person.username }),
-          disabled: person.disabled,
-          password: person.password,
-          ...(person.invitation == null
-            ? {}
-            : { invitation: person.invitation }),
-        })),
+        people: master.people.list(actor).map(personRow),
         now: master.database.now(),
         canChange: can(actor, 'people.change'),
+        ...(actor.accountId == null ? {} : { viewerId: actor.accountId }),
       })
     },
     true,
+    ['/assets/people.js'],
   )
   guarded(
     '/projects/new',
@@ -986,8 +1089,7 @@ export function masterPages(
         people: master.people.list(actor).map((person) => ({
           id: person.id,
           name: person.name,
-          ...(person.email == null ? {} : { email: person.email }),
-          addresses: person.addresses,
+          emails: person.emails.map((entry) => entry.email),
         })),
         canChange: can(actor, 'groups.change'),
       }),
@@ -1058,32 +1160,10 @@ export function masterPages(
       res,
       project.name,
       projectView({
+        viewer: viewerOf(current),
         slug: project.slug,
         name: project.name,
-        repository: project.repository,
-        defaultBranch: project.defaultBranch,
-        format: project.format,
-        apps: project.apps.map((entry) => ({
-          bundleId: entry.bundleId,
-          platforms: entry.platforms,
-          ...(entry.apple == null ? {} : { apple: { team: entry.apple.team } }),
-        })),
-        rules: project.rules.map((rule) => ({
-          pattern: rule.pattern,
-          mode: rule.mode,
-        })),
-        webhook: project.webhookSecret.set,
-        ...(project.signingLabel == null
-          ? {}
-          : { signingLabel: project.signingLabel }),
-        buildNumbers: master.buildNumbers
-          .sequences(project.id)
-          .map((sequence) => ({
-            key: sequence.key,
-            format: sequence.scheme.format,
-            scope: sequence.scheme.scope,
-            last: sequence.last,
-          })),
+        ...projectDetails(project, master.buildNumbers, master.pushes),
         canSeed: can(actor, 'buildNumbers.seed'),
       }),
       current,
@@ -1100,18 +1180,7 @@ export function masterPages(
         ? req.query.branch
         : undefined
     const now = master.database.now()
-    // The branches the build's push trigger names, from the default branch's last setup, else any branch's.
-    const push =
-      master.pushes.cached(project, project.defaultBranch) ??
-      master.pushes.latest(project)
-    const pinned =
-      push?.build == null
-        ? []
-        : push.build === true
-          ? project.rules
-              .filter((rule) => rule.mode === 'automatic')
-              .map((rule) => rule.pattern)
-          : push.build
+    const pinned = pushBranches(project, master.pushes)
     const { branches, runs } = projectRunsData(
       {
         db: master.database.db,
@@ -1130,6 +1199,7 @@ export function masterPages(
       `${project.name} · Runs and builds`,
       projectRunsView(
         {
+          viewer: viewerOf(current),
           slug: project.slug,
           name: project.name,
           ...(branch == null ? {} : { branch }),
@@ -1138,6 +1208,120 @@ export function masterPages(
         },
         now,
       ),
+      current,
+      200,
+      'dashboard',
+    )
+  })
+  /**
+   * The app ID an app ID page is about, with its project: the project's own
+   * app ID, enabled, that the viewer may see; otherwise the page answers 404
+   * under the project, and this returns nothing.
+   */
+  const appFor = (
+    req: express.Request,
+    res: express.Response,
+    title: string,
+  ):
+    | (NonNullable<ReturnType<typeof projectFor>> & {
+        details: ReturnType<typeof projectDetails>
+        app: { id: number; bundleId: string; name: string; platforms: string[] }
+      })
+    | undefined => {
+    const found = projectFor(req, res, title)
+    if (found == null) return undefined
+    const { current, project } = found
+    const bundleId = String(req.params.appId)
+    const app = project.apps.find((entry) => entry.bundleId === bundleId)
+    const enabled =
+      app != null &&
+      master.database.db
+        .prepare('SELECT 1 FROM apps WHERE id=? AND enabled=1')
+        .get(app.id) != null
+    if (app == null || !enabled || !appVisible(master, current)(app.id)) {
+      send(
+        res,
+        title,
+        appMissingView(viewerOf(current), project.slug, project.name),
+        current,
+        404,
+        'dashboard',
+      )
+      return undefined
+    }
+    return {
+      ...found,
+      details: projectDetails(project, master.buildNumbers, master.pushes),
+      app: {
+        id: app.id,
+        bundleId: app.bundleId,
+        name: app.name,
+        platforms: app.platforms,
+      },
+    }
+  }
+  app.get('/projects/:slug/apps/:appId', (req, res) => {
+    const found = appFor(req, res, 'Runs and builds')
+    if (found == null) return
+    const { current, project, details } = found
+    const branch =
+      typeof req.query.branch === 'string' && req.query.branch !== ''
+        ? req.query.branch
+        : undefined
+    const now = master.database.now()
+    const { branches, runs } = projectRunsData(
+      {
+        db: master.database.db,
+        viewer: viewerOf(current),
+        now,
+        appVisible: appVisible(master, current),
+        artifactBase: '',
+        reserved: (run): string | undefined =>
+          reservedBuildNumber(master.database.db, run),
+      },
+      project.slug,
+      {
+        ...(branch == null ? {} : { branch }),
+        pinned: details.pinned,
+        app: found.app.bundleId,
+      },
+    )
+    send(
+      res,
+      `${found.app.bundleId} · Runs and builds`,
+      projectRunsView(
+        {
+          viewer: viewerOf(current),
+          slug: project.slug,
+          name: project.name,
+          ...(branch == null ? {} : { branch }),
+          branches,
+          runs,
+          app: found.app,
+        },
+        now,
+      ),
+      current,
+      200,
+      'dashboard',
+    )
+  })
+  app.get('/projects/:slug/apps/:appId/build-numbers', (req, res) => {
+    const found = appFor(req, res, 'Build numbers')
+    if (found == null) return
+    const { current, actor, project, details } = found
+    send(
+      res,
+      `${found.app.bundleId} · Build numbers`,
+      appBuildNumbersView({
+        viewer: viewerOf(current),
+        slug: project.slug,
+        name: project.name,
+        app: found.app,
+        projectApps: details.apps.map((entry) => entry.bundleId),
+        buildNumbers: details.buildNumbers,
+        canSeed: can(actor, 'buildNumbers.seed'),
+      }),
       current,
       200,
       'dashboard',
@@ -1211,12 +1395,22 @@ export function masterPages(
       .all(project.id) as Array<{ sha: string; branch: string }>
     const commit =
       typeof req.query.commit === 'string' ? req.query.commit : commits[0]?.sha
-    const file = project.entrypoint ?? 'Masonfile.ts'
+    // The copy kept when the run pinned the commit, else the mirror.
+    const kept =
+      commit == null
+        ? undefined
+        : (master.database.db
+            .prepare('SELECT file,text FROM masonfiles WHERE key=?')
+            .get(`${project.id}:${commit}`) as
+            | { file: string; text: string }
+            | undefined)
+    const file = kept?.file ?? project.entrypoint ?? 'Masonfile.ts'
     const render = (extra: { text?: string; error?: string }): void => {
       send(
         res,
         `${project.name} · Masonfile`,
         masonfileView({
+          viewer: viewerOf(current),
           slug,
           name: project.name,
           commits,
@@ -1229,8 +1423,17 @@ export function masterPages(
         'dashboard',
       )
     }
+    if (project.format === 'script') {
+      render({ error: SCRIPT_PROJECT })
+      return
+    }
     if (commit == null) {
       render({ error: 'No run has a commit yet.' })
+      return
+    }
+    // The master still reads from its mirror a Masonfile too large to copy.
+    if (kept != null && kept.text !== masonfileTooLarge(kept.file)) {
+      render({ text: kept.text })
       return
     }
     master.mirrors.show(slug, project.repository, commit, file).then(
@@ -1261,6 +1464,8 @@ export function masterPages(
       ),
     )
   })
+  // Install apps and Devices, from the host over the link.
+  masterCatalogPages(app, master, session, send)
   app.get('/sign-in', (req, res) => {
     if (!master.configured()) {
       res.redirect(303, '/')

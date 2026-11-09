@@ -97,10 +97,23 @@ export function plainLog(text: string): string {
   return text.replace(escapes, '')
 }
 
+/** Lines of a log as HTML, numbered from `first`, as the server renders them. */
+export function logLines(text: string, first: number): string[] {
+  const lines = text.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n')
+  if (text === '') return []
+  let style = { bold: false, underline: false }
+  return lines.map((line, index) => {
+    const rendered = ansiLine(line, style)
+    style = rendered.style
+    return `<span class="line" data-line="${first + index}">${rendered.html}</span>`
+  })
+}
+
 /** The line number a byte offset of a log falls on, counting from 1. */
 export function lineAt(text: Buffer, offset: number): number {
   let lines = 1
   const end = Math.min(offset, text.length)
-  for (let i = 0; i < end; i++) if (text[i] === 0x0a) lines++
+  for (let i = text.indexOf(0x0a); i >= 0 && i < end; i = text.indexOf(0x0a, i + 1))
+    lines++
   return lines
 }

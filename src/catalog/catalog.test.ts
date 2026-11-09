@@ -23,6 +23,7 @@ import type { Build, Format, Platform } from '../validation.js'
 import { byteRange, Installations } from './install.js'
 import { branchKey, branchName, platform } from './platform.js'
 import { branches } from './routes.js'
+import { crumbTrail } from '../test/crumbs.js'
 
 let store: Store,
   accounts: Accounts,
@@ -157,6 +158,33 @@ describe('Mason protected catalog and installation', () => {
     assert(!builds.includes('build 2'))
     assert(builds.includes('abcdef012345') && builds.includes('UTC'))
     assert(builds.includes(`href="${route}?platform=android"`))
+    // Each page is in the shell, with the side menu (Install apps current)
+    // and the platform switch in its own nav, which the switch swaps.
+    for (const html of [home, list, builds]) {
+      assert.match(html, /<body class="with-rail">/)
+      assert.match(html, /<a href="\/apps" aria-current="page"/)
+      assert.match(
+        html,
+        /<main><div class="page-head"><div><nav class="breadcrumbs" aria-label="Breadcrumb">[^]*<\/nav><h1>[^<]+<\/h1><\/div><\/div><nav class="catalog-nav" data-catalog-platforms aria-label="Build platform"><div class="platforms"/,
+      )
+      assert.doesNotMatch(html, /Register Device<\/a>|action="\/auth\/logout"/)
+    }
+    // Mason Host › Install apps › the app › the branch, keeping the platform.
+    assert.match(
+      crumbTrail(home).join(),
+      /^Mason Host \/,Install apps \/apps\?platform=[a-z]+ \*$/,
+    )
+    assert.deepEqual(crumbTrail(list), [
+      'Mason Host /',
+      'Install apps /apps?platform=ios',
+      `Example App /apps/${app}?platform=ios *`,
+    ])
+    assert.deepEqual(crumbTrail(builds), [
+      'Mason Host /',
+      'Install apps /apps?platform=ios',
+      `Example App /apps/${app}?platform=ios`,
+      `feature/new ${route}?platform=ios *`,
+    ])
     assert.match(
       await (await request(route + '?platform=windows')).text(),
       /No Windows builds/,
@@ -350,6 +378,51 @@ describe('Mason protected catalog and installation', () => {
     )
   })
 
+  it('migrates a standalone store to distribution user_version 9, whose relay sessions never sign a browser in', () => {
+    const file = path.join(root, 'v8.sqlite')
+    const old = new Store(
+      asConfig({
+        origin: 'https://builds.example.test',
+        database: file,
+        storage: path.join(root, 'v8-packages'),
+        freeSpaceBytes: 0,
+      }),
+    )
+    old.db.exec(`ALTER TABLE sessions DROP COLUMN relayed;
+      ALTER TABLE device_challenges DROP COLUMN return_origin;
+      PRAGMA user_version=8;`)
+    old.close()
+    const migrated = new Store(
+      asConfig({
+        origin: 'https://builds.example.test',
+        database: file,
+        storage: path.join(root, 'v8-packages'),
+        freeSpaceBytes: 0,
+      }),
+    )
+    try {
+      assert.equal(
+        migrated.db.prepare('PRAGMA user_version').get()?.user_version,
+        9,
+      )
+      const people = new Accounts(migrated)
+      const started = people.login(identity)
+      assert.equal(
+        migrated.db
+          .prepare('SELECT relayed FROM sessions WHERE hash=?')
+          .get(started.session.hash)?.relayed,
+        0,
+      )
+      assert(people.session(started.token) != null)
+      migrated.db
+        .prepare('UPDATE sessions SET relayed=1 WHERE hash=?')
+        .run(started.session.hash)
+      assert.equal(people.session(started.token), undefined)
+      assert(people.sessionHash(started.session.hash) != null)
+    } finally {
+      migrated.close()
+    }
+  })
   it('does not reveal catalog data to anonymous or pending accounts', async () => {
     publish('android')
     const anonymous = await request(`/apps/${app}`, {}, false)
@@ -662,7 +735,10 @@ describe('Mason protected catalog and installation', () => {
       })
       if (os === 'ios') {
         assert.equal(response.status, 200)
-        assert.match(await response.text(), /itms-services:/)
+        const installer = await response.text()
+        assert.match(installer, /itms-services:/)
+        // The installer page keeps the side menu.
+        assert.match(installer, /<a href="\/apps" aria-current="page"/)
       } else {
         assert.equal(response.status, 303)
         const url = response.headers.get('location')!

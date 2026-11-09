@@ -186,3 +186,12 @@ export function asPasswordUpdate(raw: unknown): ReturnType<typeof cleanUpdate> {
   rejectRawPassword(raw)
   return cleanUpdate(raw)
 }
+
+/**
+ * What a sign-in names its person with: `identifier` (a username or an
+ * email), or the `username` a page from an earlier release sends.
+ */
+export function identifierOf(value: unknown): unknown {
+  const input = value as { identifier?: unknown; username?: unknown } | null
+  return input?.identifier ?? input?.username
+}

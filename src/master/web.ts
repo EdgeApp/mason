@@ -41,12 +41,27 @@ const bundle = (name: string): string =>
 export function masterApp(context: MasterWebContext): express.Express {
   const app = nodeWebApp(context)
   const master = context.master
-  for (const name of ['groups', 'master', 'password-worker', 'run', 'secrets'])
+  for (const name of [
+    'groups',
+    'master',
+    'password-worker',
+    'people',
+    'run',
+    'secrets',
+  ])
     app.get(`/assets/${name}.js`, (_req, res) => {
       if (name === 'password-worker')
         res.set('Content-Security-Policy', masterContentSecurityPolicy)
       res.type('js').send(bundle(name))
     })
+  // The catalog's platform switch, local times and iPad check.
+  app.get('/assets/catalog.js', (_req, res) => {
+    res
+      .type('js')
+      .send(
+        readFileSync(new URL('../browser/client.js', import.meta.url), 'utf8'),
+      )
+  })
   app.use(
     accountsApi(master, {
       setupCode: context.setupCode ?? ((): undefined => undefined),

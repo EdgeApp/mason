@@ -187,6 +187,98 @@ describe('Host opening sync', () => {
     }
   })
 
+  it('repairs a failed on-demand sync from where it asked, on the same link', async () => {
+    const asked: Array<{ revision: number; opening: boolean }> = []
+    let failNext = false
+    const link = {
+      closed: false,
+      request: async (
+        method: string,
+        params: unknown,
+        timeout: number,
+      ): Promise<Sync> => {
+        if (method !== 'host.sync') throw new Error(method)
+        const { revision } = params as { revision: number }
+        // The opening sync waits five minutes; an on-demand one 30 seconds.
+        asked.push({ revision, opening: timeout > 30_000 })
+        if (!failNext)
+          return { kind: 'changes', revision: asked.length * 4, changes: [] }
+        failNext = false
+        // The master counted this answer as sent and pushed what followed.
+        await host.methods().events!.changes!(
+          { kind: 'changes', revision: 20, changes: [] },
+          link as unknown as Link,
+        )
+        throw new LinkError('Message too large', 'failed')
+      },
+    }
+    const host = new HostRuntime({
+      dir: root(),
+      link: (): Link => link as unknown as Link,
+      syncRetryMs: (): number => 5,
+    })
+    try {
+      await host.connected()
+      assert.equal(host.cache.revision(), 4)
+      failNext = true
+      await assert.rejects(host.catchUp(), /Message too large/)
+      await until(() => host.online(), 'the opening sync did not repair')
+      assert.deepEqual(asked, [
+        { revision: 0, opening: true },
+        { revision: 4, opening: false },
+        { revision: 4, opening: true },
+      ])
+    } finally {
+      await host.stop()
+    }
+  })
+
+  it('repairs an on-demand sync that fails while the opening sync is flushing', async () => {
+    const asked: Array<{ revision: number; opening: boolean }> = []
+    let answerOpening: ((sync: Sync) => void) | undefined
+    let failOnDemand: ((error: Error) => void) | undefined
+    const link = {
+      closed: false,
+      request: (
+        method: string,
+        params: unknown,
+        timeout: number,
+      ): Promise<Sync> => {
+        if (method !== 'host.sync') throw new Error(method)
+        const opening = timeout > 30_000
+        asked.push({
+          revision: (params as { revision: number }).revision,
+          opening,
+        })
+        if (asked.length > 2)
+          return Promise.resolve({ kind: 'changes', revision: 9, changes: [] })
+        return new Promise((resolve, reject) => {
+          if (opening) answerOpening = resolve
+          else failOnDemand = reject
+        })
+      },
+    }
+    const host = new HostRuntime({
+      dir: root(),
+      link: (): Link => link as unknown as Link,
+      syncRetryMs: (): number => 5,
+    })
+    try {
+      const opening = host.connected()
+      const onDemand = host.catchUp()
+      await until(() => asked.length === 2, 'both syncs were not asked')
+      answerOpening!({ kind: 'changes', revision: 4, changes: [] })
+      failOnDemand!(new LinkError('Message too large', 'failed'))
+      await assert.rejects(onDemand, /Message too large/)
+      await opening
+      await until(() => host.online(), 'the opening sync did not repair')
+      assert.deepEqual(asked.at(-1), { revision: 0, opening: true })
+      assert.equal(host.cache.revision(), 9)
+    } finally {
+      await host.stop()
+    }
+  })
+
   it('stops retrying when the link is gone', async () => {
     let current: Link | undefined
     let calls = 0

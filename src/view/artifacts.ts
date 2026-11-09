@@ -1,6 +1,15 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { bytes, platformChip, runHref, statusDot } from './dashboard.js'
-import { ago, duration, escape, localTime, runName, time } from './html.js'
+import {
+  ago,
+  breadcrumbs,
+  duration,
+  escape,
+  localTime,
+  runName,
+  time,
+  type Crumb,
+} from './html.js'
 import { icon } from './icons.js'
 import type { Viewer } from './shell.js'
 import { isGlob, matches } from '../master/rules.js'
@@ -120,7 +129,17 @@ function runDetail(source: ArtifactsSource, run: RunRow): string {
     run.started == null
       ? ''
       : ` · took ${duration((run.finished ?? source.now) - run.started)}`
-  return `<div class="page-head"><div><div class="breadcrumbs"><a href="/artifacts">Artifacts</a><span>/</span><a href="/artifacts?project=${encodeURIComponent(run.slug)}">${escape(run.slug)}</a></div><h1>${escape(runName(run.workflow, run.number))}</h1><p>${statusDot(run.status)} ${escape(run.status)} · <span class="mono">${escape(run.branch)}</span>${run.commit_sha == null ? '' : ` · <span class="mono">${escape(run.commit_sha.slice(0, 12))}</span>`} · ${time(run.created)}${escape(took)}${run.description == null ? '' : ` · ${escape(run.description)}`}</p></div></div><section class="panel"><h2>${icon('account_tree')}Stages</h2><ul>${stages
+  return `<div class="page-head"><div>${breadcrumbs(source.viewer, [
+    { label: 'Artifacts', href: '/artifacts' },
+    {
+      label: run.name,
+      href: `/artifacts?project=${encodeURIComponent(run.slug)}`,
+    },
+    {
+      label: `Run ${run.number}`,
+      href: `/artifacts?run=${encodeURIComponent(run.id)}`,
+    },
+  ])}<h1>${escape(runName(run.workflow, run.number))}</h1><p>${statusDot(run.status)} ${escape(run.status)} · <span class="mono">${escape(run.branch)}</span>${run.commit_sha == null ? '' : ` · <span class="mono">${escape(run.commit_sha.slice(0, 12))}</span>`} · ${time(run.created)}${escape(took)}${run.description == null ? '' : ` · ${escape(run.description)}`}</p></div></div><section class="panel"><h2>${icon('account_tree')}Stages</h2><ul>${stages
     .map(
       (stage) =>
         `<li><span class="mono">${escape(stage.name)}</span><span class="state-${escape(stage.status)}">${statusDot(stage.status)} ${escape(stage.status)}${stage.started == null ? '' : ` · ${escape(duration((stage.finished ?? source.now) - stage.started))}`}</span></li>`,
@@ -189,6 +208,45 @@ export function runsTable(
     .join('')}</tbody></table>`
 }
 
+/**
+ * Whether the run's own workflow (`workflow`, its `jobs.workflow`) has a
+ * stage, in `stages` or `post`, whose `publishes` holds the app ID bound to
+ * each `?` (bound twice): `graph` is the run's recorded graph as JSON.
+ */
+const publishesApp = (graph: string, workflow: string): string =>
+  `(${['stages', 'post']
+    .map(
+      (part) =>
+        `EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(${graph}) THEN ${graph} END,'$.workflows') w, json_each(w.value,'$.${part}') s, json_each(s.value,'$.publishes') pub WHERE json_extract(w.value,'$.name')=${workflow} AND pub.value=?)`,
+    )
+    .join(' OR ')})`
+
+/**
+ * The condition on `jobs j` that its run publishes an app ID, for the
+ * database at hand: the master keeps each graph once in `graphs`, named by
+ * `jobs.graph_key`; the host's copy keeps it on the run, `jobs.graph`.
+ */
+function publishing(
+  db: DatabaseSync,
+  project: string,
+  app: string,
+): { where: string; args: string[] } {
+  const keyed =
+    db
+      .prepare("SELECT 1 FROM pragma_table_info('jobs') WHERE name='graph_key'")
+      .get() != null
+  // On the master each of the project's graphs is read once, not once per run.
+  return keyed
+    ? {
+        where: ` AND j.graph_key IN (SELECT g.key FROM graphs g WHERE g.project_id=(SELECT id FROM projects WHERE slug=?) AND ${publishesApp('g.graph', 'g.workflow')})`,
+        args: [project, app, app],
+      }
+    : {
+        where: ` AND ${publishesApp('j.graph', 'j.workflow')}`,
+        args: [app, app],
+      }
+}
+
 /** A branch in the Runs and builds tab's list; `pinned` ones are those its push trigger builds. */
 export interface BranchItem {
   branch: string
@@ -215,7 +273,8 @@ export interface ProjectRunRow {
  * for the branches with runs it matches; then every other branch with runs,
  * most recently run first. The runs are the latest 50 of one branch or all,
  * each with its published version and the app build number it reserved,
- * else its published ones.
+ * else its published ones. With `app`, only the runs whose workflow
+ * publishes that app ID count, and only the branches that have one.
  */
 export function projectRunsData(
   source: ArtifactsSource & {
@@ -223,15 +282,19 @@ export function projectRunsData(
     reserved?: (run: string) => string | undefined
   },
   project: string,
-  options: { branch?: string; pinned: string[] },
+  options: { branch?: string; pinned: string[]; app?: string },
 ): { branches: BranchItem[]; runs: ProjectRunRow[] } {
   const { db } = source
+  const app =
+    options.app == null ? undefined : publishing(db, project, options.app)
+  const filter = app?.where ?? ''
+  const appArgs = app?.args ?? []
   const latest = (
     db
       .prepare(
-        "SELECT j.branch,MAX(j.created) AS at FROM jobs j JOIN projects p ON p.id=j.project_id WHERE p.slug=? AND j.workflow NOT LIKE '@%' GROUP BY j.branch ORDER BY at DESC,j.branch LIMIT 200",
+        `SELECT j.branch,MAX(j.created) AS at FROM jobs j JOIN projects p ON p.id=j.project_id WHERE p.slug=? AND j.workflow NOT LIKE '@%'${filter} GROUP BY j.branch ORDER BY at DESC,j.branch LIMIT 200`,
       )
-      .all(project) as Array<{ branch: string; at: number }>
+      .all(project, ...appArgs) as Array<{ branch: string; at: number }>
   ).map((row) => ({ branch: row.branch, at: Number(row.at) }))
   const branches: BranchItem[] = []
   const add = (branch: string, pinned: boolean, at?: number): void => {
@@ -239,21 +302,24 @@ export function projectRunsData(
     branches.push({ branch, pinned, ...(at == null ? {} : { at }) })
   }
   for (const pattern of options.pinned)
-    if (!isGlob(pattern))
-      add(pattern, true, latest.find((entry) => entry.branch === pattern)?.at)
-    else
+    if (!isGlob(pattern)) {
+      const at = latest.find((entry) => entry.branch === pattern)?.at
+      // An app ID's page lists only the branches that ran a workflow publishing it.
+      if (at != null || options.app == null) add(pattern, true, at)
+    } else
       for (const entry of latest)
         if (matches(pattern, entry.branch)) add(entry.branch, true, entry.at)
   for (const entry of latest) add(entry.branch, false, entry.at)
   const runs = (
     db
       .prepare(
-        `${runSelect} WHERE p.slug=? AND j.workflow NOT LIKE '@%' AND (? IS NULL OR j.branch=?) ORDER BY j.created DESC LIMIT 50`,
+        `${runSelect} WHERE p.slug=? AND j.workflow NOT LIKE '@%' AND (? IS NULL OR j.branch=?)${filter} ORDER BY j.created DESC LIMIT 50`,
       )
       .all(
         project,
         options.branch ?? null,
         options.branch ?? null,
+        ...appArgs,
       ) as unknown as RunRow[]
   ).map((run) => {
     const builds = runBuilds(source, run)
@@ -301,10 +367,26 @@ export function artifactsView(
       return '<h1>Run unavailable</h1><p class="empty-state">There is no such run.</p>'
     return runDetail(source, run)
   }
-  const heading = [filter.project, filter.branch]
-    .filter((part) => part != null)
-    .join(' · ')
-  return `<div class="page-head"><div><div class="breadcrumbs"><a href="/artifacts">Artifacts</a>${heading === '' ? '' : `<span>/</span><span>${escape(heading)}</span>`}</div><h1>Artifacts</h1><p>Each run's saved artifacts, test results and published builds.</p></div></div>${runsTable(
+  // Artifacts, then the project and the branch it is narrowed to.
+  const crumbs: Crumb[] = [{ label: 'Artifacts', href: '/artifacts' }]
+  if (filter.project != null) {
+    const project = source.db
+      .prepare('SELECT name FROM projects WHERE slug=?')
+      .get(filter.project) as { name: string } | undefined
+    crumbs.push({
+      label: project?.name ?? filter.project,
+      href: `/artifacts?project=${encodeURIComponent(filter.project)}`,
+    })
+  }
+  if (filter.branch != null)
+    crumbs.push({
+      label: filter.branch,
+      href: `/artifacts?${new URLSearchParams({
+        ...(filter.project == null ? {} : { project: filter.project }),
+        branch: filter.branch,
+      }).toString()}`,
+    })
+  return `<div class="page-head"><div>${breadcrumbs(source.viewer, crumbs)}<h1>Artifacts</h1><p>Each run's saved artifacts, test results and published builds.</p></div></div>${runsTable(
     source,
     {
       ...(filter.project == null ? {} : { project: filter.project }),

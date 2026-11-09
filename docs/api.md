@@ -226,8 +226,9 @@ lowest role each permission needs (`src/master/permissions.ts`):
 | | | | `backups.key` | admin |
 
 `builds.read` is checked by the builds routes (section 14), on the master
-and on the host, and by the host's catalog; `devices.register` is checked
-on the host only.
+and on the host, and by the catalog; `devices.register` is checked by the
+host, for its own pages and for the master's (section 15, "Install apps and
+Devices").
 
 ## 2. Session and accounts
 
@@ -239,13 +240,15 @@ the master's own listener.
 
 | Method and path | What it does | Who |
 | --- | --- | --- |
-| `POST /api/v2/session/parameters` | The Argon2id parameters to hash a username's password with. | anyone |
+| `POST /api/v2/session/parameters` | The Argon2id parameters to hash the password of a username or email with. | anyone |
 | `POST /api/v2/session` | Signs in and sets the session cookie. | anyone |
 | `GET /api/v2/session` | The signed-in session, from the cookie. | a session |
 | `DELETE /api/v2/session` | Signs out and clears the cookie. | a session, with CSRF |
 
-**`POST /api/v2/session/parameters`** takes `{ "username": "ada" }` (1–64
-letters, digits, dots, dashes or underscores) and answers the parameters:
+**`POST /api/v2/session/parameters`** takes `{ "identifier": "ada" }`: a
+username (1–64 letters, digits, dots, dashes or underscores) or one of the
+person's confirmed emails (anything with `@`, ignoring case). `username` is
+still read when `identifier` is absent. It answers the parameters:
 
 ```json
 {
@@ -259,14 +262,15 @@ letters, digits, dots, dashes or underscores) and answers the parameters:
 }
 ```
 
-An unknown username gets stable decoy parameters, so the answer does not
-tell whether an account exists.
+An unknown username or email gets stable decoy parameters, so the answer
+does not tell whether an account exists.
 
-**`POST /api/v2/session`** takes `{ "username": "ada", "clientHash": "<64
+**`POST /api/v2/session`** takes `{ "identifier": "ada", "clientHash": "<64
 lowercase hex>" }`, the 32-byte Argon2id hash of the password. A body with a
 `password` field is refused (400). It answers
-`{ "name", "role", "csrf" }` and sets the cookie; a wrong username or
-password is 401, a locked account or address 429.
+`{ "name", "role", "csrf" }` and sets the cookie; a wrong username, email
+or password is 401, a locked account or address 429. Failures count against
+the account whichever identifier named it.
 
 **`GET /api/v2/session`** answers `{ "accountId", "name", "role", "csrf" }`,
 or 401 `Not signed in`.
@@ -280,7 +284,7 @@ or 401 `Not signed in`.
 | `GET /api/v2/people` | Every person who is not removed. | `people.read` |
 | `POST /api/v2/people` | Adds a person. 201. | `people.change` |
 | `GET /api/v2/people/:id` | One person. | `people.read`, or the person themselves |
-| `PUT /api/v2/people/:id` | Changes a person. | `people.change`; a person may change only their own `password` |
+| `PUT /api/v2/people/:id` | Changes a person. | `people.change`; a person may change their own `name`, `emails` and `password` |
 | `DELETE /api/v2/people/:id` | Removes a person. | `people.change` |
 | `POST /api/v2/people/:id/invitation` | Makes the person's invitation link and answers it, once. 201. | `people.change` |
 | `DELETE /api/v2/people/:id/invitation` | Revokes the person's invitation link. | `people.change` |
@@ -295,8 +299,10 @@ A person:
   "role": "manager",
   "disabled": false,
   "password": true,
-  "email": "ada@example.test",
-  "addresses": { "github": "ada@users.example.test" },
+  "emails": [
+    { "email": "ada@example.test", "confirmed": true },
+    { "email": "ada@users.example.test", "confirmed": true }
+  ],
   "groups": [2],
   "permissionVersion": 4,
   "createdAt": 1793450000000,
@@ -305,9 +311,10 @@ A person:
 ```
 
 `password` says whether the account can sign in to the master with a
-password. `email` matches every sign-in method; `addresses` holds an
-address for one method where it differs. `invitation` is there while the
-person has an unused, unexpired invitation link.
+password. `emails` are the person's email addresses, in order. An address
+carries no sign-in method: any enabled method that verifies a confirmed
+address signs its person in. `invitation` is there while the person has an
+unused, unexpired invitation link.
 
 The body of `POST` and `PUT` takes these fields, all optional for `PUT`:
 
@@ -317,12 +324,21 @@ The body of `POST` and `PUT` takes these fields, all optional for `PUT`:
 | `username` | 1–64 letters, digits, dots, dashes or underscores; unique, ignoring case (a person may change only its case) |
 | `role` | `admin`, `manager`, `developer` or `tester` (default `tester`) |
 | `disabled` | boolean |
-| `email` | an email address, up to 320 characters; unique |
-| `addresses` | `{ "<method id>": "<address>" }`; `null` removes a method's address |
+| `emails` | a list of up to 10 email addresses, each up to 320 characters, lower-cased and without repeats; it replaces the person's list. No address may be another person's |
+| `confirmEmails` | addresses the person already has, to confirm |
 | `password` | `{ "clientHash": "<64 hex>", "clientParameters": { … } }`, with parameters of at least 32 MiB, 6 iterations and 4 lanes |
 
-`POST` needs `email`, and `name` or `username`; a password needs a
-username. Setting a password is audited as `person.password` besides
+An address already on the person keeps whether it is confirmed; one an
+administrator adds is confirmed. The old `email` and `addresses` fields are
+refused (400). An address a person adds to their own record is
+unconfirmed: it signs nobody in until an administrator confirms it
+(`confirmEmails`), and an administrator who gives that address to someone
+else takes it over. A verified email from an open-admission sign-in takes
+it over too. `POST` needs `name` or `username`, and a username or at least
+one email; `"username": null` clears a username, which is refused when the
+person would be left with neither, or with no confirmed email and no
+username after having one. A person may not remove their own last
+confirmed email while they have no username. Setting a password is audited as `person.password` besides
 `person.create` or `person.update`; only `people.change` (administrators)
 may set another person's, and the People page does it with a client hash
 the browser makes from a password typed twice, as the sign-in page hashes
@@ -330,12 +346,16 @@ one. Mason never sees the password, so its length and character rules are
 checked in the browser; the master holds the hash's costs to the minimums
 above. `POST` also takes `"invite": true`, which makes the person's
 invitation link at once and adds `"invitation": { "url", "expiresAt" }` to
-the answer. Every `PUT` bumps the person's permission version, which ends
-their sessions. A raw `password` string is refused (400). 404 for an unknown
+the answer. A `PUT` that changes the role, disables or enables, sets a
+password, or takes away an address of someone other than the caller bumps
+the person's permission version, which ends their sessions; a change of
+name, username or a person's own emails keeps them. Each address added or removed is audited as
+`person.email.add` or `person.email.remove`, with the person's id and the
+address. A raw `password` string is refused (400). 404 for an unknown
 person; 409 when the username or an address is taken, or when the change
 would disable, demote or remove the last enabled admin.
 
-`DELETE` disables the account, removes its username, password, addresses
+`DELETE` disables the account, removes its username, password, emails
 and group memberships, and revokes every key it created. The record stays for
 the audit history. It answers `null`.
 
@@ -367,13 +387,16 @@ script reads the token from the fragment and makes two requests, which
 must come from that origin's own page (`Origin`) and are limited with the
 other `/auth` pages:
 
-- `POST /auth/invite/lookup` `{ "token" }` answers `{ "name", "username"? }`
+- `POST /auth/invite/lookup` `{ "token" }` answers `{ "name", "username"?,
+  "usernameRequired" }` (`false` when the person has a username or a
+  confirmed email to sign in with)
   for a live link, or 404 `This invitation link is not valid or has
   expired` (400 on the host).
 - `POST /auth/invite` `{ "token", "username", "clientHash",
   "clientParameters" }` sets the password from a client hash made as for
   `password` above (a raw `password` is refused) and the username, which a
-  person who has one keeps (409 when it is taken). The link is used up, the
+  person who has one keeps (409 when it is taken) and a person with a
+  confirmed email may leave empty. The link is used up, the
   permission version bumped, and the browser signed in (`{ "signedIn": true
   }` with the session cookie). It is audited as `person.invite.accept` by
   the person. On the host, the master does this over the host's link and
@@ -1636,6 +1659,79 @@ A wrong code delays the next guess (5 s, then 10, 20, …); it and any guess
 during the wait answer 429 with `retryAt`, and a guess during the wait is not
 checked. Once the master is configured these routes
 are 404.
+
+### Install apps and Devices
+
+The tester pages are served on both nodes, signed in with that node's
+session:
+
+| Method and path | What it does |
+| --- | --- |
+| `GET /`, `GET /apps` | Install apps: the apps the person may install, with a platform switch. `/` is everyone's home on both nodes. |
+| `GET /apps/:appId`, `GET /apps/:appId/branches/:branchKey` | An app's branches; a branch's builds for a platform, each with its install control. |
+| `POST /builds/:id/install` | A grant for the build: 303 to its package, or the iOS installer page; 409 when the selected device must be registered or the build prepared for it. |
+| `POST /builds/:id/prepare` | Requests a build of that branch and commit for the selected device. |
+| `GET /install/:token/manifest.plist`, `GET /install/:token/artifact` | A grant's iOS manifest and package, with no cookie: `HEAD`, a single `Range` (206 with `Content-Range`, 416 when unsatisfiable) and `If-Range`. |
+| `GET /devices`, `POST /devices/profile`, `POST /devices/:id/:action` | The person's devices; a registration profile; `select`, `rename`, `retry` or `remove`. |
+| `GET /devices/complete/:token` | Where a registered device lands. |
+
+The forms post `csrf`, the session's proof, from the node's own origin. The
+selected device is that node's `__Host-mason-device` cookie; a device that
+is not the person's counts as none, and selecting one is 404.
+
+**On the master** these pages draw their data from the host over the link,
+for the account the master session authenticated; the host decides what
+the person sees from its cache, as for its own pages. For each master session that uses them the host
+keeps a relay session (`sessions.relayed = 1`, keyed by an HMAC of the
+master session's digest), which holds its install grants and registration
+requests, expires with the master session, ends when that session signs
+out (`catalog.endSession`) or its account's permission version changes, and
+never signs a browser in on the host. Install tokens live on the host; the
+master relays a grant's manifest and package with the request's method,
+`Range` and `If-Range`. With a paired host disconnected the pages answer
+503 "The host is unreachable". A master whose cluster has no host yet opens
+Projects & apps at `/` for developers and up; its Install apps and Devices
+pages, and a tester's `/`, say "No host is linked yet — installs come from
+a host" (200; a form post answers 503).
+
+Projects & apps is `/projects` on both nodes, with its filters
+(`?platform=`, `?project=`) there. To a tester `/projects` and every page
+under it answer 404, on both nodes.
+
+The master's public origin is its `master` setting. A manifest from the
+master names its package there, and a registration started on the master
+carries the host's callback URL (devices live on the host), whose 301 sends
+the device back to `<master origin>/devices/complete/<token>`. Without that
+setting the master serves a certificate iOS will not install from, so its
+iOS rows and device registration link to the host's own pages instead, saying
+installs on iPhone and iPad go through the host until the master has a
+public address; other platforms still download from the master.
+
+### Project and app ID pages
+
+A project's pages are served on both nodes to developers and up, signed in
+with that node's session; the host draws them from the copy the master
+sends it, read only. To a tester they answer 404.
+
+| Method and path | What it shows |
+| --- | --- |
+| `GET /projects` | Projects & apps, with `?platform=` and `?project=`. |
+| `GET /projects/:slug` | The project's Overview: app IDs, branch rules, build numbers. |
+| `GET /projects/:slug/runs` | Runs and builds: its branches and the latest runs, `?branch=` for one. |
+| `GET /projects/:slug/masonfile` | The Masonfile at a run's commit, `?commit=`. |
+| `GET /projects/:slug/secrets` | Secrets (the master only). |
+| `GET /projects/:slug/apps/:appId` | An app ID's Runs and builds, `?branch=` for one branch. |
+| `GET /projects/:slug/apps/:appId/build-numbers` | An app ID's Build numbers. |
+
+An app ID's Runs and builds lists the runs whose own workflow has a stage,
+in `stages` or `post`, whose `publishes` holds the app ID, read from the
+graph the run recorded; its branch list holds only the branches with such
+a run, those the push trigger builds first. Its Build numbers shows the
+sequence the app ID takes its numbers from — one whose `apps` lists it,
+else its own key, else the default scheme (`N`, across branches) — and on
+the master, to a holder of `buildNumbers.seed`, a form preset to that
+sequence that posts `POST /api/v2/build-numbers/seed`. An app ID that is not
+the project's, or that is disabled, answers 404 under the project.
 
 ### The host's GitHub webhook
 

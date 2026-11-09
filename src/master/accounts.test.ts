@@ -19,7 +19,7 @@ import { cluster, type Cluster } from '../test/cluster.js'
 import { LOCKOUT, MasterAuth, SetupGate, SignInRefused } from './auth.js'
 import { MasterDatabase } from './database.js'
 import { createPasswordRecord } from './passwords.js'
-import { asForwardRequest, isRunAction } from './forward.js'
+import { asForwardRequest, isAccountChange, isRunAction } from './forward.js'
 import { policy, type Action } from './permissions.js'
 import { localOperator, roles, type Role } from './roles.js'
 import { masterApp } from './web.js'
@@ -236,11 +236,15 @@ describe('Master sign-in, setup, people and permissions', function () {
       ).status,
       201,
     )
-    // The home page needs the session; the session ends at sign-out.
+    // The pages need the session; the session ends at sign-out.
     assert.equal((await request(c.master, 'GET', '/')).status, 303)
-    const home = await request(c.master, 'GET', '/', { cookie })
+    assert.equal((await request(c.master, 'GET', '/projects')).status, 303)
+    const home = await request(c.master, 'GET', '/projects', { cookie })
     assert.equal(home.status, 200)
-    assert.match(home.text, /<strong>paul<\/strong><small>admin · master/)
+    assert.match(
+      home.text,
+      /aria-label="Your account" title="paul · admin · master"/,
+    )
     assert.match(home.text, /Projects &amp; apps/)
     assert.match(home.text, /This master is not backed up/)
     // Only the pages that hash a password, and the worker, may run WebAssembly.
@@ -279,7 +283,7 @@ describe('Master sign-in, setup, people and permissions', function () {
 
   it('U13.1 locks an account after repeated failures and refuses during the lock without checking', async () => {
     await master().people.create(admin, {
-      email: 'person1@example.test',
+      emails: ['person1@example.test'],
       name: 'Lock',
       username: 'lock',
       role: 'developer',
@@ -463,6 +467,50 @@ describe('Master sign-in, setup, people and permissions', function () {
       const home = await request(node, 'GET', '/', { cookie })
       assert.equal(home.status, 200)
       assert.match(home.text, /This master is not backed up/)
+      // A master with no host yet opens Projects & apps for developers and up.
+      assert.match(home.text, /<h1>Projects &amp; apps<\/h1>/)
+      assert.match(home.text, /<a href="\/projects" aria-current="page"/)
+      // Testers, and everyone's Install apps and Devices, hear installs come from a host.
+      const someone = async (role: Role): Promise<string> => {
+        const person = await node.master!.people.create(localOperator, {
+          name: `A ${role}`,
+          emails: [`${role}@lone.example.test`],
+          role,
+        })
+        return `__Host-mason-master=${node.master!.auth.start(person.id, '127.0.0.1').token}`
+      }
+      const tester = await someone('tester')
+      const developer = await someone('developer')
+      const NOTICE = /No host is linked yet — installs come from a host/
+      for (const [who, route, active] of [
+        [tester, '/', 'apps'],
+        [tester, '/apps', 'apps'],
+        [tester, '/devices', 'devices'],
+        [developer, '/apps', 'apps'],
+        [developer, `/apps/1`, 'apps'],
+        [developer, '/devices', 'devices'],
+      ] as const) {
+        const reply = await request(node, 'GET', route, { cookie: who })
+        assert.equal(reply.status, 200, route)
+        assert.match(reply.text, NOTICE, route)
+        assert.match(
+          reply.text,
+          new RegExp(`<a href="/${active}" aria-current="page"`),
+          route,
+        )
+      }
+      const lone = await request(node, 'GET', '/', { cookie: developer })
+      assert.match(lone.text, /<h1>Projects &amp; apps<\/h1>/)
+      assert.equal(
+        (await request(node, 'GET', '/projects', { cookie: tester })).status,
+        404,
+      )
+      // Nothing can be installed without a host.
+      assert.equal(
+        (await request(node, 'POST', '/builds/1/install', { cookie: tester }))
+          .status,
+        503,
+      )
       const backups = await request(node, 'GET', '/backups', { cookie })
       assert.match(backups.text, /data-mason="backup"/)
       assert.equal(
@@ -474,28 +522,50 @@ describe('Master sign-in, setup, people and permissions', function () {
     }
   })
 
-  it('U13.3/U13.14 people: roles, one address per method, disabling, and the last enabled admin', async () => {
+  it('U13.3/U13.14 people: roles, plain emails, disabling, and the last enabled admin', async () => {
     const people = master().people
     const mia = await people.create(admin, {
-      email: 'person2@example.test',
+      emails: ['person2@example.test', 'Mia@Example.test', 'mia@example.test'],
       name: 'Mia',
       username: 'mia',
       role: 'manager',
-      addresses: { google: 'Mia@Example.test' },
       password: await newPassword('Mia-Horse-9'),
     })
-    assert.deepEqual(mia.addresses, { google: 'mia@example.test' })
+    // Lower-cased, without repeats, in order, and confirmed when an admin sets them.
+    assert.deepEqual(mia.emails, [
+      { email: 'person2@example.test', confirmed: true },
+      { email: 'mia@example.test', confirmed: true },
+    ])
     await assert.rejects(
       people.create(admin, {
-        email: 'person3@example.test',
+        emails: ['person3@example.test', 'MIA@example.test'],
         name: 'Copy',
-        addresses: { google: 'mia@example.test' },
       }),
-      /Another person has that google address/,
+      /That email address belongs to someone else/,
+    )
+    // The fields emails replaced are refused by name.
+    for (const old of [
+      { email: 'old@example.test' },
+      { addresses: { google: 'old@example.test' } },
+    ])
+      await assert.rejects(
+        people.create(admin, { name: 'Old', ...old }),
+        /email and addresses are gone: send emails/,
+      )
+    await assert.rejects(
+      people.create(admin, {
+        name: 'Many',
+        emails: Array.from({ length: 11 }, (_, n) => `m${n}@example.test`),
+      }),
+      /at most 10 email addresses/,
+    )
+    await assert.rejects(
+      people.create(admin, { name: 'Bad', emails: 'bad@example.test' }),
+      /emails is a list of email addresses/,
     )
     await assert.rejects(
       people.create(admin, {
-        email: 'person4@example.test',
+        emails: ['person4@example.test'],
         name: 'Raw',
         username: 'raw',
         password: 'secret',
@@ -503,35 +573,24 @@ describe('Master sign-in, setup, people and permissions', function () {
       /client password hash/,
     )
     await assert.rejects(people.create(admin, {}), /name or a username/)
-    // Everyone has an email, which no one else may have for any method.
-    assert.equal(mia.email, mia.email?.toLowerCase())
     await assert.rejects(
       people.create(admin, { name: 'No mail' }),
-      /needs an email address/,
+      /needs a username or an email address/,
     )
-    await assert.rejects(
-      people.create(admin, { name: 'Twin', email: mia.email }),
-      /Another person has that email address/,
-    )
-    await assert.rejects(
-      people.create(admin, {
-        name: 'Clash',
-        email: 'clash@example.test',
-        addresses: { okta: mia.email },
-      }),
-      /Another person has that okta address/,
-    )
-    await assert.rejects(
-      people.create(admin, {
-        email: 'person5@example.test',
-        name: 'p',
-        password: await newPassword('Password-1x'),
-      }),
-      /needs a username/,
+    // An email is enough for a password.
+    assert.equal(
+      (
+        await people.create(admin, {
+          emails: ['person5@example.test'],
+          name: 'p',
+          password: await newPassword('Password-1x'),
+        })
+      ).password,
+      true,
     )
     await assert.rejects(
       people.create(admin, {
-        email: 'person6@example.test',
+        emails: ['person6@example.test'],
         username: 'mia',
       }),
       /username is taken/,
@@ -544,7 +603,7 @@ describe('Master sign-in, setup, people and permissions', function () {
     }
     await assert.rejects(
       people.create(managerActor, {
-        email: 'person7@example.test',
+        emails: ['person7@example.test'],
         name: 'X',
       }),
       /Not allowed for the manager role/,
@@ -553,20 +612,63 @@ describe('Master sign-in, setup, people and permissions', function () {
       people.list(managerActor).some((p) => p.id === mia.id),
       true,
     )
+    // Replacing the list keeps the order given and audits what moved.
+    const db = master().database.db
+    const replaced = await people.update(admin, mia.id, {
+      emails: ['mia@team.test', 'mia@example.test'],
+    })
+    assert.deepEqual(
+      replaced.emails.map((entry) => entry.email),
+      ['mia@team.test', 'mia@example.test'],
+    )
+    assert.deepEqual(
+      db
+        .prepare(
+          "SELECT action,target FROM audit WHERE action LIKE 'person.email.%' AND target LIKE ? ORDER BY id",
+        )
+        .all(`${mia.id} %`)
+        .map((row) => [row.action, row.target]),
+      [
+        ['person.email.add', `${mia.id} mia@team.test`],
+        ['person.email.remove', `${mia.id} person2@example.test`],
+      ],
+    )
+    await assert.rejects(
+      people.update(admin, mia.id, { confirmEmails: ['other@example.test'] }),
+      /not one of this person's addresses/,
+    )
     // Each change bumps the permission version, which ends sessions.
     const { cookie } = await signIn('mia', 'Mia-Horse-9')
-    const changed = await people.update(admin, mia.id, {
-      role: 'developer',
-      addresses: { google: null, okta: 'mia@team.test' },
-    })
-    assert.equal(changed.permissionVersion, mia.permissionVersion + 1)
-    assert.deepEqual(changed.addresses, { okta: 'mia@team.test' })
+    const changed = await people.update(admin, mia.id, { role: 'developer' })
+    assert.equal(changed.permissionVersion, replaced.permissionVersion + 1)
     assert.equal(
       (await request(c.master, 'GET', '/api/v2/session', { cookie })).status,
       401,
     )
-    // Someone may change their own password, and only that.
+    // An admin removing an address that was never confirmed leaves her
+    // signed in: she could not have signed in with it (review 4.3).
     const self = { role: 'developer' as const, accountId: mia.id, label: 's' }
+    const still = await signIn('mia', 'Mia-Horse-9')
+    const pending = await people.update(self, mia.id, {
+      emails: [...changed.emails.map((entry) => entry.email), 'mia@new.test'],
+    })
+    assert.equal(
+      pending.emails.find((entry) => entry.email === 'mia@new.test')?.confirmed,
+      false,
+    )
+    const unconfirmed = await people.update(admin, mia.id, {
+      emails: changed.emails.map((entry) => entry.email),
+    })
+    assert.equal(unconfirmed.permissionVersion, pending.permissionVersion)
+    assert.equal(
+      (
+        await request(c.master, 'GET', '/api/v2/session', {
+          cookie: still.cookie,
+        })
+      ).status,
+      200,
+    )
+    // Someone may change their own password, and only that.
     await people.update(self, mia.id, {
       password: await newPassword('Mia-Horse-10'),
     })
@@ -586,7 +688,7 @@ describe('Master sign-in, setup, people and permissions', function () {
       )
     assert.throws(() => people.remove(admin, paul.id), /last enabled admin/)
     const second = await people.create(admin, {
-      email: 'person8@example.test',
+      emails: ['person8@example.test'],
       name: 'Ada',
       role: 'admin',
     })
@@ -617,7 +719,7 @@ describe('Master sign-in, setup, people and permissions', function () {
     )
     assert.equal((await c.api('GET', '/api/v2/people/0')).status, 404)
     const made = await c.api('POST', '/api/v2/people', {
-      email: 'via-api@example.test',
+      emails: ['via-api@example.test'],
       name: 'Via API',
       role: 'tester',
     })
@@ -630,6 +732,264 @@ describe('Master sign-in, setup, people and permissions', function () {
       (await c.api('DELETE', `/api/v2/people/${made.json.id}`)).status,
       200,
     )
+  })
+
+  it('M2.1 a username is optional with an email; a password signs in by username or any confirmed email', async () => {
+    const people = master().people
+    // Signs in by `identifier`, as this release's pages send it.
+    const signInAs = async (
+      identifier: string,
+      password: string,
+    ): Promise<{ reply: Reply; cookie?: string }> => {
+      const p = await request(c.master, 'POST', '/api/v2/session/parameters', {
+        body: { identifier },
+      })
+      assert.equal(p.status, 200, p.text)
+      const reply = await request(c.master, 'POST', '/api/v2/session', {
+        body: {
+          identifier,
+          clientHash: await clientPasswordHash(password, p.json),
+        },
+      })
+      return reply.status === 200
+        ? { reply, cookie: sessionCookie(reply) }
+        : { reply }
+    }
+    const nora = await people.create(admin, {
+      name: 'Nora',
+      emails: ['nora@example.test', 'nora2@example.test'],
+      password: await newPassword('Nora-Horse-9'),
+    })
+    assert.equal(nora.username, undefined)
+    for (const identifier of [
+      'nora@example.test',
+      'NORA2@Example.test',
+      ' nora@example.test ',
+    ])
+      assert.equal(
+        (await signInAs(identifier, 'Nora-Horse-9')).reply.status,
+        200,
+        identifier,
+      )
+    assert.equal(
+      (await signInAs('nora@example.test', 'Wrong-Horse-9')).reply.json.error,
+      'The username or password is wrong',
+    )
+    // An unknown email gets stable decoy parameters, like an unknown username.
+    const decoy = async (identifier: string): Promise<unknown> =>
+      (
+        await request(c.master, 'POST', '/api/v2/session/parameters', {
+          body: { identifier },
+        })
+      ).json
+    assert.deepEqual(
+      await decoy('nobody@example.test'),
+      await decoy('NOBODY@example.test'),
+    )
+    assert.notDeepEqual(
+      await decoy('nobody@example.test'),
+      await decoy('somebody@example.test'),
+    )
+    assert.equal(
+      (
+        await request(c.master, 'POST', '/api/v2/session/parameters', {
+          body: { identifier: 'not an@email' },
+        })
+      ).status,
+      400,
+    )
+    // A username, or emails, or both; never neither.
+    const uma = await people.create(admin, {
+      name: 'Uma',
+      username: 'uma',
+      password: await newPassword('Uma-Horse-9'),
+    })
+    assert.deepEqual(uma.emails, [])
+    assert.equal((await signInAs('uma', 'Uma-Horse-9')).reply.status, 200)
+    await assert.rejects(
+      people.create(admin, { name: 'Nobody' }),
+      /needs a username or an email address/,
+    )
+    await assert.rejects(
+      people.update(admin, uma.id, { username: null }),
+      /needs a username or an email address/,
+    )
+    await assert.rejects(
+      people.update(admin, uma.id, { username: '' }),
+      /A username is 1–64/,
+    )
+    const cleared = await people.update(admin, nora.id, { username: 'nora' })
+    assert.equal(cleared.username, 'nora')
+    assert.equal(
+      (await people.update(admin, nora.id, { username: null })).username,
+      undefined,
+    )
+    // Lockouts follow the account whichever identifier fails.
+    const tries = await people.create(admin, {
+      name: 'Locked',
+      emails: ['locked@example.test'],
+      username: 'locked',
+      password: await newPassword('Lock-Horse-9'),
+    })
+    for (let n = 0; n < LOCKOUT.account; n++)
+      await signInAs('locked@example.test', 'Wrong-Horse-9')
+    assert.equal((await signInAs('locked', 'Lock-Horse-9')).reply.status, 429)
+    assert.ok(tries.id > 0)
+    // The address's failures would lock later tests out too.
+    master().database.db.prepare('DELETE FROM sign_in_failures').run()
+  })
+
+  it('M2.2 people change their own name and emails and stay signed in; what they add waits for an admin', async () => {
+    const people = master().people
+    const tess = await people.create(admin, {
+      name: 'Tess',
+      role: 'tester',
+      emails: ['tess.self@example.test'],
+      password: await newPassword('Tess-Horse-9'),
+    })
+    const other = await people.create(admin, {
+      name: 'Other',
+      emails: ['other.self@example.test'],
+    })
+    const self = { role: 'tester' as const, accountId: tess.id, label: 't' }
+    const { cookie } = await signIn('tess.self@example.test', 'Tess-Horse-9')
+    const renamed = await people.update(self, tess.id, {
+      name: 'Tess Renamed',
+      emails: ['tess.self@example.test', 'tess.claim@example.test'],
+    })
+    assert.equal(renamed.name, 'Tess Renamed')
+    assert.equal(renamed.permissionVersion, tess.permissionVersion)
+    assert.deepEqual(renamed.emails, [
+      { email: 'tess.self@example.test', confirmed: true },
+      { email: 'tess.claim@example.test', confirmed: false },
+    ])
+    // Still signed in.
+    assert.equal(
+      (await request(c.master, 'GET', '/api/v2/session', { cookie })).status,
+      200,
+    )
+    // The unconfirmed address signs nobody in.
+    assert.equal(
+      (await signIn('tess.claim@example.test', 'Tess-Horse-9')).reply.status,
+      401,
+    )
+    // Not their role, username or confirmations, nor anyone else.
+    for (const change of [
+      { role: 'admin' },
+      { username: 'tess' },
+      { confirmEmails: ['tess.claim@example.test'] },
+    ])
+      await assert.rejects(people.update(self, tess.id, change), /Not allowed/)
+    await assert.rejects(
+      people.update(self, other.id, { name: 'Mine' }),
+      /Not allowed/,
+    )
+    // An admin may not clear the username of someone whose emails are all
+    // unconfirmed: they could not sign in at all (review 1.harness-review.3).
+    const only = await people.create(admin, {
+      name: 'Only Username',
+      username: 'onlyuser',
+      password: await newPassword('Only-Horse-9'),
+    })
+    await people.update(
+      { role: 'tester', accountId: only.id, label: 'o' },
+      only.id,
+      { emails: ['only.claim@example.test'] },
+    )
+    await assert.rejects(
+      people.update(admin, only.id, { username: null }),
+      /Keep a confirmed email or a username/,
+    )
+    // Someone who already has neither (an import, a migration's dropped
+    // duplicate) can still be disabled or re-roled (review 2.harness-review.2).
+    master()
+      .database.db.prepare('UPDATE accounts SET username=NULL WHERE id=?')
+      .run(only.id)
+    master()
+      .database.db.prepare('DELETE FROM account_emails WHERE account_id=?')
+      .run(only.id)
+    assert.equal(
+      (await people.update(admin, only.id, { disabled: true })).disabled,
+      true,
+    )
+    // Their own last confirmed email stays while they have no username.
+    await assert.rejects(
+      people.update(self, tess.id, { emails: ['tess.claim@example.test'] }),
+      /Keep a confirmed email or a username/,
+    )
+    // Another person's confirmed address is refused; an admin takes over a claim.
+    await assert.rejects(
+      people.update(self, tess.id, {
+        emails: ['tess.self@example.test', 'other.self@example.test'],
+      }),
+      /belongs to someone else/,
+    )
+    const given = await people.update(admin, other.id, {
+      emails: ['other.self@example.test', 'tess.claim@example.test'],
+    })
+    assert.deepEqual(given.emails.at(-1), {
+      email: 'tess.claim@example.test',
+      confirmed: true,
+    })
+    assert.deepEqual(
+      people.get(admin, tess.id).emails.map((entry) => entry.email),
+      ['tess.self@example.test'],
+    )
+    // An admin confirms an address the person added.
+    await people.update(self, tess.id, {
+      emails: ['tess.self@example.test', 'tess.second@example.test'],
+    })
+    const confirmed = await people.update(admin, tess.id, {
+      confirmEmails: ['tess.second@example.test'],
+    })
+    assert.deepEqual(confirmed.emails.at(-1), {
+      email: 'tess.second@example.test',
+      confirmed: true,
+    })
+    assert.equal(
+      (await signIn('tess.second@example.test', 'Tess-Horse-9')).reply.status,
+      200,
+    )
+    // An admin taking an address away ends the person's sessions; a role
+    // change does too.
+    const removed = await people.update(admin, tess.id, {
+      emails: ['tess.self@example.test'],
+    })
+    assert.equal(removed.permissionVersion, confirmed.permissionVersion + 1)
+    assert.equal(
+      (await request(c.master, 'GET', '/api/v2/session', { cookie })).status,
+      401,
+    )
+    const promoted = await people.update(admin, tess.id, { role: 'developer' })
+    assert.equal(promoted.permissionVersion, removed.permissionVersion + 1)
+    // Renaming someone else keeps their sessions.
+    const kept = await people.update(admin, tess.id, { name: 'Tess Again' })
+    assert.equal(kept.permissionVersion, promoted.permissionVersion)
+    // An open-admission sign-in with a verified email takes it from a claim.
+    await people.update(self, tess.id, {
+      emails: ['tess.self@example.test', 'owner@example.test'],
+    })
+    const owner = people.admit('first', {
+      name: 'Owner',
+      email: 'owner@example.test',
+    })
+    assert.notEqual(owner, tess.id)
+    assert.deepEqual(people.get(admin, owner).emails, [
+      { email: 'owner@example.test', confirmed: true },
+    ])
+    assert.deepEqual(
+      people.get(admin, tess.id).emails.map((entry) => entry.email),
+      ['tess.self@example.test'],
+    )
+    // Each takeover is recorded as whoever did it: the sign-in, or the admin.
+    const takeover = (email: string): unknown =>
+      master()
+        .database.db.prepare(
+          "SELECT via FROM audit WHERE action='person.email.remove' AND target=? ORDER BY id DESC LIMIT 1",
+        )
+        .get(`${tess.id} ${email}`)?.via
+    assert.equal(takeover('owner@example.test'), 'first sign-in')
+    assert.equal(takeover('tess.claim@example.test'), admin.label)
   })
 
   it('U13.12 groups decide which apps a tester sees on the host, within a second', async () => {
@@ -650,10 +1010,9 @@ describe('Master sign-in, setup, people and permissions', function () {
           .get(slug)!.id,
       )
     const tess = await people.create(admin, {
-      email: 'person9@example.test',
+      emails: ['person9@example.test', 'tess@example.test'],
       name: 'Tess',
       role: 'tester',
-      addresses: { google: 'tess@example.test' },
     })
     const scope = (): ReadonlySet<number> | 'all' | undefined =>
       host
@@ -719,7 +1078,7 @@ describe('Master sign-in, setup, people and permissions', function () {
     people.updateGroup(admin, one.id, { name: 'Renamed' })
     // Developers, managers and admins see every app.
     const dev = await people.create(admin, {
-      email: 'person10@example.test',
+      emails: ['person10@example.test'],
       name: 'Dev',
       role: 'developer',
     })
@@ -1345,10 +1704,9 @@ export async function one(ctx: Stage) { return 1 }
     )
     // A host session may only make the run actions, with its proof.
     const dev = await master().people.create(admin, {
-      email: 'person11@example.test',
+      emails: ['person11@example.test', 'hostdev@example.test'],
       name: 'Host developer',
       role: 'developer',
-      addresses: { google: 'hostdev@example.test' },
     })
     await c.until(
       () =>
@@ -1412,6 +1770,196 @@ export async function one(ctx: Stage) { return 1 }
       },
     )
     assert.equal(cancel.status, 200, cancel.text)
+    // A host session changes its own name and emails through the master (M4),
+    // and stays signed in; never another's record, nor its own role or username.
+    const own = await request(host, 'PUT', `/api/v2/people/${dev.id}`, {
+      cookie,
+      body: {
+        name: 'Host developer renamed',
+        emails: [
+          'person11@example.test',
+          'hostdev@example.test',
+          'mine@example.test',
+        ],
+      },
+      csrf: session.csrf,
+      origin: hostOrigin,
+    })
+    assert.equal(own.status, 200, own.text)
+    assert.equal(own.json.name, 'Host developer renamed')
+    assert.deepEqual(own.json.emails.at(-1), {
+      email: 'mine@example.test',
+      confirmed: false,
+    })
+    for (const [path, change] of [
+      [`/api/v2/people/${admin.accountId ?? 1}`, { name: 'Not mine' }],
+      [`/api/v2/people/${dev.id}`, { role: 'admin' }],
+      [`/api/v2/people/${dev.id}`, { username: 'mine' }],
+    ] as const) {
+      const refused = await request(host, 'PUT', path, {
+        cookie,
+        body: change,
+        csrf: session.csrf,
+        origin: hostOrigin,
+      })
+      assert.equal(refused.status, 403, `${path} ${JSON.stringify(change)}`)
+    }
+    assert.equal(
+      (
+        await request(host, 'PUT', `/api/v2/people/${dev.id}`, {
+          cookie,
+          body: { name: 'No proof' },
+          origin: hostOrigin,
+        })
+      ).status,
+      403,
+    )
+    // The host answers once its own copy has the change: the page that
+    // reloads after Save reads it.
+    assert.ok(
+      host
+        .host!.cache.db.prepare(
+          "SELECT 1 FROM accounts WHERE id=? AND name='Host developer renamed'",
+        )
+        .get(dev.id),
+    )
+    assert.ok(host.host!.accounts.session(token), 'still signed in on the host')
+    // Catch-ups at once share syncs: the first, and one more for those that
+    // came while it ran (reviews 2.harness-review.4, 3.harness-review.1).
+    const link = host.host!.options.link()!
+    const ask = link.request.bind(link)
+    let syncs = 0
+    link.request = (async (method: string, ...rest: unknown[]) => {
+      if (method === 'host.sync') syncs++
+      return await (ask as (...args: unknown[]) => Promise<unknown>)(
+        method,
+        ...rest,
+      )
+    }) as typeof link.request
+    try {
+      await Promise.all([
+        host.host!.catchUp(),
+        host.host!.catchUp(),
+        host.host!.catchUp(),
+      ])
+    } finally {
+      link.request = ask
+    }
+    assert.equal(syncs, 2)
+    // A caller arriving while a sync is in flight still sees what changed
+    // after that sync was computed (review 3.harness-review.1).
+    let computed: () => void = () => undefined
+    const firstComputed = new Promise<void>((resolve) => {
+      computed = resolve
+    })
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let calls = 0
+    link.request = (async (method: string, ...rest: unknown[]) => {
+      const answer = await (ask as (...args: unknown[]) => Promise<unknown>)(
+        method,
+        ...rest,
+      )
+      if (method === 'host.sync' && calls++ === 0) {
+        computed()
+        await gate
+      }
+      return answer
+    }) as typeof link.request
+    try {
+      const first = host.host!.catchUp()
+      await firstComputed
+      await master().people.update(admin, dev.id, { name: 'Renamed after' })
+      const second = host.host!.catchUp()
+      release()
+      await Promise.all([first, second])
+    } finally {
+      link.request = ask
+    }
+    assert.equal(calls, 2)
+    assert.ok(
+      host
+        .host!.cache.db.prepare(
+          "SELECT 1 FROM accounts WHERE id=? AND name='Renamed after'",
+        )
+        .get(dev.id),
+    )
+    // Through the host, only a tester's password is taken, and an address is
+    // never confirmed, whoever the host says is asking (review 2.harness-review.1).
+    const throughHost = async (
+      accountId: number,
+      body: unknown,
+    ): Promise<Reply> => {
+      const started = host.host!.accounts.startSession(accountId)
+      return await request(host, 'PUT', `/api/v2/people/${accountId}`, {
+        cookie: `__Host-mason-session=${started.token}`,
+        body,
+        csrf: started.session.csrf,
+        origin: hostOrigin,
+      })
+    }
+    const refusedPassword = await throughHost(dev.id, {
+      password: await newPassword('Dev-Horse-9'),
+    })
+    assert.equal(refusedPassword.status, 403, refusedPassword.text)
+    assert.match(
+      refusedPassword.json.error,
+      /Change your password on the master/,
+    )
+    const paulId = Number(
+      master()
+        .database.db.prepare("SELECT id FROM accounts WHERE username='paul'")
+        .get()!.id,
+    )
+    const before = master().people.get(admin, paulId)
+    assert.equal(
+      (
+        await throughHost(paulId, {
+          password: await newPassword('Stolen-Horse-9'),
+        })
+      ).status,
+      403,
+    )
+    const added = await throughHost(paulId, {
+      emails: [
+        ...before.emails.map((entry) => entry.email),
+        'attacker@example.test',
+      ],
+    })
+    assert.equal(added.status, 200, added.text)
+    assert.deepEqual(added.json.emails.at(-1), {
+      email: 'attacker@example.test',
+      confirmed: false,
+    })
+    await master().people.update(admin, paulId, {
+      emails: before.emails.map((entry) => entry.email),
+    })
+    // Your account on the host: editable over the link, read-only without it.
+    const account = await request(host, 'GET', '/account', { cookie })
+    assert.equal(account.status, 200)
+    assert.match(account.text, /<h1>Your account<\/h1>/)
+    // A developer sets their password on the master, not through the host.
+    assert.match(account.text, /Change your password on the master/)
+    assert.doesNotMatch(account.text, /data-open="password-own"/)
+    assert.match(account.text, /data-edit="self"/)
+    assert.match(
+      account.text,
+      /mine@example\.test<\/span><small class="tag">unconfirmed/,
+    )
+    assert.match(
+      account.text,
+      /<script type="module" src="\/assets\/people\.js">/,
+    )
+    assert.match(account.text, /action="\/auth\/logout"/)
+    let offline = ''
+    await c.drop('host', 2000, async () => {
+      offline = (await request(host, 'GET', '/account', { cookie })).text
+    })
+    assert.match(offline, /cannot reach the master/)
+    assert.match(offline, /data-edit="none"/)
+    assert.doesNotMatch(offline, /data-add-email|data-open="password-own"/)
     // A tester's session is refused by its role; a stale permission version by the master.
     const answer = async (
       params: unknown,
@@ -1455,7 +2003,7 @@ export async function one(ctx: Stage) { return 1 }
       /only request, cancel, restart or approve/,
     )
     const tester = await master().people.create(admin, {
-      email: 'person12@example.test',
+      emails: ['person12@example.test'],
       name: 'T',
       role: 'tester',
     })
@@ -1590,6 +2138,12 @@ export async function one(ctx: Stage) { return 1 }
     assert(isRunAction('POST', '/api/jobs/abc/cancel'))
     assert(!isRunAction('GET', '/api/v2/runs'))
     assert(!isRunAction('POST', '/api/v2/keys'))
+    // A person's own record, through the host (M4).
+    assert(isAccountChange('PUT', '/api/v2/people/12'))
+    assert(isAccountChange('PUT', '/api/v2/people/12?x=1'))
+    assert(!isAccountChange('POST', '/api/v2/people/12'))
+    assert(!isAccountChange('PUT', '/api/v2/people/12/invitation'))
+    assert(!isAccountChange('PUT', '/api/v2/people'))
   })
 
   it('U13.10 the master’s pages: Backups first for an administrator until they confirm the key, and sessions on every page', async () => {
@@ -1601,7 +2155,7 @@ export async function one(ctx: Stage) { return 1 }
     )
     const people = master().people
     await people.create(admin, {
-      email: 'person13@example.test',
+      emails: ['person13@example.test'],
       name: 'Pages developer',
       username: 'pagesdev',
       role: 'developer',
@@ -1716,7 +2270,7 @@ export async function one(ctx: Stage) { return 1 }
       '--file',
       json('p.json', {
         name: 'CLI person',
-        email: 'cli.person@example.test',
+        emails: ['cli.person@example.test'],
         role: 'tester',
       }),
       '--data',
@@ -1840,7 +2394,7 @@ export async function one(ctx: Stage) { return 1 }
 
   it('U13.5 the host refuses a session request without a readable proof or origin, and answers 502 when the master refuses to forward', async () => {
     const dev = await master().people.create(admin, {
-      email: 'person14@example.test',
+      emails: ['person14@example.test'],
       name: 'Proof developer',
       role: 'developer',
     })

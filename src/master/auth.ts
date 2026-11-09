@@ -3,6 +3,7 @@ import { asObject } from 'cleaners'
 import type { Request } from 'express'
 import {
   asClientHash,
+  identifierOf,
   rejectRawPassword,
   type ArgonParameters,
 } from '../auth/passwordProtocol.js'
@@ -49,9 +50,31 @@ export interface MasterSession {
   role: Role
   csrf: string
   expiresAt: number
+  /** The digest the session is kept by: what a host's relay session stands for. */
+  id: string
+  /** The account's permission version when the session started. */
+  permissionVersion: number
 }
 
-const asSignIn = asObject({ username: asUsername, clientHash: asClientHash })
+/**
+ * What a person signs in with: their username, or one of their confirmed
+ * emails (an identifier with `@`, which no username has).
+ */
+export function asIdentifier(value: unknown): string {
+  if (typeof value === 'string' && value.includes('@')) {
+    const email = value.trim().toLowerCase()
+    if (email.length > 320 || !/^[^\s@]+@[^\s@]+$/.test(email))
+      throw new Error('That is not an email address')
+    return email
+  }
+  return asUsername(value)
+}
+const asSignIn = (
+  value: unknown,
+): { identifier: string; clientHash: string } => ({
+  identifier: asIdentifier(identifierOf(value)),
+  ...asObject({ clientHash: asClientHash })(value),
+})
 
 /**
  * Master sign-in with a client-hash protocol: the browser sends
@@ -61,6 +84,8 @@ const asSignIn = asObject({ username: asUsername, clientHash: asClientHash })
  */
 export class MasterAuth {
   private decoy: Promise<string> | undefined
+  /** Told each session that ends by signing out or going stale, by its digest. */
+  onEnd: ((id: string) => void) | undefined
   constructor(private readonly master: MasterDatabase) {}
   private get db(): MasterDatabase['db'] {
     return this.master.db
@@ -81,23 +106,26 @@ export class MasterAuth {
     return this.decoySecret()
   }
 
-  /** The client parameters to hash a username's password with. */
+  /** The client parameters to hash the password of a username or email with. */
   parameters(value: unknown): ArgonParameters {
-    const username = asUsername(value)
-    const row = this.account(username)
+    const identifier = asIdentifier(value)
+    const row = this.account(identifier)
     const record = readPasswordRecord(row?.password as string | undefined)
     return (
       record?.client ??
-      decoyParameters(username.toLowerCase(), this.decoySecret())
+      decoyParameters(identifier.toLowerCase(), this.decoySecret())
     )
   }
 
-  private account(username: string): Record<string, unknown> | undefined {
+  /** The account a username, or one of its confirmed emails, names. */
+  private account(identifier: string): Record<string, unknown> | undefined {
     return this.db
       .prepare(
-        'SELECT * FROM accounts WHERE username=? COLLATE NOCASE AND removed_at IS NULL',
+        identifier.includes('@')
+          ? 'SELECT a.* FROM account_emails x JOIN accounts a ON a.id=x.account_id WHERE x.email=? AND x.confirmed=1 AND a.removed_at IS NULL'
+          : 'SELECT * FROM accounts WHERE username=? COLLATE NOCASE AND removed_at IS NULL',
       )
-      .get(username)
+      .get(identifier)
   }
 
   /** When a key is locked until, or undefined. */
@@ -139,14 +167,14 @@ export class MasterAuth {
   }
 
   /**
-   * Checks a username and client hash, with the same lockouts as signing in,
-   * and answers the account's id: the host signs people in this way.
+   * Checks a username or email and a client hash, with the same lockouts as
+   * signing in, and answers the account's id: the host signs people in this way.
    */
   async verify(value: unknown, address: string): Promise<number> {
     rejectRawPassword(value)
     const input = asSignIn(value)
-    const row = this.account(input.username)
-    const accountKey = `account:${row?.id ?? `?${input.username.toLowerCase()}`}`
+    const row = this.account(input.identifier)
+    const accountKey = `account:${row?.id ?? `?${input.identifier.toLowerCase()}`}`
     const addressKey = `address:${address}`
     const until = Math.max(
       this.locked(accountKey) ?? 0,
@@ -162,7 +190,7 @@ export class MasterAuth {
       row?.password == null
         ? await (this.decoy ??= createPasswordRecord(
             randomBytes(32).toString('hex'),
-            decoyParameters(input.username.toLowerCase(), this.decoySecret()),
+            decoyParameters(input.identifier.toLowerCase(), this.decoySecret()),
           ))
         : String(row.password)
     const matches =
@@ -217,6 +245,8 @@ export class MasterAuth {
         role: asRole(row.role),
         csrf,
         expiresAt,
+        id: digest(secret),
+        permissionVersion: row.permission_version,
       },
     }
   }
@@ -239,6 +269,7 @@ export class MasterAuth {
       this.db
         .prepare('DELETE FROM master_sessions WHERE hash=?')
         .run(digest(secret))
+      this.onEnd?.(digest(secret))
       return undefined
     }
     return {
@@ -247,14 +278,17 @@ export class MasterAuth {
       role: asRole(row.role),
       csrf: String(row.csrf),
       expiresAt: Number(row.expires_at),
+      id: digest(secret),
+      permissionVersion: Number(row.permission_version),
     }
   }
 
   signOut(secret: string | undefined): void {
     if (secret == null) return
-    this.db
+    const ended = this.db
       .prepare('DELETE FROM master_sessions WHERE hash=?')
       .run(digest(secret))
+    if (Number(ended.changes) > 0) this.onEnd?.(digest(secret))
   }
 
   /** Sessions and invitation links past their expiry. */

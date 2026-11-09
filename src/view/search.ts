@@ -1,7 +1,7 @@
 import type { DatabaseSync } from 'node:sqlite'
 import type { SearchResult } from '../browser/shell.js'
 import { runHref } from './dashboard.js'
-import { runName } from './html.js'
+import { appPath, runName } from './html.js'
 import { atLeast, type Viewer } from './shell.js'
 
 export interface SearchScope {
@@ -18,9 +18,10 @@ const like = (text: string): string => text.replace(/[\\%_]/g, (c) => '\\' + c)
 
 /**
  * ⌘K search: projects, app IDs, runs by number, commits by SHA prefix and
- * branches, within what the viewer may see. Testers find only the app IDs
- * they may install and the projects that hold them; runs, commits and
- * branches are for developers and up.
+ * branches, within what the viewer may see. An app ID opens its page in its
+ * project for developers and up, on either node; testers find only the app
+ * IDs they may install, each opening its Install apps page. Projects, runs,
+ * commits and branches are for developers and up.
  */
 export function search(scope: SearchScope, text: string): SearchResult[] {
   const query = text.trim().slice(0, 100)
@@ -41,20 +42,13 @@ export function search(scope: SearchScope, text: string): SearchResult[] {
       project: string
     }>
   ).filter((app) => scope.appVisible(app.id))
-  const visibleProjects = new Set<string>()
-  if (!developer)
-    for (const row of db
+  // A tester has no project pages; Install apps holds their apps.
+  if (developer)
+    for (const project of db
       .prepare(
-        'SELECT p.slug,pa.app_id FROM projects p JOIN project_apps pa ON pa.project_id=p.id WHERE p.enabled=1',
+        "SELECT slug,name FROM projects WHERE enabled=1 AND (lower(slug) LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\') ORDER BY position,id LIMIT 20",
       )
-      .all() as Array<{ slug: string; app_id: number }>)
-      if (scope.appVisible(row.app_id)) visibleProjects.add(row.slug)
-  for (const project of db
-    .prepare(
-      "SELECT slug,name FROM projects WHERE enabled=1 AND (lower(slug) LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\') ORDER BY position,id LIMIT 20",
-    )
-    .all(pattern, pattern) as Array<{ slug: string; name: string }>)
-    if (developer || visibleProjects.has(project.slug))
+      .all(pattern, pattern) as Array<{ slug: string; name: string }>)
       out.push({
         kind: 'project',
         label: project.name,
@@ -66,10 +60,7 @@ export function search(scope: SearchScope, text: string): SearchResult[] {
       kind: 'app',
       label: app.slug,
       detail: `${app.name} · ${app.project}`,
-      href:
-        viewer.node === 'host'
-          ? `/apps/${app.id}`
-          : `/projects/${encodeURIComponent(app.project)}`,
+      href: developer ? appPath(app.project, app.slug) : `/apps/${app.id}`,
     })
   if (!developer) return out.slice(0, LIMIT)
   const number = /^(?:#|run\s*)?(\d{1,9})$/i.exec(query)?.[1]

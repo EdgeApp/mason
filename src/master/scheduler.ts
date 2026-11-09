@@ -75,6 +75,14 @@ import { SETUP_LABEL } from '../pipeline/graph.js'
 
 type Row = Record<string, unknown>
 
+/** The largest Masonfile the master keeps a copy of for its hosts. */
+export const MASONFILE_COPY_BYTES = 256 * 1024
+/** How many commits' Masonfiles the master keeps per project. */
+export const MASONFILE_COPIES = 50
+/** What the copy of a Masonfile too large to keep says instead. */
+export const masonfileTooLarge = (file: string): string =>
+  `// ${file} is larger than ${MASONFILE_COPY_BYTES / 1024} KiB; Mason keeps no copy of it.\n`
+
 /** The workflow name of a run that only reads the Masonfile (the add-project wizard). */
 export const DISCOVER = '@discover'
 export const SETUP = '@setup'
@@ -659,6 +667,56 @@ export class Scheduler {
     else this.begin(job)
   }
 
+  /**
+   * Keeps the commit's Masonfile (at most MASONFILE_COPY_BYTES, the newest
+   * MASONFILE_COPIES commits per project), once per project and commit, as
+   * `stage.masonfile` reads it; the host shows this copy. A script project
+   * has none, and a failed read is tried again by the next run of the commit.
+   */
+  private async keepMasonfile(project: Project, commit: string): Promise<void> {
+    if (project.format === 'script') return
+    const key = `${project.id}:${commit}`
+    if (
+      this.db.prepare('SELECT 1 FROM masonfiles WHERE key=?').get(key) != null
+    )
+      return
+    try {
+      for (const file of project.entrypoint == null
+        ? ['Masonfile.ts', 'Masonfile.js']
+        : [project.entrypoint]) {
+        const found = await this.options.mirrors.file(
+          project.slug,
+          project.repository,
+          commit,
+          file,
+          MASONFILE_COPY_BYTES,
+        )
+        if (found == null) continue
+        const text = found.text ?? masonfileTooLarge(file)
+        this.options.master.transaction(() => {
+          this.db
+            .prepare(
+              'INSERT INTO masonfiles(key,project_id,commit_sha,file,text,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(key) DO NOTHING',
+            )
+            .run(key, project.id, commit, file, text, this.options.master.now())
+          this.options.master.change('masonfile', key)
+          // Only the newest commits' copies are kept, here and on the host.
+          for (const old of this.db
+            .prepare(
+              'SELECT key FROM masonfiles WHERE project_id=? ORDER BY created_at DESC, key DESC LIMIT -1 OFFSET ?',
+            )
+            .all(project.id, MASONFILE_COPIES) as Array<{ key: string }>) {
+            this.db.prepare('DELETE FROM masonfiles WHERE key=?').run(old.key)
+            this.options.master.change('masonfile', old.key, 'delete')
+          }
+        })
+        return
+      }
+    } catch {
+      // The run goes on; the next one on this commit reads it again.
+    }
+  }
+
   /** Pins the job's commit and makes sure the master's mirror holds it. */
   private async prepare(job: Row): Promise<void> {
     const project = this.project(job)
@@ -678,6 +736,8 @@ export class Scheduler {
       .prepare('UPDATE jobs SET commit_sha=? WHERE id=?')
       .run(commit!, String(job.id))
     this.ensured.add(`${String(job.project_id)}:${commit!}`)
+    // Kept on the side: the run does not wait for its Masonfile's copy.
+    void this.keepMasonfile(project, commit!)
     if (job.graph_key != null) return
     if (project.format === 'script') {
       const graph = scriptGraph(project)
@@ -2617,6 +2677,13 @@ export class Scheduler {
   }
 
   /** Every stage log of a job, setup first, each under a header. */
+  /** The run's stage logs that exist, in the order its whole log joins them. */
+  logFiles(job: string): string[] {
+    return this.stages(job)
+      .map((row) => this.logFile(job, String(row.name)))
+      .filter((file) => existsSync(file))
+  }
+
   logs(job: string): string | undefined {
     if (this.job(job) == null) return undefined
     return this.stages(job)

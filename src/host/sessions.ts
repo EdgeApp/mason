@@ -20,15 +20,12 @@ export function hostLogin(
   identity: Identity,
   previousToken: string | undefined,
 ) => Promise<{ token: string; session: Session; account: Account }> {
-  const accountFor = (
-    identity: Identity,
-    email: string,
-  ): { id: number } | undefined =>
+  const accountFor = (email: string): { id: number } | undefined =>
     cache.db
       .prepare(
-        "SELECT a.id FROM account_addresses x JOIN accounts a ON a.id=x.account_id WHERE x.method IN (?, '*') AND lower(x.email)=lower(?) AND a.disabled=0 ORDER BY x.method='*'",
+        'SELECT a.id FROM account_emails x JOIN accounts a ON a.id=x.account_id WHERE x.email=? AND x.confirmed=1 AND a.disabled=0',
       )
-      .get(identity.provider, email) as { id: number } | undefined
+      .get(email) as { id: number } | undefined
   return async (identity, previousToken) => {
     if (
       !cache.signInMethods().some((method) => method.id === identity.provider)
@@ -37,7 +34,7 @@ export function hostLogin(
     if (!identity.emailVerified || identity.email == null)
       throw new SignInRefused('The provider did not confirm a verified email')
     const email = identity.email
-    let found = accountFor(identity, email)
+    let found = accountFor(email)
     if (found == null) {
       if (!cache.admitsTesters(identity.provider) || admit == null)
         throw new SignInRefused(
@@ -54,7 +51,7 @@ export function hostLogin(
               : 'Sign-in failed',
         )
       }
-      found = accountFor(identity, email)
+      found = accountFor(email)
       if (found == null)
         throw new SignInRefused(
           `No Mason account has ${identity.email} for ${identity.provider}`,

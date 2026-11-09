@@ -19,7 +19,7 @@ export interface ImportSummary {
   branchRules: number
   /** Distribution admin keys, now admin keys on /api/v2; their callers move. */
   adminKeys: Array<{ id: string; name: string }>
-  /** Identities whose address another account already uses for that method. */
+  /** Identities whose address another account already has. */
   skippedAddresses: number
 }
 
@@ -86,10 +86,11 @@ export function importDeployment(
         }
       ).user_version,
     )
-    // 8 adds build variants; an imported build is the default variant either way.
-    if (version !== 7 && version !== 8)
+    // 8 adds build variants; an imported build is the default variant either
+    // way. 9 adds relay sessions and registration return origins, neither imported.
+    if (version < 7 || version > 9)
       throw new ImportRefused(
-        `The distribution database is at schema ${version}; migrate it to 8 first (mason migrate --config …)`,
+        `The distribution database is at schema ${version}; migrate it to 9 first (mason migrate --config …)`,
       )
     const builderVersion = (
       builder.prepare('SELECT version FROM builder_meta').get() as
@@ -126,17 +127,21 @@ export function importDeployment(
       db.exec(
         "UPDATE accounts SET role=CASE WHEN is_admin=1 THEN 'admin' WHEN is_tester=1 THEN 'tester' ELSE 'tester' END",
       )
-      const address = db.prepare(
-        'INSERT INTO account_addresses(account_id,method,email) VALUES(?,?,?) ON CONFLICT DO NOTHING',
+      // A person's addresses are plain emails; the first account to claim one keeps it.
+      const insertEmail = db.prepare(
+        'INSERT INTO account_emails(account_id,email,position,confirmed) SELECT ?1,?2,COALESCE(MAX(position)+1,0),1 FROM account_emails WHERE account_id=?1 ON CONFLICT DO NOTHING',
       )
+      const address = (
+        account: number,
+        email: string,
+      ): { changes: number | bigint } => insertEmail.run(account, email)
       for (const identity of distribution
         .prepare(
           'SELECT account_id,provider,lower(email) email FROM identities WHERE email_verified=1 AND email IS NOT NULL ORDER BY id',
         )
         .all()) {
-        const result = address.run(
+        const result = address(
           identity.account_id as number,
-          identity.provider as string,
           identity.email as string,
         )
         if (result.changes === 1) summary.addresses++
@@ -149,8 +154,8 @@ export function importDeployment(
         )
         .all(now)) {
         const taken = db
-          .prepare('SELECT 1 FROM account_addresses WHERE method=? AND email=?')
-          .get(invite.provider as string, invite.email as string)
+          .prepare('SELECT 1 FROM account_emails WHERE email=?')
+          .get(invite.email as string)
         if (taken != null) continue
         const id = db
           .prepare(
@@ -161,11 +166,7 @@ export function importDeployment(
             invite.email as string,
             now,
           ).lastInsertRowid
-        address.run(
-          Number(id),
-          invite.provider as string,
-          invite.email as string,
-        )
+        address(Number(id), invite.email as string)
         summary.invitedTesters++
         summary.addresses++
       }

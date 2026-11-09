@@ -14,8 +14,8 @@ export interface GroupApp {
 export interface GroupPerson {
   id: number
   name: string
-  email?: string
-  addresses: Record<string, string>
+  /** Their email addresses, the first shown beside their name. */
+  emails: string[]
 }
 
 /** One of the group's apps: its name, and its slug in smaller text. */
@@ -25,7 +25,7 @@ export function appRow(app: GroupApp): string {
 
 /** One of the group's members: their name, and their email in smaller text. */
 export function memberRow(person: GroupPerson): string {
-  const address = person.email ?? Object.values(person.addresses)[0]
+  const address = person.emails[0]
   return `<li data-id="${person.id}"><div><strong>${escape(person.name)}</strong>${address == null ? '' : `<small>${escape(address)}</small>`}</div></li>`
 }
 

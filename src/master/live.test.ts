@@ -10,7 +10,10 @@ import type { QueueEntry } from '../view/dashboard.js'
 import { FakeLiveSource, liveRun, liveStage } from '../test/fakeLiveSource.js'
 import {
   asLiveStreamParams,
+  fileLines,
   followed,
+  lineCount,
+  lineStart,
   LiveSession,
   parseMessage,
   sameOrigin,
@@ -750,6 +753,56 @@ describe('Live socket sessions', () => {
       { subscribe: 'status', key: 'status:r', run: 'r', after: 3 },
     )
     assert.throws(() => parseMessage('null'), /one JSON object/)
+  })
+})
+
+describe('A log read by line number', () => {
+  it('finds any line of a log past its index marks, as reading the whole log would', async () => {
+    const root = mkdtempSync(
+      path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'lines-'),
+    )
+    // 3.4 MB of lines of every length, so lines cross each 1 MB mark.
+    const lines = Array.from(
+      { length: 60_000 },
+      (_, index) => `line ${index + 1} ${'x'.repeat(index % 97)}`,
+    )
+    const file = path.join(root, 'stage.log')
+    writeFileSync(file, lines.join('\n') + '\n')
+    const whole = readFileSync(file)
+    assert(whole.length > 3 * 1024 * 1024)
+    assert.equal(await lineCount(file), lines.length)
+    let offset = 0
+    const starts = lines.map((line) => {
+      const at = offset
+      offset += Buffer.byteLength(line) + 1
+      return at
+    })
+    for (const n of [1, 2, 9_999, 17_321, 30_000, 45_123, 59_999, 60_000])
+      assert.equal(await lineStart(file, n), starts[n - 1], `line ${n}`)
+    assert.equal(await lineStart(file, 60_001), whole.length)
+    const page = await fileLines(file, 45_000, 500)
+    assert.equal(page.first, 45_000)
+    assert.deepEqual(
+      page.text.split('\n').slice(0, -1),
+      lines.slice(44_999, 45_499),
+    )
+    assert.equal(page.end, starts[45_499])
+    // At the end: what is left. Within a step's bytes: only those.
+    assert.equal(
+      (await fileLines(file, 59_999, 500)).text,
+      lines.slice(59_998).join('\n') + '\n',
+    )
+    const step = await fileLines(file, 100, 500, {
+      from: starts[99],
+      to: starts[102],
+    })
+    assert.equal(step.text, lines.slice(99, 102).join('\n') + '\n')
+    // A last line with no newline yet is a line.
+    const open = path.join(root, 'open.log')
+    writeFileSync(open, 'one\ntwo')
+    assert.equal(await lineCount(open), 2)
+    assert.equal((await fileLines(open, 2, 10)).text, 'two')
+    assert.equal(await lineCount(path.join(root, 'none.log')), 0)
   })
 })
 
