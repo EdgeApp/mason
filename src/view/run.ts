@@ -328,8 +328,14 @@ export interface RunViewOptions {
   now: number
   /** The selected stage's log (or the run's, with no stage selected): the text, or why it is unavailable. */
   log: { text: string; first?: number } | { unavailable: string }
-  /** A URL the page fetches the log from (the stage's, the whole run's or a step's), when this node does not hold it (the host). */
-  logSource?: string
+  /**
+   * Where the page asks for the log's lines by number (the logs API, with
+   * the stage and step it shows): the page draws only the lines in view.
+   */
+  logLines?: string
+  /** The number of the log's first line, and how many it holds; unknown on the host, which asks. */
+  logStart?: number
+  logTotal?: number
   /** Where the shown stage log ends, so the live stream continues from there. */
   logOffset?: number
   /** The page holds none of the stage's log (the host): its live log starts at the end. */
@@ -399,11 +405,16 @@ function stagePanel(run: RunData, options: RunViewOptions): string {
       : logHtml(options.log.text, options.log.first ?? 1)
   const downloads = `<div class="actions log-actions"><label class="wrap"><input type="checkbox" data-wrap> Wrap lines</label><a href="${escape(`${options.base}/api/v2/runs/${encodeURIComponent(run.id)}/logs${selected == null ? '' : `?stage=${encodeURIComponent(selected.name)}`}`)}" download>${icon('download')} Raw</a><a href="${escape(`${options.base}/api/v2/runs/${encodeURIComponent(run.id)}/logs?plain=1${selected == null ? '' : `&stage=${encodeURIComponent(selected.name)}`}`)}" download>${icon('description')} Plain text</a></div>`
   const live = run.finished == null
+  // The lines the log box scrolls through, and where to ask for those not drawn.
+  const lines =
+    options.logLines == null
+      ? ''
+      : ` data-lines="${escape(options.logLines)}"${options.logStart == null ? '' : ` data-start="${options.logStart}"`}${options.logTotal == null ? '' : ` data-total="${options.logTotal}"`}`
   // Shown while the log is not scrolled to its end: it scrolls there, and a
   // live log then keeps following the lines that arrive.
   const jump = `<button type="button" class="jump" data-jump aria-label="Go to the end of the log" title="Go to the end of the log" hidden>${icon('expand_more')}</button>`
   if (selected == null)
-    return `<section class="panel stage-panel" data-stage=""><h2 data-log-title>${icon('receipt_long')}Whole run log</h2>${downloads}${live ? '<ol class="steps" data-steps hidden></ol>' : ''}<div data-log${options.logSource == null ? '' : ` data-src="${escape(options.logSource)}"`}>${log}${jump}</div></section>`
+    return `<section class="panel stage-panel" data-stage=""><h2 data-log-title>${icon('receipt_long')}Whole run log</h2>${downloads}${live ? '<ol class="steps" data-steps hidden></ol>' : ''}<div data-log${lines}>${log}${jump}</div></section>`
   const steps = run.steps.filter(
     (step) => step.stage === selected.name && step.attempt === selected.attempt,
   )
@@ -468,7 +479,7 @@ function stagePanel(run: RunData, options: RunViewOptions): string {
       ...(options.step == null ? {} : { open: options.step }),
       tab: options.tab,
     },
-  )}</ol><h3>${options.step == null ? 'Log' : 'Lines of this step'}</h3>${downloads}<div data-log data-offset="${options.step != null ? -1 : options.logTail === true ? 'tail' : (options.logOffset ?? 0)}"${options.logSource == null ? '' : ` data-src="${escape(options.logSource)}"`}>${log}${jump}</div></section>`
+  )}</ol><h3>${options.step == null ? 'Log' : 'Lines of this step'}</h3>${downloads}<div data-log data-offset="${options.step != null ? -1 : options.logTail === true ? 'tail' : (options.logOffset ?? 0)}"${lines}>${log}${jump}</div></section>`
 }
 
 function stageList(

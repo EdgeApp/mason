@@ -536,12 +536,18 @@ describe('Run view', () => {
         selected: 'test',
         step: 2,
         log: { text: 'two\n', first: 2 },
-        logSource: '/x',
+        logLines: '/x?stage=test&step=2',
+        logStart: 2,
+        logTotal: 3,
       }),
     )
     assert.match(step, /Lines of this step/)
     assert.match(step, /data-line="2">two/)
-    assert.match(step, /data-offset="-1" data-src="\/x"/)
+    // The page asks for the step's other lines by number.
+    assert.match(
+      step,
+      /data-offset="-1" data-lines="\/x\?stage=test&amp;step=2" data-start="2" data-total="3"/,
+    )
     assert.match(step, /class="step open"/)
     // A step's lines have the button to their end too.
     assert.match(step, /data-jump/)

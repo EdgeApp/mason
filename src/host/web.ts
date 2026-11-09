@@ -684,10 +684,10 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
         ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
         tab: query('tab') === 'timeline' ? 'timeline' : 'graph',
         now: host.now(),
-        // The logs are on the master. A running stage's arrive by its live
-        // stream, relayed over the host's link; a finished run's, the whole
-        // run's and a step's lines are fetched through the host, which
-        // forwards the request over that link as well.
+        // The logs are on the master. The page asks for the lines in view by
+        // number through the host, which forwards each request over the
+        // master's link; a running stage's new lines arrive by its live
+        // stream, relayed over the same link.
         log:
           stage == null && run.finished == null
             ? {
@@ -695,18 +695,14 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
                   'The whole run’s log is shown once the run ends: choose a stage to follow its log here.',
               }
             : { text: '' },
-        ...(step != null && Number.isSafeInteger(step)
-          ? {
-              logSource: `${logs}?stage=${encodeURIComponent(stage!)}&step=${step}`,
-            }
-          : run.finished != null
-            ? {
-                logSource:
-                  stage == null
-                    ? logs
-                    : `${logs}?stage=${encodeURIComponent(stage)}`,
-              }
-            : {}),
+        ...(stage == null && run.finished == null
+          ? {}
+          : {
+              logLines:
+                stage == null
+                  ? logs
+                  : `${logs}?stage=${encodeURIComponent(stage)}${step != null && Number.isSafeInteger(step) ? `&step=${step}` : ''}`,
+            }),
         // A running stage's page holds none of its log: the socket starts
         // with its last part.
         ...(run.finished == null ? { logTail: true } : {}),

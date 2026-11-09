@@ -59,8 +59,8 @@ const STREAM_GATE = path.join(tmpdir(), `mason-e11-gate-${process.pid}`)
 
 /**
  * Two apps, two workflows: build-alpha publishes alpha, build-beta beta;
- * beta shares alpha's sequence. A third, stream, logs 400 lines and then a
- * line every quarter second until STREAM_GATE exists.
+ * beta shares alpha's sequence. A third, stream, logs 100,000 lines (2 MB)
+ * and then a line every quarter second until STREAM_GATE exists.
  */
 export const masonfile = `
 import type { Setup, Stage } from '@mason/types'
@@ -79,7 +79,7 @@ export function setup(m: Setup) {
 }
 export async function streamLog(ctx: Stage) {
   const { existsSync } = await import('node:fs')
-  for (let i = 1; i <= 400; i++) ctx.log.info('stream line ' + i)
+  await ctx.sh("seq -f 'stream line %.0f' 1 100000")
   let n = 0
   while (!existsSync(${JSON.stringify(STREAM_GATE)})) {
     ctx.log.info('waiting ' + ++n)
@@ -1187,7 +1187,7 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     }
   })
 
-  it('E11 a developer on the host follows a running stage’s log live over the link, goes to its end with the round button, and reads it again once the run is finished', async () => {
+  it('E11 a developer on the host scrolls a 100,000-line log drawn a window at a time, follows it live over the link, goes to its end with the round button, and reads it again once the run is finished', async () => {
     const master = c.master.master!
     rmSync(STREAM_GATE, { force: true })
     const created = await c.api('POST', '/api/v2/runs', {
@@ -1216,15 +1216,27 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     const h = await browser('mason-e11-dev', host, '1280x860')
     const pre = "document.querySelector('[data-log] pre')"
     const button = "document.querySelector('[data-jump]')"
-    const lines = "document.querySelectorAll('[data-log] code .line').length"
+    const rows = "[...document.querySelectorAll('[data-log] code .line')]"
+    /** The highest line number drawn. */
+    const last = `Math.max(0, ...${rows}.map((l) => Number(l.dataset.line)))`
+    /** Whether a line with this text is drawn. */
+    const drawn = (text: string): string =>
+      `${rows}.some((l) => l.textContent === ${JSON.stringify(text)})`
+    /** No more than a window of lines is in the page. */
+    const windowed = `(${rows}.length > 0 && ${rows}.length < 1500)`
     const atEnd = `(${pre}.scrollHeight - ${pre}.scrollTop - ${pre}.clientHeight < 2)`
+    const scrollTo = async (fraction: number): Promise<void> => {
+      await h.script(
+        `${pre}.scrollTop = (${pre}.scrollHeight - ${pre}.clientHeight) * ${fraction}; ${pre}.dispatchEvent(new Event('scroll'))`,
+      )
+    }
     /** Waits until the page's condition holds, or fails saying what did not. */
     const holds = async (condition: string, what: string): Promise<void> => {
       const deadline = Date.now() + 20_000
       for (;;) {
         try {
           await h.script(
-            `if (!(${condition})) throw new Error(${JSON.stringify(what)})`,
+            `if (!(${condition})) throw new Error(${JSON.stringify(what)} + ': ' + ${rows}.length + ' rows, last ' + ${last})`,
           )
           return
         } catch (error) {
@@ -1233,34 +1245,44 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         }
       }
     }
-    /** Waits for more lines than the log holds now. */
+    /** Waits for lines numbered past those drawn now. */
     const more = async (what: string, also = 'true'): Promise<void> => {
-      await h.script(`window.__lines = ${lines}`)
-      await holds(`${lines} > window.__lines + 3 && ${also}`, what)
+      await h.script(`window.__last = ${last}`)
+      await holds(`${last} > window.__last + 2 && ${also}`, what)
     }
     try {
       await hostSignIn(h, 'dev', PASSWORDS.dev!, `/runs/${id}?stage=stream`)
-      // The running stage's log comes live from the master, relayed over the
-      // host's link, and stays at its end with no button while it follows.
+      // The running stage opens at its end, its new lines live from the
+      // master over the host's link, with only a window of lines drawn and
+      // no button while it follows.
       await holds(
-        `/stream line 400(?!\\d)/.test(${pre}.textContent) && /waiting \\d+/.test(${pre}.textContent)`,
+        `${rows}.some((l) => /^waiting \\d+$/.test(l.textContent)) && ${windowed}`,
         'the live log',
       )
-      await more('new lines', `${atEnd} && ${button}.hidden`)
-      // Scrolled up, it holds still while lines arrive, and offers the button.
-      await h.script(
-        `${pre}.scrollTop = 0; ${pre}.dispatchEvent(new Event('scroll'))`,
-      )
+      await more('new lines', `${atEnd} && ${button}.hidden && ${windowed}`)
+      // Scrolled to its top, the lines there are asked for over the link.
+      await scrollTo(0)
+      await holds(`${drawn('stream line 1')} && ${windowed}`, 'the top')
       await holds(`!${button}.hidden`, 'the button shown')
-      await more('lines while scrolled up', `${pre}.scrollTop === 0`)
       await h.script(
         "document.querySelector('[data-log]').scrollIntoView({ block: 'end' })",
       )
       await h.shot('host-live-log-button.png')
+      // Halfway down: the middle of the log, still a window.
+      await scrollTo(0.5)
+      await holds(
+        `${rows}.some((l) => /^stream line [4-5]\\d{4}$/.test(l.textContent)) && ${windowed}`,
+        'the middle',
+      )
       // The button goes to the end and follows again, then hides.
       await h.tap('[data-jump]')
       await more('lines while following', `${atEnd} && ${button}.hidden`)
-      // The run ends: its log is fetched through the host, over the link.
+      // Wrapped lines are measured, and the log still scrolls to its top.
+      await h.tap('[data-wrap]')
+      await scrollTo(0)
+      await holds(drawn('stream line 1'), 'the top, wrapped')
+      await h.tap('[data-wrap]')
+      // The run ends: its log is asked for a window at a time, through the host.
       writeFileSync(STREAM_GATE, '')
       await c.until(
         () =>
@@ -1273,24 +1295,58 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         'the run finished on the host',
       )
       await h.open(`/runs/${id}?stage=stream`)
-      await holds(
-        `/stream line 1(?!\\d)/.test(${pre}.textContent) && /stream done/.test(${pre}.textContent)`,
-        'the finished stage log',
-      )
       // A finished log opens at its start, with the button to its end.
+      await holds(`${drawn('stream line 1')} && ${windowed}`, 'the start')
       await holds(`${pre}.scrollTop === 0 && !${button}.hidden`, 'the button')
       await h.script(
         "document.querySelector('[data-log]').scrollIntoView({ block: 'end' })",
       )
       await h.shot('host-finished-log.png')
       await h.tap('[data-jump]')
-      await holds(`${atEnd} && ${button}.hidden`, 'the end of the log')
-      // So is the whole run's.
+      await holds(
+        `${atEnd} && ${button}.hidden && ${rows}.some((l) => l.textContent === 'stream done') && ${windowed}`,
+        'the end of the log',
+      )
+      // So is the whole run's, its stages one after another.
       await h.open(`/runs/${id}`)
-      await holds(`/stream done/.test(${pre}.textContent)`, 'the whole run log')
+      await holds(windowed, 'the whole run log')
+      await h.tap('[data-jump]')
+      await holds(
+        `${rows}.some((l) => l.textContent === 'stream done')`,
+        'the whole run log’s end',
+      )
     } finally {
       await h.close()
       rmSync(STREAM_GATE, { force: true })
+    }
+    // The master's own page draws a window too, from its first chunk.
+    const m = await browser('mason-e11-master', c.master, '1280x860')
+    /** Waits until the master's page holds, or fails saying what did not. */
+    const shows = async (condition: string, what: string): Promise<void> => {
+      const deadline = Date.now() + 20_000
+      for (;;) {
+        try {
+          await m.script(
+            `if (!(${condition})) throw new Error(${JSON.stringify(what)})`,
+          )
+          return
+        } catch (error) {
+          if (Date.now() > deadline) throw error
+          await new Promise((resolve) => setTimeout(resolve, 300))
+        }
+      }
+    }
+    try {
+      await masterSignIn(m, 'paul', PASSWORDS.paul!)
+      await shows("location.pathname !== '/sign-in'", 'signed in')
+      await m.open(`/runs/${id}?stage=stream`)
+      await shows(`${drawn('stream line 1')} && ${windowed}`, 'the start')
+      await m.script(
+        `${pre}.scrollTop = ${pre}.scrollHeight; ${pre}.dispatchEvent(new Event('scroll'))`,
+      )
+      await shows(`${drawn('stream done')} && ${windowed}`, 'the end')
+    } finally {
+      await m.close()
     }
   })
 })

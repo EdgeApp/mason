@@ -45,7 +45,7 @@ import {
 import { graphFromJson, runData, runTitle, runView } from '../view/run.js'
 import { requesterName } from './requesters.js'
 import { search } from '../view/search.js'
-import { runLog } from './runsApi.js'
+import { runLines, type PageLines } from './runsApi.js'
 import { discovery } from './wizard.js'
 import { shell, type Viewer } from '../view/shell.js'
 import type { GroupApp } from '../view/groups.js'
@@ -460,104 +460,143 @@ export function masterPages(
       'artifacts',
     )
   })
-  app.get('/runs/:id', (req, res) => {
-    const current = session(req)
-    if (current == null) {
-      res.redirect(303, master.configured() ? '/sign-in' : '/')
-      return
-    }
-    const actor = sessionActor(current)
-    if (!can(actor, 'runs.read')) {
-      send(res, 'Run', '<p>Runs are for developers and up.</p>', current, 403)
-      return
-    }
-    const id = String(req.params.id)
-    const db = master.database.db
-    const run = runData(
-      db,
-      id,
-      (job) => {
-        const row = db
-          .prepare(
-            'SELECT j.workflow,g.graph FROM jobs j LEFT JOIN graphs g ON g.key=j.graph_key WHERE j.id=?',
-          )
-          .get(job) as { workflow: string; graph: string | null } | undefined
-        return row == null ? undefined : graphFromJson(row.graph, row.workflow)
-      },
-      {
-        repository: (project) =>
-          (
-            db
-              .prepare('SELECT repository FROM projects WHERE id=?')
-              .get(project) as { repository: string } | undefined
-          )?.repository,
-        nodeName: (fingerprint) => master.registry.get(fingerprint)?.name,
-        requester: (label) => requesterName(db, label),
-        buildNumber: (job) => reservedBuildNumber(db, job),
-      },
-    )
-    if (run == null) {
+  app.get('/runs/:id', (req, res, next) => {
+    void (async (): Promise<void> => {
+      const current = session(req)
+      if (current == null) {
+        res.redirect(303, master.configured() ? '/sign-in' : '/')
+        return
+      }
+      const actor = sessionActor(current)
+      if (!can(actor, 'runs.read')) {
+        send(res, 'Run', '<p>Runs are for developers and up.</p>', current, 403)
+        return
+      }
+      const id = String(req.params.id)
+      const db = master.database.db
+      const run = runData(
+        db,
+        id,
+        (job) => {
+          const row = db
+            .prepare(
+              'SELECT j.workflow,g.graph FROM jobs j LEFT JOIN graphs g ON g.key=j.graph_key WHERE j.id=?',
+            )
+            .get(job) as { workflow: string; graph: string | null } | undefined
+          return row == null
+            ? undefined
+            : graphFromJson(row.graph, row.workflow)
+        },
+        {
+          repository: (project) =>
+            (
+              db
+                .prepare('SELECT repository FROM projects WHERE id=?')
+                .get(project) as { repository: string } | undefined
+            )?.repository,
+          nodeName: (fingerprint) => master.registry.get(fingerprint)?.name,
+          requester: (label) => requesterName(db, label),
+          buildNumber: (job) => reservedBuildNumber(db, job),
+        },
+      )
+      if (run == null) {
+        send(
+          res,
+          'Run unavailable',
+          '<p class="empty-state">There is no such run.</p>',
+          current,
+          404,
+        )
+        return
+      }
+      const query = (name: string): string | undefined =>
+        typeof req.query[name] === 'string'
+          ? (req.query[name] as string)
+          : undefined
+      const stage = run.stages.some((entry) => entry.name === query('stage'))
+        ? query('stage')
+        : undefined
+      const step =
+        stage == null || query('step') == null
+          ? undefined
+          : Number(query('step'))
+      // The page draws one chunk of the log (a finished one's start, a running
+      // stage's end); it asks for the rest by number as it comes into view.
+      const live = stage != null && step == null && run.finished == null
+      let log: { text: string; first: number } | { unavailable: string }
+      let lines: PageLines | undefined
+      try {
+        lines = await runLines(master, id, {
+          ...(stage == null ? {} : { stage }),
+          ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
+          ...(live ? { last: true } : { from: 0 }),
+        })
+        log =
+          lines == null
+            ? { unavailable: 'This run has no log.' }
+            : { text: lines.text, first: lines.first }
+      } catch {
+        log = { unavailable: 'There is no such step.' }
+      }
+      // A live log's last partial line comes with the rest of it, over the socket.
+      if (
+        live &&
+        lines != null &&
+        !lines.text.endsWith('\n') &&
+        lines.text !== ''
+      ) {
+        const cut = lines.text.lastIndexOf('\n') + 1
+        lines = {
+          ...lines,
+          text: lines.text.slice(0, cut),
+          total: lines.total - 1,
+          end: lines.end - Buffer.byteLength(lines.text.slice(cut)),
+        }
+        log = { text: lines.text, first: lines.first }
+      }
+      const base = `/api/v2/runs/${encodeURIComponent(id)}/logs`
+      const requester = can(actor, 'runs.request')
       send(
         res,
-        'Run unavailable',
-        '<p class="empty-state">There is no such run.</p>',
+        runTitle(run),
+        runView(run, {
+          ...(stage == null ? {} : { selected: stage }),
+          ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
+          ...(stage != null && step == null && lines != null
+            ? { logOffset: lines.end }
+            : {}),
+          ...(lines == null
+            ? {}
+            : {
+                logLines:
+                  stage == null
+                    ? base
+                    : `${base}?stage=${encodeURIComponent(stage)}${step != null && Number.isSafeInteger(step) ? `&step=${step}` : ''}`,
+                logStart: lines.start,
+                logTotal: lines.total,
+              }),
+          tab: query('tab') === 'timeline' ? 'timeline' : 'graph',
+          now: master.database.now(),
+          log,
+          can: {
+            cancel: requester,
+            restart: requester,
+            request: requester,
+            approve: (name) =>
+              can(actor, 'runs.approve') &&
+              (current.role === 'admin' ||
+                (
+                  run.graph?.approvals[name]?.roles ?? ['admin', 'manager']
+                ).includes(current.role)),
+          },
+          base: '',
+          viewer: viewerOf(current),
+        }),
         current,
-        404,
+        200,
+        'dashboard',
       )
-      return
-    }
-    const query = (name: string): string | undefined =>
-      typeof req.query[name] === 'string'
-        ? (req.query[name] as string)
-        : undefined
-    const stage = run.stages.some((entry) => entry.name === query('stage'))
-      ? query('stage')
-      : undefined
-    const step =
-      stage == null || query('step') == null ? undefined : Number(query('step'))
-    let log: { text: string; first: number } | { unavailable: string }
-    try {
-      log = runLog(master, id, {
-        ...(stage == null ? {} : { stage }),
-        ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
-      }) ?? { unavailable: 'This run has no log.' }
-    } catch {
-      log = { unavailable: 'There is no such step.' }
-    }
-    // A live log's last partial line comes with the rest of it, over the socket.
-    if (stage != null && step == null && run.finished == null && 'text' in log)
-      log = { ...log, text: log.text.slice(0, log.text.lastIndexOf('\n') + 1) }
-    const requester = can(actor, 'runs.request')
-    send(
-      res,
-      runTitle(run),
-      runView(run, {
-        ...(stage == null ? {} : { selected: stage }),
-        ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
-        ...(stage != null && step == null && 'text' in log
-          ? { logOffset: Buffer.byteLength(log.text) }
-          : {}),
-        tab: query('tab') === 'timeline' ? 'timeline' : 'graph',
-        now: master.database.now(),
-        log,
-        can: {
-          cancel: requester,
-          restart: requester,
-          request: requester,
-          approve: (name) =>
-            can(actor, 'runs.approve') &&
-            (current.role === 'admin' ||
-              (
-                run.graph?.approvals[name]?.roles ?? ['admin', 'manager']
-              ).includes(current.role)),
-        },
-        base: '',
-        viewer: viewerOf(current),
-      }),
-      current,
-      200,
-      'dashboard',
-    )
+    })().catch(next)
   })
   /** A page for those whose role allows an action; others get a 403 page. */
   const guarded = (
