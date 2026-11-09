@@ -39,6 +39,7 @@
     "yauzl": "3.4.0"
   },
   "devDependencies": {
+    "@tanstack/virtual-core": "3.19.11",
     "@types/busboy": "1.5.4",
     "@types/express": "5.0.6",
     "@types/mocha": "10.0.10",

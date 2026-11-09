@@ -4,6 +4,7 @@ import { FakeLiveWindow } from '../test/fakeLiveSocket.js'
 import {
   actionBody,
   domRunPage,
+  logScroller,
   formFields,
   formPath,
   highlight,
@@ -545,10 +546,10 @@ describe('Run view script', () => {
     assert.match(steps.innerHTML, /exec · 4s/)
     // The log opened at its end, and follows new lines there.
     assert.equal(pre.scrollTop, 100)
-    real.appendLog([])
+    real.appendLog([], 1)
     pre.scrollHeight = 300
-    real.appendLog(['<span>one</span>'])
-    real.appendLog(['<span>two</span>'])
+    real.appendLog(['<span>one</span>'], 1)
+    real.appendLog(['<span>two</span>'], 1)
     assert.equal(code.innerHTML, '<span>one</span><span>two</span>')
     assert.equal(pre.scrollTop, 300)
     // Scrolled up, it holds still and offers Jump to latest.
@@ -556,7 +557,7 @@ describe('Run view script', () => {
     pre.scrollTop = 100
     pre.fire('scroll')
     assert.equal(jump.hidden, false)
-    real.appendLog(['<span>three</span>'])
+    real.appendLog(['<span>three</span>'], 1)
     assert.equal(pre.scrollTop, 100)
     // A small move up stops it too, though still near the bottom.
     pre.scrollTop = 900
@@ -564,7 +565,7 @@ describe('Run view script', () => {
     pre.scrollTop = 880
     pre.fire('scroll')
     assert.equal(jump.hidden, false)
-    real.appendLog(['<span>late</span>'])
+    real.appendLog(['<span>late</span>'], 1)
     assert.equal(pre.scrollTop, 880)
     pre.scrollTop = 100
     pre.fire('scroll')
@@ -583,14 +584,14 @@ describe('Run view script', () => {
     pre.fire('scroll')
     assert.equal(jump.hidden, true)
     pre.scrollHeight = 1200
-    real.appendLog(['<span>four</span>'])
+    real.appendLog(['<span>four</span>'], 1)
     assert.equal(pre.scrollTop, 1200)
     pre.scrollTop = 0
     pre.fire('scroll')
     jump.fire('click')
     assert.deepEqual([pre.scrollTop, jump.hidden], [1200, true])
     pre.scrollHeight = 1300
-    real.appendLog(['<span>five</span>'])
+    real.appendLog(['<span>five</span>'], 1)
     assert.equal(pre.scrollTop, 1300)
     // Following a stage relabels the panel and starts its log afresh.
     pre.scrollTop = 0
@@ -624,8 +625,38 @@ describe('Run view script', () => {
     empty.setRunStatus('x')
     empty.setSteps('x', [])
     empty.follow('x')
-    empty.appendLog(['x'])
+    empty.appendLog(['x'], 1)
     empty.ended()
+  })
+
+  it('opens a finished log at its start, with the button to its end until the viewer is there', () => {
+    const pre = new El()
+    pre.scrollHeight = 1000
+    pre.clientHeight = 200
+    const jump = new El()
+    const doc = new El()
+      .set('[data-log] pre', pre)
+      .set('[data-jump]', jump) as unknown as Document
+    const scroller = logScroller(doc, false)
+    assert.deepEqual([pre.scrollTop, jump.hidden], [0, false])
+    // Scrolled to the end by hand, the button goes; back up, it returns.
+    pre.scrollTop = 790
+    pre.fire('scroll')
+    assert.equal(jump.hidden, true)
+    pre.scrollTop = 300
+    pre.fire('scroll')
+    assert.equal(jump.hidden, false)
+    jump.fire('click')
+    assert.deepEqual([pre.scrollTop, jump.hidden], [1000, true])
+    // A short log needs no button.
+    pre.scrollHeight = 150
+    pre.scrollTop = 0
+    scroller.reset(false)
+    assert.equal(jump.hidden, true)
+    // A log fetched later (the host's) is measured again once it is in.
+    pre.scrollHeight = 5000
+    scroller.reset(false)
+    assert.equal(jump.hidden, false)
   })
 
   it('highlights a bubble’s inputs, dependents and rails', () => {
@@ -663,7 +694,7 @@ describe('Run view script', () => {
     assert(!a.classes.has('related'))
   })
 
-  it('wires forms, the log wrap, the stage filters, zoom, hover, a fetched log, the live stream and the queue', async () => {
+  it('wires forms, the log wrap, the stage filters, zoom, hover, the live stream and the queue', async () => {
     const action = form('/api/v2/runs/r/cancel', {}, { then: 'reload' })
     const failing = form('/x', {})
     const wrap = new El()
@@ -694,15 +725,15 @@ describe('Run view script', () => {
     }
     const buttons = ['in', 'out', 'reset', 'full'].map(zoom)
     const graphPanel = new El()
-    const sourceCode = new El()
-    const source = new El().set('code', sourceCode)
-    source.dataset.src = '/api/v2/runs/r/logs?stage=test&step=1'
     const head = new El()
     head.dataset = { live: '1', run: 'r' }
     const panel = new El()
     panel.dataset.stage = 'test'
     const logBox = new El()
     logBox.dataset.offset = '12'
+    // A box with no log drawn yet asks for no lines: the viewer needs a
+    // real page, and the browser scenarios drive it.
+    logBox.dataset.lines = '/api/v2/runs/r/logs?stage=test'
     const runStatus = new El()
     const liveState = new El()
     const csrf = new El()
@@ -718,7 +749,6 @@ describe('Run view script', () => {
       .set('.pipeline-graph', svg)
       .set('[data-zoom]', ...buttons)
       .set('.graph-panel', graphPanel)
-      .set('[data-log][data-src]', source)
       .set('.run-head', head)
       .set('.stage-panel', panel)
       .set('[data-log]', logBox)
@@ -731,7 +761,6 @@ describe('Run view script', () => {
       fetch: (async (url: string) => {
         fetched.push(url)
         if (url === '/x') throw new Error('offline')
-        if (url.includes('/logs')) return reply(200, 'line one\nline two\n')
         return reply(200, {})
       }) as typeof fetch,
       location: {
@@ -769,10 +798,7 @@ describe('Run view script', () => {
     bubble.fire('mouseenter')
     bubble.fire('mouseleave')
     assert(bubble.classes.has('related'))
-    assert.equal(
-      sourceCode.innerHTML,
-      '<span class="line" data-line="1">line one</span><span class="line" data-line="2">line two</span>',
-    )
+    assert(!fetched.some((url) => url.includes('/logs')))
     // The run's socket resumes the log after the offset the page has.
     const socket = live.socket
     assert.equal(socket.url, 'wss://mason.example/live')

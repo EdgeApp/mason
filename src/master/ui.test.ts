@@ -834,12 +834,18 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.match(
       step.text,
-      /data-src="\/api\/v2\/runs\/[^"]+\/logs\?stage=test&amp;step=1"/,
+      /data-lines="\/api\/v2\/runs\/[^"]+\/logs\?stage=test&amp;step=1"/,
     )
-    assert.match(
-      (await request(host, 'GET', `/runs/${run}`, developer)).text,
-      /The whole run’s log is on the master/,
-    )
+    // A finished run's whole log is fetched through the host, over its link;
+    // a running one's waits for the run to end.
+    const whole = (await request(host, 'GET', `/runs/${run}`, developer)).text
+    if ((c.master.master!.run(run) as Json).finished == null)
+      assert.match(whole, /The whole run’s log is shown once the run ends/)
+    else
+      assert.match(
+        whole,
+        new RegExp(`<div data-log data-lines="/api/v2/runs/${run}/logs">`),
+      )
     assert.equal(
       (await request(host, 'GET', `/runs/${run}`, onHost('tester'))).status,
       403,
@@ -857,6 +863,30 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.equal(log.status, 200, log.text)
     assert.match(log.text, /second line/)
+    // A page's lines by number, forwarded over the host's link as JSON.
+    const tail = await request(
+      host,
+      'GET',
+      `/api/v2/runs/${run}/logs?stage=test&last=1&count=1`,
+      { cookie: developer.cookie },
+    )
+    assert.equal(tail.status, 200, tail.text)
+    assert.equal(tail.json.start, 1)
+    assert(tail.json.total >= 2, tail.text)
+    assert.equal(tail.json.first, tail.json.total)
+    assert.match(tail.json.text, /second line\n$/)
+    const top = await request(
+      host,
+      'GET',
+      `/api/v2/runs/${run}/logs?stage=test&from=1&count=500`,
+      { cookie: developer.cookie },
+    )
+    assert.equal(top.json.first, 1)
+    assert.equal(
+      top.json.text.split('\n').length - 1,
+      tail.json.total,
+      top.text,
+    )
     // Live updates are not forwarded requests: they come over the host's live stream.
     assert.equal(
       (
@@ -1025,7 +1055,10 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       await request(c.master, 'GET', '/people', signIn('admin'))
     ).text
     assert.match(adminPeople, /<form data-mason="person-add">/)
-    assert.match(adminPeople, /data-email-fields><input id="person-email" name="email"/)
+    assert.match(
+      adminPeople,
+      /data-email-fields><input id="person-email" name="email"/,
+    )
     assert.doesNotMatch(adminPeople, /addresses\./)
     const managerPeople = (
       await request(c.master, 'GET', '/people', signIn('manager'))
@@ -1278,7 +1311,10 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     const admin = signIn('admin')
     const manager = signIn('manager')
     const adminPeople = (await request(c.master, 'GET', '/people', admin)).text
-    assert.match(adminPeople, /data-email-fields><input id="person-email" name="email"/)
+    assert.match(
+      adminPeople,
+      /data-email-fields><input id="person-email" name="email"/,
+    )
     assert.doesNotMatch(adminPeople, /\/api\/v2\/groups/)
     const managerPeople = (await request(c.master, 'GET', '/people', manager))
       .text

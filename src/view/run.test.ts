@@ -407,7 +407,7 @@ describe('Run view', () => {
     )
     assert.match(
       whole,
-      /<button type="button" class="secondary jump" data-jump hidden>.*Jump to latest<\/button><\/div>/,
+      /<button type="button" class="jump" data-jump aria-label="Go to the end of the log" title="Go to the end of the log" hidden><span class="icon" aria-hidden="true">&#xe5cf;<\/span><\/button><\/div>/,
     )
     // The header: the run number when it reserved no build number, the
     // start in the viewer's zone, how long it queued and took and where,
@@ -536,20 +536,33 @@ describe('Run view', () => {
         selected: 'test',
         step: 2,
         log: { text: 'two\n', first: 2 },
-        logSource: '/x',
+        logLines: '/x?stage=test&step=2',
+        logStart: 2,
+        logTotal: 3,
       }),
     )
     assert.match(step, /Lines of this step/)
     assert.match(step, /data-line="2">two/)
-    assert.match(step, /data-offset="-1" data-src="\/x"/)
+    // The page asks for the step's other lines by number.
+    assert.match(
+      step,
+      /data-offset="-1" data-lines="\/x\?stage=test&amp;step=2" data-start="2" data-total="3"/,
+    )
     assert.match(step, /class="step open"/)
-    assert.doesNotMatch(step, /data-jump/)
+    // A step's lines have the button to their end too.
+    assert.match(step, /data-jump/)
     // Hidden means hidden, though buttons are drawn inline-flex.
     assert.match(stylesheet, /\[data-log\] \.jump\[hidden\]\{display:none\}/)
     assert.match(selected, /data-jump/)
-    // A finished run's page has no live parts.
+    // A finished run's page has no live parts, but its log has the button to its end.
     const finished = runView({ ...run, finished: 3000 }, options({}))
-    assert.doesNotMatch(finished, /data-live-state|data-jump|data-steps/)
+    assert.doesNotMatch(finished, /data-live-state|data-steps/)
+    assert.match(finished, /data-jump/)
+    // The button is a circle at the log's bottom right.
+    assert.match(
+      stylesheet,
+      /\[data-log\] \.jump\{position:absolute;right:16px;bottom:16px;width:36px;height:36px;min-height:36px;padding:0;border-radius:50%/,
+    )
     const approval = runView(run, options({ selected: 'approve' }))
     assert.match(approval, /Ship it\?/)
     assert.match(approval, /data-fields="stage,approve,notes"/)

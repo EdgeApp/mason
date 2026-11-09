@@ -2677,6 +2677,13 @@ export class Scheduler {
   }
 
   /** Every stage log of a job, setup first, each under a header. */
+  /** The run's stage logs that exist, in the order its whole log joins them. */
+  logFiles(job: string): string[] {
+    return this.stages(job)
+      .map((row) => this.logFile(job, String(row.name)))
+      .filter((file) => existsSync(file))
+  }
+
   logs(job: string): string | undefined {
     if (this.job(job) == null) return undefined
     return this.stages(job)
