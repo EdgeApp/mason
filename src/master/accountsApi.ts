@@ -10,7 +10,9 @@ import type { Master } from './runtime.js'
 import { clientAddress } from './forward.js'
 import { invitationUrl } from './invitations.js'
 import { permissionsOf } from './permissions.js'
+import { allow } from './permissions.js'
 import type {
+  GroupDetail,
   SessionInfo,
   SetupStatus,
   SignInReply,
@@ -280,6 +282,15 @@ export function accountsApi(
   router.get(
     '/api/v2/groups',
     json((_req, res) => master.people.groups(actorOf(res))),
+  )
+  router.get(
+    '/api/v2/groups/:id',
+    json((req, res): GroupDetail => {
+      allow(actorOf(res), 'groups.read')
+      const group = master.people.group(id(req.params.id))
+      if (group == null) throw new NotFound('No such group')
+      return group
+    }),
   )
   router.post(
     '/api/v2/groups',

@@ -10,7 +10,8 @@ is the reference for every route under `/api/v2/`, for how callers
 authenticate, and, briefly, for the few routes outside `/api/v2/` that
 clients still use. The host forwards most of these routes to the master
 (see [Requests through the host](#requests-through-the-host)); it answers
-the builds routes itself (see [Builds](#14-builds)).
+the builds routes and the pages' reads itself (see [Builds](#14-builds) and
+[The pages' reads](#15-the-pages-reads)).
 
 ## Conventions
 
@@ -42,7 +43,7 @@ the builds routes itself (see [Builds](#14-builds)).
   | --- | --- |
   | `/api/v2/projects/:slug/secrets…` | 8 MB |
   | `/api/v2/apple/certificates`, `…/profiles`, `…/setup` | 2 MB |
-  | the wizard's routes: `POST /api/v2/projects/check` (that path alone, so a project slugged `check` takes the next limit), `…/:slug/discover`, `…/:slug/wizard/…`, `…/:slug/webhook`, `…/:slug/masonfile` | 64 KB |
+  | the wizard's routes: `POST /api/v2/projects/check` (that path alone, so a project slugged `check` takes the next limit), `…/:slug/discover`, `…/:slug/wizard/…`, `…/:slug/webhook` | 64 KB |
   | other `/api/v2/projects…` | 1 MB |
   | `/api/v2/build-numbers/…` | 1 MB |
   | `/api/v2/runs…`, `/api/v2/queue…` | 16 KB |
@@ -174,10 +175,11 @@ requests. While the master is unreachable the host answers 503. `/api/apps`
 is not forwarded, and neither is `GET /api/v2/builds…`: the host answers
 those itself, from its cache and storage, for API keys and for its own
 signed-in people, and keeps answering while the master is away (see
-[Builds](#14-builds)). The host also answers `GET /api/v2/node` and the
-session routes itself (see [Node](#node) and
-[Session on the host](#session-on-the-host)); they never reach the master
-as forwarded requests.
+[Builds](#14-builds)). The host also answers `GET /api/v2/node`, the
+session routes and [the pages' reads](#15-the-pages-reads) itself (see
+[Node](#node) and [Session on the host](#session-on-the-host)); they never
+reach the master as forwarded requests, and the reads keep answering, from
+the host's cache, while the master is away.
 
 - A forwarded request with an `Authorization` header is an API-key request;
   the master checks the key.
@@ -503,6 +505,7 @@ published builds of their groups' apps.
 | Method and path | What it does | Permission |
 | --- | --- | --- |
 | `GET /api/v2/groups` | Every group, by name. | `groups.read` |
+| `GET /api/v2/groups/:id` | One group. | `groups.read` |
 | `POST /api/v2/groups` | Adds a group. 201. | `groups.change` |
 | `PUT /api/v2/groups/:id` | Renames a group or replaces its apps or members. | `groups.change` |
 | `DELETE /api/v2/groups/:id` | Removes a group. | `groups.change` |
@@ -690,7 +693,9 @@ Requests a run of any workflow on a branch or commit.
 
 ### GET /api/v2/runs/:id
 
-One run. Permission: `runs.read`. Answers the run.
+One run. Permission: `runs.read`. Answers the run. With `?include=` it
+answers the run page's shape instead, on the master and on the host (see
+[A run page](#a-run-page)).
 
 ### POST /api/v2/runs/:id/cancel
 
@@ -757,11 +762,12 @@ master, which checks every subscription.
   | --- | --- |
   | `{ "subscribe": "run", "run": id, "stage"?: name, "after"?: offset, "tail"?: true, "log"?: false, "follow"?: true, "key"?: key }` | the run's `run`, `stages` and `steps` events, and the stage's log from byte `after`, or from its last megabyte with `tail`, or not at all with `log: false`. Without `stage` it follows the running stage, sending the last megabyte of its log from a line's start and switching when the next stage starts; `follow` keeps following after naming a stage. |
   | `{ "subscribe": "status", "run": id }` | the run's `run` events only |
+  | `{ "subscribe": "status" }` | the shell's `status` events: what [`GET /api/v2/status`](#status-notifications-and-search) answers, whenever it changes. The master checks it on every change of a run and every two seconds; a host answers it itself, with its link to the master, and never sends it on. Every role may subscribe. |
   | `{ "subscribe": "queue" }` | `queue` events: the queue panel's running and queued stages, of the runs a key's scopes cover |
   | `{ "unsubscribe": key }` | stop one subscription |
 
   `key` names the subscription in the frames that answer it; it defaults to
-  `run:<id>`, `status:<id>` or `queue`. Each subscription is checked as the
+  `run:<id>`, `status:<id>`, `status` or `queue`. Each subscription is checked as the
   matching HTTP read (`runs.read` on the run's project and branch). A page
   holds 200 subscriptions at most and may send 50 messages at once and 20 a
   second after that.
@@ -774,6 +780,7 @@ master, which checks every subscription.
   | `steps` | `{ "stage", "steps": [{ "id", "kind", "title", "status", "ms", "parent" }] }` |
   | `log` | `{ "stage", "offset", "first", "text", "partial"? }`: `offset` is the byte the text ends at and `first` the number of its first line. A line longer than 256 KB comes in pieces marked `partial`, the last unmarked. A running stage's unfinished last line waits for its end. |
   | `queue` | `[{ "job", "project", "workflow", "number", "branch", "stage", "status", "elapsed"?, "progress"? }]` |
+  | `status` | the shell's status (`StatusInfo`), as `GET /api/v2/status` answers it |
   | `end` | the run has finished and its log has been sent |
   | `gone` | the run does not exist |
   | `error` | `{ "error" }`, for a bad message or a refused subscription |
@@ -950,8 +957,9 @@ no project yet, so a key scoped to projects cannot use it.
   `{ "created": true, "url": "…" }`; `created` is `false` when the GitHub
   connection is an SSH key, which cannot make webhooks. 400 when the `host`
   setting has no origin or GitHub refuses.
-- **`masonfile`** takes `?commit=<40 or 64 hex>` and answers
-  `{ "commit", "file", "text" }`. 404 when the file is not in that commit.
+- A project's Masonfile at a commit is
+  [`GET /api/v2/projects/:slug/masonfile`](#project-pages), with the
+  project pages' reads.
 
 ## 6. Secrets
 
@@ -967,6 +975,7 @@ in the project's secret audit when the project exists.
 | Method and path | What it does | Permission |
 | --- | --- | --- |
 | `GET /api/v2/projects/:slug/secrets` | The variants, without contents. | `projects.read` |
+| `GET /api/v2/projects/:slug/secrets/backups` | `{ "backupsConfigured" }`: secrets are kept only once backups are configured. | `projects.read` |
 | `GET /api/v2/projects/:slug/secrets/audit` | The latest audit entries. | `secrets.read` |
 | `GET /api/v2/projects/:slug/secrets/:id` | One variant's contents. | `secrets.read` |
 | `POST /api/v2/projects/:slug/secrets` | Adds a variant. 201. | `secrets.change` |
@@ -1075,7 +1084,7 @@ Workers and the host paired with the master.
 
 | Method and path | What it does | Permission |
 | --- | --- | --- |
-| `GET /api/v2/nodes` | Every paired node with its inventory and software state. | `nodes.read` |
+| `GET /api/v2/nodes` | Every paired node with its inventory and software state, its `status` (`idle`, `busy` or `offline`; a host is `idle` while connected) and, while it runs one, its `stage` (`<run id> <stage>`). | `nodes.read` |
 | `POST /api/v2/nodes` | Pairs a node by its address and pairing key. 201. | `nodes.change`; a host also `hosts.change` |
 | `PUT /api/v2/nodes/:fingerprint` | Sets a node's name, type, labels and slots. | `nodes.change` |
 | `DELETE /api/v2/nodes/:fingerprint` | Unpairs a node. | `nodes.change`; a host also `hosts.change` |
@@ -1163,6 +1172,7 @@ host or node; 409 for a pool name in use; 400 otherwise.
 | `POST /api/v2/cloud/accounts/:id/check` | Asks the provider about the key again. | `settings.read` |
 | `DELETE /api/v2/cloud/accounts/:id` | Removes an account. | `settings.change`; the host's account also `hosts.change` |
 | `GET /api/v2/cloud/accounts/:id/catalog` | The regions, sizes and images a pool may use. | `settings.read` |
+| `GET /api/v2/cloud/accounts/:id/domains` | The account's DNS domains, for a host's name: `["example.test"]`. None for NoMac or when the provider cannot list them. | `nodes.read` |
 
 `POST` takes:
 
@@ -1218,6 +1228,7 @@ Pools live in the `cloud` settings area beside the monthly budget.
 | Method and path | What it does | Permission |
 | --- | --- | --- |
 | `GET /api/v2/cloud/pools` | The pools, each with its machines (`id`, `state`, `address`, `created`). | `settings.read` |
+| `GET /api/v2/cloud/budget` | `{ "monthly", "notice"? }`: the monthly budget in dollars and, once pools near or pass it, why they stop growing. | `settings.read` |
 | `POST /api/v2/cloud/pools` | Adds a pool. 201. | `settings.change` |
 | `PUT /api/v2/cloud/pools/:name` | Replaces a pool; it keeps its name. | `settings.change` |
 | `DELETE /api/v2/cloud/pools/:name` | Removes a pool; its machines retire. | `settings.change` |
@@ -1527,6 +1538,7 @@ master.
 
 | Method and path | What it does |
 | --- | --- |
+| `GET /api/v2/apple/signing` | What Settings shows: the Apple ID (`signedIn`, `needsCode`, `appleId`, `notice`), its teams with each configured team's key and current distribution certificate (`setup`), why a team's last setup failed (`failures`) and the teams being set up now (`settingUp`). `settings.read`. |
 | `GET /api/v2/apple/session` | The Apple ID session's state. |
 | `POST /api/v2/apple/session` | Signs the Apple ID in; Apple usually asks for a code next. |
 | `POST /api/v2/apple/session/code` | Sends Apple's two-factor code. |
@@ -1638,6 +1650,7 @@ Query, every field optional:
 | `branch` | A branch, exactly. |
 | `platform` | `ios`, `android`, `macos`, `windows` or `tvos`. |
 | `variant` | A variant name; empty (`variant=`) is the default variant, the file a stage published with none. |
+| `run` | A run's id: the builds that run published. |
 | `latest` | `1` keeps only the newest build of each app, branch, platform and variant. |
 | `limit` | 1–500, default 50, applied after the caller's apps and scopes. |
 
@@ -1696,7 +1709,320 @@ The host logs each download once its file is under way (`Build 41
 downloaded by key 830f19 through the master`, or `Build 41 redirected to its
 Space for …`); `HEAD` is not logged. Build reads are not audited.
 
-## 15. Routes outside `/api/v2/`
+## 15. The pages' reads
+
+What the web app's pages show, as JSON. The master answers each read from
+its database and **the host answers the same routes itself, from its
+cache**, so they keep answering, read only, while the master is
+unreachable; they never reach the forwarder. Both nodes answer them through
+the same page-data code their pages use, so a page renders the same on
+either. The caller is a session of that node, or an API key (on the host, a
+key the host verifies itself); a key scoped to projects is refused (403)
+where a read is not about one project. The host answers 503 before its
+first sync and once past its offline grace window.
+
+| Method and path | What it answers | Permission |
+| --- | --- | --- |
+| `GET /api/v2/status` | The shell: the master's workers, the host's link, the banners. | `builds.read` |
+| `GET /api/v2/notifications` | Approvals the caller may decide; the master's notices for managers. | `builds.read` |
+| `GET /api/v2/search?q=` | ⌘K results. | `builds.read` |
+| `GET /api/v2/dashboard?platform=&project=` | Projects & apps. | `projects.read` |
+| `GET /api/v2/queue` | The running and queued stages. | `runs.read` |
+| `GET /api/v2/artifacts?project=&branch=` | The latest 50 runs with their build numbers and saved artifacts. | `runs.read` |
+| `GET /api/v2/artifacts/runs/:id` | One run's stages, tests, published builds and saved artifacts. | `runs.read` |
+| `GET /api/v2/runs/:id?include=graph,steps,history,details` | The run page. | `runs.read` |
+| `GET /api/v2/projects/:slug/overview` | A project's details. | `projects.read` |
+| `GET /api/v2/projects/:slug/runs?branch=&app=` | A project's or an app ID's Runs and builds. | `projects.read` |
+| `GET /api/v2/projects/:slug/apps/:appId` | An app ID and its build-number sequence. | `projects.read` |
+| `GET /api/v2/projects/:slug/masonfile/commits` | The commits the Masonfile tab offers. | `projects.read` |
+| `GET /api/v2/projects/:slug/masonfile?commit=` | The Masonfile at a commit. | `projects.read` |
+| `GET /api/v2/account` | The caller's own record. | a session (a key gets 401) |
+
+### Status, notifications and search
+
+**`GET /api/v2/status`** answers `StatusInfo`: on the master `cluster`, its
+workers (connected and idle, all of them, and whether every one is
+connected); on a host `link`, whether it reaches its master, when it last
+did, and whether it is past its grace window. `banners` holds what the shell
+shows above every page: `testEndpoints` on a node with test endpoints, the
+master's `backup` reminder for those with `settings.read` (and, for an
+administrator who has not confirmed the backup key, that reminder), and a
+host's `offline` banner while its master is unreachable. The `/live`
+`status` subscription sends the same object when it changes.
+
+```ts
+import type { StatusInfo } from '@mason/api'
+
+export const host: StatusInfo = {
+  node: 'host',
+  link: { online: false, lastContact: 1793450000000, maintenance: false },
+  banners: [
+    {
+      kind: 'offline',
+      text: 'The Mason master is unreachable. You are seeing the last synced builds.',
+    },
+  ],
+}
+```
+
+**`GET /api/v2/notifications`** lists the approvals waiting for the caller
+(those whose roles include theirs, `admin` and `manager` when the approval
+names none, within a key's scopes), and on the master, for managers and
+administrators, its notices (the Apple two-factor code, the cloud budget,
+node checklists, Apple setup, the backup reminder):
+
+```ts
+import type { NotificationItem } from '@mason/api'
+
+export const notifications: NotificationItem[] = [
+  {
+    kind: 'approval',
+    text: 'phones Release 4 (master) waits for your approval at ship',
+    href: '/runs/1d0c6e2a',
+  },
+  { kind: 'notice', text: 'This master is not backed up' },
+]
+```
+
+**`GET /api/v2/search?q=`** answers up to 20 results, each
+`{ kind, label, detail, href }` (`kind` `project`, `app`, `run`, `commit` or
+`branch`): projects, runs by number, commits by SHA prefix and branches for
+developers and up; app IDs for everyone, a tester's opening Install apps.
+The old `/search` keeps answering beside it.
+
+### Projects & apps, the queue and Artifacts
+
+**`GET /api/v2/dashboard`** answers `DashboardData`: the tiles (projects,
+app IDs, success rate over the last finished runs, finished runs, storage
+bytes), counts per platform, the filter, each project's card (repository,
+webhook, latest commit, latest runs, and each app ID's latest build per
+branch, push branches first, with how many branches have one), the queue,
+the latest builds and, on the master only, `nodes`: its workers, each
+`idle`, `busy` or `offline`.
+
+**`GET /api/v2/queue`** answers the queue panel's entries, as the `/live`
+`queue` event carries them.
+
+**`GET /api/v2/artifacts`** answers `{ project?, branch?, runs }`: each run
+with its project, status, commit, times, the build numbers its published
+builds carry, how many it published that the caller may see, and its saved
+artifacts' count and bytes. **`GET /api/v2/artifacts/runs/:id`** answers
+the run, its stages and test summaries, the builds it published that the
+caller may see, and its saved artifacts, each with its `url` (and a
+report's `viewUrl`) under `artifactOrigin`: the host's origin on the master,
+`''` on the host.
+
+```ts
+import type { ArtifactRunDetail } from '@mason/api'
+
+export const detail: ArtifactRunDetail = {
+  run: {
+    id: '1d0c6e2a',
+    number: 12,
+    workflow: 'build',
+    branch: 'master',
+    status: 'succeeded',
+    project: { slug: 'phones', name: 'Phones' },
+    commit: 'c3a1f00dc3a1f00dc3a1f00dc3a1f00dc3a1f00d',
+    description: null,
+    created: 1793450000000,
+    started: 1793450001000,
+    finished: 1793450301000,
+  },
+  stages: [
+    {
+      name: 'android',
+      status: 'succeeded',
+      kind: 'stage',
+      started: 1793450001000,
+      finished: 1793450301000,
+    },
+  ],
+  tests: [{ stage: 'android', passed: 41, failed: 0, skipped: 2 }],
+  builds: [
+    {
+      id: 88,
+      appId: 3,
+      app: 'Phones',
+      platform: 'android',
+      version: '2.4.0',
+      buildNumber: '2611120',
+      size: 48211973,
+      variant: '',
+      format: 'apk',
+    },
+  ],
+  artifacts: [
+    {
+      name: 'report.html',
+      stage: 'android',
+      kind: 'report',
+      size: 18233,
+      created: 1793450300000,
+      url: 'https://builds.example.test/runs/1d0c6e2a/artifacts/report.html',
+      viewUrl:
+        'https://builds.example.test/runs/1d0c6e2a/artifacts/report.html/view',
+    },
+  ],
+  artifactOrigin: 'https://builds.example.test',
+}
+```
+
+### A run page
+
+**`GET /api/v2/runs/:id?include=`** answers `RunPage`: the run (status,
+times, commit, description, reason, project), its stages (each with the
+node it ran on, by name) and saved artifacts, and the parts `include` names,
+comma-separated:
+
+| Part | Adds |
+| --- | --- |
+| `graph` | `graph`, the workflow's recorded stages, post stages, approvals (who decides each, its message and parameters) and parameters; and `layout`, its bubbles and rails in columns and rows with each stage's state. A run whose graph is no longer kept has neither. |
+| `steps` | `steps`, every stage's steps with `logStart` and `logEnd`, the byte range of their lines in the stage's log. |
+| `history` | `history`, the last 10 runs of the same branch and workflow, each with its stages' states. |
+| `details` | `details`: `trigger`, `requestedBy`, the `buildNumber` the run reserved, its `params`, the project's `repository` and the `nodes` it ran on. |
+
+Another part is 400. The first page of the log comes from the windowed
+[`GET /api/v2/runs/:id/logs?from=|last=`](#get-apiv2runsidlogs). Without
+`include` the route answers the run as before.
+
+```ts fragment
+const page: RunPage = await get(runPath(id, ['graph', 'steps', 'history', 'details']))
+```
+
+### Project pages
+
+**`GET /api/v2/projects/:slug/overview`** answers the project's details
+(`ProjectDetails`: repository, default branch, format, app IDs with their
+platforms and Apple team, branch rules, webhook, signing label, the pinned
+branches its push trigger builds, and its build-number sequences) with its
+`slug`, `name`, the app IDs' names, `canSeed` (a holder of
+`buildNumbers.seed` on the master; never on a host) and `secrets` (whether
+the node has a Secrets tab: the master's). The host answers from the copy
+of the details the master sends it.
+
+**`GET /api/v2/projects/:slug/runs`** answers the branch list (pinned
+first, then the 200 most recently run) and the latest 50 runs, each with
+its version and the build number it reserved (else those it published).
+`?branch=` narrows the runs; `?app=<app ID>` narrows both to the runs
+whose workflow publishes that app ID and adds the app ID's heading; an app
+ID the project does not have, that is disabled, or that the caller may not
+see is 404.
+
+**`GET /api/v2/projects/:slug/apps/:appId`** answers the app ID, the
+sequence it takes its build numbers from (one whose `apps` lists it, else
+its own key; none for the default scheme), the other app IDs that sequence
+numbers, the default scheme and `canSeed`:
+
+```ts
+import type { ProjectApp } from '@mason/api'
+
+export const beta: ProjectApp = {
+  slug: 'phones',
+  name: 'Phones',
+  app: {
+    id: 4,
+    bundleId: 'app.example.beta',
+    name: 'Beta',
+    platforms: ['android'],
+  },
+  sequence: {
+    key: 'app.example.alpha',
+    format: 'N',
+    scope: 'app',
+    apps: ['app.example.beta'],
+    last: [{ branch: '', value: '41' }],
+  },
+  shared: ['app.example.alpha'],
+  defaultScheme: { format: 'N', scope: 'app' },
+  canSeed: false,
+}
+```
+
+**`GET /api/v2/projects/:slug/masonfile/commits`** answers the commits
+runs pinned, newest first, each `{ sha, branch }` (the host lists those it
+holds a copy for). **`GET /api/v2/projects/:slug/masonfile?commit=`**
+answers `{ commit, file, text }` for that commit, the newest without one.
+The master reads the copy it kept when a run pinned the commit, then its
+mirror (a Masonfile too large to keep comes from the mirror); the host
+answers from its copies only. 404 says why there is none: the project
+builds from a script, no run has a commit yet, the host is still copying
+it or has none, or the file is not in that commit.
+
+### Your account
+
+**`GET /api/v2/account`** answers the caller's own record: id, name, role,
+username, whether they have a password, their emails, `editable` (on a
+host, whether its master is reachable to take a change) and `passwordHere`
+(always on the master; on a host, for testers only). A key has no account
+and gets 401. Changes go to `PUT /api/v2/people/:id` as before.
+
+```ts
+import type { AccountInfo } from '@mason/api'
+
+export const account: AccountInfo = {
+  id: 12,
+  name: 'Tess Tester',
+  role: 'tester',
+  password: true,
+  emails: [{ email: 'tess@example.com', confirmed: true }],
+  editable: false,
+  passwordHere: true,
+}
+```
+
+### Install apps and Devices
+
+Install apps and Devices as JSON, on both nodes, for a person signed in
+there (a key gets 401). The host answers from its cache; the master asks
+the host over its link exactly as for its pages (`catalog.*`, `devices.*`)
+and answers 503 when it has no host or cannot reach it. A change needs the
+session's proof in `X-Mason-CSRF` from the node's own `Origin` (else 403).
+The selected device is the node's `__Host-mason-device` cookie, which
+`select` sets and removing the selected device clears. `?platform=` chooses
+the platform; without it, the remembered choice, else the browser's.
+
+| Method and path | What it does |
+| --- | --- |
+| `GET /api/v2/catalog/apps` | `{ apps, platforms }`: the apps the person may install. |
+| `GET /api/v2/catalog/apps/:id?platform=` | The app, its platforms, its branches (master first) and each platform's latest build. |
+| `GET /api/v2/catalog/apps/:id/branches/:key?platform=` | A branch's builds for a platform, each with whether the selected device may install it and, for an eligible iOS app, its grant. |
+| `POST /api/v2/catalog/builds/:id/install` | `InstallAnswer`, below. |
+| `POST /api/v2/catalog/builds/:id/prepare` | Asks for a build of that branch and commit for the selected device: `{ prepared }`, `false` with none of the person's selected. |
+| `GET /api/v2/devices` | The person's devices, the selected one, whether registration is configured, and every registered device for an administrator. |
+| `POST /api/v2/devices/registrations` | `{ url, expiresAt }`: a registration profile to download once, with a plain `GET`, within five minutes (`/devices/profiles/<token>`, `application/x-apple-aspen-config`; 404 after). |
+| `POST /api/v2/devices/:id/select`, `…/rename` (`{ "name" }`), `…/retry`, `…/remove` | The action, then the devices as `GET /api/v2/devices` answers them. 404 for a device not the person's or another action. |
+| `GET /api/v2/devices/complete/:token` | Where a registration link ended: `registering`, `registered` (selecting the device) or `unavailable`. |
+
+An app or build the person may not see is 404; Install apps for someone
+without tester access is 403. **Install** answers what the button does:
+
+```ts
+import type { InstallAnswer } from '@mason/api'
+
+// An iOS app: the installer's link, at the node's public origin.
+export const ios: InstallAnswer = {
+  kind: 'itms',
+  url: 'itms-services://?action=download-manifest&url=https%3A%2F%2Fmason.example.test%2Finstall%2FQ2xpZW50LXByb29mLW9mLXRoZS1zZXNzaW9uLTEyMzQ%2Fmanifest.plist',
+  expiresAt: 1793453600000,
+}
+// Anything else downloads from this node.
+export const download: InstallAnswer = {
+  kind: 'download',
+  url: '/install/Q2xpZW50LXByb29mLW9mLXRoZS1zZXNzaW9uLTEyMzQ/artifact',
+  expiresAt: 1793453600000,
+}
+// The device must be registered, or the build prepared for it, first.
+export const register: InstallAnswer = { kind: 'register' }
+export const prepare: InstallAnswer = { kind: 'prepare', buildId: 88 }
+```
+
+On the master `itms` has no `url` until the master or the host has a
+public origin. The `.mobileconfig` and grant files, `GET /devices/qr` and
+`GET /install/:token/*` stay plain `GET`s, and the pages' form posts keep
+working beside these routes.
+
+## 16. Routes outside `/api/v2/`
 
 ### The v1 job API
 
@@ -1844,7 +2170,7 @@ master is unreachable the host keeps the latest delivery per project and
 branch and answers 202 `{ "status": "queued" }`. See "Webhooks" in
 [docs/masonfile.md](masonfile.md#triggers).
 
-## 16. Examples
+## 17. Examples
 
 ```sh
 MASON=https://mason.example.test

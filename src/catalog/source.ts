@@ -33,7 +33,7 @@ export class CatalogRefused extends Error {
 
 /** What Install answers: a grant to download or install, or what the device needs first. */
 export type InstallResult =
-  | { kind: 'download' | 'ios'; token: string }
+  | { kind: 'download' | 'ios'; token: string; expiresAt?: number }
   | { kind: 'register' }
   | { kind: 'prepare'; buildId: number }
 
@@ -282,6 +282,7 @@ export class StoreCatalogSource implements CatalogSource {
           ? 'download'
           : 'ios',
       token: grant.token,
+      expiresAt: grant.expiresAt,
     }
   }
 

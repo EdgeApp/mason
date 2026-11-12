@@ -24,52 +24,9 @@ import { icon } from './icons.js'
 import { logHtml } from './log.js'
 import { stepItems } from './steps.js'
 import { shownLabel } from '../master/requesters.js'
+import type { RunGraph, RunStep } from '../shared/api/runs.js'
 
-/** A run's graph as its stages and post stages, from the graph its setup recorded. */
-export interface RunGraph {
-  stages: LayoutStage[]
-  post: LayoutStage[]
-  /** Who may decide each approval, by stage name. */
-  approvals: Record<
-    string,
-    {
-      roles: string[]
-      message?: string
-      params: Record<
-        string,
-        {
-          type: string
-          choices?: string[]
-          default?: unknown
-          description?: string
-        }
-      >
-    }
-  >
-  params: Record<
-    string,
-    {
-      type: string
-      choices?: string[]
-      default?: unknown
-      description?: string
-    }
-  >
-}
-
-export interface RunStep {
-  stage: string
-  attempt: number
-  id: number
-  kind: string
-  title: string
-  status: string
-  ms: number | null
-  logStart: number | null
-  logEnd: number | null
-  /** The section step it ran in, if any. */
-  parent: number | null
-}
+export type { RunGraph, RunStep }
 
 export interface RunData {
   id: string

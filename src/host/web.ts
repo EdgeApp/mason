@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import {
   authRoutes,
   cookieOptions,
+  csrf,
   SESSION_COOKIE,
   sessionContext,
   type AuthOptions,
@@ -33,11 +34,7 @@ import {
   projectRunsView,
   projectView,
 } from '../view/admin.js'
-import {
-  SCRIPT_PROJECT,
-  storedDetails,
-  type ProjectDetails,
-} from '../master/projectDetails.js'
+import { storedDetails, type ProjectDetails } from '../master/projectDetails.js'
 import { artifactsView, projectRunsData } from '../view/artifacts.js'
 import { dashboardData, dashboardView } from '../view/dashboard.js'
 import {
@@ -55,9 +52,14 @@ import type { HostRuntime } from './runtime.js'
 import { hostLogin } from './sessions.js'
 import { hostNodeInfo, hostSessionApi } from './sessionApi.js'
 import { nodeInfoRoutes } from '../node/nodeInfo.js'
+import { catalogApi } from '../catalog/api.js'
+import { StoreCatalogSource } from '../catalog/source.js'
+import { Devices } from '../devices/store.js'
+import { Refused } from './builds.js'
+import { masonfileData, readApi } from '../node/readApi.js'
+import { hostAccount, hostReader, OFFLINE_TEXT } from './reads.js'
 
-const OFFLINE_BANNER =
-  '<p class="notice" role="status">The Mason master is unreachable. You are seeing the last synced builds.</p>'
+const OFFLINE_BANNER = `<p class="notice" role="status">${OFFLINE_TEXT}</p>`
 
 /** Every HTML page carries the banner while the master is unreachable. */
 function offlineBanner(host: HostRuntime): RequestHandler {
@@ -152,6 +154,7 @@ function hostFrame(host: HostRuntime, context: WebAppContext): Frame {
  */
 function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
   const router = express.Router()
+  const reader = hostReader(host, context)
   const visible =
     (accountId: number) =>
     (appId: number): boolean =>
@@ -426,49 +429,28 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
   router.get('/projects/:slug/masonfile', (req, res) => {
     const page = projectPage(req, res)
     if (page == null) return
-    const db = host.cache.db
-    // The commits the host has a copy for, newest run first.
-    const commits = db
-      .prepare(
-        "SELECT j.commit_sha AS sha, j.branch FROM jobs j JOIN masonfiles m ON m.key=j.project_id || ':' || j.commit_sha WHERE j.project_id=? GROUP BY j.commit_sha ORDER BY MAX(j.created) DESC LIMIT 50",
-      )
-      .all(page.project.id) as Array<{ sha: string; branch: string }>
     const commit =
-      typeof req.query.commit === 'string' ? req.query.commit : commits[0]?.sha
-    const kept =
-      commit == null
-        ? undefined
-        : (db
-            .prepare('SELECT file,text FROM masonfiles WHERE key=?')
-            .get(`${page.project.id}:${commit}`) as
-            | { file: string; text: string | null }
-            | undefined)
-    render(
-      res,
-      page.found.viewer,
-      `${page.project.name} · Masonfile`,
-      masonfileView({
-        viewer: page.found.viewer,
-        slug: page.project.slug,
-        name: page.project.name,
-        commits,
-        ...(commit == null ? {} : { commit }),
-        ...(kept?.text == null ? {} : { file: kept.file, text: kept.text }),
-        ...(kept?.text != null
-          ? {}
-          : {
-              error:
-                page.details.format === 'script'
-                  ? SCRIPT_PROJECT
-                  : commit == null
-                    ? 'No run has a commit yet.'
-                    : kept != null
-                      ? 'The host is still copying that commit’s Masonfile from the master.'
-                      : 'The host has no copy of that commit’s Masonfile.',
-            }),
-        secrets: false,
-      }),
-      'dashboard',
+      typeof req.query.commit === 'string' ? req.query.commit : undefined
+    void masonfileData(reader, reader.project(page.project.slug)!, commit).then(
+      (data) => {
+        render(
+          res,
+          page.found.viewer,
+          `${page.project.name} · Masonfile`,
+          masonfileView({
+            viewer: page.found.viewer,
+            slug: page.project.slug,
+            name: page.project.name,
+            commits: data.commits,
+            ...(data.commit == null ? {} : { commit: data.commit }),
+            ...(data.file == null ? {} : { file: data.file }),
+            ...(data.text == null ? {} : { text: data.text }),
+            ...(data.error == null ? {} : { error: data.error }),
+            secrets: false,
+          }),
+          'dashboard',
+        )
+      },
     )
   })
   // Your account: the person's own record from the cache; changes go to the
@@ -479,19 +461,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       signIn(req, res)
       return
     }
-    const db = host.cache.db
-    const row = db
-      .prepare(
-        'SELECT id,name,username,role,has_password FROM accounts WHERE id=?',
-      )
-      .get(found.accountId) as {
-      id: number
-      name: string
-      username: string | null
-      role: string
-      has_password: number
-    }
-    const link = host.options.link()
+    const account = hostAccount(host, found.accountId)
     res.set('Content-Security-Policy', masterContentSecurityPolicy)
     render(
       res,
@@ -500,26 +470,16 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       accountView({
         viewer: found.viewer,
         person: {
-          id: row.id,
-          name: row.name,
-          role: row.role,
-          ...(row.username == null ? {} : { username: row.username }),
-          password: row.has_password === 1,
-          emails: (
-            db
-              .prepare(
-                'SELECT email,confirmed FROM account_emails WHERE account_id=? ORDER BY position',
-              )
-              .all(row.id) as Array<{ email: string; confirmed: number }>
-          ).map((entry) => ({
-            email: entry.email,
-            confirmed: entry.confirmed === 1,
-          })),
+          id: account.id,
+          name: account.name,
+          role: account.role,
+          ...(account.username == null ? {} : { username: account.username }),
+          password: account.password,
+          emails: account.emails,
         },
         signOut: found.viewer.signOut,
-        editable: link != null && !link.closed,
-        // The master takes a password through a host from testers only.
-        passwordHere: row.role === 'tester',
+        editable: account.editable,
+        passwordHere: account.passwordHere,
       }),
       'account',
       found.csrf,
@@ -537,16 +497,6 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       typeof req.query.platform === 'string' ? req.query.platform : undefined
     const project =
       typeof req.query.project === 'string' ? req.query.project : undefined
-    // Each project's repository, webhook and push branches, from the copy of its details the master sent.
-    const details = (
-      host.cache.db.prepare('SELECT id,details FROM projects').all() as Array<{
-        id: number
-        details: string | null
-      }>
-    ).flatMap((row) => {
-      const kept = storedDetails(row.details)
-      return kept == null ? [] : [[row.id, kept] as const]
-    })
     render(
       res,
       found.viewer,
@@ -558,13 +508,7 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
             viewer: found.viewer,
             now,
             appVisible: visible(found.accountId),
-            repositories: new Map(
-              details.map(([id, kept]) => [
-                id,
-                { repository: kept.repository, webhook: kept.webhook },
-              ]),
-            ),
-            pinned: new Map(details.map(([id, kept]) => [id, kept.pinned])),
+            ...reader.dashboard(),
           },
           {
             ...(platform == null ? {} : { platform }),
@@ -870,6 +814,37 @@ function hostInvitation(
   }
 }
 
+/** Install apps and Devices as JSON, from the host's cache, for its own signed-in people. */
+function hostCatalogApi(host: HostRuntime): express.Router {
+  const store = host.cache.store
+  return catalogApi({
+    caller(req) {
+      // Before the first sync and in maintenance there is nothing to serve.
+      host.builds.ready()
+      const context = sessionContext(req, host.accounts)
+      if (context == null) return undefined
+      return {
+        accountId: context.account.id,
+        source: new StoreCatalogSource(store, {
+          session: context.session,
+          relay: host.devices,
+        }),
+        checkCsrf: (request): void => {
+          csrf(request, store, context.session)
+        },
+        mayRegister: new Devices(store, host.devices).allowed(context.account),
+        registration: store.config.devices != null,
+        installOrigin: store.config.origin,
+      }
+    },
+    failure: (error) =>
+      error instanceof Refused
+        ? { status: error.status, error: error.message }
+        : undefined,
+    now: () => host.now(),
+  })
+}
+
 /** The host's public web listener: catalog, installs and sign-in from its cache. */
 export function hostApp(
   context: WebAppContext & { host?: HostRuntime },
@@ -913,9 +888,12 @@ export function hostApp(
   app.use(host.artifacts.routes(host.accounts))
   // The web app's session is the host's own; it never reaches the forwarder.
   app.use(hostSessionApi(host, hostPassword(host)))
-  // The builds API is answered here, from the cache and storage, so it keeps
-  // working while the master is away; the rest of /api/v2 is forwarded.
+  // The builds API and the pages' reads are answered here, from the cache
+  // and storage, so they keep working while the master is away; the rest of
+  // /api/v2 is forwarded.
   app.use(host.builds.routes(host.accounts))
+  app.use(readApi(hostReader(host, context)))
+  app.use(hostCatalogApi(host))
   app.use(forwardRoutes(host))
   app.use((_req, res, next) => {
     if (host.cache.host() == null) {

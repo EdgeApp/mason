@@ -12,6 +12,8 @@ import { allow, allowRole, covers } from './permissions.js'
 import type { Actor } from './roles.js'
 import type { FeedEvent } from './runFeed.js'
 import type { Master } from './runtime.js'
+import { masterStatus } from './reads.js'
+import type { StatusInfo } from '../shared/api/shell.js'
 import {
   LIVE_PATH,
   type LiveEvent,
@@ -45,6 +47,8 @@ const MESSAGE_BURST = 50
 const MESSAGES_PER_SECOND = 20
 /** Sockets one viewer may hold open at once on a node. */
 export const MAX_SOCKETS_PER_VIEWER = 16
+/** How often a shell status subscription is checked for a change. */
+const STATUS_MS = 2000
 /** A stage in these states writes no more lines. */
 const SETTLED = new Set([
   'succeeded',
@@ -59,6 +63,8 @@ const SETTLED = new Set([
 /** What the live socket reads: the master's runs, their stage logs and the queue. */
 export interface LiveSource {
   subscribe(listener: (events: FeedEvent[]) => void): () => void
+  /** The shell's status for a viewer; a node without one refuses the subscription. */
+  status?(actor: Actor): StatusInfo
   run(id: string): LiveRun | undefined
   /** A stage's steps, of its latest attempt. */
   steps(id: string, stage: string): LiveStep[]
@@ -128,6 +134,9 @@ export function parseMessage(text: string): LiveMessage {
   const key = text100('key', 200)
   if (kind === 'queue') return { subscribe: kind, key: key ?? 'queue' }
   const run = text100('run', 64)
+  // A status without a run is the shell's.
+  if (run == null && kind === 'status')
+    return { subscribe: kind, key: key ?? 'status' }
   if (run == null) throw new Error('Name the run')
   const stage = text100('stage', 500)
   const after = value.after
@@ -403,7 +412,8 @@ export function followed(
 }
 
 interface Watch {
-  kind: 'run' | 'status' | 'queue'
+  /** `shell`: the shell's status, a `status` subscription without a run. */
+  kind: 'run' | 'status' | 'queue' | 'shell'
   run: string
   /** Whether the stage follows the running one. */
   follow: boolean
@@ -442,7 +452,9 @@ interface Watch {
  * gets every later line once. Without a stage it follows the running one,
  * sending that stage's steps and the last megabyte of its log, from a
  * line's start, whenever it changes.
- * `status` sends only `run`; `queue`, the queue panel's entries. Every
+ * `status` sends only `run`; without a run, the shell's `status` whenever
+ * it changes (checked on every change of a run, and every two seconds);
+ * `queue`, the queue panel's entries. Every
  * subscription is checked as the HTTP routes check the same read; a run's
  * subscription ends with `end` once it has finished and its log is
  * drained, or `gone` when it is deleted.
@@ -454,6 +466,8 @@ export class LiveSession {
   /** Messages it may still send now, refilled each second. */
   private allowance = MESSAGE_BURST
   private counted: number
+  /** Checks the shell's status while a subscription to it is open. */
+  private ticker: ReturnType<typeof setInterval> | undefined
 
   constructor(
     private readonly source: LiveSource,
@@ -503,6 +517,17 @@ export class LiveSession {
     try {
       if (!this.watches.has(key) && this.watches.size >= MAX_SUBSCRIPTIONS)
         throw new Error('Too many subscriptions')
+      if (message.subscribe === 'status' && message.run == null) {
+        allowRole(actor, 'builds.read')
+        if (this.source.status == null)
+          throw new Error('This node has no status to follow')
+        const watch = this.watch('shell', '')
+        this.watches.set(key, watch)
+        this.shell(key, watch, actor)
+        this.ticker ??= setInterval(() => this.tick(), STATUS_MS)
+        this.ticker.unref?.()
+        return
+      }
       allowRole(actor, 'runs.read')
       if (message.subscribe === 'queue') {
         const watch = this.watch('queue', '')
@@ -556,6 +581,38 @@ export class LiveSession {
   private forget(key: string): void {
     this.watches.get(key)?.cancel?.()
     this.watches.delete(key)
+    if (
+      this.ticker != null &&
+      ![...this.watches.values()].some((watch) => watch.kind === 'shell')
+    ) {
+      clearInterval(this.ticker)
+      this.ticker = undefined
+    }
+  }
+
+  /** Sends the shell's status to a subscription when it changed. */
+  private shell(key: string, watch: Watch, actor: Actor): void {
+    this.changed(key, watch, 'status', this.source.status!(actor))
+  }
+
+  /** Checks every shell status subscription; a viewer who has gone closes the socket. */
+  private tick(): void {
+    if (this.ended) return
+    const shells = [...this.watches].filter(
+      ([, watch]) => watch.kind === 'shell',
+    )
+    if (shells.length === 0) return
+    const actor = this.viewer()
+    if (actor == null) {
+      this.out.close(1008)
+      return
+    }
+    for (const [key, watch] of shells)
+      try {
+        this.shell(key, watch, actor)
+      } catch (error) {
+        this.fail(key, error)
+      }
   }
 
   private watch(kind: Watch['kind'], run: string): Watch {
@@ -642,7 +699,16 @@ export class LiveSession {
     for (const [key, watch] of [...this.watches]) {
       if (this.watches.get(key) !== watch) continue
       try {
-        if (watch.kind === 'queue') {
+        if (watch.kind === 'shell') {
+          // A stage starting or ending changes the workers; log lines do not.
+          if (runs.size === 0) continue
+          const actor = this.viewer()
+          if (actor == null) {
+            this.out.close(1008)
+            return
+          }
+          this.shell(key, watch, actor)
+        } else if (watch.kind === 'queue') {
           if (runs.size === 0) continue
           const actor = this.viewer()
           if (actor == null) {
@@ -960,11 +1026,16 @@ export function serveLive(
   }
 }
 
-/** The master's runs, stage logs and queue, for the live socket. */
-export function masterLiveSource(master: Master): LiveSource {
+/** The master's runs, stage logs, queue and shell status, for the live socket. */
+export function masterLiveSource(
+  master: Master,
+  options: { testEndpoints?: boolean } = {},
+): LiveSource {
   const db = master.database.db
   return {
     subscribe: (listener) => master.feed.subscribe(listener),
+    status: (actor) =>
+      masterStatus(master, actor, options.testEndpoints === true),
     run: (id): LiveRun | undefined => {
       const job = db
         .prepare(

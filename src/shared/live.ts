@@ -1,5 +1,6 @@
 // The `/live` WebSocket's messages, which the server (src/master/live.ts,
 // src/host/live.ts) and the pages (src/browser/live.ts, the web app) share.
+import type { StatusInfo } from './api/shell.js'
 
 /** Where the master and the host accept the live pages' socket. */
 export const LIVE_PATH = '/live'
@@ -7,13 +8,17 @@ export const LIVE_PATH = '/live'
 /** The close code that means the node cannot serve live updates (its master is older): final. */
 export const LIVE_UNAVAILABLE = 4000
 
-/** What a page subscribes to: a run's log, a run's status, or the queue. */
+/**
+ * What a page subscribes to: a run's log, a run's status, or the queue;
+ * `status` without a run is the shell's: the master's workers, or the
+ * host's link to its master.
+ */
 export type LiveTopic = 'run' | 'status' | 'queue'
 
 /**
  * The events a frame carries: a run's status line, its stages, a stage's
- * steps, log text, the queue, the end of a subscription (`end`: the run
- * finished; `gone`: it no longer exists) and refusals.
+ * steps, log text, the queue, the shell's status, the end of a subscription
+ * (`end`: the run finished; `gone`: it no longer exists) and refusals.
  */
 export type LiveEvent =
   | 'run'
@@ -21,6 +26,7 @@ export type LiveEvent =
   | 'steps'
   | 'log'
   | 'queue'
+  | 'status'
   | 'end'
   | 'gone'
   | 'error'
@@ -30,6 +36,16 @@ export interface LiveFrame {
   key?: string
   event: LiveEvent
   data?: unknown
+}
+
+/**
+ * The shell's `status` subscription's frame: what `GET /api/v2/status`
+ * answers, sent when it subscribes and again whenever it changes.
+ */
+export interface LiveStatusFrame {
+  key: string
+  event: 'status'
+  data: StatusInfo
 }
 
 /** A message a page sends: a subscription under its key, or the end of one. */

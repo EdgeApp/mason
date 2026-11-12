@@ -157,7 +157,6 @@ const wizardPaths = [
   '/api/v2/projects/:slug/discover',
   '/api/v2/projects/:slug/wizard',
   '/api/v2/projects/:slug/webhook',
-  '/api/v2/projects/:slug/masonfile',
 ]
 
 /** The add-project wizard's API and a project's Masonfile at a commit, for managers and administrators. */
@@ -319,26 +318,6 @@ export function wizardApi(master: Master): Router {
       )
       master.database.audit(actor, 'project.webhook', slug)
       return { created, url }
-    }),
-  )
-  router.get(
-    '/api/v2/projects/:slug/masonfile',
-    json(async (req, res) => {
-      allow(actorOf(res), 'projects.read', {
-        project: String(req.params.slug),
-      })
-      const slug = String(req.params.slug)
-      const found = project(slug)
-      const commit = String(req.query.commit ?? '')
-      const entry = master.projects.get(slug).entrypoint ?? 'Masonfile.ts'
-      const text = await master.mirrors.show(
-        slug,
-        found.repository,
-        commit,
-        entry,
-      )
-      if (text == null) throw new NotFound(`${entry} is not in that commit`)
-      return { commit, file: entry, text }
     }),
   )
   router.use([checkPath, ...wizardPaths], apiErrors)

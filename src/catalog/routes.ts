@@ -59,7 +59,8 @@ export function selectedDevice(req: Request): number | undefined {
   return id == null ? undefined : Number(id)
 }
 
-function chosenPlatform(req: Request): Platform {
+/** The platform a catalog request is for: `?platform=`, the remembered choice, else the browser's. */
+export function chosenPlatform(req: Request): Platform {
   const preferences = (req.headers.cookie ?? '')
     .split(';')
     .map((part) => part.trim())

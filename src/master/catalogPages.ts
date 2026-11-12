@@ -1,4 +1,5 @@
 import express, { type Request, type Response } from 'express'
+import { catalogApi } from '../catalog/api.js'
 import { catalogPages, type CatalogCaller } from '../catalog/routes.js'
 import { LinkCatalogSource, type CatalogLink } from '../catalog/source.js'
 import {
@@ -51,6 +52,78 @@ export function catalogLink(master: Master): CatalogLink {
   }
 }
 
+/** The master's public origin, and the host's. */
+function catalogOrigins(master: Master): { master?: string; host?: string } {
+  const host = (master.settings.value('host') ?? {}) as { origin?: string }
+  const own = master.providerSignIn.origin()
+  return {
+    ...(own == null ? {} : { master: own }),
+    ...(host.origin == null ? {} : { host: host.origin }),
+  }
+}
+
+/** Whether an error says the host is away, rather than refusing the request. */
+function unreachable(error: unknown): boolean {
+  return (
+    error instanceof HostNotConnected ||
+    (error instanceof LinkError &&
+      (error.code === 'closed' || error.code === 'timeout'))
+  )
+}
+
+/**
+ * Install apps and Devices as JSON on the master, for a person signed in
+ * here: the host answers over the link, as it does for the pages. Without a
+ * host, or with it away, they answer 503.
+ */
+export function masterCatalogApi(
+  master: Master,
+  session: (req: Request) => MasterSession | undefined,
+): express.Router {
+  const link = catalogLink(master)
+  return catalogApi({
+    caller(req) {
+      const current = master.forwarder.forwarded(req) ? undefined : session(req)
+      if (current == null) return undefined
+      const { master: own, host } = catalogOrigins(master)
+      const origin = own ?? host
+      return {
+        accountId: current.accountId,
+        source: new LinkCatalogSource(
+          link,
+          {
+            id: current.id,
+            expiresAt: current.expiresAt,
+            permissionVersion: current.permissionVersion,
+          },
+          own,
+        ),
+        checkCsrf: (request): void => {
+          checkCsrf(request, current)
+        },
+        mayRegister: true,
+        registration: true,
+        ...(origin == null ? {} : { installOrigin: origin }),
+      }
+    },
+    failure(error) {
+      const missing = noHost(master)
+      if (missing != null)
+        return {
+          status: 503,
+          error: 'No host is linked yet — installs come from a host.',
+        }
+      if (unreachable(error))
+        return {
+          status: 503,
+          error:
+            'The master cannot reach the Mason host right now; try again in a moment.',
+        }
+      return undefined
+    },
+  })
+}
+
 /**
  * Install apps and Devices on the master: the pages the host serves, with
  * their data from the host over the link, drawn in the master's shell for
@@ -67,18 +140,8 @@ export function masterCatalogPages(
   send: MasterSend,
 ): void {
   const link = catalogLink(master)
-  const origins = (): { master?: string; host?: string } => {
-    const host = (master.settings.value('host') ?? {}) as { origin?: string }
-    const own = master.providerSignIn.origin()
-    return {
-      ...(own == null ? {} : { master: own }),
-      ...(host.origin == null ? {} : { host: host.origin }),
-    }
-  }
-  const unreachable = (error: unknown): boolean =>
-    error instanceof HostNotConnected ||
-    (error instanceof LinkError &&
-      (error.code === 'closed' || error.code === 'timeout'))
+  const origins = (): { master?: string; host?: string } =>
+    catalogOrigins(master)
   const pages = catalogPages({
     paths: ['/', '/apps', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
     caller(req): MasterCaller | undefined {

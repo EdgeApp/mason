@@ -32,12 +32,8 @@ import { artifactsView, projectRunsData } from '../view/artifacts.js'
 import { fqdn } from './cloud/hosts.js'
 import { DEFAULT_MONTHLY_BUDGET } from './cloud/pools.js'
 import { methodsOf } from './hostSettings.js'
-import { storedNodeType } from './nodeTypes.js'
-import {
-  dashboardData,
-  dashboardView,
-  type DashboardSource,
-} from '../view/dashboard.js'
+import { nodeTypesView } from './nodeTypes.js'
+import { dashboardData, dashboardView } from '../view/dashboard.js'
 import {
   approvalNotifications,
   notificationsFor,
@@ -48,16 +44,11 @@ import { search } from '../view/search.js'
 import { runLines, type PageLines } from './runsApi.js'
 import { discovery } from './wizard.js'
 import { shell, type Viewer } from '../view/shell.js'
-import type { GroupApp } from '../view/groups.js'
+import { apps } from './adminApi.js'
 import { MASTER_SESSION_COOKIE, type MasterSession } from './auth.js'
 import { can } from './permissions.js'
 import type { Person } from './people.js'
-import {
-  projectDetails,
-  pushBranches,
-  SCRIPT_PROJECT,
-} from './projectDetails.js'
-import { masonfileTooLarge } from './scheduler.js'
+import { projectDetails, pushBranches } from './projectDetails.js'
 import { sessionActor } from './auth.js'
 import type { Master } from './runtime.js'
 import { repository, version } from '../version.js'
@@ -65,6 +56,16 @@ import { clientAddress } from './forward.js'
 import { ProjectNotFound } from './projects.js'
 import type { ProviderSignIn } from './providerSignIn.js'
 import { masterCatalogPages } from './catalogPages.js'
+import {
+  appleSigning,
+  appVisibleTo,
+  backupNotice,
+  cluster,
+  masterReader,
+  runningStage,
+  workerStatus,
+} from './reads.js'
+import { masonfileData } from '../node/readApi.js'
 
 /** A person as the People page and Your account draw them. */
 function personRow(person: Person): PersonRow {
@@ -91,42 +92,6 @@ function viewerOf(session: MasterSession): Viewer {
   }
 }
 
-/** Worker capacity and health for the top bar, and the nodes for the dashboard. */
-function cluster(master: Master): {
-  status: { idle: number; total: number; healthy: boolean }
-  nodes: NonNullable<DashboardSource['nodes']>
-} {
-  const workers = master.registry
-    .list()
-    .filter((node) => node.role === 'worker')
-  const nodes = workers.map((node) => {
-    const busy = node.connected && master.scheduler.busy(node.fingerprint)
-    const inventory = master.scheduler.inventoryOf(node.fingerprint)
-    return {
-      name: node.name,
-      status: (!node.connected ? 'offline' : busy ? 'busy' : 'idle') as
-        | 'offline'
-        | 'busy'
-        | 'idle',
-      detail: [
-        node.type,
-        inventory == null ? undefined : `${inventory.os} ${inventory.arch}`,
-        `${node.slots} slot${node.slots === 1 ? '' : 's'}`,
-      ]
-        .filter((part) => part != null && part !== '')
-        .join(' · '),
-    }
-  })
-  return {
-    status: {
-      idle: nodes.filter((node) => node.status === 'idle').length,
-      total: nodes.length,
-      healthy: nodes.every((node) => node.status !== 'offline'),
-    },
-    nodes,
-  }
-}
-
 /** A master page: the shell, the forms script, and the banners that apply. */
 function masterPage(
   context: WebAppContext,
@@ -137,18 +102,8 @@ function masterPage(
   active?: string,
   scripts: string[] = [],
 ): string {
-  // The backup reminder is for those who may configure backups; an
-  // administrator who skipped confirming the key is reminded of it too.
   const notice =
-    master.configured() &&
-    session != null &&
-    can(sessionActor(session), 'settings.read')
-      ? (master.backups.notice() ??
-        (can(sessionActor(session), 'backups.key') &&
-        master.backups.needsConfirmation(session.accountId)
-          ? 'The backup key is not confirmed as stored'
-          : undefined))
-      : undefined
+    session == null ? undefined : backupNotice(master, sessionActor(session))
   const banner =
     notice == null
       ? ''
@@ -184,21 +139,7 @@ function appVisible(
   master: Master,
   session: MasterSession,
 ): (appId: number) => boolean {
-  if (session.role !== 'tester') return () => true
-  const admitted = master.database.db
-    .prepare('SELECT open_admission FROM accounts WHERE id=?')
-    .get(session.accountId) as { open_admission?: number } | undefined
-  if (admitted?.open_admission === 1) return () => true
-  const allowed = new Set(
-    (
-      master.database.db
-        .prepare(
-          'SELECT ga.app_id FROM group_apps ga JOIN group_members gm ON gm.group_id=ga.group_id WHERE gm.account_id=?',
-        )
-        .all(session.accountId) as Array<{ app_id: number }>
-    ).map((row) => row.app_id),
-  )
-  return (appId) => allowed.has(appId)
+  return appVisibleTo(master, sessionActor(session))
 }
 
 const status = '<p class="notice" role="status" data-field="status" hidden></p>'
@@ -247,19 +188,6 @@ function backupsPage(master: Master, session: MasterSession): string {
 /** Set by "Skip for now": the dashboard stops sending an administrator to Backups for this browser session. */
 const BACKUP_LATER_COOKIE = 'mason-backups-later'
 
-/** Every app, in the order the catalog lists them, for a group page. */
-function groupApps(master: Master): GroupApp[] {
-  return master.database.db
-    .prepare('SELECT id,name,slug,enabled FROM apps ORDER BY position,id')
-    .all()
-    .map((row) => ({
-      id: Number(row.id),
-      name: String(row.name),
-      slug: String(row.slug),
-      enabled: Number(row.enabled) === 1,
-    }))
-}
-
 /** The master's pages: setup until the first account exists, then sign-in, home and backups. */
 export function masterPages(
   app: express.Express,
@@ -268,6 +196,7 @@ export function masterPages(
 ): void {
   const session = (req: express.Request): MasterSession | undefined =>
     master.auth.session(cookie(req, MASTER_SESSION_COOKIE))
+  const reader = masterReader(master, context)
   const send = (
     res: express.Response,
     title: string,
@@ -298,34 +227,13 @@ export function masterPages(
       typeof req.query.platform === 'string' ? req.query.platform : undefined
     const project =
       typeof req.query.project === 'string' ? req.query.project : undefined
-    const repositories = new Map(
-      (
-        master.database.db
-          .prepare(
-            'SELECT id,repository,webhook_secret IS NOT NULL AS webhook FROM projects',
-          )
-          .all() as Array<{ id: number; repository: string; webhook: number }>
-      ).map((row) => [
-        row.id,
-        { repository: row.repository, webhook: row.webhook === 1 },
-      ]),
-    )
     const data = dashboardData(
       {
         db: master.database.db,
         viewer: viewerOf(current),
         now,
         appVisible: appVisible(master, current),
-        nodes: cluster(master).nodes,
-        repositories,
-        pinned: new Map(
-          master.projects
-            .list()
-            .map((project) => [
-              project.id,
-              pushBranches(project, master.pushes),
-            ]),
-        ),
+        ...reader.dashboard(),
       },
       {
         ...(platform == null ? {} : { platform }),
@@ -649,18 +557,13 @@ export function masterPages(
     })
   }
   guarded('/nodes', 'nodes.read', 'Nodes', 'nodes', async (current) => {
-    const busy = cluster(master).nodes
     return nodesView({
       nodes: master.registry.list().map((node) => {
         const details = master.nodeDetails(node.fingerprint) as {
           checklist?: NodeRow['checklist']
           inventory?: NodeRow['inventory'] & { version?: string }
         }
-        const stage = master.database.db
-          .prepare(
-            "SELECT job_id||' '||name AS name FROM job_stages WHERE worker=? AND status='running' LIMIT 1",
-          )
-          .get(node.fingerprint) as { name: string } | undefined
+        const stage = runningStage(master, node.fingerprint)
         return {
           name: node.name,
           fingerprint: node.fingerprint,
@@ -668,14 +571,8 @@ export function masterPages(
           type: node.type,
           labels: node.labels,
           slots: node.slots,
-          status:
-            node.role === 'host'
-              ? node.connected
-                ? 'idle'
-                : 'offline'
-              : (busy.find((entry) => entry.name === node.name)?.status ??
-                'offline'),
-          ...(stage == null ? {} : { stage: stage.name }),
+          status: workerStatus(master, node),
+          ...(stage == null ? {} : { stage }),
           ...(details.inventory == null
             ? {}
             : { inventory: details.inventory }),
@@ -820,58 +717,8 @@ export function masterPages(
     'settings',
     async (current) => {
       const actor = sessionActor(current)
-      const apple = master.apple.status()
-      // With the Apple ID signed in, the teams it can set up signing for.
-      const stored = (
-        (master.settings.value('apple') ?? {}) as {
-          teams?: Record<string, { keyId: string; name?: string }>
-        }
-      ).teams
-      const configured = Object.entries(stored ?? {}).map(([id, key]) => {
-        const certificate = master.appleSigning.certificates.current(
-          id,
-          'distribution',
-        )
-        return {
-          id,
-          name: key.name ?? id,
-          keyId: key.keyId,
-          ...(certificate == null
-            ? {}
-            : {
-                certificate: {
-                  name: certificate.name,
-                  expiresAt: certificate.expiresAt,
-                },
-              }),
-        }
-      })
-      const setup =
-        apple.state !== 'signedIn'
-          ? undefined
-          : await master.appleSetup.teams().then(
-              (teams) => ({
-                keyName: master.appleSetup.keyName,
-                teams,
-                configured,
-              }),
-              (error: unknown) => ({
-                keyName: master.appleSetup.keyName,
-                teams: [],
-                configured,
-                error: (error as Error).message,
-              }),
-            )
       return settingsView({
-        apple: {
-          signedIn: apple.state === 'signedIn',
-          needsCode: apple.state === 'needsCode',
-          ...(apple.appleId == null ? {} : { appleId: apple.appleId }),
-          ...(apple.notice == null ? {} : { notice: apple.notice }),
-          ...(setup == null ? {} : { setup }),
-          failures: master.appleSigning.setupFailures(),
-          settingUp: master.appleTeamsInSetup(),
-        },
+        apple: await appleSigning(master),
         keys: can(actor, 'keys.read')
           ? master.keys.list().map((key) => ({
               id: key.id,
@@ -938,16 +785,11 @@ export function masterPages(
               delete view.clientSecret
               return view as unknown as SignInMethodView
             }),
-            nodeTypes: Object.fromEntries(
-              Object.entries(
-                (master.settings.value('nodeTypes') ?? {}) as Record<
-                  string,
-                  unknown
-                >,
-              ).flatMap(([name, value]) => {
-                const type = storedNodeType(value)
-                return type == null ? [] : [[name, type]]
-              }),
+            nodeTypes: nodeTypesView(
+              (master.settings.value('nodeTypes') ?? {}) as Record<
+                string,
+                unknown
+              >,
             ),
             monthlyBudget: Number(
               (
@@ -1085,7 +927,7 @@ export function masterPages(
           apps: group.apps.map((app) => app.id),
           members: group.members,
         },
-        apps: groupApps(master),
+        apps: apps(master),
         people: master.people.list(actor).map((person) => ({
           id: person.id,
           name: person.name,
@@ -1388,62 +1230,37 @@ export function masterPages(
       )
       return
     }
-    const commits = master.database.db
-      .prepare(
-        'SELECT commit_sha AS sha,branch FROM (SELECT commit_sha,branch,ROW_NUMBER() OVER (PARTITION BY commit_sha ORDER BY created DESC) AS place,created FROM jobs WHERE project_id=? AND commit_sha IS NOT NULL) WHERE place=1 ORDER BY created DESC LIMIT 30',
-      )
-      .all(project.id) as Array<{ sha: string; branch: string }>
     const commit =
-      typeof req.query.commit === 'string' ? req.query.commit : commits[0]?.sha
-    // The copy kept when the run pinned the commit, else the mirror.
-    const kept =
-      commit == null
-        ? undefined
-        : (master.database.db
-            .prepare('SELECT file,text FROM masonfiles WHERE key=?')
-            .get(`${project.id}:${commit}`) as
-            | { file: string; text: string }
-            | undefined)
-    const file = kept?.file ?? project.entrypoint ?? 'Masonfile.ts'
-    const render = (extra: { text?: string; error?: string }): void => {
-      send(
-        res,
-        `${project.name} · Masonfile`,
-        masonfileView({
-          viewer: viewerOf(current),
-          slug,
-          name: project.name,
-          commits,
-          ...(commit == null ? {} : { commit }),
-          file,
-          ...extra,
-        }),
-        current,
-        200,
-        'dashboard',
-      )
-    }
-    if (project.format === 'script') {
-      render({ error: SCRIPT_PROJECT })
-      return
-    }
-    if (commit == null) {
-      render({ error: 'No run has a commit yet.' })
-      return
-    }
-    // The master still reads from its mirror a Masonfile too large to copy.
-    if (kept != null && kept.text !== masonfileTooLarge(kept.file)) {
-      render({ text: kept.text })
-      return
-    }
-    master.mirrors.show(slug, project.repository, commit, file).then(
-      (text) => {
-        render(
-          text == null ? { error: `${file} is not in that commit.` } : { text },
+      typeof req.query.commit === 'string' ? req.query.commit : undefined
+    const entry = project.entrypoint ?? 'Masonfile.ts'
+    masonfileData(reader, reader.project(slug)!, commit).then(
+      (data) => {
+        send(
+          res,
+          `${project.name} · Masonfile`,
+          masonfileView({
+            viewer: viewerOf(current),
+            slug,
+            name: project.name,
+            commits: data.commits,
+            ...(data.commit == null ? {} : { commit: data.commit }),
+            file: data.file ?? entry,
+            ...(data.text == null ? {} : { text: data.text }),
+            ...(data.error == null ? {} : { error: data.error }),
+          }),
+          current,
+          200,
+          'dashboard',
         )
       },
       (error: unknown) => {
-        render({ error: (error as Error).message })
+        send(
+          res,
+          'Masonfile',
+          `<p class="state-failed">${escape((error as Error).message)}</p>`,
+          current,
+          400,
+        )
       },
     )
   })

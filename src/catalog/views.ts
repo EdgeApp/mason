@@ -1,77 +1,27 @@
-import type { Device } from '../devices/store.js'
 import type { Platform } from '../validation.js'
 import { breadcrumbs, escape, type Crumb } from '../view/html.js'
 import type { ViewerNode } from '../view/shell.js'
 import { iosInstallUrl } from './install.js'
 import { branchKey, labels } from './platform.js'
+import type {
+  AppData,
+  AppsData,
+  BranchData,
+  CatalogApp,
+  CatalogBuild,
+  CompleteData,
+  DevicesData,
+} from '../shared/api/catalog.js'
 
-/** An app the viewer may install. */
-export interface CatalogApp {
-  id: number
-  name: string
-  slug: string
+export type {
+  AppData,
+  AppsData,
+  BranchData,
+  CatalogApp,
+  CatalogBuild,
+  CompleteData,
+  DevicesData,
 }
-
-/** The apps list: the viewer's apps and the platforms they have channels for. */
-export interface AppsData {
-  apps: CatalogApp[]
-  platforms: Platform[]
-}
-
-/** An app's branches, newest build first, and each platform's latest build. */
-export interface AppData {
-  app: CatalogApp
-  platforms: Platform[]
-  /** Every branch with a build on any platform, master first. */
-  branches: Array<{ name: string; time: number }>
-  /** When each platform's newest build was published. */
-  latest: Partial<Record<Platform, number>>
-}
-
-/** One build on a branch page, with what the selected device may do with it. */
-export interface CatalogBuild {
-  id: number
-  platform: Platform
-  format: string
-  version: string
-  buildNumber: string
-  commit: string
-  publishedAt: number
-  size: number
-  variant: string
-  run: string | null
-  /** For a build that is only downloaded: what it runs on. */
-  download?: string
-  /** Whether the selected device (or none, off iOS) may install it. */
-  eligible: boolean
-  /** The grant for an eligible iOS app, so the tap opens the installer. */
-  token?: string
-}
-
-/** A branch's builds for one platform, newest first. */
-export interface BranchData {
-  app: CatalogApp
-  platforms: Platform[]
-  branch: string
-  builds: CatalogBuild[]
-  /** Whether the viewer has a device selected. */
-  device: boolean
-}
-
-/** A person's devices, and every registered device for an administrator. */
-export interface DevicesData {
-  devices: Array<Device & { name: string }>
-  selected?: number
-  /** Whether device registration is configured here. */
-  registration: boolean
-  all: Array<{ name: string; model: string; status: string }>
-}
-
-/** Where a registration link ended. */
-export type CompleteData =
-  | { state: 'registering' }
-  | { state: 'registered'; device: { id: number; model: string } }
-  | { state: 'unavailable' }
 
 /** Who the catalog pages are for, and where installs happen. */
 export interface CatalogViewer {

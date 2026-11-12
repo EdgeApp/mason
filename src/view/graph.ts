@@ -1,14 +1,8 @@
 import { duration, escape } from './html.js'
 import { icons } from './icons.js'
+import type { Bubble, Layout, LayoutStage, Rail } from '../shared/api/runs.js'
 
-/** What the layout needs of a stage from a run's graph. */
-export interface LayoutStage {
-  name: string
-  kind: 'stage' | 'approval' | 'script'
-  group?: string
-  needs: string[]
-  matrix?: Record<string, string | number | boolean>
-}
+export type { Bubble, Layout, LayoutStage, Rail }
 
 /** What a run says about a stage. */
 export interface StageState {
@@ -16,34 +10,6 @@ export interface StageState {
   started?: number | null
   finished?: number | null
   worker?: string | null
-}
-
-export interface Bubble {
-  /** The stage's full name; `@start` and `@end` for the ends. */
-  name: string
-  label: string
-  kind: 'start' | 'end' | 'stage' | 'approval' | 'post'
-  col: number
-  row: number
-  status: string
-  /** The parallel member a row belongs to, on that row's first bubble. */
-  rowLabel?: string
-  /** For a queued stage: the stages it still waits for. */
-  waitingFor: string[]
-  needs: string[]
-  dependents: string[]
-  node?: string
-  took?: number
-}
-export interface Rail {
-  from: string
-  to: string
-}
-export interface Layout {
-  bubbles: Bubble[]
-  rails: Rail[]
-  cols: number
-  rows: number
 }
 
 const finished = new Set([

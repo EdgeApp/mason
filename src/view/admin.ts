@@ -32,6 +32,7 @@ import {
 } from './groups.js'
 import { spacesRegions } from '../master/cloud/regions.js'
 import type { BuildNumberSequence } from '../master/projectDetails.js'
+import type { ProjectApp } from '../shared/api/projects.js'
 import { SETUP_LABEL } from '../pipeline/graph.js'
 
 const statusLine =
@@ -2185,6 +2186,28 @@ export function appSequence(
   )
 }
 
+/** An app ID's sequence, the other app IDs it numbers, and the default scheme. */
+export function appBuildNumbers(
+  sequences: BuildNumberSequence[],
+  projectApps: string[],
+  appId: string,
+): Pick<ProjectApp, 'sequence' | 'shared' | 'defaultScheme'> {
+  const sequence = appSequence(sequences, appId)
+  return {
+    ...(sequence == null ? {} : { sequence }),
+    shared:
+      sequence == null
+        ? []
+        : [
+            ...(sequence.key !== appId && projectApps.includes(sequence.key)
+              ? [sequence.key]
+              : []),
+            ...sequence.apps.filter((app) => app !== appId),
+          ],
+    defaultScheme: { format: 'N', scope: 'app' },
+  }
+}
+
 /**
  * An app ID's Build numbers tab: the sequence it takes its numbers from
  * (its own key, or a shared one, naming the app IDs it is shared with), else
@@ -2204,19 +2227,17 @@ export function appBuildNumbersView(data: {
   canSeed: boolean
 }): string {
   const id = data.app.bundleId
-  const sequence = appSequence(data.buildNumbers, id)
+  const { sequence, shared } = appBuildNumbers(
+    data.buildNumbers,
+    data.projectApps,
+    id,
+  )
   const scope = (value: string): string =>
     value === 'branch' ? 'per branch' : 'across branches'
   let body: string
   if (sequence == null)
     body = `<p>No sequence in the Masonfile names <span class="mono">${escape(id)}</span>, so it takes the default scheme: <span class="mono">N</span>, ${scope('app')}.</p>`
   else {
-    const shared = [
-      ...(sequence.key !== id && data.projectApps.includes(sequence.key)
-        ? [sequence.key]
-        : []),
-      ...sequence.apps.filter((app) => app !== id),
-    ]
     // One line per branch (none for a sequence across branches).
     const last =
       sequence.last

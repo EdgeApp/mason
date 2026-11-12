@@ -10,6 +10,7 @@ import {
   type LiveViewer,
 } from '../master/live.js'
 import { LIVE_UNAVAILABLE } from '../shared/live.js'
+import { hostStatus } from './reads.js'
 import type { HostRuntime } from './runtime.js'
 
 /** The longest frame the master sends: a log frame's text, escaped. */
@@ -25,6 +26,9 @@ const BEARER =
 const UNSERVED = /(^live is not allowed$)|does not serve live pages/
 export { LIVE_UNAVAILABLE }
 
+/** How often the host checks its link for a shell status subscription. */
+const STATUS_MS = 2000
+
 /** Live streams open on each link. */
 const streams = new WeakMap<Link, number>()
 
@@ -36,10 +40,12 @@ const streams = new WeakMap<Link, number>()
  * master trusts only on this link; a script's API key goes to the master
  * as it is. While the master is unreachable the upgrade is refused with
  * 503; when the link drops, each page is closed with 1012 and reconnects.
+ * The shell's `status` (a `status` subscription without a run) is the
+ * host's own link state, answered here and never sent to the master.
  */
 export function hostLive(
   host: HostRuntime,
-  options: { maxStreams?: number } = {},
+  options: { maxStreams?: number; testEndpoints?: boolean } = {},
 ): (req: IncomingMessage) => LiveViewer | number {
   return (req) => {
     const origin = sameOrigin(req)
@@ -139,12 +145,62 @@ export function hostLive(
           uncount()
           close(1000)
         })
+        // The shell's status subscriptions, by key, with what each was sent last.
+        const shells = new Map<string, string>()
+        let ticker: ReturnType<typeof setInterval> | undefined
+        const status = (key: string): void => {
+          const data = JSON.stringify(
+            hostStatus(host, options.testEndpoints === true),
+          )
+          if (shells.get(key) === data) return
+          shells.set(key, data)
+          out.send(
+            `{"key":${JSON.stringify(key)},"event":"status","data":${data}}`,
+          )
+        }
+        const local = (text: string): boolean => {
+          let message: Record<string, unknown>
+          try {
+            message = JSON.parse(text) as Record<string, unknown>
+          } catch {
+            return false
+          }
+          if (message == null || typeof message !== 'object') return false
+          if (
+            typeof message.unsubscribe === 'string' &&
+            shells.has(message.unsubscribe)
+          ) {
+            shells.delete(message.unsubscribe)
+            if (shells.size === 0) {
+              clearInterval(ticker)
+              ticker = undefined
+            }
+            return true
+          }
+          if (message.subscribe !== 'status' || message.run != null)
+            return false
+          const key =
+            typeof message.key === 'string' &&
+            message.key !== '' &&
+            message.key.length <= 200
+              ? message.key
+              : 'status'
+          shells.delete(key)
+          status(key)
+          ticker ??= setInterval(() => {
+            for (const key of shells.keys()) status(key)
+          }, STATUS_MS)
+          ticker.unref?.()
+          return true
+        }
         return {
           receive: (text): void => {
+            if (local(text)) return
             stream.write(Buffer.from(text + '\n')).catch(() => undefined)
           },
           end: (): void => {
             closed = true
+            clearInterval(ticker)
             stream.end()
           },
         }

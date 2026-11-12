@@ -3,6 +3,13 @@ import { isGlob, matches } from '../master/rules.js'
 import { ago, appPath, breadcrumbs, duration, escape, runName } from './html.js'
 import { icon, type IconName } from './icons.js'
 import type { Viewer } from './shell.js'
+import type {
+  DashboardData,
+  DashboardFilter,
+  ProjectCard,
+  QueueEntry,
+  WorkerNode,
+} from '../shared/api/dashboard.js'
 
 export const platforms = ['ios', 'android', 'macos', 'windows', 'tvos'] as const
 export type Platform = (typeof platforms)[number]
@@ -71,100 +78,21 @@ export interface DashboardSource {
   /** Whether the viewer may see an app ID (its builds and installs). */
   appVisible: (appId: number) => boolean
   /** The master's worker nodes; the host has none to show. */
-  nodes?: Array<{
-    name: string
-    status: 'idle' | 'busy' | 'offline'
-    detail: string
-  }>
+  nodes?: WorkerNode[]
   /** Projects' repositories and webhooks: the master's, or the host's copy of them. */
   repositories?: Map<number, { repository: string; webhook: boolean }>
   /** Each project's push branches (or patterns), whose builds its card lists first. */
   pinned?: Map<number, readonly string[]>
 }
 
-export interface DashboardFilter {
-  platform?: string
-  project?: string
-}
-
-interface ProjectCard {
-  id: number
-  slug: string
-  name: string
-  defaultBranch: string | null
-  repository?: string
-  webhook?: boolean
-  latest?: { commit: string; description: string; at: number }
-  runs: Array<{
-    id: string
-    branch: string
-    number: number
-    status: string
-    workflow: string
-  }>
-  apps: Array<{
-    id: number
-    slug: string
-    name: string
-    platforms: string[]
-    /** The latest build of each branch: push branches first, then the newest. */
-    builds: Array<{
-      branch: string
-      buildNumber: string
-      at: number
-      /** The run that published it, and that run's status. */
-      run?: string
-      status?: string
-    }>
-    /** How many branches have a build: more than `builds` holds for an app built on very many. */
-    branches: number
-  }>
-}
+export type { DashboardData, DashboardFilter, ProjectCard, QueueEntry }
 
 /** How many branches' builds an app ID's row shows before "+N more". */
 export const BRANCH_CHIPS = 6
 /** How many of an app's most recently built branches the card reads to rank its chips. */
 const BRANCHES_READ = 100
 
-export interface DashboardData {
-  tiles: {
-    projects: number
-    apps: number
-    successRate?: number
-    finished: number
-    storage: number
-  }
-  counts: Record<'all' | Platform, number>
-  filter: DashboardFilter
-  projects: ProjectCard[]
-  queue: Array<{
-    job: string
-    project: string
-    workflow: string
-    number: number
-    branch: string
-    stage: string
-    status: string
-    elapsed?: number
-    progress?: number
-  }>
-  builds: Array<{
-    id: number
-    app: string
-    platform: string
-    buildNumber: string
-    version: string
-    branch: string
-    at: number
-    size: number
-  }>
-  nodes?: DashboardSource['nodes']
-}
-
 const DAY = 86_400_000
-
-/** A queue panel's entry: a running or queued stage of a run. */
-export type QueueEntry = DashboardData['queue'][number]
 
 /** The queue panel's entries: running stages first, then queued ones, eight at most. */
 export function queueEntries(db: DatabaseSync, now: number): QueueEntry[] {

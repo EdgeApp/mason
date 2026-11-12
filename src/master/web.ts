@@ -24,6 +24,12 @@ import { nodeInfoRoutes, releaseInfo } from '../node/nodeInfo.js'
 import type { NodeInfo } from '../shared/api/index.js'
 import { version } from '../version.js'
 import { secretsApi } from './secretsApi.js'
+import { adminApi } from './adminApi.js'
+import { masterReader, nodeViews } from './reads.js'
+import { readApi } from '../node/readApi.js'
+import { masterCatalogApi } from './catalogPages.js'
+import { cookie } from '../auth/routes.js'
+import { MASTER_SESSION_COOKIE } from './auth.js'
 
 export interface MasterWebContext extends WebAppContext {
   configured: () => boolean
@@ -73,6 +79,15 @@ export function masterApp(context: MasterWebContext): express.Express {
   const app = nodeWebApp(context)
   const master = context.master
   app.use(nodeInfoRoutes(() => masterNodeInfo(context)))
+  // The pages' reads, which the host answers the same from its cache.
+  app.use(readApi(masterReader(master, context)))
+  app.use(adminApi(master))
+  // Install apps and Devices, from the host over the link.
+  app.use(
+    masterCatalogApi(master, (req) =>
+      master.auth.session(cookie(req, MASTER_SESSION_COOKIE)),
+    ),
+  )
   for (const name of [
     'groups',
     'master',
@@ -122,6 +137,7 @@ export function masterApp(context: MasterWebContext): express.Express {
       settings: master.settings,
       registry: master.registry,
       nodeDetails: (fingerprint) => master.nodeDetails(fingerprint),
+      nodes: () => nodeViews(master),
       apple: {
         status: () => master.apple.status(),
         signIn: async (actor, appleId, password) =>

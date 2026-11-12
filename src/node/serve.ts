@@ -10,7 +10,7 @@ import { hostLive } from '../host/live.js'
 import { HostRuntime, type HostOptions } from '../host/runtime.js'
 import { recordIdentity } from '../master/identity.js'
 import { masterApp } from '../master/web.js'
-import { masterLive, serveLive } from '../master/live.js'
+import { masterLive, masterLiveSource, serveLive } from '../master/live.js'
 import {
   applyPendingRestore,
   PENDING_RESTORE,
@@ -439,10 +439,10 @@ export async function startNode(
       // The live pages' socket, closed before the listener so pages reconnect.
       const accept =
         master != null
-          ? masterLive(master)
+          ? masterLive(master, masterLiveSource(master, { testEndpoints }))
           : hostRuntime == null
             ? undefined
-            : hostLive(hostRuntime)
+            : hostLive(hostRuntime, { testEndpoints })
       if (accept != null) {
         const live = serveLive(server, accept)
         cleanup.push(() => live.close())

@@ -9,6 +9,7 @@ import {
 } from './api.js'
 import { clientAddress, FORWARDED_FOR } from './forward.js'
 import type { Master } from './runtime.js'
+import type { SecretsBackups } from '../shared/api/index.js'
 import {
   BackupRefused,
   NotApplied,
@@ -82,6 +83,14 @@ export function secretsApi(master: Master): Router {
         req.query.limit == null ? undefined : Number(req.query.limit),
       ),
     ),
+  )
+  // Whether secrets can be kept: the master stores them only once backups are configured.
+  router.get(
+    '/api/v2/projects/:slug/secrets/backups',
+    json((req, res): SecretsBackups => {
+      master.secrets.list(caller(req, res), slug(req))
+      return { backupsConfigured: master.backups.status().configured }
+    }),
   )
   router.get(
     '/api/v2/projects/:slug/secrets/:id',

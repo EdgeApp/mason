@@ -13,12 +13,41 @@ import {
 import { permissionsOf } from '../master/permissions.js'
 import { localOperator } from '../master/roles.js'
 import {
+  asAccountInfo,
+  asAppData,
+  asAppsData,
+  asArtifactRunDetail,
+  asBranchData,
+  asDashboardData,
+  asDevicesData,
+  asInstallAnswer,
+  asMasonfileText,
   asNodeInfo,
+  asNotifications,
+  asPrepareAnswer,
+  asProjectApp,
+  asProjectOverview,
+  asProjectRuns,
+  asRegistrationAnswer,
+  asRunPage,
   asSessionInfo,
   asSignInReply,
+  asStatusInfo,
 } from '../shared/api/index.js'
 import { cluster, type Cluster } from '../test/cluster.js'
 import { proofLog } from '../test/proofLog.js'
+import {
+  ALPHA,
+  readFixture,
+  shape,
+  type ReadFixture,
+  type Reply as FixtureReply,
+  type Who,
+} from '../test/readFixture.js'
+import { branchKey } from '../catalog/platform.js'
+import type { RunningNode } from '../node/serve.js'
+import type { Role } from '../shared/permissions.js'
+import { WebSocket } from 'ws'
 import { version } from '../version.js'
 import type { HostRuntime } from './runtime.js'
 import { hostSessionApi } from './sessionApi.js'
@@ -396,5 +425,354 @@ describe('Host web API: node and session', function () {
     }
     assert.equal(last!.status, 429, last!.text)
     assert.equal(typeof last!.json.retryAt, 'number')
+  })
+})
+
+type Reply2 = FixtureReply
+
+describe('Host web API: the pages’ reads, from its cache', function () {
+  this.timeout(300_000)
+  let f: ReadFixture
+  let host: RunningNode
+  const as = (role: Role): Who => f.on('host', role)
+  const get = async (route: string, who: Who): Promise<Reply2> =>
+    await f.request(host, 'GET', route, who)
+  const post = async (
+    route: string,
+    who: Who,
+    body: unknown = {},
+  ): Promise<Reply2> => await f.request(host, 'POST', route, who, body)
+  /** Every read the host answers itself, with the roles that may make it. */
+  const reads = (): Array<[string, Role[]]> => {
+    const developers: Role[] = ['developer', 'manager', 'admin']
+    const everyone: Role[] = ['tester', ...developers]
+    return [
+      ['/api/v2/status', everyone],
+      ['/api/v2/notifications', everyone],
+      ['/api/v2/search?q=reads', everyone],
+      ['/api/v2/dashboard', developers],
+      ['/api/v2/queue', developers],
+      ['/api/v2/artifacts', developers],
+      [`/api/v2/artifacts/runs/${f.runs.built}`, developers],
+      [
+        `/api/v2/runs/${f.runs.built}?include=graph,steps,history,details`,
+        developers,
+      ],
+      ['/api/v2/projects/reads/overview', developers],
+      ['/api/v2/projects/reads/runs', developers],
+      [`/api/v2/projects/reads/apps/${ALPHA}`, developers],
+      ['/api/v2/projects/reads/masonfile/commits', developers],
+      ['/api/v2/projects/reads/masonfile', developers],
+      ['/api/v2/account', everyone],
+      ['/api/v2/catalog/apps', everyone],
+      ['/api/v2/devices', everyone],
+      [`/api/v2/builds?run=${f.runs.built}`, everyone],
+    ]
+  }
+  /** Master-only routes, which a host session may not reach through the forwarder. */
+  const masterOnly = [
+    '/api/v2/people',
+    '/api/v2/groups/1',
+    '/api/v2/apps',
+    '/api/v2/apple/signing',
+    '/api/v2/nodes',
+    '/api/v2/cloud/budget',
+    '/api/v2/projects/reads/secrets/backups',
+    '/api/v2/settings/backup',
+  ]
+
+  before(async () => {
+    f = await readFixture(
+      mkdtempSync(
+        path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'hostreads-'),
+      ),
+    )
+    host = f.host
+  })
+  after(async () => {
+    await f?.c.close()
+  })
+
+  it('answers every read itself, for each role it allows, as the master would', async () => {
+    for (const [route, allowed] of reads())
+      for (const role of ['tester', 'developer', 'manager', 'admin'] as const) {
+        const reply = await get(route, as(role))
+        assert.equal(
+          reply.status,
+          allowed.includes(role) ? 200 : 403,
+          `${role} ${route}: ${reply.text}`,
+        )
+      }
+    for (const [route] of reads())
+      assert.equal((await get(route, {})).status, 401, route)
+    // The host's own answers, in the shared shapes.
+    const status = shape(
+      asStatusInfo,
+      (await get('/api/v2/status', as('tester'))).json,
+    )
+    assert.deepEqual(status.link?.online, true)
+    assert.equal(status.node, 'host')
+    assert.equal(typeof status.link?.lastContact, 'number')
+    assert.deepEqual(status.banners, [
+      {
+        kind: 'testEndpoints',
+        text: 'Test endpoints are enabled on this Mason node.',
+      },
+    ])
+    const manager = shape(
+      asNotifications,
+      (await get('/api/v2/notifications', as('manager'))).json,
+    )
+    // Approvals only: the master's notices are the master's.
+    assert.deepEqual(
+      manager.map((entry) => [entry.kind, entry.href]),
+      [['approval', `/runs/${f.runs.waiting}`]],
+    )
+    const dashboard = shape(
+      asDashboardData,
+      (await get('/api/v2/dashboard', as('developer'))).json,
+    )
+    assert.equal(dashboard.nodes, undefined)
+    assert.deepEqual(
+      dashboard.projects.map((project) => project.slug),
+      ['reads'],
+    )
+    const detail = shape(
+      asArtifactRunDetail,
+      (await get(`/api/v2/artifacts/runs/${f.runs.built}`, as('developer')))
+        .json,
+    )
+    assert.equal(detail.artifactOrigin, '')
+    assert.equal(
+      detail.artifacts[0]!.url,
+      `/runs/${f.runs.built}/artifacts/report.html`,
+    )
+    const route = `/api/v2/runs/${f.runs.built}?include=graph,steps,history,details`
+    const onHost = shape(asRunPage, (await get(route, as('developer'))).json)
+    const onMaster = (
+      await f.request(f.c.master, 'GET', route, f.on('master', 'developer'))
+    ).json
+    for (const part of [
+      'graph',
+      'layout',
+      'history',
+      'artifacts',
+      'project',
+    ] as const)
+      assert.deepEqual(onHost[part], onMaster[part], part)
+    assert.deepEqual(onHost.details?.buildNumber, onMaster.details.buildNumber)
+    const overview = shape(
+      asProjectOverview,
+      (await get('/api/v2/projects/reads/overview', as('manager'))).json,
+    )
+    // The host's copy is read-only, with no Secrets tab.
+    assert.deepEqual([overview.canSeed, overview.secrets], [false, false])
+    shape(
+      asProjectRuns,
+      (await get('/api/v2/projects/reads/runs', as('developer'))).json,
+    )
+    shape(
+      asProjectApp,
+      (await get(`/api/v2/projects/reads/apps/${ALPHA}`, as('developer'))).json,
+    )
+    const text = shape(
+      asMasonfileText,
+      (await get('/api/v2/projects/reads/masonfile', as('developer'))).json,
+    )
+    assert.match(text.text, /compiled/)
+    const account = shape(
+      asAccountInfo,
+      (await get('/api/v2/account', as('tester'))).json,
+    )
+    assert.deepEqual(
+      [account.id, account.editable, account.passwordHere],
+      [f.people.tester, true, true],
+    )
+    assert.equal(
+      (await get('/api/v2/account', as('developer'))).json.passwordHere,
+      false,
+    )
+    // An API key the host verifies itself.
+    assert.equal(
+      (await get('/api/v2/dashboard', { key: f.keys.developer })).status,
+      200,
+    )
+    assert.equal(
+      (await get('/api/v2/dashboard', { key: f.keys.scoped })).status,
+      403,
+    )
+    assert.equal(
+      (await get('/api/v2/account', { key: f.keys.developer })).status,
+      401,
+    )
+  })
+
+  it('keeps answering every read from its cache while the master is unreachable, and refuses master-only paths', async () => {
+    const tester = as('tester') as { cookie: string; csrf: string }
+    // With the master reachable, the forwarder refuses a host session.
+    for (const route of masterOnly) {
+      const reply = await get(route, as('admin'))
+      assert.equal(reply.status, 403, `${route}: ${reply.text}`)
+      assert.match(reply.json.error, /A host session may only/)
+    }
+    await f.c.drop('host', 1000, async () => {
+      await f.c.until(() => !host.host!.online(), 5000, 'offline')
+      proofLog(
+        'mason: the master drops the host’s link (the host is offline)',
+        `host.online() = ${String(host.host!.online())}`,
+      )
+      for (const [route, allowed] of reads()) {
+        const role = allowed.includes('developer') ? 'developer' : 'tester'
+        const reply = await get(route, as(role))
+        assert.equal(reply.status, 200, `${route} offline: ${reply.text}`)
+      }
+      const status = shape(
+        asStatusInfo,
+        (await get('/api/v2/status', as('developer'))).json,
+      )
+      assert.equal(status.link?.online, false)
+      assert.deepEqual(status.banners.at(-1), {
+        kind: 'offline',
+        text: 'The Mason master is unreachable. You are seeing the last synced builds.',
+      })
+      assert.equal(
+        (await get('/api/v2/account', as('developer'))).json.editable,
+        false,
+      )
+      // Master-only paths need the master.
+      for (const route of masterOnly) {
+        const reply = await get(route, as('admin'))
+        assert.equal(reply.status, 503, `${route}: ${reply.text}`)
+      }
+      // Installs still work from the host's own storage.
+      const install = await post(
+        `/api/v2/catalog/builds/${f.build}/install`,
+        tester,
+      )
+      assert.equal(install.status, 200, install.text)
+      assert.equal(install.json.kind, 'download')
+    })
+    await f.c.until(() => host.host!.online(), 10_000, 'online')
+    proofLog(
+      'mason: the master redials the host (the host is online)',
+      `host.online() = ${String(host.host!.online())}`,
+    )
+  })
+
+  it('Install apps and Devices as JSON on the host', async () => {
+    const tester = as('tester') as { cookie: string; csrf: string }
+    const apps = shape(
+      asAppsData,
+      (await get('/api/v2/catalog/apps', tester)).json,
+    )
+    const id = apps.apps[0]!.id
+    shape(asAppData, (await get(`/api/v2/catalog/apps/${id}`, tester)).json)
+    const branch = shape(
+      asBranchData,
+      (
+        await get(
+          `/api/v2/catalog/apps/${id}/branches/${branchKey('master')}?platform=android`,
+          tester,
+        )
+      ).json,
+    )
+    assert.equal(branch.builds[0]!.id, f.build)
+    const install = shape(
+      asInstallAnswer,
+      (await post(`/api/v2/catalog/builds/${f.build}/install`, tester)).json,
+    )
+    assert.equal(install.kind, 'download')
+    const file = await get(install.url!, {})
+    assert.equal(file.status, 200)
+    assert.equal(
+      (
+        await f.request(
+          host,
+          'POST',
+          `/api/v2/catalog/builds/${f.build}/install`,
+          { cookie: tester.cookie, csrf: 'not-it' },
+          {},
+        )
+      ).status,
+      403,
+    )
+    // An iOS build needs a registered device first.
+    const ipa = await f.publish('ios', '30')
+    assert.deepEqual(
+      (await post(`/api/v2/catalog/builds/${ipa}/install`, tester)).json,
+      { kind: 'register' },
+    )
+    const devices = shape(
+      asDevicesData,
+      (await get('/api/v2/devices', tester)).json,
+    )
+    assert.equal(devices.registration, true)
+    const made = shape(
+      asRegistrationAnswer,
+      (await post('/api/v2/devices/registrations', tester)).json,
+    )
+    const profile = await get(made.url, {})
+    assert.equal(profile.status, 200)
+    assert.match(profile.text, /PayloadType/)
+    assert.deepEqual(
+      shape(
+        asPrepareAnswer,
+        (await post(`/api/v2/catalog/builds/${f.build}/prepare`, tester)).json,
+      ),
+      { prepared: false },
+    )
+    assert.deepEqual(
+      (await get('/api/v2/devices/complete/nope', tester)).json,
+      { state: 'unavailable' },
+    )
+    assert.equal(
+      (await post('/api/v2/devices/424242/select', tester)).status,
+      404,
+    )
+    // The host answers from its copies only.
+    const copy = await get(
+      `/api/v2/projects/reads/masonfile?commit=${'0'.repeat(40)}`,
+      as('developer'),
+    )
+    assert.deepEqual(
+      [copy.status, copy.json],
+      [404, { error: 'The host has no copy of that commit’s Masonfile.' }],
+    )
+    assert.equal((await get('/api/v2/catalog/apps', {})).status, 401)
+  })
+
+  it('/live status on the host is its own link to the master, answered without the master', async () => {
+    const url = host.web!.url.replace(/^https:\/\/[^:]+:/, 'wss://127.0.0.1:')
+    const session = as('developer') as { cookie: string }
+    const ws = new WebSocket(`${url}/live`, {
+      headers: {
+        cookie: session.cookie,
+        origin: host.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:'),
+      },
+      rejectUnauthorized: false,
+    })
+    await new Promise((resolve, reject) => {
+      ws.once('open', resolve)
+      ws.once('error', reject)
+    })
+    const frames: Array<{ key?: string; event: string; data?: unknown }> = []
+    ws.on('message', (data) => {
+      frames.push(JSON.parse(String(data)) as (typeof frames)[number])
+    })
+    ws.send(JSON.stringify({ subscribe: 'status' }))
+    ws.send(JSON.stringify({ subscribe: 'status', key: 'again' }))
+    ws.send(JSON.stringify({ unsubscribe: 'again' }))
+    ws.send(JSON.stringify({ subscribe: 'queue', key: 'queue' }))
+    await f.c.until(() => frames.length >= 3, 5000, 'three frames')
+    ws.close()
+    proofLog(
+      'WS host/live {subscribe:status} (developer session)',
+      JSON.stringify(frames),
+    )
+    const status = frames.find((frame) => frame.key === 'status')!
+    assert.equal(status.event, 'status')
+    assert.equal(shape(asStatusInfo, status.data).link?.online, true)
+    // The queue is still the master's, relayed.
+    assert.equal(frames.find((frame) => frame.key === 'queue')?.event, 'queue')
   })
 })

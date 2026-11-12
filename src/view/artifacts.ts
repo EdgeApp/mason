@@ -14,6 +14,14 @@ import { icon } from './icons.js'
 import type { Viewer } from './shell.js'
 import { isGlob, matches } from '../master/rules.js'
 import { downloadOnly } from '../validation.js'
+import type {
+  ArtifactRun,
+  ArtifactRunDetail,
+  ArtifactsList,
+  PublishedBuild,
+  SavedArtifact,
+} from '../shared/api/artifacts.js'
+import type { BranchItem, ProjectRunRow } from '../shared/api/projects.js'
 
 export interface ArtifactsFilter {
   project?: string
@@ -45,30 +53,44 @@ interface RunRow {
   name: string
 }
 
-function artifactLinks(source: ArtifactsSource, run: string): string {
+/** A run's saved artifacts, each with where it downloads and, for a report, its viewer. */
+function savedArtifacts(source: ArtifactsSource, run: string): SavedArtifact[] {
   const rows = source.db
     .prepare(
-      'SELECT name,stage,kind,size,entry,created_at FROM run_artifacts WHERE job_id=? AND deleting=0 ORDER BY stage,name',
+      'SELECT name,stage,kind,size,created_at FROM run_artifacts WHERE job_id=? AND deleting=0 ORDER BY stage,name',
     )
     .all(run) as Array<{
     name: string
     stage: string
     kind: string
     size: number
-    entry: string | null
     created_at: number
   }>
+  const base = `${source.artifactBase}/runs/${encodeURIComponent(run)}/artifacts/`
+  return rows.map((row) => ({
+    name: row.name,
+    stage: row.stage,
+    kind: row.kind,
+    size: Number(row.size),
+    created: Number(row.created_at),
+    url: base + encodeURIComponent(row.name),
+    ...(row.kind === 'report'
+      ? { viewUrl: `${base + encodeURIComponent(row.name)}/view` }
+      : {}),
+  }))
+}
+
+function artifactLinks(rows: SavedArtifact[]): string {
   if (rows.length === 0)
     return '<p class="empty-state">This run saved no artifacts.</p>'
-  const base = `${source.artifactBase}/runs/${encodeURIComponent(run)}/artifacts/`
   return `<table class="list"><thead><tr><th>Artifact</th><th>Stage</th><th>Kind</th><th>Size</th><th></th></tr></thead><tbody>${rows
     .map(
       (row) =>
         `<tr><td class="mono">${escape(row.name)}</td><td class="mono">${escape(row.stage)}</td><td>${escape(row.kind)}</td><td class="mono">${escape(bytes(row.size))}</td><td class="actions">${
-          row.kind === 'report'
-            ? `<a href="${escape(base + encodeURIComponent(row.name))}/view">${icon('open_in_new')} View</a>`
+          row.viewUrl != null
+            ? `<a href="${escape(row.viewUrl)}">${icon('open_in_new')} View</a>`
             : ''
-        }<a href="${escape(base + encodeURIComponent(row.name))}">${icon('download')} Download</a></td></tr>`,
+        }<a href="${escape(row.url)}">${icon('download')} Download</a></td></tr>`,
     )
     .join('')}</tbody></table>`
 }
@@ -107,7 +129,55 @@ function runBuilds(
   ).filter((build) => source.appVisible(build.app_id))
 }
 
-function runDetail(source: ArtifactsSource, run: RunRow): string {
+/** A run as the Artifacts pages show it. */
+function artifactRun(run: RunRow): ArtifactRun {
+  return {
+    id: run.id,
+    number: Number(run.number),
+    workflow: run.workflow,
+    branch: run.branch,
+    status: run.status,
+    project: { slug: run.slug, name: run.name },
+    commit: run.commit_sha,
+    description: run.description,
+    created: Number(run.created),
+    started: run.started == null ? null : Number(run.started),
+    finished: run.finished == null ? null : Number(run.finished),
+  }
+}
+
+/** A published build as the Artifacts pages and the API show it. */
+function publishedBuild(
+  build: ReturnType<typeof runBuilds>[number],
+): PublishedBuild {
+  const only = downloadOnly(build)
+  return {
+    id: Number(build.id),
+    appId: Number(build.app_id),
+    app: build.name,
+    platform: build.platform,
+    version: build.version,
+    buildNumber: build.build_number,
+    size: Number(build.size),
+    variant: build.variant,
+    format: build.format,
+    ...(only == null ? {} : { downloadOnly: only }),
+  }
+}
+
+/**
+ * One run's Artifacts page: its stages, test results, the builds it
+ * published that the viewer may see, and its saved artifacts; undefined for
+ * no such run.
+ */
+export function artifactRunData(
+  source: ArtifactsSource,
+  id: string,
+): ArtifactRunDetail | undefined {
+  const run = source.db.prepare(`${runSelect} WHERE j.id=?`).get(id) as
+    | RunRow
+    | undefined
+  if (run == null) return undefined
   const stages = source.db
     .prepare(
       "SELECT name,status,kind,started,finished FROM job_stages WHERE job_id=? AND name NOT LIKE '@%' ORDER BY position",
@@ -119,12 +189,43 @@ function runDetail(source: ArtifactsSource, run: RunRow): string {
     started: number | null
     finished: number | null
   }>
-  const tests = source.db
-    .prepare(
-      'SELECT stage,summary FROM run_tests WHERE job_id=? ORDER BY stage,attempt',
-    )
-    .all(run.id) as Array<{ stage: string; summary: string }>
-  const builds = runBuilds(source, run)
+  const tests = (
+    source.db
+      .prepare(
+        'SELECT stage,summary FROM run_tests WHERE job_id=? ORDER BY stage,attempt',
+      )
+      .all(run.id) as Array<{ stage: string; summary: string }>
+  ).map((row) => {
+    const summary = JSON.parse(row.summary) as {
+      passed: number
+      failed: number
+      skipped: number
+    }
+    return {
+      stage: row.stage,
+      passed: Number(summary.passed),
+      failed: Number(summary.failed),
+      skipped: Number(summary.skipped),
+    }
+  })
+  return {
+    run: artifactRun(run),
+    stages: stages.map((stage) => ({
+      name: stage.name,
+      status: stage.status,
+      kind: stage.kind,
+      started: stage.started == null ? null : Number(stage.started),
+      finished: stage.finished == null ? null : Number(stage.finished),
+    })),
+    tests,
+    builds: runBuilds(source, run).map(publishedBuild),
+    artifacts: savedArtifacts(source, run.id),
+    artifactOrigin: source.artifactBase,
+  }
+}
+
+function runDetail(source: ArtifactsSource, data: ArtifactRunDetail): string {
+  const { run, stages, tests, builds } = data
   const took =
     run.started == null
       ? ''
@@ -132,14 +233,14 @@ function runDetail(source: ArtifactsSource, run: RunRow): string {
   return `<div class="page-head"><div>${breadcrumbs(source.viewer, [
     { label: 'Artifacts', href: '/artifacts' },
     {
-      label: run.name,
-      href: `/artifacts?project=${encodeURIComponent(run.slug)}`,
+      label: run.project.name,
+      href: `/artifacts?project=${encodeURIComponent(run.project.slug)}`,
     },
     {
       label: `Run ${run.number}`,
       href: `/artifacts?run=${encodeURIComponent(run.id)}`,
     },
-  ])}<h1>${escape(runName(run.workflow, run.number))}</h1><p>${statusDot(run.status)} ${escape(run.status)} · <span class="mono">${escape(run.branch)}</span>${run.commit_sha == null ? '' : ` · <span class="mono">${escape(run.commit_sha.slice(0, 12))}</span>`} · ${time(run.created)}${escape(took)}${run.description == null ? '' : ` · ${escape(run.description)}`}</p></div></div><section class="panel"><h2>${icon('account_tree')}Stages</h2><ul>${stages
+  ])}<h1>${escape(runName(run.workflow, run.number))}</h1><p>${statusDot(run.status)} ${escape(run.status)} · <span class="mono">${escape(run.branch)}</span>${run.commit == null ? '' : ` · <span class="mono">${escape(run.commit.slice(0, 12))}</span>`} · ${time(run.created)}${escape(took)}${run.description == null ? '' : ` · ${escape(run.description)}`}</p></div></div><section class="panel"><h2>${icon('account_tree')}Stages</h2><ul>${stages
     .map(
       (stage) =>
         `<li><span class="mono">${escape(stage.name)}</span><span class="state-${escape(stage.status)}">${statusDot(stage.status)} ${escape(stage.status)}${stage.started == null ? '' : ` · ${escape(duration((stage.finished ?? source.now) - stage.started))}`}</span></li>`,
@@ -148,27 +249,23 @@ function runDetail(source: ArtifactsSource, run: RunRow): string {
     tests.length === 0
       ? ''
       : `<section class="panel"><h2>${icon('check_circle')}Tests</h2><ul>${tests
-          .map((row) => {
-            const summary = JSON.parse(row.summary) as {
-              passed: number
-              failed: number
-              skipped: number
-            }
-            return `<li><span class="mono">${escape(row.stage)}</span><span>${summary.passed} passed · <span class="${summary.failed > 0 ? 'state-failed' : ''}">${summary.failed} failed</span> · ${summary.skipped} skipped</span></li>`
-          })
+          .map(
+            (summary) =>
+              `<li><span class="mono">${escape(summary.stage)}</span><span>${summary.passed} passed · <span class="${summary.failed > 0 ? 'state-failed' : ''}">${summary.failed} failed</span> · ${summary.skipped} skipped</span></li>`,
+          )
           .join('')}</ul></section>`
   }<section class="panel"><h2>${icon('deployed_code')}Published builds</h2><ul>${
     builds
       .map(
         (build) =>
-          `<li><div><span class="mono">${escape(build.name)} ${escape(build.version)} (${escape(build.build_number)})${build.variant === '' ? '' : ` ${escape(build.variant)}`}</span><small>${platformChip(build.platform)}${downloadOnly(build) == null ? '' : ` · ${escape(downloadOnly(build)!)}`} · ${escape(bytes(build.size))}</small></div>${
+          `<li><div><span class="mono">${escape(build.app)} ${escape(build.version)} (${escape(build.buildNumber)})${build.variant === '' ? '' : ` ${escape(build.variant)}`}</span><small>${platformChip(build.platform)}${build.downloadOnly == null ? '' : ` · ${escape(build.downloadOnly)}`} · ${escape(bytes(build.size))}</small></div>${
             source.viewer.node === 'host'
-              ? `<a href="/apps/${build.app_id}">${downloadOnly(build) == null ? 'Install' : 'Download'}</a>`
+              ? `<a href="/apps/${build.appId}">${build.downloadOnly == null ? 'Install' : 'Download'}</a>`
               : ''
           }</li>`,
       )
       .join('') || '<li>None.</li>'
-  }</ul></section><h2>Saved artifacts</h2>${artifactLinks(source, run.id)}`
+  }</ul></section><h2>Saved artifacts</h2>${artifactLinks(data.artifacts)}`
 }
 
 const runSelect =
@@ -179,10 +276,10 @@ const runSelect =
  * or one: each with its status, its published builds' numbers and its saved
  * artifacts.
  */
-export function runsTable(
+export function artifactsListData(
   source: ArtifactsSource,
   filter: { project?: string; branch?: string },
-): string {
+): ArtifactsList {
   const { db } = source
   const runs = db
     .prepare(
@@ -194,16 +291,45 @@ export function runsTable(
       filter.branch ?? null,
       filter.branch ?? null,
     ) as unknown as RunRow[]
-  if (runs.length === 0) return '<p class="empty-state">No runs yet.</p>'
   const counts = db.prepare(
     'SELECT COUNT(*) AS count,COALESCE(SUM(size),0) AS size FROM run_artifacts WHERE job_id=? AND deleting=0',
   )
-  return `<table class="list"><thead><tr><th>Run</th><th>Branch</th><th>Status</th><th>Builds</th><th>Artifacts</th><th>Started</th></tr></thead><tbody>${runs
-    .map((run) => {
+  const project =
+    filter.project == null
+      ? undefined
+      : (db
+          .prepare('SELECT slug,name FROM projects WHERE slug=?')
+          .get(filter.project) as { slug: string; name: string } | undefined)
+  return {
+    ...(filter.project == null
+      ? {}
+      : {
+          project: {
+            slug: filter.project,
+            name: project?.name ?? filter.project,
+          },
+        }),
+    ...(filter.branch == null ? {} : { branch: filter.branch }),
+    runs: runs.map((run) => {
       const saved = counts.get(run.id) as { count: number; size: number }
       const builds = runBuilds(source, run)
-      const numbers = [...new Set(builds.map((build) => build.build_number))]
-      return `<tr data-run-id="${escape(run.id)}" data-status="${escape(run.status)}"><td><a href="${runHref(run.id)}">${escape(run.slug)} ${escape(runName(run.workflow, run.number))}</a></td><td class="mono">${escape(run.branch)}</td><td>${statusDot(run.status)} <span data-status-text>${escape(run.status)}</span></td><td class="mono">${builds.length === 0 ? '—' : `${numbers.map(escape).join(', ')} · ${builds.length} ${builds.length === 1 ? 'file' : 'files'}`}</td><td class="mono">${saved.count === 0 ? '—' : `${saved.count} · ${escape(bytes(saved.size))}`}</td><td>${escape(ago(run.created, source.now))}</td></tr>`
+      return {
+        ...artifactRun(run),
+        buildNumbers: [...new Set(builds.map((build) => build.build_number))],
+        builds: builds.length,
+        artifacts: { count: Number(saved.count), size: Number(saved.size) },
+      }
+    }),
+  }
+}
+
+function runsTable(source: ArtifactsSource, data: ArtifactsList): string {
+  const { runs } = data
+  if (runs.length === 0) return '<p class="empty-state">No runs yet.</p>'
+  return `<table class="list"><thead><tr><th>Run</th><th>Branch</th><th>Status</th><th>Builds</th><th>Artifacts</th><th>Started</th></tr></thead><tbody>${runs
+    .map((run) => {
+      const numbers = run.buildNumbers
+      return `<tr data-run-id="${escape(run.id)}" data-status="${escape(run.status)}"><td><a href="${runHref(run.id)}">${escape(run.project.slug)} ${escape(runName(run.workflow, run.number))}</a></td><td class="mono">${escape(run.branch)}</td><td>${statusDot(run.status)} <span data-status-text>${escape(run.status)}</span></td><td class="mono">${run.builds === 0 ? '—' : `${numbers.map(escape).join(', ')} · ${run.builds} ${run.builds === 1 ? 'file' : 'files'}`}</td><td class="mono">${run.artifacts.count === 0 ? '—' : `${run.artifacts.count} · ${escape(bytes(run.artifacts.size))}`}</td><td>${escape(ago(run.created, source.now))}</td></tr>`
     })
     .join('')}</tbody></table>`
 }
@@ -247,25 +373,7 @@ function publishing(
       }
 }
 
-/** A branch in the Runs and builds tab's list; `pinned` ones are those its push trigger builds. */
-export interface BranchItem {
-  branch: string
-  pinned: boolean
-  /** When its latest run was made. */
-  at?: number
-}
-
-/** One run in the Runs and builds tab: its status, the app's version and build number, and when it started. */
-export interface ProjectRunRow {
-  id: string
-  number: number
-  workflow: string
-  branch: string
-  status: string
-  at: number
-  version: string
-  buildNumber: string
-}
+export type { BranchItem, ProjectRunRow }
 
 /**
  * A project's branches and runs for its Runs and builds tab. The branches
@@ -360,24 +468,22 @@ export function artifactsView(
   filter: ArtifactsFilter,
 ): string {
   if (filter.run != null) {
-    const run = source.db
-      .prepare(`${runSelect} WHERE j.id=?`)
-      .get(filter.run) as RunRow | undefined
-    if (run == null)
+    const data = artifactRunData(source, filter.run)
+    if (data == null)
       return '<h1>Run unavailable</h1><p class="empty-state">There is no such run.</p>'
-    return runDetail(source, run)
+    return runDetail(source, data)
   }
+  const data = artifactsListData(source, {
+    ...(filter.project == null ? {} : { project: filter.project }),
+    ...(filter.branch == null ? {} : { branch: filter.branch }),
+  })
   // Artifacts, then the project and the branch it is narrowed to.
   const crumbs: Crumb[] = [{ label: 'Artifacts', href: '/artifacts' }]
-  if (filter.project != null) {
-    const project = source.db
-      .prepare('SELECT name FROM projects WHERE slug=?')
-      .get(filter.project) as { name: string } | undefined
+  if (data.project != null)
     crumbs.push({
-      label: project?.name ?? filter.project,
-      href: `/artifacts?project=${encodeURIComponent(filter.project)}`,
+      label: data.project.name,
+      href: `/artifacts?project=${encodeURIComponent(data.project.slug)}`,
     })
-  }
   if (filter.branch != null)
     crumbs.push({
       label: filter.branch,
@@ -386,11 +492,5 @@ export function artifactsView(
         branch: filter.branch,
       }).toString()}`,
     })
-  return `<div class="page-head"><div>${breadcrumbs(source.viewer, crumbs)}<h1>Artifacts</h1><p>Each run's saved artifacts, test results and published builds.</p></div></div>${runsTable(
-    source,
-    {
-      ...(filter.project == null ? {} : { project: filter.project }),
-      ...(filter.branch == null ? {} : { branch: filter.branch }),
-    },
-  )}`
+  return `<div class="page-head"><div>${breadcrumbs(source.viewer, crumbs)}<h1>Artifacts</h1><p>Each run's saved artifacts, test results and published builds.</p></div></div>${runsTable(source, data)}`
 }

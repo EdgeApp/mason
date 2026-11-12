@@ -49,6 +49,8 @@ export interface ApiContext {
   registry: NodeRegistry
   /** What the master knows about a node beyond its record: inventory and update state. */
   nodeDetails?: (fingerprint: string) => Record<string, unknown>
+  /** Every node with its details and what it is doing: busy or idle, and its running stage. */
+  nodes?: () => unknown[]
   /** The master's Apple ID session for Xcode downloads. */
   apple?: {
     status(): unknown
@@ -388,10 +390,13 @@ export function masterApi(context: ApiContext): Router {
     '/api/v2/nodes',
     json((_req, res) => {
       allow(actorOf(res), 'nodes.read')
-      return context.registry.list().map((node) => ({
-        ...node,
-        ...context.nodeDetails?.(node.fingerprint),
-      }))
+      return (
+        context.nodes?.() ??
+        context.registry.list().map((node) => ({
+          ...node,
+          ...context.nodeDetails?.(node.fingerprint),
+        }))
+      )
     }),
   )
   router.post(

@@ -770,7 +770,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       `/api/v2/projects/wizard/masonfile?commit=${'0'.repeat(40)}`,
       developer,
     )
-    assert.equal(api.status, 400)
+    assert.equal(api.status, 404)
   })
 
   it('serves the run view on the host, its logs forwarded and its live updates relayed from the master, and a developer’s cancel through it', async () => {
