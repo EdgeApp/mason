@@ -2,12 +2,9 @@
 // live part of the page. It reconnects after 1, 2, 4… up to 30 seconds and
 // resubscribes, each subscription naming where it left off.
 
-/** A frame the node sends: an event of one subscription. */
-export interface LiveFrame {
-  key?: string
-  event: string
-  data?: unknown
-}
+import { LIVE_UNAVAILABLE, type LiveFrame } from '../shared/live.js'
+
+export { LIVE_UNAVAILABLE, type LiveFrame }
 
 /** The parts of a WebSocket the client uses, so a test can supply them. */
 export interface LiveSocket {
@@ -27,9 +24,6 @@ export interface LiveWindow {
 
 /** The socket's state, for a page's "Reconnecting…" line. */
 export type LiveState = 'open' | 'reconnecting' | 'closed' | 'unavailable'
-
-/** The close code that means the node cannot serve live updates (its master is older): final. */
-export const LIVE_UNAVAILABLE = 4000
 
 /** Where a page's socket goes: `/live` on its own origin. */
 export function liveUrl(location: { protocol: string; host: string }): string {

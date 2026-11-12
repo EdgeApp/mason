@@ -9,6 +9,7 @@ import {
   type LiveStreamParams,
   type LiveViewer,
 } from '../master/live.js'
+import { LIVE_UNAVAILABLE } from '../shared/live.js'
 import type { HostRuntime } from './runtime.js'
 
 /** The longest frame the master sends: a log frame's text, escaped. */
@@ -22,8 +23,7 @@ const BEARER =
   /^Bearer (mason_v1_[a-f0-9]{32}\.[A-Za-z0-9_-]{43}|[a-f0-9]{64})$/
 /** Why a master that serves no live pages (an older one) refuses the stream. */
 const UNSERVED = /(^live is not allowed$)|does not serve live pages/
-/** The close code a page takes as final: this node cannot serve live updates. */
-export const LIVE_UNAVAILABLE = 4000
+export { LIVE_UNAVAILABLE }
 
 /** Live streams open on each link. */
 const streams = new WeakMap<Link, number>()

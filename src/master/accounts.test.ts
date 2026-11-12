@@ -1405,6 +1405,7 @@ describe('Master sign-in, setup, people and permissions', function () {
   it('U13.13 every API route is checked against the policy table for every role', async () => {
     // Open routes: sign-in and first-run setup.
     const open = [
+      'GET /api/v2/node',
       'GET /api/setup',
       'POST /api/setup',
       'POST /api/setup/restore',

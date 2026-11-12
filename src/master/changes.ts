@@ -51,7 +51,13 @@ const one = (
 ): Row | undefined => db.prepare(sql).get(...args) as Row | undefined
 
 /** Settings areas the host needs; anything else stays on the master. */
-export const publishedSettings = ['host', 'signIn', 'storage'] as const
+// `master` is its public origin, which the host's GET /api/v2/node names.
+export const publishedSettings = [
+  'host',
+  'master',
+  'signIn',
+  'storage',
+] as const
 
 interface Entity {
   /** Every key, for a snapshot. */

@@ -7,6 +7,7 @@ import {
   sessionContext,
   type AuthOptions,
   type Frame,
+  type PasswordRelay,
 } from '../auth/routes.js'
 import { LinkError, type Link } from '../link/link.js'
 import type { Session } from '../auth/accounts.js'
@@ -52,6 +53,8 @@ import { stylesheet } from '../view/stylesheet.js'
 import type { Projected } from '../master/changes.js'
 import type { HostRuntime } from './runtime.js'
 import { hostLogin } from './sessions.js'
+import { hostNodeInfo, hostSessionApi } from './sessionApi.js'
+import { nodeInfoRoutes } from '../node/nodeInfo.js'
 
 const OFFLINE_BANNER =
   '<p class="notice" role="status">The Mason master is unreachable. You are seeing the last synced builds.</p>'
@@ -784,7 +787,7 @@ export function named(identifier: unknown): {
     : { identifier }
 }
 
-function hostPassword(host: HostRuntime): NonNullable<AuthOptions['password']> {
+function hostPassword(host: HostRuntime): PasswordRelay {
   const link = (): Link => {
     const current = host.options.link()
     if (current == null || current.closed)
@@ -873,6 +876,8 @@ export function hostApp(
 ): express.Express {
   const app = nodeWebApp({ ...context, styles: stylesheet })
   const host = context.host
+  // Before every gate: the web app reads it while the host waits or is in maintenance.
+  app.use(nodeInfoRoutes(() => hostNodeInfo(host, context)))
   if (host == null) {
     app.use((_req, res) => {
       sendPage(
@@ -906,6 +911,8 @@ export function hostApp(
   // stages upload and fetch artifacts by their tokens and grants.
   app.use(host.webhooks.routes())
   app.use(host.artifacts.routes(host.accounts))
+  // The web app's session is the host's own; it never reaches the forwarder.
+  app.use(hostSessionApi(host, hostPassword(host)))
   // The builds API is answered here, from the cache and storage, so it keeps
   // working while the master is away; the rest of /api/v2 is forwarded.
   app.use(host.builds.routes(host.accounts))

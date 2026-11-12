@@ -3,12 +3,18 @@ import { identifierOf, rejectRawPassword } from '../auth/passwordProtocol.js'
 import { cookie } from '../auth/routes.js'
 import { AlreadyConfigured, createFirstAdmin } from '../setup/setup.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
-import { SELF_FIELDS } from './people.js'
+import { accountEmails, SELF_FIELDS } from './people.js'
 import { MASTER_SESSION_COOKIE, SetupGate, SignInRefused } from './auth.js'
 import { Forbidden } from './roles.js'
 import type { Master } from './runtime.js'
 import { clientAddress } from './forward.js'
 import { invitationUrl } from './invitations.js'
+import { permissionsOf } from './permissions.js'
+import type {
+  SessionInfo,
+  SetupStatus,
+  SignInReply,
+} from '../shared/api/index.js'
 
 /** The master session cookie: host-only, Strict, until the session expires. */
 export const sessionCookieOptions = (
@@ -72,10 +78,12 @@ export function accountsApi(
   router.get(
     '/api/setup',
     direct,
-    json(() => ({
-      configured: master.configured(),
-      ...(master.configured() ? {} : { waitUntil: gate.waitUntil() }),
-    })),
+    json(
+      (): SetupStatus => ({
+        configured: master.configured(),
+        ...(master.configured() ? {} : { waitUntil: gate.waitUntil() }),
+      }),
+    ),
   )
   router.post(
     '/api/setup',
@@ -135,7 +143,7 @@ export function accountsApi(
     '/api/v2/session',
     direct,
     body,
-    json(async (req, res) => {
+    json(async (req, res): Promise<SignInReply> => {
       const { token, session } = await master.auth.signIn(
         req.body,
         clientAddress(req),
@@ -147,7 +155,8 @@ export function accountsApi(
   router.get(
     '/api/v2/session',
     direct,
-    json((req) => {
+    json((req): SessionInfo => {
+      // The browser's own session only: a key is not a session.
       const session = master.auth.session(cookie(req, MASTER_SESSION_COOKIE))
       if (session == null) throw new SignInRefused('Not signed in')
       return {
@@ -155,6 +164,8 @@ export function accountsApi(
         name: session.name,
         role: session.role,
         csrf: session.csrf,
+        permissions: permissionsOf(session.role),
+        emails: accountEmails(master.database.db, session.accountId),
       }
     }),
   )

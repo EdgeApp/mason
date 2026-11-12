@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto'
+import type { DatabaseSync } from 'node:sqlite'
 import { asArray, asObject, asOptional } from 'cleaners'
 import { asClientHash, rejectRawPassword } from '../auth/passwordProtocol.js'
 import { asUsername } from '../setup/setup.js'
@@ -138,6 +139,25 @@ const asGroupInput = asObject({
   members: asOptional(asArray(integer(1))),
 })
 
+/**
+ * An account's email addresses, in order, from `account_emails`: the
+ * master's table and the host's copy have the same columns.
+ */
+export function accountEmails(
+  db: Pick<DatabaseSync, 'prepare'>,
+  accountId: number,
+): PersonEmail[] {
+  return db
+    .prepare(
+      'SELECT email,confirmed FROM account_emails WHERE account_id=? ORDER BY position,email',
+    )
+    .all(accountId)
+    .map((entry) => ({
+      email: String(entry.email),
+      confirmed: Number(entry.confirmed) === 1,
+    }))
+}
+
 /** People and the groups that decide what testers see. */
 export class People {
   constructor(readonly master: MasterDatabase) {}
@@ -167,15 +187,7 @@ export class People {
       )
       .get(id)
     if (row == null) return undefined
-    const emails = this.db
-      .prepare(
-        'SELECT email,confirmed FROM account_emails WHERE account_id=? ORDER BY position,email',
-      )
-      .all(id)
-      .map((entry) => ({
-        email: String(entry.email),
-        confirmed: Number(entry.confirmed) === 1,
-      }))
+    const emails = accountEmails(this.db, id)
     return {
       id: Number(row.id),
       name: String(row.name),

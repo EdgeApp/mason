@@ -12,9 +12,19 @@ import { allow, allowRole, covers } from './permissions.js'
 import type { Actor } from './roles.js'
 import type { FeedEvent } from './runFeed.js'
 import type { Master } from './runtime.js'
+import {
+  LIVE_PATH,
+  type LiveEvent,
+  type LiveFrame,
+  type LiveMessage,
+  type LiveRun,
+  type LiveStage,
+  type LiveStep,
+} from '../shared/live.js'
 
-/** Where the master and the host accept the live pages' socket. */
-export const LIVE_PATH = '/live'
+export { LIVE_PATH }
+export type { LiveFrame, LiveRun, LiveStage, LiveStep }
+
 /** How often the socket pings; a client that misses two is closed. */
 const PING_MS = 25_000
 /** The largest message a page may send. */
@@ -46,49 +56,6 @@ const SETTLED = new Set([
   'interrupted',
 ])
 
-/** One stage of a run, as the run page draws it. */
-export interface LiveStage {
-  name: string
-  kind: string
-  status: string
-  attempt: number
-  node?: string
-  started?: number
-  finished?: number
-  reason?: string
-  disconnected?: true
-}
-
-/** A run's state, as the live pages show it. */
-export interface LiveRun {
-  project: string
-  branch: string
-  finished: boolean
-  /** The run's status line: what the `run` event carries. */
-  summary: {
-    id: string
-    number: number
-    workflow: string
-    branch: string
-    status: string
-    created: number
-    started?: number
-    finished?: number
-    description?: string
-    reason?: string
-  }
-  stages: LiveStage[]
-}
-
-export interface LiveStep {
-  id: number
-  kind: string
-  title: string
-  status: string
-  ms: number | null
-  parent: number | null
-}
-
 /** What the live socket reads: the master's runs, their stage logs and the queue. */
 export interface LiveSource {
   subscribe(listener: (events: FeedEvent[]) => void): () => void
@@ -97,13 +64,6 @@ export interface LiveSource {
   steps(id: string, stage: string): LiveStep[]
   logFile(id: string, stage: string): string
   queue(): QueueEntry[]
-}
-
-/** A frame the server sends: an event of one subscription, or an error. */
-export interface LiveFrame {
-  key?: string
-  event: string
-  data?: unknown
 }
 
 /** One end of a live connection, a WebSocket or a host's link stream. */
@@ -142,23 +102,8 @@ class Backlog {
   }
 }
 
-type Message =
-  | { unsubscribe: string }
-  | {
-      subscribe: 'run' | 'status' | 'queue'
-      key: string
-      run?: string
-      stage?: string
-      after?: number
-      follow?: boolean
-      /** Start at the log's end, as a page with none of its own. */
-      tail?: boolean
-      /** False for a page that shows no more of the log (a step's lines). */
-      log?: boolean
-    }
-
 /** Reads and checks one message a page sent. */
-export function parseMessage(text: string): Message {
+export function parseMessage(text: string): LiveMessage {
   if (text.length > MAX_MESSAGE) throw new Error('The message is too large')
   let value: Record<string, unknown>
   try {
@@ -537,7 +482,7 @@ export class LiveSession {
       return
     }
     this.allowance--
-    let message: Message
+    let message: LiveMessage
     try {
       message = parseMessage(text)
     } catch (error) {
@@ -678,7 +623,7 @@ export class LiveSession {
   private changed(
     key: string,
     watch: Watch,
-    event: string,
+    event: LiveEvent,
     data: unknown,
   ): void {
     const text = JSON.stringify(data)

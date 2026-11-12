@@ -1,4 +1,4 @@
-import { asObject, asOptional, asString } from 'cleaners'
+import { asOptional, asString } from 'cleaners'
 import { identifierOf } from './passwordProtocol.js'
 import express, {
   Router,
@@ -82,8 +82,12 @@ export function csrf(req: Request, store: Store, session: Session): void {
     req.get('host') === new URL(store.config.origin).host
   if (origin !== store.config.origin && !privateForm)
     throw new Error('Untrusted origin')
-  const proof = asObject({ csrf: asString })(req.body).csrf
-  if (!sameSecret(proof, session.csrf)) throw new Error('Invalid request proof')
+  // The web app sends the proof in a header; the pages' forms in a field.
+  const proof =
+    req.get('x-mason-csrf') ??
+    (req.body as { csrf?: unknown } | undefined)?.csrf
+  if (typeof proof !== 'string' || !sameSecret(proof, session.csrf))
+    throw new Error('Invalid request proof')
 }
 export function sessionContext(
   req: Request,
@@ -191,6 +195,57 @@ export interface AuthOptions {
   }
 }
 
+/** Username and password sign-in that the master checks (a host's). */
+export type PasswordRelay = NonNullable<AuthOptions['password']>
+
+/**
+ * How a refused password relay answers: 503 while the master cannot be
+ * asked, else 401 with the master's reason (and, for a lock, `retryAt`).
+ */
+export function passwordRefusal(error: unknown): {
+  status: number
+  body: { error: string; retryAt?: number }
+} {
+  const detail = error as Error & { code?: string; retryAt?: number }
+  if (detail.code === 'closed' || detail.code === 'timeout')
+    return {
+      status: 503,
+      body: { error: 'Password sign-in needs the master; try again shortly' },
+    }
+  let body: { error: string; retryAt?: number } = { error: detail.message }
+  try {
+    body = JSON.parse(detail.message) as typeof body
+  } catch {
+    // A plain message.
+  }
+  return { status: 401, body }
+}
+
+/**
+ * Relays a sign-in's identifier and client hash to the master, then starts
+ * this node's session for the account it answers and sets its cookie.
+ */
+export async function passwordSignIn(
+  req: Request,
+  res: Response,
+  store: Store,
+  password: PasswordRelay,
+): Promise<{ token: string; session: Session }> {
+  const result = await password.signIn(
+    {
+      identifier: identifierOf(req.body),
+      clientHash: (req.body as { clientHash?: unknown } | null)?.clientHash,
+    },
+    req.ip ?? '',
+    cookie(req, SESSION_COOKIE),
+  )
+  res.cookie(SESSION_COOKIE, result.token, {
+    ...cookieOptions,
+    maxAge: result.session.expires_at - store.now(),
+  })
+  return result
+}
+
 export function authRoutes(
   store: Store,
   providersOrCurrent: Providers | (() => Providers),
@@ -269,22 +324,8 @@ export function authRoutes(
     const password = options.password
     const json = express.json({ limit: '4kb' })
     const refused = (res: Response, error: unknown): void => {
-      const detail = error as Error & { code?: string; retryAt?: number }
-      if (detail.code === 'closed' || detail.code === 'timeout') {
-        res.status(503).json({
-          error: 'Password sign-in needs the master; try again shortly',
-        })
-        return
-      }
-      let body: { error: string; retryAt?: number } = {
-        error: detail.message,
-      }
-      try {
-        body = JSON.parse(detail.message) as typeof body
-      } catch {
-        // A plain message.
-      }
-      res.status(401).json(body)
+      const { status, body } = passwordRefusal(error)
+      res.status(status).json(body)
     }
     router.post('/auth/password/parameters', json, async (req, res) => {
       try {
@@ -295,19 +336,7 @@ export function authRoutes(
     })
     router.post('/auth/password', json, async (req, res) => {
       try {
-        const result = await password.signIn(
-          {
-            identifier: identifierOf(req.body),
-            clientHash: (req.body as { clientHash?: unknown } | null)
-              ?.clientHash,
-          },
-          req.ip ?? '',
-          cookie(req, SESSION_COOKIE),
-        )
-        res.cookie(SESSION_COOKIE, result.token, {
-          ...cookieOptions,
-          maxAge: result.session.expires_at - store.now(),
-        })
+        await passwordSignIn(req, res, store, password)
         res.json({ signedIn: true })
       } catch (error) {
         refused(res, error)

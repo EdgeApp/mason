@@ -20,6 +20,9 @@ import { providerSignInRoutes } from './providerSignIn.js'
 import { wizardApi } from './wizard.js'
 import { runsApi } from './runsApi.js'
 import type { Master } from './runtime.js'
+import { nodeInfoRoutes, releaseInfo } from '../node/nodeInfo.js'
+import type { NodeInfo } from '../shared/api/index.js'
+import { version } from '../version.js'
 import { secretsApi } from './secretsApi.js'
 
 export interface MasterWebContext extends WebAppContext {
@@ -29,6 +32,34 @@ export interface MasterWebContext extends WebAppContext {
   setupCode?: () => string | undefined
   onConfigured?: () => void
   restore?: Parameters<typeof accountsApi>[1]['restore']
+}
+
+/** The master's `GET /api/v2/node`. */
+export function masterNodeInfo(context: MasterWebContext): NodeInfo {
+  const settings = context.master.settings
+  const origin = (area: string): string | undefined => {
+    const value = (settings.value(area) as { origin?: unknown } | undefined)
+      ?.origin
+    return typeof value === 'string' ? value : undefined
+  }
+  const masterOrigin = origin('master')
+  const hostOrigin = origin('host')
+  return {
+    role: 'master',
+    version,
+    ...(masterOrigin == null ? {} : { masterOrigin }),
+    ...(hostOrigin == null ? {} : { hostOrigin }),
+    setupNeeded: !context.configured(),
+    signIn: {
+      password: true,
+      providers: context.master.providerSignIn
+        .offered()
+        .map(({ id, name }) => ({ id, name })),
+    },
+    state: 'ok',
+    testEndpoints: context.testEndpoints,
+    ...releaseInfo(),
+  }
 }
 
 const bundle = (name: string): string =>
@@ -41,6 +72,7 @@ const bundle = (name: string): string =>
 export function masterApp(context: MasterWebContext): express.Express {
   const app = nodeWebApp(context)
   const master = context.master
+  app.use(nodeInfoRoutes(() => masterNodeInfo(context)))
   for (const name of [
     'groups',
     'master',

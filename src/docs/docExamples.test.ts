@@ -83,4 +83,33 @@ describe('Masonfile documentation examples', function () {
     assert(codeBlocks(markdown).length >= 5)
     assert.deepEqual(checkExamples(markdown, types), [])
   })
+  it('typechecks the API reference’s examples against the shared contract', () => {
+    const api = { '@mason/api': 'src/shared/api/index.ts' }
+    const answer = [
+      'Intro', // 1
+      '', // 2
+      '```ts', // 3
+      "import type { NodeInfo } from '@mason/api'", // 4
+      'export const node: NodeInfo = {', // 5
+      "  role: 'worker',", // 6
+      "  version: '0.1.0',", // 7
+      '  setupNeeded: false,', // 8
+      '  signIn: { password: true, providers: [] },', // 9
+      "  state: 'ok',", // 10
+      '  testEndpoints: false,', // 11
+      '}', // 12
+      '```', // 13
+    ].join('\n')
+    const errors = checkExamples(answer, types, api)
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0]!.line, 6)
+    assert.match(errors[0]!.message, /"worker"/)
+    assert.deepEqual(
+      checkExamples(answer.replace("'worker'", "'host'"), types, api),
+      [],
+    )
+    const markdown = readFileSync('docs/api.md', 'utf8')
+    assert(codeBlocks(markdown).length >= 2)
+    assert.deepEqual(checkExamples(markdown, types, api), [])
+  })
 })

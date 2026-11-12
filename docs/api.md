@@ -1,7 +1,11 @@
 # Master API reference
 
 The Mason master serves its HTTP API under `/api/v2/` on its web listener.
-The dashboard, the `mason api` command and scripts all use it. This document
+The web app, the dashboard, the `mason api` command and scripts all use it.
+The request and answer types the web app relies on are in
+`src/shared/api/` (TypeScript types and the `cleaners` the app checks each
+answer with); the `ts` examples below import them as `@mason/api`, and
+`npm run check:doc-examples` typechecks them. This document
 is the reference for every route under `/api/v2/`, for how callers
 authenticate, and, briefly, for the few routes outside `/api/v2/` that
 clients still use. The host forwards most of these routes to the master
@@ -56,9 +60,9 @@ The examples use `$MASON` for the master's URL (such as
 
 ## 1. Authentication
 
-Every `/api/v2/` route except sign-in (`POST /api/v2/session/parameters`,
-`POST /api/v2/session` and `GET /api/v2/session`) needs a caller. The master
-takes, in this order:
+Every `/api/v2/` route except the node's description (`GET /api/v2/node`)
+and sign-in (`POST /api/v2/session/parameters`, `POST /api/v2/session` and
+`GET /api/v2/session`) needs a caller. The master takes, in this order:
 
 1. an `Authorization: Bearer <key>` header: an API key;
 2. a request the host forwarded for one of its signed-in people, on the
@@ -170,7 +174,10 @@ requests. While the master is unreachable the host answers 503. `/api/apps`
 is not forwarded, and neither is `GET /api/v2/builds…`: the host answers
 those itself, from its cache and storage, for API keys and for its own
 signed-in people, and keeps answering while the master is away (see
-[Builds](#14-builds)).
+[Builds](#14-builds)). The host also answers `GET /api/v2/node` and the
+session routes itself (see [Node](#node) and
+[Session on the host](#session-on-the-host)); they never reach the master
+as forwarded requests.
 
 - A forwarded request with an `Authorization` header is an API-key request;
   the master checks the key.
@@ -232,9 +239,47 @@ Devices").
 
 ## 2. Session and accounts
 
-Sign-in on the master, and the people and groups that decide what each
-person may do and which builds testers see. Sign-in routes answer only on
-the master's own listener.
+What a node is, sign-in, and the people and groups that decide what each
+person may do and which builds testers see. The master's sign-in routes
+answer only on its own listener; the host answers the same session routes
+for its own sign-ins.
+
+### Node
+
+**`GET /api/v2/node`**, on the master and on the host, needs no caller. It
+tells the web app which node it runs on and what to show before anyone signs
+in:
+
+| Field | Meaning |
+| --- | --- |
+| `role` | `master` or `host`. |
+| `version` | The Mason version the node runs. |
+| `masterOrigin` | The master's public origin (the `master` setting), when one is set. The host learns it from the master. |
+| `hostOrigin` | The host's public origin (the `host` setting), when one is set. |
+| `setupNeeded` | `true` on a master with no account yet: first-run setup. Always `false` on a host. |
+| `signIn` | `password`: whether username and password sign-in is offered (`false` on a host that has never reached its master). `providers`: the enabled [sign-in methods](#sign-in-methods) offered here, as `{ id, name }` (on the master only once the `master` setting names its origin). |
+| `state` | `ok`; on a host, `waitingForMaster` before its first sync, and `maintenance` once it has not reached its master for longer than its offline grace window. |
+| `testEndpoints` | Whether the node runs with `--test-endpoints`. |
+| `release` | `{ repository, version }`: the GitHub repository and version of the release the node runs, when it comes from one. |
+
+The host answers it in every state, also while it waits for its master and
+in maintenance, when its other pages answer 503.
+
+```ts
+import type { NodeInfo } from '@mason/api'
+
+export const host: NodeInfo = {
+  role: 'host',
+  version: '0.1.0',
+  masterOrigin: 'https://mason.example.test',
+  hostOrigin: 'https://builds.example.test',
+  setupNeeded: false,
+  signIn: { password: true, providers: [{ id: 'google', name: 'Google' }] },
+  state: 'ok',
+  testEndpoints: false,
+  release: { repository: 'EdgeApp/mason', version: '0.1.0' },
+}
+```
 
 ### Session
 
@@ -272,10 +317,58 @@ lowercase hex>" }`, the 32-byte Argon2id hash of the password. A body with a
 or password is 401, a locked account or address 429. Failures count against
 the account whichever identifier named it.
 
-**`GET /api/v2/session`** answers `{ "accountId", "name", "role", "csrf" }`,
-or 401 `Not signed in`.
+**`GET /api/v2/session`** answers the signed-in person, or 401 `Not
+signed in`. It reads the session cookie only: an API key is not a session
+and gets 401 too.
+
+| Field | Meaning |
+| --- | --- |
+| `accountId`, `name`, `role` | Who is signed in. |
+| `csrf` | The proof every other request from this session sends in `X-Mason-CSRF`. |
+| `permissions` | The [permissions](#roles-and-permissions) the person's role holds, in the table's order; the web app shows or hides actions by them. |
+| `emails` | The person's email addresses in order, each `{ email, confirmed }`. |
+
+```ts
+import type { SessionInfo } from '@mason/api'
+
+export const tester: SessionInfo = {
+  accountId: 12,
+  name: 'Tess Tester',
+  role: 'tester',
+  csrf: 'Q2xpZW50LXByb29mLW9mLXRoZS1zZXNzaW9uLTEyMzQ',
+  permissions: ['builds.read', 'devices.register'],
+  emails: [{ email: 'tess@example.com', confirmed: true }],
+}
+```
 
 **`DELETE /api/v2/session`** ends the session and answers `null`.
+
+### Session on the host
+
+The host answers the same four routes itself, with its own cookie
+`__Host-mason-session` (HttpOnly, Secure, SameSite=Lax), and never forwards
+them:
+
+- `POST /api/v2/session/parameters` and `POST /api/v2/session` take the same
+  bodies as on the master. The host relays them to the master over its
+  link, as its sign-in page's `/auth/password/parameters` and
+  `/auth/password` do: the master checks the hash with its lockouts and
+  answers whose account it is, and the host starts its own session for that
+  account. `POST /api/v2/session` answers `{ "name", "role", "csrf" }`. Both
+  must come from the host's own origin (`Origin`), else 403 `Untrusted
+  origin`. A wrong username, email or password is 401, a locked account or
+  address 429 with `retryAt`, and without the master 503 `Password sign-in
+  needs the master; try again shortly`.
+- `GET /api/v2/session` answers the same fields as on the master, from the
+  host's cache, so it keeps answering while the master is away.
+- `DELETE /api/v2/session` ends the host session and clears its cookie. It
+  needs the session's CSRF token in `X-Mason-CSRF` (or a `csrf` field) and
+  the host's own `Origin`, else 403.
+
+Bodies are limited to 4 KB, and the routes to 120 requests a minute per
+address. Before the host's first sync and in maintenance they answer 503
+with the reason. The sign-in page's `/auth/password…` routes and its
+sign-out form (`POST /auth/logout`) keep working beside them.
 
 ### People
 

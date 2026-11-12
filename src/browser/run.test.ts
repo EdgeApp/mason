@@ -18,6 +18,7 @@ import {
   type RunPage,
   type RunWindow,
 } from './run.js'
+import type { LiveFrame } from './live.js'
 
 /** An element whose queries answer from a table of selectors. */
 class El {
@@ -401,7 +402,8 @@ describe('Run view script', () => {
       data: [{ name: 'new', status: 'queued' }],
     })
     selected.apply({ event: 'end' })
-    selected.apply({ event: 'other' })
+    // An event a newer node may send is ignored.
+    selected.apply({ event: 'other' } as unknown as LiveFrame)
     assert.deepEqual(recorded.splice(0), [
       'run=running',
       'a=running',
