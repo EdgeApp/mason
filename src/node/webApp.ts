@@ -3,17 +3,10 @@ import { escape } from '../view/html.js'
 import { page } from '../view/shell.js'
 import { assetRoutes } from '../view/assets.js'
 import { stylesheet } from '../view/stylesheet.js'
+import { contentSecurityPolicy } from './csp.js'
+import { webAppRoutes } from './webRoutes.js'
 
-export const contentSecurityPolicy =
-  "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
-/**
- * The master's sign-in, first-run and password pages, and the password
- * worker, compile the Argon2id WebAssembly; no other page may.
- */
-export const masterContentSecurityPolicy = contentSecurityPolicy.replace(
-  "script-src 'self'",
-  "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'",
-)
+export { contentSecurityPolicy, masterContentSecurityPolicy } from './csp.js'
 
 export interface WebAppContext {
   role: 'master' | 'host'
@@ -29,7 +22,10 @@ export function testBanner(context: WebAppContext): string {
     : ''
 }
 
-/** Common headers, health check and stylesheet for a node's web listener. */
+/**
+ * Common headers, health check, stylesheet and the React app (under `/_web`)
+ * for a node's web listener.
+ */
 export function nodeWebApp(context: WebAppContext): express.Express {
   const app = express()
   app.disable('x-powered-by')
@@ -50,6 +46,7 @@ export function nodeWebApp(context: WebAppContext): express.Express {
     res.type('css').send(context.styles ?? stylesheet)
   })
   app.use(assetRoutes())
+  app.use(webAppRoutes())
   return app
 }
 
