@@ -101,6 +101,8 @@ describe('Navigation per node and role', () => {
     assert.equal(currentNav('/groups', items)?.key, 'groups')
     assert.equal(currentNav('/groupsx', items), undefined)
     assert.equal(currentNav('/account', items), undefined)
+    // The app draws / only as the master's Projects & apps.
+    assert.equal(currentNav('/', items)?.key, 'dashboard')
     assert.equal(homeFor(items), '/projects')
     assert.equal(homeFor(navFor('host', permissionsOf('tester'))), '/apps')
     assert.equal(homeFor([]), '/account')

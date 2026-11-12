@@ -35,8 +35,7 @@ import {
   projectView,
 } from '../view/admin.js'
 import { storedDetails, type ProjectDetails } from '../master/projectDetails.js'
-import { artifactsView, projectRunsData } from '../view/artifacts.js'
-import { dashboardData, dashboardView } from '../view/dashboard.js'
+import { projectRunsData } from '../view/artifacts.js'
 import {
   approvalNotifications,
   approvalRolesFromGraph,
@@ -487,84 +486,16 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       ['/assets/master.js', '/assets/people.js'],
     )
   })
-  router.get('/projects', (req, res) => {
+  // Projects & apps and Artifacts are the web app's, read from this host's
+  // copy; a tester reads the 403 inside it on Artifacts (and the 404 above
+  // on Projects).
+  router.get(['/projects', '/artifacts'], (req, res) => {
     const found = hostViewer(host, req)
     if (found == null) {
       signIn(req, res)
       return
     }
-    const now = host.now()
-    const platform =
-      typeof req.query.platform === 'string' ? req.query.platform : undefined
-    const project =
-      typeof req.query.project === 'string' ? req.query.project : undefined
-    render(
-      res,
-      found.viewer,
-      'Projects & apps',
-      dashboardView(
-        dashboardData(
-          {
-            db: host.cache.db,
-            viewer: found.viewer,
-            now,
-            appVisible: visible(found.accountId),
-            ...reader.dashboard(),
-          },
-          {
-            ...(platform == null ? {} : { platform }),
-            ...(project == null ? {} : { project }),
-          },
-        ),
-        found.viewer,
-        now,
-      ),
-      'dashboard',
-    )
-  })
-  router.get('/artifacts', (req, res) => {
-    const found = hostViewer(host, req)
-    if (found == null) {
-      signIn(req, res)
-      return
-    }
-    if (found.viewer.role === 'tester') {
-      render(
-        res.status(403),
-        found.viewer,
-        'Artifacts',
-        '<h1>Artifacts</h1><p>Artifacts are for developers and up.</p>',
-        'catalog',
-      )
-      return
-    }
-    const filter = (name: string): string | undefined =>
-      typeof req.query[name] === 'string'
-        ? (req.query[name] as string)
-        : undefined
-    const run = filter('run')
-    const project = filter('project')
-    const branch = filter('branch')
-    render(
-      res,
-      found.viewer,
-      'Artifacts',
-      artifactsView(
-        {
-          db: host.cache.db,
-          viewer: found.viewer,
-          now: host.now(),
-          appVisible: visible(found.accountId),
-          artifactBase: '',
-        },
-        {
-          ...(run == null ? {} : { run }),
-          ...(project == null ? {} : { project }),
-          ...(branch == null ? {} : { branch }),
-        },
-      ),
-      'artifacts',
-    )
+    sendShell(res, found.viewer.role === 'tester' ? { status: 403 } : {})
   })
   // E2E only: a browser that cannot be handed a cookie (Safari in a
   // Simulator) opens the session a test.session control request started.

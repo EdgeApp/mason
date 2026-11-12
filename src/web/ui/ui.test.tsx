@@ -615,3 +615,56 @@ function withClock(): {
     },
   }
 }
+
+describe('Platforms, stat tiles and filter pills', () => {
+  it('gives every platform one name, colour and glyph, and an unknown one its own name', async () => {
+    const { platformLook } = await import('./platform.js')
+    assert.deepEqual(platformLook('tvos'), {
+      name: 'tvOS',
+      series: 2,
+      icon: 'ios',
+    })
+    assert.deepEqual(platformLook('linux'), {
+      name: 'linux',
+      series: 6,
+      icon: 'apps',
+    })
+  })
+
+  it('draws a stat tile’s unit and foot, a meter of non-zero shares, and pills with one pressed', async () => {
+    const { StatTile, Meter } = await import('./StatTile.js')
+    const { FilterPills } = await import('./FilterPills.js')
+    const chosen: string[] = []
+    render(
+      <>
+        <StatTile label="Storage" value="1.2" unit="GB" foot="Builds" />
+        <Meter
+          parts={[
+            { label: 'iOS', value: 2, series: 1 },
+            { label: 'tvOS', value: 0, series: 2 },
+          ]}
+        />
+        <FilterPills
+          label="Platform"
+          value="all"
+          onChange={(key) => chosen.push(key)}
+          options={[
+            { key: 'all', label: 'All', count: 3 },
+            { key: 'ios', label: 'iOS', count: 2 },
+          ]}
+        />
+      </>,
+    )
+    screen.getByText('GB')
+    screen.getByText('Builds')
+    screen.getByRole('img', { name: 'iOS 2' })
+    fireEvent.click(screen.getByRole('button', { name: 'iOS 2' }))
+    assert.deepEqual(chosen, ['ios'])
+    assert.equal(
+      screen
+        .getByRole('button', { name: 'All 3' })
+        .getAttribute('aria-pressed'),
+      'true',
+    )
+  })
+})

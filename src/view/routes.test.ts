@@ -142,11 +142,13 @@ describe('Pages on the master and the host', function () {
         assert.match(resource, /^\/(?!\/)/, `${route} loads ${resource}`)
       assert.match(reply.csp, /font-src 'self'/)
       // No page compiles the password hash: the sign-in pages are the web
-      // app's shell, which only starts the worker that does.
+      // app's shell, which only starts the worker that does. Projects & apps
+      // (the master's home) and Artifacts are the shell too.
       assert.doesNotMatch(reply.csp, /wasm-unsafe-eval/, route)
       assert.equal(
         reply.csp === shellContentSecurityPolicy,
-        route === '/sign-in' || route === '/auth/login',
+        ['/sign-in', '/auth/login', '/artifacts'].includes(route) ||
+          (node === c.master && route === '/'),
         route,
       )
     }
@@ -201,10 +203,11 @@ describe('Pages on the master and the host', function () {
         [403, 404].includes((await get(host, route, onHost('admin'))).status),
         route,
       )
-    const admin = (await get(c.master, '/', onMaster('admin'))).text
+    // The master's server pages (Install apps here) draw the side menu by role.
+    const admin = (await get(c.master, '/apps', onMaster('admin'))).text
     assert.match(admin, /href="\/backups"/)
     assert.match(admin, /href="\/groups"/)
-    const developer = await get(c.master, '/', onMaster('developer'))
+    const developer = await get(c.master, '/apps', onMaster('developer'))
     assert.doesNotMatch(developer.text, /href="\/(backups|groups)"/)
     assert.match(
       developer.text,
@@ -230,24 +233,48 @@ describe('Pages on the master and the host', function () {
   })
 
   it('U17.4 both nodes render the dashboard from their own data; only the master lists nodes', async () => {
-    const master = await get(
+    // Each node answers the web app's shell, and the dashboard from its own data.
+    const shell = (reply: Reply): void => {
+      assert.equal(reply.status, 200, reply.text.slice(0, 200))
+      assert.match(reply.text, /<div id="root"><\/div>/)
+      assert.equal(reply.csp, shellContentSecurityPolicy)
+    }
+    shell(
+      await get(c.master, '/projects?platform=android', onMaster('developer')),
+    )
+    const json = async (
+      node: RunningNode,
+      route: string,
+      cookie: string,
+    ): Promise<Json> => {
+      const reply = await get(node, route, cookie)
+      assert.equal(reply.status, 200, reply.text)
+      return JSON.parse(reply.text)
+    }
+    const master = await json(
       c.master,
-      '/projects?platform=android',
+      '/api/v2/dashboard?platform=android',
       onMaster('developer'),
     )
-    assert.match(master.text, /app\.example\.views/)
-    assert.match(master.text, /Worker nodes/)
-    assert.match(master.text, /workers idle/)
-    const onHostPage = await get(
+    assert(
+      JSON.stringify(master.projects).includes('app.example.views'),
+      'the master’s dashboard',
+    )
+    assert(Array.isArray(master.nodes))
+    shell(await get(host, '/projects?project=views', onHost('developer')))
+    const onHostPage = await json(
       host,
-      '/projects?project=views',
+      '/api/v2/dashboard?project=views',
       onHost('developer'),
     )
-    assert.match(onHostPage.text, /app\.example\.views/)
-    assert.doesNotMatch(onHostPage.text, /Worker nodes|workers idle/)
-    assert.match(
-      (await get(host, '/artifacts?run=none', onHost('developer'))).text,
-      /Run unavailable/,
+    assert(JSON.stringify(onHostPage.projects).includes('app.example.views'))
+    assert.equal(onHostPage.nodes, undefined)
+    // An unknown run's detail: the shell, which reads the 404.
+    shell(await get(host, '/artifacts?run=none', onHost('developer')))
+    assert.equal(
+      (await get(host, '/api/v2/artifacts/runs/none', onHost('developer')))
+        .status,
+      404,
     )
   })
 
@@ -276,14 +303,10 @@ describe('Pages on the master and the host', function () {
   })
 
   it('U17.6 the master’s notices reach managers and administrators only', async () => {
-    assert.match(
-      (await get(c.master, '/', onMaster('manager'))).text,
-      /This master is not backed up<\/li>/,
-    )
-    assert.doesNotMatch(
-      (await get(c.master, '/', onMaster('developer'))).text,
-      /not backed up<\/li>/,
-    )
+    const notices = async (role: string): Promise<string> =>
+      (await get(c.master, '/api/v2/notifications', onMaster(role))).text
+    assert.match(await notices('manager'), /This master is not backed up/)
+    assert.doesNotMatch(await notices('developer'), /not backed up/)
   })
 
   it('M5.1 the host serves Overview, Runs and builds and Masonfile from its own copy, read-only, for developers and up', async () => {

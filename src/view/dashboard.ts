@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { isGlob, matches } from '../master/rules.js'
-import { ago, appPath, breadcrumbs, duration, escape, runName } from './html.js'
+import { duration, escape, runName } from './html.js'
 import { icon, type IconName } from './icons.js'
 import type { Viewer } from './shell.js'
 import type {
@@ -351,34 +351,7 @@ export function dashboardData(
 }
 
 /** Bytes as `312.8 GB`. */
-export function bytes(size: number): string {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let value = size
-  let unit = 0
-  while (value >= 1000 && unit < units.length - 1) {
-    value /= 1000
-    unit++
-  }
-  return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`
-}
-
-function tile(
-  iconName: IconName,
-  label: string,
-  value: string,
-  note = '',
-): string {
-  return `<div class="tile">${icon(iconName)}<div><span>${escape(label)}</span><strong>${escape(value)}</strong>${note === '' ? '' : `<small>${escape(note)}</small>`}</div></div>`
-}
-
-function query(filter: DashboardFilter, change: DashboardFilter): string {
-  const merged = { ...filter, ...change }
-  const params = new URLSearchParams()
-  if (merged.project != null) params.set('project', merged.project)
-  if (merged.platform != null) params.set('platform', merged.platform)
-  const text = params.toString()
-  return text === '' ? '/projects' : `/projects?${text}`
-}
+export { bytes } from '../shared/format.js'
 
 /** A run's page. */
 export const runHref = (id: string): string => `/runs/${encodeURIComponent(id)}`
@@ -402,104 +375,4 @@ export function queueItems(entries: readonly QueueEntry[]): string {
       )
       .join('') || '<li>Nothing is running.</li>'
   )
-}
-
-/**
- * A branch's latest build of an app ID: branch, build number, its run's
- * status and age, opening that run. The page's socket keeps the status.
- */
-function buildChip(
-  build: ProjectCard['apps'][number]['builds'][number],
-  now: number,
-): string {
-  const text = `${escape(build.branch)} <span>${escape(build.buildNumber)}</span>${build.status == null ? '' : statusDot(build.status)}<small>${escape(ago(build.at, now))}</small>`
-  return build.run == null
-    ? `<span class="run-chip">${text}</span>`
-    : `<a class="run-chip" href="${runHref(build.run)}" title="${escape(build.branch)} ${escape(build.buildNumber)} ${escape(build.status ?? '')}" data-run-id="${escape(build.run)}" data-status="${escape(build.status ?? '')}">${text}</a>`
-}
-
-/**
- * A project's card. Its header opens the project's page, but for its run
- * chips, which open their runs; each app ID's row opens that app ID's
- * page, but for its build chips, which open their runs.
- */
-function projectCard(card: ProjectCard, now: number): string {
-  const runs = card.runs.map(runChip).join('')
-  const apps = card.apps
-    .map((app) => {
-      const href = appPath(card.slug, app.slug)
-      const more = Math.max(app.builds.length, app.branches) - BRANCH_CHIPS
-      const builds =
-        app.builds
-          .slice(0, BRANCH_CHIPS)
-          .map((build) => buildChip(build, now))
-          .join('') +
-        (more > 0
-          ? `<a class="run-chip more" href="${escape(href)}">+${more} more</a>`
-          : '')
-      return appGridRow(href, app.slug, `<small>${escape(app.name)}</small>`, [
-        platformChips(app.platforms),
-        `<span class="app-builds">${builds || '<small>No builds yet</small>'}</span>`,
-      ])
-    })
-    .join('')
-  return `<article class="project" id="project-${escape(card.slug)}"><header>${icon('folder')}<div><h2><a class="card-link" href="/projects/${encodeURIComponent(card.slug)}">${escape(card.name)}</a></h2>${
-    card.repository == null
-      ? ''
-      : `<small class="mono">${escape(card.repository)}</small>`
-  }<div class="meta">${card.defaultBranch == null ? '' : `<span>${icon('fork_right')} Default: <span class="mono">${escape(card.defaultBranch)}</span></span>`}${
-    card.webhook == null
-      ? ''
-      : `<span>${statusDot(card.webhook ? 'succeeded' : 'queued')} Webhook ${card.webhook ? 'active' : 'not set up'}</span>`
-  }${
-    card.latest == null
-      ? ''
-      : `<span>${icon('commit')} <span class="mono">${escape(card.latest.commit.slice(0, 8))}</span> ${escape(card.latest.description)} · ${escape(ago(card.latest.at, now))}</span>`
-  }</div></div><div class="runs" data-project-runs="${escape(card.slug)}">${runs}</div></header><div class="apps"><h3>App IDs (${card.apps.length})</h3>${apps === '' ? '<p>No app IDs.</p>' : `<div class="app-grid" role="table" aria-label="App IDs">${apps}</div>`}</div></article>`
-}
-
-/** The projects-and-apps dashboard for developers and up. */
-export function dashboardView(
-  data: DashboardData,
-  viewer: Viewer,
-  now: number,
-): string {
-  const rate =
-    data.tiles.successRate == null
-      ? '—'
-      : `${(data.tiles.successRate * 100).toFixed(1)}%`
-  const chips = (['all', ...platforms] as const)
-    .filter((key) => key === 'all' || data.counts[key] > 0)
-    .map((key) => {
-      const current =
-        key === 'all'
-          ? data.filter.platform == null
-          : data.filter.platform === key
-      const href = query(data.filter, {
-        platform: key === 'all' ? undefined : key,
-      })
-      return `<a class="chip" href="${escape(href)}"${current ? ' aria-current="true"' : ''}>${escape(key === 'all' ? 'All' : platformNames[key])} (${data.counts[key]})</a>`
-    })
-    .join('')
-  const nodes =
-    data.nodes == null
-      ? ''
-      : `<section class="panel"><h2>${icon('dns')}Worker nodes</h2><ul>${
-          data.nodes
-            .map(
-              (node) =>
-                `<li><div><span class="mono">${escape(node.name)}</span><small>${escape(node.detail)}</small></div><span>${statusDot(node.status === 'busy' ? 'running' : node.status === 'idle' ? 'succeeded' : 'cancelled')} ${escape(node.status)}</span></li>`,
-            )
-            .join('') || '<li>No nodes are linked.</li>'
-        }</ul></section>`
-  const builds = data.builds
-    .map(
-      (build) =>
-        `<li><div><span class="mono">${escape(build.app)} ${escape(build.version)} (${escape(build.buildNumber)})</span><small>${platformChip(build.platform)} <span class="mono">${escape(build.branch)}</span> · ${escape(bytes(build.size))} · ${escape(ago(build.at, now))}</small></div></li>`,
-    )
-    .join('')
-  return `<div class="page-head"><div>${breadcrumbs(viewer, [{ label: 'Projects', href: '/projects' }])}<h1>Projects &amp; apps</h1><p>Every project's app IDs, their latest builds and runs.</p></div>${viewer.node === 'master' && (viewer.role === 'admin' || viewer.role === 'manager') ? `<a class="button" href="/projects/new">${icon('add')} Add project</a>` : ''}</div><div class="tiles">${tile('folder', 'Projects', String(data.tiles.projects))}${tile('apps', 'App IDs', String(data.tiles.apps))}${tile('speed', 'Success rate', rate, data.tiles.finished === 0 ? 'No finished runs in 30 days' : `${data.tiles.finished} runs in 30 days`)}${tile('storage', 'Artifact storage', bytes(data.tiles.storage))}</div><nav class="chips" aria-label="Platforms">${chips}</nav><div class="columns"><div>${
-    data.projects.map((card) => projectCard(card, now)).join('') ||
-    '<p class="empty-state">No projects match.</p>'
-  }</div><aside><section class="panel" data-queue><h2>${icon('hourglass_top')}Queue</h2><ul>${queueItems(data.queue)}</ul></section>${nodes}<section class="panel"><h2>${icon('deployed_code')}Recent builds</h2><ul>${builds || '<li>No builds yet.</li>'}</ul></section></aside></div>`
 }

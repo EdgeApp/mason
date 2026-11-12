@@ -388,7 +388,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     // The discovery run never shows among the project's runs.
     assert.doesNotMatch(
-      (await request(c.master, 'GET', '/projects', manager)).text,
+      (await request(c.master, 'GET', '/api/v2/dashboard', manager)).text,
       /@discover/,
     )
     assert.equal(slugFor('git@github.com:Owner/My_App.git'), 'my-app')
@@ -1037,18 +1037,21 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       'Runs and builds /projects/wizard/runs',
     ])
     assert.match(runTrail.at(-1)!, new RegExp(`^Run \\d+ /runs/${run} \\*$`))
-    const developer = (
-      await request(c.master, 'GET', '/projects', signIn('developer'))
-    ).text
-    assert.doesNotMatch(
-      developer,
-      /href="\/(nodes|settings|people|groups|backups)"|Add project/,
-    )
-    const manager = (
-      await request(c.master, 'GET', '/projects', signIn('manager'))
-    ).text
-    assert.match(manager, /href="\/nodes"/)
-    assert.match(manager, /Add project/)
+    // Projects & apps is the web app's: its links and Add project follow the
+    // session's permissions, which it reads.
+    const permissions = async (role: string): Promise<string[]> =>
+      (await request(c.master, 'GET', '/api/v2/session', signIn(role))).json
+        .permissions
+    for (const role of ['developer', 'manager']) {
+      const page = await request(c.master, 'GET', '/projects', signIn(role))
+      assert.match(page.text, /<div id="root"><\/div>/)
+    }
+    const developer = await permissions('developer')
+    assert(!developer.includes('nodes.read'))
+    assert(!developer.includes('projects.change'))
+    const manager = await permissions('manager')
+    assert(manager.includes('nodes.read'))
+    assert(manager.includes('projects.change'))
     // Only administrators change people; the form asks for an email, which
     // any enabled sign-in method that confirms it signs them in with.
     const adminPeople = (
@@ -1323,7 +1326,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       /data-mason="person-add"|\/api\/v2\/groups/,
     )
     assert.match(
-      (await request(c.master, 'GET', '/', admin)).text,
+      (await request(c.master, 'GET', '/groups', admin)).text,
       /<a href="\/people"[^>]*>.*?<span class="label">People<\/span><\/a><a href="\/groups"[^>]*>.*?<span class="label">Groups<\/span>/,
     )
     const db = c.master.master!.database.db

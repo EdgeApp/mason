@@ -17,7 +17,8 @@ describe('scripts/bundle-web.mjs', () => {
 
   it('writes hashed app, stylesheet and worker files, theme-boot.js and index.html', () => {
     assert.deepEqual(
-      names.map((name) => name.replace(/-[A-Z0-9]{8}\./, '-[hash].')),
+      // Sorted after the hashes go, so the order never depends on them.
+      names.map((name) => name.replace(/-[A-Z0-9]{8}\./, '-[hash].')).sort(),
       [
         'app-[hash].css',
         'app-[hash].js',

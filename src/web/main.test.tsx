@@ -2,7 +2,14 @@ import assert from 'node:assert/strict'
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, it } from 'mocha'
 import { ApiClient } from './api/client.js'
-import { App, basenameFor, Root, start, WEB_BASENAME } from './main.js'
+import {
+  App,
+  basenameFor,
+  Root,
+  serverPages,
+  start,
+  WEB_BASENAME,
+} from './main.js'
 import { fakeNode, nodeInfo, shellReplies, until } from './test/render.js'
 
 describe('The web app entry', () => {
@@ -20,6 +27,22 @@ describe('The web app entry', () => {
     assert.equal(basenameFor('/'), undefined)
     assert.equal(basenameFor('/_webby'), undefined)
     assert.equal(basenameFor('/runs/12'), undefined)
+  })
+
+  it('loads the node’s own pages in place of the current entry, from where the document was loaded', () => {
+    const replaced: string[] = []
+    const win = {
+      location: {
+        pathname: '/projects',
+        search: '?platform=ios',
+        replace: (url: string) => replaced.push(url),
+      },
+    } as unknown as Window
+    const pages = serverPages(win)
+    assert.equal(pages.here, '/projects?platform=ios')
+    pages.go('/nodes')
+    assert.deepEqual(replaced, ['/nodes'])
+    assert.equal(serverPages().here, `${location.pathname}${location.search}`)
   })
 
   it('mounts nothing on a page without #root', () => {

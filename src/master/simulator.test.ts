@@ -13,7 +13,7 @@ import {
   simulatorZip,
   zip,
 } from '../upload/fixtures.test.js'
-import { artifactsView } from '../view/artifacts.js'
+import { artifactRunData } from '../view/artifacts.js'
 import { olderVersion } from './artifacts.js'
 import { localOperator } from './roles.js'
 
@@ -241,8 +241,9 @@ describe('iPhone Simulator and tvOS builds', function () {
         `aria-label="Register Device for 1\\.2\\.3 build ${number} \\(Default\\)"`,
       ),
     )
-    // The run's page lists it as an iPhone Simulator download.
-    const runPage = artifactsView(
+    // Artifacts' run detail lists it as an iPhone Simulator download (the
+    // web app labels such a build Download, to /apps/:id, on the host).
+    const detail = artifactRunData(
       {
         db: host.host!.cache.db,
         viewer: { name: 'Sam', role: 'admin', node: 'host', signOut: '' },
@@ -250,13 +251,19 @@ describe('iPhone Simulator and tvOS builds', function () {
         appVisible: () => true,
         artifactBase: '',
       },
-      { run: value.id },
-    )
-    assert.match(
-      runPage,
-      new RegExp(
-        `Phone 1\\.2\\.3 \\(${number}\\) maestro</span><small><span class="platform">.*?iOS</span> · iPhone Simulator · [^<]+</small></div><a href="/apps/${appId}">Download</a>`,
-      ),
+      value.id,
+    )!
+    const download = detail.builds.find((build) => build.variant === 'maestro')!
+    assert.deepEqual(
+      [
+        download.app,
+        download.version,
+        download.buildNumber,
+        download.platform,
+        download.downloadOnly,
+        download.appId,
+      ],
+      ['Phone', '1.2.3', number, 'ios', 'iPhone Simulator', appId],
     )
   })
 

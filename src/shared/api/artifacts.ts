@@ -44,6 +44,10 @@ export interface ArtifactsList {
   project?: { slug: string; name: string }
   branch?: string
   runs: ArtifactsRow[]
+  /** Every project, for the project select. */
+  projects: Array<{ slug: string; name: string }>
+  /** The narrowed-to project's branches, newest run first (none without a project). */
+  branches: string[]
 }
 
 /** A build a run published, which the viewer may see. */
@@ -129,6 +133,8 @@ export const asArtifactsList = asObject<ArtifactsList>({
       artifacts: asObject({ count: asNumber, size: asNumber }),
     }),
   ),
+  projects: asArray(asObject({ slug: asString, name: asString })),
+  branches: asArray(asString),
 })
 
 export const asPublishedBuild = asObject<PublishedBuild>({

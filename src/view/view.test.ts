@@ -21,16 +21,12 @@ import {
   wizardView,
 } from './admin.js'
 import {
-  artifactsView,
+  artifactRunData,
+  artifactsListData,
   projectRunsData,
   projectRunsTable,
 } from './artifacts.js'
-import {
-  bytes,
-  dashboardData,
-  dashboardView,
-  platformChip,
-} from './dashboard.js'
+import { bytes, dashboardData, platformChip } from './dashboard.js'
 import {
   ago,
   breadcrumbs,
@@ -661,36 +657,13 @@ describe('Design system and views', () => {
       ],
     )
     assert.equal(data.builds[0]!.app, 'Phone')
-    const html = dashboardView(data, viewer('developer'), NOW)
-    assert.match(html, /Projects &amp; apps/)
-    assert.deepEqual(crumbTrail(html), [
-      'Mason Master /',
-      'Projects /projects *',
+    // The page draws these (src/web/pages/dashboard); the answer carries them.
+    assert.equal(data.tiles.successRate, 0.5)
+    assert.equal(data.counts.windows, 0)
+    assert.deepEqual(data.nodes, [
+      { name: 'buildbox', status: 'busy', detail: 'mac' },
     ])
-    assert.match(html, /50\.0%/)
-    assert.match(html, /11\.5 MB/)
-    assert.match(
-      html,
-      /<a class="chip" href="\/projects" aria-current="true">All \(3\)<\/a>/,
-    )
-    // The filter chips stay on Projects & apps, now at /projects.
-    assert.match(html, /href="\/projects\?platform=macos">macOS \(1\)/)
-    assert.doesNotMatch(html, /Windows \(/)
-    assert.match(html, /Webhook active/)
-    assert.match(html, /buildbox/)
-    assert.match(html, /role="progressbar"/)
-    // The card's header opens the project; its run chips open their runs.
-    assert.match(
-      html,
-      /<header>.*<h2><a class="card-link" href="\/projects\/phones">Phones<\/a><\/h2>.*<\/header>/,
-    )
-    assert.doesNotMatch(html, /meta-link|\/masonfile"|\?project=/)
-    assert.match(html, /<a class="run-chip" href="\/runs\/run-\d+"/)
-    // Each chip names its run, branch and status, for the page's socket to keep current.
-    assert.match(
-      html,
-      /<div class="runs" data-project-runs="phones"><a class="run-chip" [^>]*data-run-id="run-\d+" data-branch="[^"]+" data-status="[a-z_]+">/,
-    )
+    assert.deepEqual(data.projects[0]!.webhook, true)
     // A platform filter keeps the projects with an app on it.
     const mac = dashboardData(
       { db, viewer: viewer('developer'), now: NOW, appVisible: all },
@@ -701,23 +674,12 @@ describe('Design system and views', () => {
       ['desk'],
     )
     assert.equal(mac.nodes, undefined)
-    assert.doesNotMatch(
-      dashboardView(mac, viewer('developer', 'host'), NOW),
-      /Worker nodes/,
-    )
-    assert.deepEqual(
-      crumbTrail(dashboardView(mac, viewer('developer', 'host'), NOW)),
-      ['Mason Host /', 'Projects /projects *'],
-    )
+    assert.deepEqual(mac.filter, { platform: 'macos' })
     const one = dashboardData(
       { db, viewer: viewer('developer'), now: NOW, appVisible: all },
       { project: 'desk', platform: 'ios' },
     )
     assert.deepEqual(one.projects, [])
-    assert.match(
-      dashboardView(one, viewer('developer'), NOW),
-      /No projects match/,
-    )
     // A tester sees only the apps and builds shared with them.
     const tester = dashboardData({
       db,
@@ -740,10 +702,9 @@ describe('Design system and views', () => {
       now: NOW,
       appVisible: all,
     })
-    const emptyHtml = dashboardView(empty, viewer('admin'), NOW)
-    assert.match(emptyHtml, /No finished runs in 30 days/)
-    assert.match(emptyHtml, /Nothing is running\./)
-    assert.match(emptyHtml, /No builds yet\./)
+    assert.equal(empty.tiles.finished, 0)
+    assert.equal(empty.tiles.successRate, undefined)
+    assert.deepEqual([empty.queue, empty.builds, empty.projects], [[], [], []])
     assert.equal(bytes(999), '999 B')
     assert.equal(bytes(2_500_000_000_000_000), '2500.0 TB')
     assert.match(platformChip('linux'), />linux</)
@@ -823,105 +784,19 @@ describe('Design system and views', () => {
         .map((entry) => entry.branch),
       ['feature/login', 'release/2', 'topic/a'],
     )
-    const html = dashboardView(data, viewer('developer'), NOW)
-    const card = html.slice(
-      html.indexOf('<article class="project" id="project-phones">'),
-      html.indexOf('</article>') + '</article>'.length,
-    )
-    // The header holds the project's link and the run chips, and no app ID.
-    const header = card.slice(
-      card.indexOf('<header>'),
-      card.indexOf('</header>'),
-    )
-    assert.match(
-      header,
-      /<h2><a class="card-link" href="\/projects\/phones">Phones<\/a><\/h2>/,
-    )
-    assert.match(
-      header,
-      /<div class="runs" data-project-runs="phones"><a class="run-chip" href="\/runs\//,
-    )
-    assert.doesNotMatch(header, /app-grid|row-link/)
-    assert.equal([...card.matchAll(/class="card-link"/g)].length, 1)
-    // Every one of the eight rows opens its app ID's page.
-    const rows = [
-      ...card.matchAll(
-        /<div class="app-grid-row" role="row"><div role="cell"><a class="row-link" href="([^"]+)">([^<]+)<\/a><small>([^<]*)<\/small><\/div><div role="cell"><span class="app-platforms">/g,
-      ),
-    ].map((match) => [match[1], match[2], match[3]])
-    assert.match(
-      card,
-      /<h3>App IDs \(8\)<\/h3><div class="app-grid" role="table" aria-label="App IDs">/,
-    )
-    assert.deepEqual(rows, [
-      ['/projects/phones/apps/app.example.phone', 'app.example.phone', 'Phone'],
-      ['/projects/phones/apps/app.example.watch', 'app.example.watch', 'Watch'],
-      ...[1, 2, 3, 4, 5, 6].map((n) => [
-        `/projects/phones/apps/app.example.extra${n}`,
-        `app.example.extra${n}`,
-        `Extra ${n}`,
-      ]),
-    ])
-    // Phone's row: six branches' builds, each opening its run, then +3 more, opening its page.
-    const row = card.slice(
-      card.indexOf('href="/projects/phones/apps/app.example.phone"'),
-      card.indexOf('href="/projects/phones/apps/app.example.watch"'),
-    )
-    const chips = row.slice(row.indexOf('<span class="app-builds">'))
+    // Each build names its run (when it is known) for its chip to open.
     assert.deepEqual(
+      phones.apps.map((app) => app.slug),
       [
-        ...chips.matchAll(
-          /<(a|span) class="run-chip(?: more)?"(?: href="([^"]+)")?[^>]*>([^<]*)/g,
-        ),
-      ].map((match) => [match[1], match[2], match[3]!.trim()]),
-      [
-        ['a', '/runs/run-1', 'main'],
-        ['a', '/runs/run-2', 'release/2'],
-        ['span', undefined, 'release/1'],
-        ['a', '/runs/run-3', 'feature/login'],
-        ['a', '/runs/gone', 'topic/a'],
-        ['a', '/runs/run-1', 'topic/b'],
-        ['a', '/projects/phones/apps/app.example.phone', '+3 more'],
+        'app.example.phone',
+        'app.example.watch',
+        ...[1, 2, 3, 4, 5, 6].map((n) => `app.example.extra${n}`),
       ],
     )
-    // Branch, build number, the run's status dot and age; the page's socket keeps the status.
-    assert.match(
-      chips,
-      /<a class="run-chip" href="\/runs\/run-2" title="release\/2 261061 failed" data-run-id="run-2" data-status="failed">release\/2 <span>261061<\/span><span class="dot failed" aria-hidden="true"><\/span><small>2h ago<\/small><\/a>/,
-    )
-    assert.match(
-      chips,
-      /<span class="run-chip">release\/1 <span>261067<\/span><small>10h ago<\/small><\/span>/,
-    )
-    assert.match(
-      chips,
-      /data-run-id="gone" data-status="">topic\/a <span>261062<\/span><small>/,
-    )
-    assert.doesNotMatch(chips, /topic\/c|topic\/d|topic\/e/)
-    // Six or fewer: no +N more; none: No builds yet.
-    const watch = card.slice(
-      card.indexOf('href="/projects/phones/apps/app.example.watch"'),
-      card.indexOf('href="/projects/phones/apps/app.example.extra1"'),
-    )
-    assert.match(
-      watch,
-      /<span class="app-builds"><small>No builds yet<\/small><\/span>/,
-    )
-    db.prepare(
-      "DELETE FROM builds WHERE branch IN ('topic/c','topic/d','topic/e')",
-    ).run()
-    assert.doesNotMatch(
-      dashboardView(
-        dashboardData({
-          db,
-          viewer: viewer('developer'),
-          now: NOW,
-          appVisible: () => true,
-        }),
-        viewer('developer'),
-        NOW,
-      ),
-      /more<\/a>/,
+    assert.equal(phone.branches, 9)
+    assert.deepEqual(
+      phones.apps.find((app) => app.slug === 'app.example.watch')!.builds,
+      [],
     )
     // An app built on very many branches: the card reads only the newest
     // hundred, and its +N still counts them all (review 1.harness-review.7).
@@ -948,10 +823,6 @@ describe('Design system and views', () => {
       .find((app) => app.slug === 'app.example.phone')!
     assert.equal(busy.builds.length, 100)
     assert.ok(busy.branches > 110)
-    assert.match(
-      dashboardView(wide, viewer('developer'), NOW),
-      new RegExp(`\\+${busy.branches - 6} more</a>`),
-    )
     // The header's link covers the header only; chips and rows sit above or beside it.
     assert.match(stylesheet, /\.project header\{[^}]*position:relative\}/)
     assert.match(
@@ -966,19 +837,15 @@ describe('Design system and views', () => {
       stylesheet,
       /\.app-grid-row a:not\(\.row-link\)\{position:relative;z-index:1\}/,
     )
-    // A project with no app IDs says so.
-    assert.match(
-      dashboardView(
-        dashboardData({
-          db: fixture(),
-          viewer: viewer('developer'),
-          now: NOW,
-          appVisible: (id) => id === 3,
-        }),
-        viewer('developer'),
-        NOW,
-      ),
-      /<h3>App IDs \(0\)<\/h3><p>No app IDs\.<\/p>/,
+    // A project whose app IDs the viewer may not see has none.
+    assert.deepEqual(
+      dashboardData({
+        db: fixture(),
+        viewer: viewer('developer'),
+        now: NOW,
+        appVisible: (id) => id === 3,
+      }).projects.find((card) => card.slug === 'phones')!.apps,
+      [],
     )
   })
 
@@ -1038,37 +905,22 @@ describe('Design system and views', () => {
 
   it('U17.6 secrets never render, and notifications are only for the viewer’s role', () => {
     const db = fixture()
+    // What the dashboard and Artifacts answer, as the pages read it.
+    const source = {
+      db,
+      viewer: viewer('admin'),
+      now: NOW,
+      appVisible: () => true,
+    }
     const html = [
-      dashboardView(
-        dashboardData({
-          db,
-          viewer: viewer('admin'),
-          now: NOW,
-          appVisible: () => true,
-        }),
-        viewer('admin'),
-        NOW,
+      JSON.stringify(dashboardData(source)),
+      JSON.stringify(
+        artifactsListData(
+          { ...source, artifactBase: 'https://builds.example.test' },
+          {},
+        ),
       ),
-      artifactsView(
-        {
-          db,
-          viewer: viewer('admin'),
-          now: NOW,
-          appVisible: () => true,
-          artifactBase: 'https://builds.example.test',
-        },
-        {},
-      ),
-      artifactsView(
-        {
-          db,
-          viewer: viewer('admin'),
-          now: NOW,
-          appVisible: () => true,
-          artifactBase: '',
-        },
-        { run: 'run-1' },
-      ),
+      JSON.stringify(artifactRunData({ ...source, artifactBase: '' }, 'run-1')),
       JSON.stringify(
         search({ db, viewer: viewer('admin'), appVisible: () => true }, 'a'),
       ),
@@ -1142,69 +994,69 @@ describe('Design system and views', () => {
       '',
       'run-other',
     )
-    const run = artifactsView(source, { run: 'run-1' })
-    assert.match(run, /Phone 1\.0 \(26102013\) arm64-v8a</)
-    assert.doesNotMatch(run, /26102014/)
-    assert.match(run, /<h1>Run 1<\/h1>/)
-    // Artifacts › the project › the run, on the host.
-    assert.deepEqual(crumbTrail(run), [
-      'Mason Host /',
-      'Artifacts /artifacts',
-      'Phones /artifacts?project=phones',
-      'Run 1 /artifacts?run=run-1 *',
-    ])
-    assert.match(run, /Version 1\.0 \(11\)/)
-    assert.match(run, /12 passed/)
-    assert.match(run, /href="\/runs\/run-1\/artifacts\/report\/view"/)
-    assert.match(run, /href="\/runs\/run-1\/artifacts\/phone-dsyms"/)
-    assert.match(run, /Phone 1\.0 \(26102011\)/)
-    assert.match(run, /href="\/apps\/1">Install/)
-    const running = artifactsView(source, { run: 'run-3' })
-    assert.match(running, /This run saved no artifacts/)
-    assert.match(running, /<li>None\.<\/li>/)
-    assert.match(artifactsView(source, { run: 'none' }), /Run unavailable/)
-    const list = artifactsView(source, { project: 'phones', branch: 'main' })
-    assert.deepEqual(crumbTrail(list), [
-      'Mason Host /',
-      'Artifacts /artifacts',
-      'Phones /artifacts?project=phones',
-      'main /artifacts?project=phones&amp;branch=main *',
-    ])
-    assert.deepEqual(crumbTrail(artifactsView(source, {})), [
-      'Mason Host /',
-      'Artifacts /artifacts *',
-    ])
-    // A project it does not know keeps its slug; a branch alone narrows every project.
+    const run = artifactRunData(source, 'run-1')!
+    // This run's variant, and the build of its commit made before builds named their run.
+    const published = run.builds.map(
+      (build) => `${build.buildNumber} ${build.variant}`,
+    )
+    assert(published.includes('26102013 arm64-v8a'))
+    assert(published.includes('26102011 '))
+    assert(!published.some((build) => build.startsWith('26102014')))
+    assert.equal(run.builds[0]!.appId, 1)
+    assert.deepEqual(run.run.project, { slug: 'phones', name: 'Phones' })
+    assert.equal(run.run.number, 1)
     assert.deepEqual(
-      crumbTrail(artifactsView(source, { project: 'nothing' })).slice(2),
-      ['nothing /artifacts?project=nothing *'],
+      run.tests.map((entry) => entry.passed),
+      [12],
     )
+    // Saved artifacts on the host's own origin, a report with its viewer.
+    const report = run.artifacts.find((entry) => entry.kind === 'report')!
+    assert.equal(report.viewUrl, '/runs/run-1/artifacts/report/view')
+    assert(
+      run.artifacts.some(
+        (entry) => entry.url === '/runs/run-1/artifacts/phone-dsyms',
+      ),
+    )
+    const running = artifactRunData(source, 'run-3')!
+    assert.deepEqual([running.artifacts, running.builds], [[], []])
+    assert.equal(artifactRunData(source, 'none'), undefined)
+    const list = artifactsListData(source, {
+      project: 'phones',
+      branch: 'main',
+    })
+    assert.deepEqual(list.project, { slug: 'phones', name: 'Phones' })
+    assert.equal(list.branch, 'main')
+    // The filters' options: every project, and the project's branches, newest run first.
     assert.deepEqual(
-      crumbTrail(artifactsView(source, { branch: 'feature/login' })).slice(2),
-      ['feature/login /artifacts?branch=feature%2Flogin *'],
+      list.projects.map((project) => project.slug),
+      ['phones', 'desk'],
     )
-    assert.match(list, /2 · 1\.5 MB/)
-    assert.match(list, /<td class="mono">26102011, 26102013 · 3 files<\/td>/)
-    // Each row names its run and status, for the page's socket to keep current.
-    assert.match(
-      list,
-      /<tr data-run-id="run-\d+" data-status="[a-z_]+">.*<span data-status-text>[a-z_]+<\/span><\/td>/,
+    assert.equal(list.branches[0], 'feature/login')
+    assert(list.branches.includes('main'))
+    assert.deepEqual(artifactsListData(source, {}).branches, [])
+    // A project it does not know keeps its slug and has no runs.
+    const nothing = artifactsListData(source, { project: 'nothing' })
+    assert.deepEqual(nothing.project, { slug: 'nothing', name: 'nothing' })
+    assert.deepEqual(nothing.runs, [])
+    // A branch alone narrows every project.
+    assert(
+      artifactsListData(source, { branch: 'feature/login' }).runs.every(
+        (entry) => entry.branch === 'feature/login',
+      ),
     )
-    assert.doesNotMatch(list, /feature\/login/)
-    assert.match(artifactsView(source, { project: 'nothing' }), /No runs yet/)
-    const master = artifactsView(
-      {
-        ...source,
-        viewer: viewer('developer'),
-        artifactBase: 'https://builds.example.test',
-      },
-      { run: 'run-1' },
+    const main = list.runs.find((entry) => entry.builds === 3)!
+    assert.deepEqual(main.artifacts, { count: 2, size: 1_500_000 })
+    assert.deepEqual(main.buildNumbers, ['26102011', '26102013'])
+    assert(list.runs.every((entry) => entry.branch === 'main'))
+    const master = artifactRunData(
+      { ...source, artifactBase: 'https://builds.example.test' },
+      'run-1',
+    )!
+    assert.equal(master.artifactOrigin, 'https://builds.example.test')
+    assert.equal(
+      master.artifacts.find((entry) => entry.kind === 'report')!.viewUrl,
+      'https://builds.example.test/runs/run-1/artifacts/report/view',
     )
-    assert.match(
-      master,
-      /href="https:\/\/builds\.example\.test\/runs\/run-1\/artifacts\/report\/view"/,
-    )
-    assert.doesNotMatch(master, /Install/)
   })
 
   it('M2 lists the Runs and builds tab’s branches, push trigger’s first, and the selected one’s runs with version, build number and start', () => {

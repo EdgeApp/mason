@@ -709,9 +709,13 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     try {
       await masterSignIn(d, 'dev', PASSWORDS.dev!)
       await d.visible('their latest builds and runs')
-      await menu(d, ['/apps', '/projects*', '/artifacts', '/devices'])
+      // The web app's sidebar, at /: Projects & apps is current.
+      await d.script(
+        `const items = [...document.querySelectorAll('.m-sidebar nav[aria-label="Destinations"] a')].map((a) => a.getAttribute('href') + (a.getAttribute('aria-current') === 'page' ? '*' : '')).join(); if (items !== ${JSON.stringify(['/projects*', '/artifacts', '/apps', '/devices'].join())}) throw new Error('The sidebar is ' + items + ' on ' + location.pathname); if (location.pathname !== '/') throw new Error('Home is ' + location.pathname)`,
+      )
       await d.shot('master-home-developer-after.png')
-      await d.tap('nav.rail a[href="/apps"]')
+      // Install apps is still the master's own page: a full load.
+      await d.tap('.m-sidebar a[href="/apps"]')
       await d.visible('Choose an app to browse recent builds')
       await heading(d, 'Apps')
       await menu(d, ['/apps*', '/projects', '/artifacts', '/devices'])
@@ -789,14 +793,20 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await pill('/projects')
       await b.visible('their latest builds and runs')
       await at('/projects')
-      await trail(['Mason Master', 'Projects*'])
-      // The first opens the master's home: Projects & apps.
-      await pill('/')
+      // Projects & apps is the web app's, with its own trail; its node pill
+      // opens the master's home, Projects & apps again.
+      const appTrail = async (expected: string[]): Promise<void> => {
+        await b.script(
+          `const got = [...document.querySelectorAll('.m-crumbs li')].map((li) => li.textContent.replace(/[\\uE000-\\uF8FF]/g, '') + (li.querySelector('[aria-current="page"]') ? '*' : '')).join(' › '); if (got !== ${JSON.stringify(expected.join(' › '))}) throw new Error('The breadcrumbs are ' + got)`,
+        )
+      }
+      await appTrail(['Mason Master', 'Projects & apps*'])
+      await b.tap('.m-crumbs a.m-node-pill[href="/"]')
       await b.visible('their latest builds and runs')
       await b.script(
         "if (location.pathname !== '/') throw new Error('The page is ' + location.pathname)",
       )
-      await trail(['Mason Master', 'Projects*'])
+      await appTrail(['Mason Master', 'Projects & apps*'])
     } finally {
       await b.close()
     }
@@ -1125,7 +1135,7 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     }
   })
 
-  it('E9 on Projects & apps the card’s header opens the project, alpha’s row its app ID page, and a build chip its run', async () => {
+  it('E9 on Projects & apps the card’s title opens the project, alpha’s app ID its page, and a build chip its run', async () => {
     const alphaPage = `/projects/fixture/apps/${ALPHA}`
     const b = await browser('mason-e9-paul', c.master, '1280x860')
     /** Fails unless the page is at this path. */
@@ -1157,9 +1167,42 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await b.open('/projects')
       await b.visible('their latest builds and runs')
       await b.visible(`^${BETA.replaceAll('.', '\\.')}$`)
+      // The keyboard: from the top, Tab walks the skip link, the shell and
+      // the page in visual order, each stop with a visible focus ring.
+      const stops: string[] = []
+      await b.script('document.activeElement?.blur(); window.scrollTo(0, 0)')
+      for (let n = 0; n < 40; n++) {
+        await b.command('pressKey', { key: 'Tab' })
+        const reply = (await b.script(
+          "const e = document.activeElement; const s = getComputedStyle(e); const ring = s.outlineStyle !== 'none' && parseFloat(s.outlineWidth) >= 2 || s.boxShadow !== 'none'; return (ring ? 'ring ' : 'NO RING ') + e.tagName.toLowerCase() + ' ' + (e.getAttribute('aria-label') || e.textContent || e.getAttribute('placeholder') || '').replace(/[\\uE000-\\uF8FF]/g, '').replace(/\\s+/g, ' ').trim().slice(0, 60)",
+        )) as { data?: unknown }
+        stops.push(String(reply.data))
+      }
+      writeFileSync(
+        path.join(artifacts!, 'dashboard-tab-order.log'),
+        `$ Tab ×40 on ${origin(c.master)}/projects at 1280x860\n${stops.map((stop, n) => `${n + 1}. ${stop}`).join('\n')}\n`,
+      )
+      assert.match(stops[0]!, /^ring a Skip to content$/)
+      assert.deepEqual(
+        // Past the last stop focus leaves the page (the body), then wraps.
+        stops.filter(
+          (stop) =>
+            stop.startsWith('NO RING') && !stop.startsWith('NO RING body'),
+        ),
+        [],
+      )
+      const place = (pattern: RegExp): number =>
+        stops.findIndex((stop) => pattern.test(stop))
+      assert(place(/All \d/) > 0, stops.join('\n'))
+      assert(place(/All \d/) < place(/Filter app IDs/), stops.join('\n'))
+      assert(
+        place(/Filter app IDs/) < place(/Fixture\s*Default branch/),
+        stops.join('\n'),
+      )
       // Alpha's row: a chip per branch it built, newest first, each opening its run.
+      const alphaRow = `#project-fixture li.m-approw:has(a[href="${alphaPage}"])`
       await b.script(
-        `const row = document.querySelector('#project-fixture a.row-link[href=${JSON.stringify(alphaPage)}]').closest('.app-grid-row'); const chips = [...row.querySelectorAll('.app-builds a.run-chip')].map((chip) => chip.getAttribute('href') + ' ' + chip.firstChild.textContent.trim()).join(); if (chips !== ${JSON.stringify(
+        `const row = document.querySelector(${JSON.stringify(alphaRow)}); const chips = [...row.querySelectorAll('a.m-runchip:not(.m-runchip--more)')].map((chip) => chip.getAttribute('href') + ' ' + chip.querySelector('.m-runchip__branch').textContent).join(); if (chips !== ${JSON.stringify(
           [
             `/runs/${runs['build-alpha@develop'].id} develop`,
             `/runs/${runs['build-alpha@master'].id} master`,
@@ -1167,23 +1210,20 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         )}) throw new Error('The chips are ' + chips)`,
       )
       await b.shot('projects-card-after.png')
-      // The header, away from its title: the project.
-      await click('#project-fixture header .meta', '/projects/fixture')
+      // The card's title: the project (the node's own page, a full load).
+      await click('#project-fixture header h2', '/projects/fixture')
       await b.visible('App IDs')
       await at('/projects/fixture')
       await back()
-      // Alpha's row, on its platform chips: its app ID page.
-      await click(
-        `#project-fixture .app-grid-row:has(a.row-link[href="${alphaPage}"]) .app-platforms`,
-        alphaPage,
-      )
+      // Alpha's app ID: its page.
+      await click(`${alphaRow} a.m-approw__id`, alphaPage)
       await b.visible('^Runs and builds$')
       await at(alphaPage)
       await back()
       // A build chip in alpha's row: its run.
       const run = runs['build-alpha@master']
       await click(
-        `#project-fixture .app-grid-row:has(a.row-link[href="${alphaPage}"]) a.run-chip[href="/runs/${run.id}"]`,
+        `${alphaRow} a.m-runchip[href="/runs/${run.id}"]`,
         `/runs/${run.id}`,
       )
       await b.visible('History of master')
@@ -1583,6 +1623,71 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       assert.equal(commitOf, sha)
     } finally {
       await b.close()
+    }
+  })
+
+  it('N7 a developer browses the host while its master is unreachable: the banner and footer say so, cached pages read, and what needs the master is named', async () => {
+    const run = runs['build-alpha@master']
+    const h = await browser('mason-n7-dev', host, '1280x860')
+    try {
+      await hostSignIn(h, 'dev', PASSWORDS.dev!, '/projects')
+      await h.visible('their latest builds and runs')
+      await holds(
+        h,
+        "!document.body.textContent.includes('The master is unreachable')",
+        'no banner while the link is up',
+      )
+      await c.drop('host', 1000, async () => {
+        // Projects & apps from the host's copy, under the read-only banner.
+        await h.open('/projects')
+        await h.visible('The master is unreachable')
+        await h.visible('Runs, approvals and account changes need the master')
+        await holds(
+          h,
+          "document.querySelector('.m-banner [role=status], .m-banner[role=status]')?.textContent.includes('Read-only')",
+          'the banner’s Read-only chip',
+        )
+        await holds(
+          h,
+          "document.querySelector('.m-sidebar__foot')?.textContent.includes('Master unreachable')",
+          'the footer',
+        )
+        await holds(
+          h,
+          `document.querySelector('#project-fixture a[href="/projects/fixture/apps/${ALPHA}"]') != null`,
+          'the cached project card',
+        )
+        // The host has no Add project, and its queue reads from its copy.
+        await holds(
+          h,
+          "![...document.querySelectorAll('a')].some((a) => a.textContent.includes('Add project')) && document.querySelector('[aria-label=Queue]') != null",
+          'the read-only page',
+        )
+        await h.shot('host-offline-banner.png')
+        // Artifacts and a run's detail read from the copy too.
+        await h.open('/artifacts')
+        await h.visible('The master is unreachable')
+        await h.visible(`fixture Run ${run.number}`)
+        await h.open(`/artifacts?run=${run.id}`)
+        await h.visible('Published builds')
+        // The host serves the build itself: Install stays.
+        await holds(
+          h,
+          "[...document.querySelectorAll('a[href^=\"/apps/\"]')].some((a) => a.textContent.endsWith('Install'))",
+          'Install on the cached build',
+        )
+        await h.visible('The master is unreachable')
+      })
+      // Once the link is back, the banner goes.
+      await h.open('/projects')
+      await h.visible('their latest builds and runs')
+      await holds(
+        h,
+        "!document.body.textContent.includes('The master is unreachable')",
+        'the banner gone',
+      )
+    } finally {
+      await h.close()
     }
   })
 })

@@ -236,7 +236,11 @@ describe('Master web API: the pages’ reads', function () {
       [row.buildNumbers, row.builds, row.artifacts, row.project],
       [['7'], 1, { count: 1, size: 42 }, { slug: 'reads', name: 'Reads' }],
     )
+    // The filters' options: every project, and the narrowed one's branches.
+    assert(list.branches.includes('master'))
     const all = (await get('/api/v2/artifacts', as('admin'))).json
+    assert(all.projects.some((p: { slug: string }) => p.slug === 'reads'))
+    assert.deepEqual(all.branches, [])
     assert.deepEqual(
       all.runs.map((run: { id: string }) => run.id).sort(),
       [f.runs.built, f.runs.waiting].sort(),
@@ -252,6 +256,10 @@ describe('Master web API: the pages’ reads', function () {
         .json.runs,
       [],
     )
+    const scoped = (
+      await get('/api/v2/artifacts?project=elsewhere', { key: f.keys.scoped })
+    ).json
+    assert(!scoped.projects.some((p: { slug: string }) => p.slug === 'reads'))
   })
 
   it('GET /api/v2/artifacts/runs/:id: stages, tests, published builds and saved artifacts at the host’s origin', async () => {

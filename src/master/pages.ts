@@ -28,12 +28,11 @@ import {
   wizardView,
   type NodeRow,
 } from '../view/admin.js'
-import { artifactsView, projectRunsData } from '../view/artifacts.js'
+import { projectRunsData } from '../view/artifacts.js'
 import { fqdn } from './cloud/hosts.js'
 import { DEFAULT_MONTHLY_BUDGET } from './cloud/pools.js'
 import { methodsOf } from './hostSettings.js'
 import { nodeTypesView } from './nodeTypes.js'
-import { dashboardData, dashboardView } from '../view/dashboard.js'
 import {
   approvalNotifications,
   notificationsFor,
@@ -199,39 +198,6 @@ export function masterPages(
   const hashing = (res: express.Response): void => {
     res.set('Content-Security-Policy', masterContentSecurityPolicy)
   }
-  /** Projects & apps: every project's app IDs, builds and runs. */
-  const projects = (
-    req: express.Request,
-    res: express.Response,
-    current: MasterSession,
-  ): void => {
-    const now = master.database.now()
-    const platform =
-      typeof req.query.platform === 'string' ? req.query.platform : undefined
-    const project =
-      typeof req.query.project === 'string' ? req.query.project : undefined
-    const data = dashboardData(
-      {
-        db: master.database.db,
-        viewer: viewerOf(current),
-        now,
-        appVisible: appVisible(master, current),
-        ...reader.dashboard(),
-      },
-      {
-        ...(platform == null ? {} : { platform }),
-        ...(project == null ? {} : { project }),
-      },
-    )
-    send(
-      res,
-      'Projects & apps',
-      dashboardView(data, viewerOf(current), now),
-      current,
-      200,
-      'dashboard',
-    )
-  }
   app.get('/', (req, res, next) => {
     // First-run setup and restore are the web app's.
     if (!master.configured()) {
@@ -274,7 +240,7 @@ export function masterPages(
     // The master opens on Projects & apps for developers and up; a tester's
     // home is Install apps, from the host.
     if (current.role !== 'tester') {
-      projects(req, res, current)
+      sendShell(res)
       return
     }
     next()
@@ -295,61 +261,15 @@ export function masterPages(
       'catalog',
     )
   })
-  app.get('/projects', (req, res) => {
+  // Projects & apps and Artifacts are the web app's; a tester reads the
+  // 403 inside it on Artifacts (and the 404 above on Projects).
+  app.get(['/projects', '/artifacts'], (req, res) => {
     const current = session(req)
     if (current == null) {
       res.redirect(303, master.configured() ? '/sign-in' : '/')
       return
     }
-    projects(req, res, current)
-  })
-  app.get('/artifacts', (req, res) => {
-    const current = session(req)
-    if (current == null) {
-      res.redirect(303, master.configured() ? '/sign-in' : '/')
-      return
-    }
-    if (current.role === 'tester') {
-      send(
-        res,
-        'Artifacts',
-        '<p>Artifacts are for developers and up.</p>',
-        current,
-        403,
-      )
-      return
-    }
-    const origin = (
-      (master.settings.value('host') ?? {}) as { origin?: string }
-    ).origin
-    const filter = (name: string): string | undefined =>
-      typeof req.query[name] === 'string'
-        ? (req.query[name] as string)
-        : undefined
-    const run = filter('run')
-    const project = filter('project')
-    const branch = filter('branch')
-    send(
-      res,
-      'Artifacts',
-      artifactsView(
-        {
-          db: master.database.db,
-          viewer: viewerOf(current),
-          now: master.database.now(),
-          appVisible: appVisible(master, current),
-          artifactBase: origin ?? '',
-        },
-        {
-          ...(run == null ? {} : { run }),
-          ...(project == null ? {} : { project }),
-          ...(branch == null ? {} : { branch }),
-        },
-      ),
-      current,
-      200,
-      'artifacts',
-    )
+    sendShell(res, current.role === 'tester' ? { status: 403 } : {})
   })
   app.get('/runs/:id', (req, res, next) => {
     void (async (): Promise<void> => {

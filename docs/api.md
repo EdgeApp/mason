@@ -1814,7 +1814,9 @@ the latest builds and, on the master only, `nodes`: its workers, each
 **`GET /api/v2/artifacts`** answers `{ project?, branch?, runs }`: each run
 with its project, status, commit, times, the build numbers its published
 builds carry, how many it published that the caller may see, and its saved
-artifacts' count and bytes. **`GET /api/v2/artifacts/runs/:id`** answers
+artifacts' count and bytes, with `projects` (every project's slug and
+name) and `branches` (the narrowed-to project's branches, newest run
+first) for its filters. **`GET /api/v2/artifacts/runs/:id`** answers
 the run, its stages and test summaries, the builds it published that the
 caller may see, and its saved artifacts, each with its `url` (and a
 report's `viewUrl`) under `artifactOrigin`: the host's origin on the master,

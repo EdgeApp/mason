@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'mocha'
-import { absoluteTime, count, relativeTime, tryAgainAt } from './format.js'
+import {
+  absoluteTime,
+  bytes,
+  count,
+  duration,
+  relativeTime,
+  shortAge,
+  tryAgainAt,
+} from './format.js'
 
 const at = (iso: string): number => Date.parse(iso)
 
@@ -57,5 +65,27 @@ describe('The design language’s formats', () => {
       tryAgainAt(at('2026-11-13T17:12:00Z'), now, zone),
       'Try again at Nov 13 0912 PT',
     )
+  })
+
+  it('writes durations, bytes and a build chip’s short age', () => {
+    assert.equal(duration(-5), '0s')
+    assert.equal(duration(42_000), '42s')
+    assert.equal(duration(252_000), '4m 12s')
+    assert.equal(duration(3_960_000), '1h 6m')
+    assert.equal(bytes(512), '512 B')
+    assert.equal(bytes(84_100_000), '84.1 MB')
+    assert.equal(bytes(312_800_000_000), '312.8 GB')
+    assert.equal(bytes(5e18), '5000000.0 TB')
+    const minute = 60_000
+    const day = 1440 * minute
+    assert.equal(shortAge(now - 30_000, now), 'now')
+    assert.equal(shortAge(now + 30_000, now), 'now')
+    assert.equal(shortAge(now - 5 * minute, now), '5m')
+    assert.equal(shortAge(now - 3 * 60 * minute, now), '3h')
+    assert.equal(shortAge(now - 6 * day, now), '6d')
+    assert.equal(shortAge(now - 15 * day, now), '2w')
+    assert.equal(shortAge(now - 40 * day, now), '5w')
+    assert.equal(shortAge(now - 70 * day, now), '2mo')
+    assert.equal(shortAge(now - 800 * day, now), '2y')
   })
 })

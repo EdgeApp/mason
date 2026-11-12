@@ -240,14 +240,18 @@ describe('Master sign-in, setup, people and permissions', function () {
     // The pages need the session; the session ends at sign-out.
     assert.equal((await request(c.master, 'GET', '/')).status, 303)
     assert.equal((await request(c.master, 'GET', '/projects')).status, 303)
+    // Projects & apps is the web app's: it reads the session and the status.
     const home = await request(c.master, 'GET', '/projects', { cookie })
-    assert.equal(home.status, 200)
+    assertShell(home)
+    const viewer = (
+      await request(c.master, 'GET', '/api/v2/session', { cookie })
+    ).json
+    assert.deepEqual([viewer.name, viewer.role], ['paul', 'admin'])
     assert.match(
-      home.text,
-      /aria-label="Your account" title="paul · admin · master"/,
+      (await request(c.master, 'GET', '/api/v2/notifications', { cookie }))
+        .text,
+      /This master is not backed up/,
     )
-    assert.match(home.text, /Projects &amp; apps/)
-    assert.match(home.text, /This master is not backed up/)
     // Only the password workers may run WebAssembly: sign-in is the web
     // app's shell, which starts its worker and compiles nothing itself.
     assert.doesNotMatch(
@@ -465,12 +469,13 @@ describe('Master sign-in, setup, people and permissions', function () {
         (await request(node, 'GET', '/api/v2/node')).json.setupNeeded,
         false,
       )
-      const home = await request(node, 'GET', '/', { cookie })
-      assert.equal(home.status, 200)
-      assert.match(home.text, /This master is not backed up/)
-      // A master with no host yet opens Projects & apps for developers and up.
-      assert.match(home.text, /<h1>Projects &amp; apps<\/h1>/)
-      assert.match(home.text, /<a href="\/projects" aria-current="page"/)
+      // A master with no host yet opens Projects & apps (the web app's) for
+      // developers and up; the backup notice is among its notifications.
+      assertShell(await request(node, 'GET', '/', { cookie }))
+      assert.match(
+        (await request(node, 'GET', '/api/v2/notifications', { cookie })).text,
+        /This master is not backed up/,
+      )
       // Testers, and everyone's Install apps and Devices, hear installs come from a host.
       const someone = async (role: Role): Promise<string> => {
         const person = await node.master!.people.create(localOperator, {
@@ -500,8 +505,7 @@ describe('Master sign-in, setup, people and permissions', function () {
           route,
         )
       }
-      const lone = await request(node, 'GET', '/', { cookie: developer })
-      assert.match(lone.text, /<h1>Projects &amp; apps<\/h1>/)
+      assertShell(await request(node, 'GET', '/', { cookie: developer }))
       assert.equal(
         (await request(node, 'GET', '/projects', { cookie: tester })).status,
         404,
@@ -2219,20 +2223,23 @@ export async function one(ctx: Stage) { return 1 }
     assert.equal(home.headers.get('location'), '/backups')
     // Once: the redirect itself lets "Projects & apps" through for this browser session.
     const once = home.headers.get('set-cookie')!.split(';')[0]!
-    const dashboard = await request(c.master, 'GET', '/', {
-      cookie: `${cookie}; ${once}`,
-    })
-    assert.equal(dashboard.status, 200)
-    assert.match(dashboard.text, /This master is not backed up/)
+    assertShell(
+      await request(c.master, 'GET', '/', { cookie: `${cookie}; ${once}` }),
+    )
+    // The reminder is the banner the web app reads from the status.
+    const banners = async (): Promise<string> =>
+      JSON.stringify(
+        (await request(c.master, 'GET', '/api/v2/status', { cookie })).json
+          .banners,
+      )
+    assert.match(await banners(), /This master is not backed up/)
     // "Skip for now" lets the dashboard through for this browser session, with a reminder.
     const later = await request(c.master, 'GET', '/?later=backups', { cookie })
     assert.equal(later.headers.get('location'), '/')
     const skip = later.headers.get('set-cookie')!.split(';')[0]!
-    const through = await request(c.master, 'GET', '/', {
-      cookie: `${cookie}; ${skip}`,
-    })
-    assert.equal(through.status, 200)
-    assert.match(through.text, /This master is not backed up/)
+    assertShell(
+      await request(c.master, 'GET', '/', { cookie: `${cookie}; ${skip}` }),
+    )
     let page = await request(c.master, 'GET', '/backups', { cookie })
     assert.match(page.text, /No backup has run yet/)
     assert.match(page.text, /data-mason="backup-confirm"/)
@@ -2254,11 +2261,7 @@ export async function one(ctx: Stage) { return 1 }
       /, pushed with the GitHub connection\./,
     )
     // Backed up, the reminder is the key still to confirm.
-    assert.match(
-      (await request(c.master, 'GET', '/', { cookie: `${cookie}; ${skip}` }))
-        .text,
-      /The backup key is not confirmed as stored/,
-    )
+    assert.match(await banners(), /The backup key is not confirmed as stored/)
     assert.equal(
       (await c.api('POST', '/api/v2/settings/backup/confirm', {})).status,
       200,

@@ -14,6 +14,7 @@ import { after, before, describe, it } from 'mocha'
 import { SESSION_COOKIE } from '../auth/routes.js'
 import { branchKey } from '../catalog/platform.js'
 import { DEVICE_COOKIE } from '../devices/store.js'
+import { assertShell } from '../test/webShell.js'
 import { HostCache } from '../host/cache.js'
 import { pinnedFetch } from '../node/pinnedFetch.js'
 import type { RunningNode } from '../node/serve.js'
@@ -459,31 +460,12 @@ describe('Install apps and Devices on the master, through the host', function ()
           ['/apps*', '/projects', '/artifacts', '/devices'],
           name,
         )
-      } else {
-        assert.match(home.text, /<h1>Projects &amp; apps<\/h1>/)
-        assert.deepEqual(
-          rail(home.text),
-          ['/apps', '/projects*', '/artifacts', '/devices'],
-          name,
-        )
-      }
+      } else assertShell(home)
+      // Projects & apps is the web app's on both nodes, filters and all.
       const projects = await request(node, '/projects?platform=android', {
         cookie: who.cookie,
       })
-      assert.equal(projects.status, 200, name)
-      assert.match(projects.text, /<h1>Projects &amp; apps<\/h1>/)
-      assert.deepEqual(crumbTrail(projects.text), [
-        node === host ? 'Mason Host /' : 'Mason Master /',
-        'Projects /projects *',
-      ])
-      assert.deepEqual(rail(projects.text), [
-        '/apps',
-        '/projects*',
-        '/artifacts',
-        '/devices',
-      ])
-      // The filter chips stay on Projects & apps.
-      assert.match(projects.text, /href="\/projects\?platform=ios"/)
+      assertShell(projects)
       const project = await request(node, '/projects/relay', {
         cookie: who.cookie,
       })

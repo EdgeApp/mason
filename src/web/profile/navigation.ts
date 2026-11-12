@@ -204,11 +204,15 @@ export function tabBar(items: readonly NavItem[]): {
   }
 }
 
-/** The destination a path belongs to, for `aria-current`. */
+/**
+ * The destination a path belongs to, for `aria-current`. The app draws `/`
+ * only as the master's Projects & apps.
+ */
 export function currentNav(
   pathname: string,
   items: readonly NavItem[],
 ): NavItem | undefined {
+  if (pathname === '/') return items.find((entry) => entry.key === 'dashboard')
   return items.find(
     (entry) => pathname === entry.href || pathname.startsWith(`${entry.href}/`),
   )

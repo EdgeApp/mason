@@ -26,7 +26,11 @@ import {
   profileFor,
   ProfileContext,
 } from './profile/NodeProfile.js'
-import { AppRoutes } from './profile/routes.js'
+import {
+  AppRoutes,
+  ServerPagesContext,
+  type ServerPages,
+} from './profile/routes.js'
 import { ToastProvider } from './ui/Toast.js'
 
 /** Where the master and the host mount the app beside the server pages. */
@@ -48,6 +52,18 @@ export interface AppProps {
   flow?: SignInFlow
 }
 
+/**
+ * Outside the /_web mount, the node's own pages for the addresses the app
+ * has not ported: a full load of them, never of the address this document
+ * was loaded at (the node answered the app there).
+ */
+export function serverPages(win: Window = window): ServerPages {
+  return {
+    here: `${win.location.pathname}${win.location.search}`,
+    go: (url) => win.location.replace(url),
+  }
+}
+
 /** The app for a node: its profile, client, live updates, toasts and routes. */
 export function App({
   node,
@@ -57,6 +73,9 @@ export function App({
   flow,
 }: AppProps): JSX.Element {
   const profile = profileFor(node)
+  const [server] = useState(() =>
+    basename == null ? serverPages() : undefined,
+  )
   if (flow != null)
     return (
       <ProfileContext.Provider value={profile}>
@@ -80,9 +99,11 @@ export function App({
       <ProfileContext.Provider value={profile}>
         <LiveProvider {...(live == null ? {} : { client: live })}>
           <ToastProvider>
-            <BrowserRouter basename={basename}>
-              <AppRoutes node={node} />
-            </BrowserRouter>
+            <ServerPagesContext.Provider value={server}>
+              <BrowserRouter basename={basename}>
+                <AppRoutes node={node} />
+              </BrowserRouter>
+            </ServerPagesContext.Provider>
           </ToastProvider>
         </LiveProvider>
       </ProfileContext.Provider>

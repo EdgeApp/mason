@@ -398,10 +398,20 @@ export function readApi(reader: NodeReader): Router {
         ? undefined
         : { project: filter, ...(branch == null ? {} : { branch }) },
     )
-    return artifactsListData(source(actor), {
+    const list = artifactsListData(source(actor), {
       ...(filter == null ? {} : { project: filter }),
       ...(branch == null ? {} : { branch }),
     })
+    // A scoped key's filters offer only what it may read.
+    return {
+      ...list,
+      projects: list.projects.filter((project) =>
+        covers(actor, { project: project.slug }),
+      ),
+      branches: list.branches.filter((name) =>
+        covers(actor, { project: filter!, branch: name }),
+      ),
+    }
   })
   get(`${ARTIFACTS_PATH}/runs/:id`, (req, _res, actor): ArtifactRunDetail => {
     const id = String(req.params.id)

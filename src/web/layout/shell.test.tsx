@@ -1049,7 +1049,10 @@ describe('Pages in the shell', () => {
     renderApp({ path: '/projects' })
     const first = await page('Projects & apps')
     assert.notEqual(document.activeElement, first)
-    assert.equal(document.title, 'Projects & apps · Mason')
+    await until(
+      () => document.title === 'Projects & apps · Mason',
+      'the tab’s title',
+    )
     await act(async () =>
       within(sidebar())
         .getByRole('link', { name: /Artifacts/ })
@@ -1057,7 +1060,7 @@ describe('Pages in the shell', () => {
     )
     const next = await page('Artifacts')
     assert.equal(document.activeElement, next)
-    assert.equal(document.title, 'Artifacts · Mason')
+    await until(() => document.title === 'Artifacts · Mason', 'the new title')
     const skip = screen.getAllByRole('link', { name: 'Skip to content' })[0]!
     assert.equal(skip.className, 'm-skip')
     await act(async () => skip.click())

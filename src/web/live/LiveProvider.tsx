@@ -79,6 +79,10 @@ export function LiveProvider({
 export const useInvalidations = (): Invalidations =>
   useContext(LiveContext).invalidations
 
+/** The page's live client, if it has live updates. */
+export const useLiveClient = (): LiveClient | undefined =>
+  useContext(LiveContext).client
+
 /** The live socket's state, kept current. */
 export function useLiveState(): LiveState {
   const { client } = useContext(LiveContext)

@@ -16,7 +16,11 @@ import { ApiProvider } from '../api/context.js'
 import { LiveClient } from '../live/LiveClient.js'
 import { Invalidations, LiveProvider } from '../live/LiveProvider.js'
 import { profileFor, ProfileContext } from '../profile/NodeProfile.js'
-import { AppRoutes } from '../profile/routes.js'
+import {
+  AppRoutes,
+  ServerPagesContext,
+  type ServerPages,
+} from '../profile/routes.js'
 import { ToastProvider } from '../ui/Toast.js'
 import { HasherContext, type Hasher } from '../workers/hasher.js'
 import { FakeLiveWindow } from './fakeLiveSocket.js'
@@ -206,6 +210,8 @@ export interface HarnessOptions {
   route?: string
   /** The password hasher; a fake that never hashes, by default. */
   hasher?: Hasher
+  /** Outside the /_web mount: where the node's own pages load (none: inside it). */
+  server?: ServerPages
 }
 
 /** A hasher that answers at once: `hash:<password>`, and new passwords with fixed parameters. */
@@ -261,19 +267,21 @@ export function renderApp(options: HarnessOptions = {}): Harness {
         <ProfileContext.Provider value={profileFor(info)}>
           <LiveProvider client={liveClient} invalidations={invalidations}>
             <ToastProvider>
-              <MemoryRouter initialEntries={[options.path ?? '/']}>
-                <Location />
-                {options.element == null ? (
-                  <AppRoutes node={info} />
-                ) : (
-                  <Routes>
-                    <Route
-                      path={options.route ?? '*'}
-                      element={options.element}
-                    />
-                  </Routes>
-                )}
-              </MemoryRouter>
+              <ServerPagesContext.Provider value={options.server}>
+                <MemoryRouter initialEntries={[options.path ?? '/']}>
+                  <Location />
+                  {options.element == null ? (
+                    <AppRoutes node={info} />
+                  ) : (
+                    <Routes>
+                      <Route
+                        path={options.route ?? '*'}
+                        element={options.element}
+                      />
+                    </Routes>
+                  )}
+                </MemoryRouter>
+              </ServerPagesContext.Provider>
             </ToastProvider>
           </LiveProvider>
         </ProfileContext.Provider>

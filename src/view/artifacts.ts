@@ -1,16 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { bytes, platformChip, runHref, statusDot } from './dashboard.js'
-import {
-  ago,
-  breadcrumbs,
-  duration,
-  escape,
-  localTime,
-  runName,
-  time,
-  type Crumb,
-} from './html.js'
-import { icon } from './icons.js'
+import { runHref, statusDot } from './dashboard.js'
+import { escape, localTime } from './html.js'
 import type { Viewer } from './shell.js'
 import { isGlob, matches } from '../master/rules.js'
 import { downloadOnly } from '../validation.js'
@@ -78,21 +68,6 @@ function savedArtifacts(source: ArtifactsSource, run: string): SavedArtifact[] {
       ? { viewUrl: `${base + encodeURIComponent(row.name)}/view` }
       : {}),
   }))
-}
-
-function artifactLinks(rows: SavedArtifact[]): string {
-  if (rows.length === 0)
-    return '<p class="empty-state">This run saved no artifacts.</p>'
-  return `<table class="list"><thead><tr><th>Artifact</th><th>Stage</th><th>Kind</th><th>Size</th><th></th></tr></thead><tbody>${rows
-    .map(
-      (row) =>
-        `<tr><td class="mono">${escape(row.name)}</td><td class="mono">${escape(row.stage)}</td><td>${escape(row.kind)}</td><td class="mono">${escape(bytes(row.size))}</td><td class="actions">${
-          row.viewUrl != null
-            ? `<a href="${escape(row.viewUrl)}">${icon('open_in_new')} View</a>`
-            : ''
-        }<a href="${escape(row.url)}">${icon('download')} Download</a></td></tr>`,
-    )
-    .join('')}</tbody></table>`
 }
 
 /** A run's published builds the viewer may see; one published before builds named their run is found by its commit and branch. */
@@ -224,50 +199,6 @@ export function artifactRunData(
   }
 }
 
-function runDetail(source: ArtifactsSource, data: ArtifactRunDetail): string {
-  const { run, stages, tests, builds } = data
-  const took =
-    run.started == null
-      ? ''
-      : ` · took ${duration((run.finished ?? source.now) - run.started)}`
-  return `<div class="page-head"><div>${breadcrumbs(source.viewer, [
-    { label: 'Artifacts', href: '/artifacts' },
-    {
-      label: run.project.name,
-      href: `/artifacts?project=${encodeURIComponent(run.project.slug)}`,
-    },
-    {
-      label: `Run ${run.number}`,
-      href: `/artifacts?run=${encodeURIComponent(run.id)}`,
-    },
-  ])}<h1>${escape(runName(run.workflow, run.number))}</h1><p>${statusDot(run.status)} ${escape(run.status)} · <span class="mono">${escape(run.branch)}</span>${run.commit == null ? '' : ` · <span class="mono">${escape(run.commit.slice(0, 12))}</span>`} · ${time(run.created)}${escape(took)}${run.description == null ? '' : ` · ${escape(run.description)}`}</p></div></div><section class="panel"><h2>${icon('account_tree')}Stages</h2><ul>${stages
-    .map(
-      (stage) =>
-        `<li><span class="mono">${escape(stage.name)}</span><span class="state-${escape(stage.status)}">${statusDot(stage.status)} ${escape(stage.status)}${stage.started == null ? '' : ` · ${escape(duration((stage.finished ?? source.now) - stage.started))}`}</span></li>`,
-    )
-    .join('')}</ul></section>${
-    tests.length === 0
-      ? ''
-      : `<section class="panel"><h2>${icon('check_circle')}Tests</h2><ul>${tests
-          .map(
-            (summary) =>
-              `<li><span class="mono">${escape(summary.stage)}</span><span>${summary.passed} passed · <span class="${summary.failed > 0 ? 'state-failed' : ''}">${summary.failed} failed</span> · ${summary.skipped} skipped</span></li>`,
-          )
-          .join('')}</ul></section>`
-  }<section class="panel"><h2>${icon('deployed_code')}Published builds</h2><ul>${
-    builds
-      .map(
-        (build) =>
-          `<li><div><span class="mono">${escape(build.app)} ${escape(build.version)} (${escape(build.buildNumber)})${build.variant === '' ? '' : ` ${escape(build.variant)}`}</span><small>${platformChip(build.platform)}${build.downloadOnly == null ? '' : ` · ${escape(build.downloadOnly)}`} · ${escape(bytes(build.size))}</small></div>${
-            source.viewer.node === 'host'
-              ? `<a href="/apps/${build.appId}">${build.downloadOnly == null ? 'Install' : 'Download'}</a>`
-              : ''
-          }</li>`,
-      )
-      .join('') || '<li>None.</li>'
-  }</ul></section><h2>Saved artifacts</h2>${artifactLinks(data.artifacts)}`
-}
-
 const runSelect =
   'SELECT j.id,j.number,j.workflow,j.branch,j.status,j.commit_sha,j.description,j.created,j.started,j.finished,p.slug,p.name FROM jobs j JOIN projects p ON p.id=j.project_id'
 
@@ -310,6 +241,21 @@ export function artifactsListData(
           },
         }),
     ...(filter.branch == null ? {} : { branch: filter.branch }),
+    projects: db
+      .prepare(
+        'SELECT slug,name FROM projects WHERE enabled=1 ORDER BY position,id',
+      )
+      .all() as Array<{ slug: string; name: string }>,
+    branches:
+      filter.project == null
+        ? []
+        : (
+            db
+              .prepare(
+                "SELECT j.branch FROM jobs j JOIN projects p ON p.id=j.project_id WHERE p.slug=? AND j.workflow NOT LIKE '@%' GROUP BY j.branch ORDER BY MAX(j.created) DESC LIMIT 100",
+              )
+              .all(filter.project) as Array<{ branch: string }>
+          ).map((row) => row.branch),
     runs: runs.map((run) => {
       const saved = counts.get(run.id) as { count: number; size: number }
       const builds = runBuilds(source, run)
@@ -321,17 +267,6 @@ export function artifactsListData(
       }
     }),
   }
-}
-
-function runsTable(source: ArtifactsSource, data: ArtifactsList): string {
-  const { runs } = data
-  if (runs.length === 0) return '<p class="empty-state">No runs yet.</p>'
-  return `<table class="list"><thead><tr><th>Run</th><th>Branch</th><th>Status</th><th>Builds</th><th>Artifacts</th><th>Started</th></tr></thead><tbody>${runs
-    .map((run) => {
-      const numbers = run.buildNumbers
-      return `<tr data-run-id="${escape(run.id)}" data-status="${escape(run.status)}"><td><a href="${runHref(run.id)}">${escape(run.project.slug)} ${escape(runName(run.workflow, run.number))}</a></td><td class="mono">${escape(run.branch)}</td><td>${statusDot(run.status)} <span data-status-text>${escape(run.status)}</span></td><td class="mono">${run.builds === 0 ? '—' : `${numbers.map(escape).join(', ')} · ${run.builds} ${run.builds === 1 ? 'file' : 'files'}`}</td><td class="mono">${run.artifacts.count === 0 ? '—' : `${run.artifacts.count} · ${escape(bytes(run.artifacts.size))}`}</td><td>${escape(ago(run.created, source.now))}</td></tr>`
-    })
-    .join('')}</tbody></table>`
 }
 
 /**
@@ -460,37 +395,4 @@ export function projectRunsTable(
         `<tr data-run-id="${escape(run.id)}" data-status="${escape(run.status)}"><td><a href="${runHref(run.id)}">${statusDot(run.status)} <span data-status-text>${escape(run.status)}</span></a><small>Run ${run.number}${run.workflow === 'build' ? '' : ` · ${escape(run.workflow)}`}${every ? ` · <span class="mono">${escape(run.branch)}</span>` : ''}</small></td><td class="mono">${run.version === '' ? '—' : escape(run.version)}</td><td class="mono">${run.buildNumber === '' ? '—' : escape(run.buildNumber)}</td><td>${localTime(run.at, now, 'since')}</td></tr>`,
     )
     .join('')}</tbody></table>`
-}
-
-/** Published builds and saved artifacts, by project, branch and run. */
-export function artifactsView(
-  source: ArtifactsSource,
-  filter: ArtifactsFilter,
-): string {
-  if (filter.run != null) {
-    const data = artifactRunData(source, filter.run)
-    if (data == null)
-      return '<h1>Run unavailable</h1><p class="empty-state">There is no such run.</p>'
-    return runDetail(source, data)
-  }
-  const data = artifactsListData(source, {
-    ...(filter.project == null ? {} : { project: filter.project }),
-    ...(filter.branch == null ? {} : { branch: filter.branch }),
-  })
-  // Artifacts, then the project and the branch it is narrowed to.
-  const crumbs: Crumb[] = [{ label: 'Artifacts', href: '/artifacts' }]
-  if (data.project != null)
-    crumbs.push({
-      label: data.project.name,
-      href: `/artifacts?project=${encodeURIComponent(data.project.slug)}`,
-    })
-  if (filter.branch != null)
-    crumbs.push({
-      label: filter.branch,
-      href: `/artifacts?${new URLSearchParams({
-        ...(filter.project == null ? {} : { project: filter.project }),
-        branch: filter.branch,
-      }).toString()}`,
-    })
-  return `<div class="page-head"><div>${breadcrumbs(source.viewer, crumbs)}<h1>Artifacts</h1><p>Each run's saved artifacts, test results and published builds.</p></div></div>${runsTable(source, data)}`
 }

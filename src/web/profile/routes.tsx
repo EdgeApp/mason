@@ -1,9 +1,17 @@
 // Every page's route, declared once for both profiles: master-only routes
 // are not registered on the host (their addresses answer 404 there). Until a
-// page's milestone ports it, its route renders the page's header and what is
-// coming; the access check and the 403 are real already.
-import type { JSX } from 'react'
-import { Navigate, Route, Routes, useParams } from 'react-router'
+// page's milestone ports it, its route is the node's own page: outside the
+// /_web mount the app leaves for it with a full load, and inside the mount
+// it renders the page's header and what is coming. The access check and
+// the 403 are real already.
+import {
+  createContext,
+  useContext,
+  useEffect,
+  type ComponentType,
+  type JSX,
+} from 'react'
+import { Navigate, Route, Routes, useLocation, useParams } from 'react-router'
 import type { NodeInfo } from '../../shared/api/index.js'
 import type { Permission, Role } from '../../shared/permissions.js'
 import { AppShell } from '../layout/AppShell.js'
@@ -14,7 +22,11 @@ import { NotFound } from '../pages/errors/NotFound.js'
 import { InvitePage } from '../pages/auth/Invite.js'
 import { SetupPage } from '../pages/auth/Setup.js'
 import { SignInPage } from '../pages/auth/SignIn.js'
+import { ArtifactsPage } from '../pages/artifacts/Artifacts.js'
+import { DashboardPage } from '../pages/dashboard/Dashboard.js'
 import { PlaceholderPage } from '../pages/Placeholder.js'
+import { SearchPage } from '../pages/search/Search.js'
+import { SkeletonText } from '../ui/Skeleton.js'
 import type { IconName } from '../ui/icons.js'
 import { homeFor, navItem } from './navigation.js'
 import { useProfile } from './NodeProfile.js'
@@ -35,6 +47,8 @@ export interface PageRoute {
   masterOnly: boolean
   /** The trail after the node's pill; the last is the page. */
   crumbs: (params: Params) => Crumb[]
+  /** The page, once its milestone has ported it; until then the node draws it. */
+  page?: ComponentType
 }
 
 /** A route that is one of the navigation's destinations. */
@@ -90,17 +104,24 @@ function projectPage(
 
 /** Every signed-in page, in no particular order (the router ranks them). */
 export const PAGE_ROUTES: readonly PageRoute[] = [
-  destination(
-    'dashboard',
-    'Every project, its app IDs and their latest builds.',
-    'M6',
-  ),
-  destination(
-    'artifacts',
-    'Every run’s published builds, tests and saved artifacts.',
-    'M6',
-  ),
   {
+    ...destination(
+      'dashboard',
+      'Every project’s app IDs, their latest builds and runs.',
+      'M6',
+    ),
+    page: DashboardPage,
+  },
+  {
+    ...destination(
+      'artifacts',
+      'Each run’s saved artifacts, test results and published builds.',
+      'M6',
+    ),
+    page: ArtifactsPage,
+  },
+  {
+    page: SearchPage,
     path: '/search',
     title: () => 'Search',
     description: 'Projects, app IDs, runs, commits and branches.',
@@ -241,6 +262,43 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
 export const routesFor = (node: 'master' | 'host'): PageRoute[] =>
   PAGE_ROUTES.filter((route) => node === 'master' || !route.masterOnly)
 
+/**
+ * Where the app leaves for the node's own pages, outside the /_web mount:
+ * `here` is the address the document was loaded at (the node answered the
+ * app there, so the app never leaves it), `go` loads another with a full
+ * document load. Inside the mount there is none, and unported pages draw
+ * their placeholder.
+ */
+export interface ServerPages {
+  here: string
+  go: (url: string) => void
+}
+
+export const ServerPagesContext = createContext<ServerPages | undefined>(
+  undefined,
+)
+
+/** The node's own page at an address: a full load of it, or the placeholder. */
+function ServerPage({
+  placeholder,
+}: {
+  placeholder: () => JSX.Element
+}): JSX.Element {
+  const server = useContext(ServerPagesContext)
+  const { pathname, search } = useLocation()
+  const target = `${pathname}${search}`
+  const leaving = server != null && server.here !== target
+  useEffect(() => {
+    if (leaving) server.go(target)
+  }, [leaving, server, target])
+  if (!leaving) return placeholder()
+  return (
+    <div className="m-page">
+      <SkeletonText lines={4} label="Opening the page" />
+    </div>
+  )
+}
+
 /** One page: the 403 when the viewer's session lacks its permission. */
 function RoutePage({ route }: { route: PageRoute }): JSX.Element {
   const params = useParams()
@@ -249,20 +307,39 @@ function RoutePage({ route }: { route: PageRoute }): JSX.Element {
   const crumbs = route.crumbs(params)
   if (!session.permissions.includes(route.permission))
     return <Forbidden title={title} least={route.least} crumbs={crumbs} />
+  const Ported = route.page
+  if (Ported != null) return <Ported />
   return (
-    <PlaceholderPage
-      crumbs={crumbs}
-      title={title}
-      description={route.description}
-      milestone={route.milestone}
-      icon={route.icon}
+    <ServerPage
+      placeholder={() => (
+        <PlaceholderPage
+          crumbs={crumbs}
+          title={title}
+          description={route.description}
+          milestone={route.milestone}
+          icon={route.icon}
+        />
+      )}
     />
   )
 }
 
-/** `/`: the viewer's first destination (Install apps for a tester). */
+/**
+ * `/`: on the master, Projects & apps for those who may read projects;
+ * otherwise the viewer's first destination (Install apps for a tester),
+ * which outside the mount is the node's own page at `/`.
+ */
 function Home(): JSX.Element {
-  const { nav } = useShell()
+  const { nav, session } = useShell()
+  const profile = useProfile()
+  const server = useContext(ServerPagesContext)
+  if (
+    profile.role === 'master' &&
+    session.permissions.includes('projects.read')
+  )
+    return <DashboardPage />
+  if (server != null && server.here !== '/')
+    return <ServerPage placeholder={() => <></>} />
   return <Navigate to={homeFor(nav)} replace />
 }
 

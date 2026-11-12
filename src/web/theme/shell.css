@@ -67,3 +67,8 @@
 
 /* The tab bar's More is a button among links. */
 button.m-tabbar__item { border: 0; background: transparent; font-family: inherit; line-height: inherit; cursor: pointer; }
+
+/* A build chip's number reads in text colour; "+N more" in link colour. */
+.m-runchip__num--build { color: var(--m-text); }
+.m-runchip--more { color: var(--m-text-link); }
+.m-runchip--more:hover { color: var(--m-text-link); }

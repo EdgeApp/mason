@@ -99,3 +99,38 @@ export function tryAgainAt(at: number, now: number, timeZone?: string): string {
   const when = absoluteTime(at, now, timeZone)
   return `Try again at ${when.replace(/^Today /, '')}`
 }
+
+/** A duration such as `4m 12s`: seconds under a minute, hours past an hour. */
+export function duration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+}
+
+/** Bytes in powers of a thousand: `312.8 GB`, `512 B`. */
+export function bytes(size: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = size
+  let unit = 0
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000
+    unit++
+  }
+  return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`
+}
+
+/** A build chip's age, as short as it can be: `now`, `5m`, `3h`, `6d`, `2w`, `1mo`, `2y`. */
+export function shortAge(at: number, now: number): string {
+  const minutes = Math.max(0, Math.floor((now - at) / 60_000))
+  if (minutes < 1) return 'now'
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h`
+  const days = Math.floor(hours / 24)
+  if (days < 14) return `${days}d`
+  if (days < 60) return `${Math.floor(days / 7)}w`
+  if (days < 365) return `${Math.floor(days / 30)}mo`
+  return `${Math.floor(days / 365)}y`
+}
