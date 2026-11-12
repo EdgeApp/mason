@@ -5,7 +5,10 @@
 // from lib/. Each screen is saved as `<screen>-<width>-<MASON_SCREENS>.png`
 // in MASON_ARTIFACTS (MASON_SCREENS is `after` unless set); `light` sets
 // Appearance to Light in local storage before each capture. Every request a
-// page made must be to its own origin.
+// page made must be to its own origin. MASON_SCREENS_PREFIX (`/_web`) opens
+// each screen under the React app's mount, and MASON_SCREENS_ONLY (names,
+// comma-separated) captures only those screens: a milestone captures the
+// screens it ships while the server still answers the real routes.
 import assert from 'node:assert/strict'
 import {
   existsSync,
@@ -381,6 +384,10 @@ describe('Every Mason screen at three widths', function () {
   this.timeout(1_800_000)
   const enabled = process.env.MASON_WEB_E2E === '1'
   const variant = process.env.MASON_SCREENS ?? 'after'
+  const prefix = process.env.MASON_SCREENS_PREFIX ?? ''
+  const only = process.env.MASON_SCREENS_ONLY?.split(',').filter(Boolean)
+  const wanted = (screen: Screen): boolean =>
+    only == null || only.includes(screen.name)
   const {
     MASON_TEST_ROOT: parent,
     MASON_ARTIFACTS: artifacts,
@@ -714,6 +721,7 @@ describe('Every Mason screen at three widths', function () {
 
   /** A screen's path with its fixtures filled in. */
   const resolve = (screen: Screen): string =>
+    prefix +
     screen.path.replace(/\{([a-z.]+)\}/g, (_match, key: string) => {
       const value = fixtures[key]
       assert(value != null, `No fixture ${key} for ${screen.name}`)
@@ -927,7 +935,7 @@ describe('Every Mason screen at three widths', function () {
   const groups = (): Map<string, Screen[]> => {
     const byKey = new Map<string, Screen[]>()
     for (const screen of SCREENS) {
-      if (screen.state != null) continue
+      if (screen.state != null || !wanted(screen)) continue
       const key =
         screen.as === 'none' ? 'signed-out' : `${screen.as}@${screen.node}`
       byKey.set(key, [...(byKey.get(key) ?? []), screen])
@@ -942,17 +950,20 @@ describe('Every Mason screen at three widths', function () {
     'developer@host',
     'tester@host',
   ])
-    it(`captures the screens ${key} sees`, async () => {
+    it(`captures the screens ${key} sees`, async function () {
       const screens = groups().get(key) ?? []
-      assert(screens.length > 0, key)
+      if (screens.length === 0) return this.skip()
       await captureAll(key.replace('@', '-'), screens)
     })
 
-  it('captures the host while its master is unreachable, then past the grace window', async () => {
-    const offline = SCREENS.filter((screen) => screen.state === 'offline')
-    const maintenance = SCREENS.filter(
-      (screen) => screen.state === 'maintenance',
+  it('captures the host while its master is unreachable, then past the grace window', async function () {
+    const offline = SCREENS.filter(
+      (screen) => screen.state === 'offline' && wanted(screen),
     )
+    const maintenance = SCREENS.filter(
+      (screen) => screen.state === 'maintenance' && wanted(screen),
+    )
+    if (offline.length + maintenance.length === 0) return this.skip()
     // Signed in while the link is up; the link drops for the captures.
     await captureAll(
       'host-offline',

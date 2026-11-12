@@ -1,8 +1,14 @@
 import assert from 'node:assert/strict'
 import { asNumber, asObject } from 'cleaners'
-import { describe, it } from 'mocha'
+import { afterEach, beforeEach, describe, it } from 'mocha'
 import { asNodeInfo, type SessionInfo } from '../../shared/api/index.js'
-import { ApiClient, ApiError, ContractError } from './client.js'
+import {
+  afterKeyboard,
+  ApiClient,
+  ApiError,
+  ContractError,
+  keyboardUp,
+} from './client.js'
 
 interface Sent {
   url: string
@@ -192,6 +198,96 @@ describe('The web API client', () => {
     assert.equal(node.sent.at(-1)!.url, '/api/v2/session')
   })
 
+  it('reads the session again after a stale proof is refused and sends the change once more', async () => {
+    const stale = json({ error: 'Invalid request proof' }, 403)
+    // The master's API and the host's forwarded API refuse alike.
+    for (const path of ['/api/v2/runs', '/api/v2/projects/a/runs']) {
+      const node = fakeNode({
+        'GET /api/v2/session': [
+          json(session),
+          json({ ...session, csrf: 'new' }),
+        ],
+        [`POST ${path}`]: [stale, json({ count: 1 })],
+      })
+      const client = new ApiClient({ signIn: '/sign-in', fetch: node.fetch })
+      assert.deepEqual(await client.post(path, asCount, { body: { at: 1 } }), {
+        count: 1,
+      })
+      assert.deepEqual(
+        node.sent.map((entry) => [
+          `${entry.method} ${entry.url}`,
+          entry.headers['X-Mason-CSRF'],
+          entry.body,
+        ]),
+        [
+          ['GET /api/v2/session', undefined, undefined],
+          [`POST ${path}`, 'proof-of-the-session', '{"at":1}'],
+          ['GET /api/v2/session', undefined, undefined],
+          [`POST ${path}`, 'new', '{"at":1}'],
+        ],
+      )
+    }
+  })
+
+  it('sends a change refused for its proof only once more, and retries no other 403', async () => {
+    const node = fakeNode({
+      'GET /api/v2/session': [
+        json(session),
+        json({ ...session, csrf: 'new' }),
+        json({ ...session, csrf: 'newer' }),
+      ],
+      'POST /api/v2/runs': [
+        json({ error: 'Invalid request proof' }, 403),
+        json({ error: 'Invalid request proof' }, 403),
+        json({ error: 'Untrusted origin' }, 403),
+      ],
+      'POST /api/v2/session/parameters': [
+        json({ error: 'Invalid request proof' }, 403),
+      ],
+    })
+    const client = new ApiClient({ signIn: '/sign-in', fetch: node.fetch })
+    const twice = await client.post('/api/v2/runs', asCount).catch((e) => e)
+    assert(twice instanceof ApiError)
+    assert.deepEqual(
+      [twice.status, twice.message],
+      [403, 'Invalid request proof'],
+    )
+    assert.equal(node.sent.length, 4)
+    // The refused proof is dropped: the next change reads the session first.
+    const origin = await client.post('/api/v2/runs', asCount).catch((e) => e)
+    assert.deepEqual([origin.status, origin.message], [403, 'Untrusted origin'])
+    assert.deepEqual(
+      node.sent.slice(4).map((entry) => entry.headers['X-Mason-CSRF']),
+      [undefined, 'newer'],
+    )
+    // A request that sent no proof is not sent again.
+    const unproven = await client.parameters('ada').catch((e) => e)
+    assert.equal(unproven.status, 403)
+    assert.equal(node.sent.length, 7)
+  })
+
+  it('asks a sign-in function where to go at the time of the 401, and leaves with a full load when told', async () => {
+    const node = fakeNode({
+      'GET /api/v2/session': [json({ error: 'Not signed in' }, 401)],
+    })
+    const navigated: string[] = []
+    let here = '/_web/projects'
+    const client = new ApiClient({
+      signIn: (): string => `/auth/login?return=${encodeURIComponent(here)}`,
+      fetch: node.fetch,
+      navigate: (url): void => {
+        navigated.push(url)
+      },
+    })
+    here = '/_web/runs/7'
+    await client.session().catch(() => undefined)
+    client.leave('/sign-in')
+    assert.deepEqual(navigated, [
+      '/auth/login?return=%2F_web%2Fruns%2F7',
+      '/sign-in',
+    ])
+  })
+
   it('uses location.assign to leave for sign-in by default', async () => {
     const node = fakeNode({
       'GET /api/v2/session': [json({ error: 'Not signed in' }, 401)],
@@ -285,5 +381,89 @@ describe('The web API client', () => {
     } finally {
       globalThis.fetch = original
     }
+  })
+})
+
+describe('leaving with the software keyboard up', () => {
+  /** A phone's visual viewport: 714 px tall, 377 with the keyboard up. */
+  class Viewport extends EventTarget {
+    height = 377
+    scale = 1
+  }
+  let viewport: Viewport
+  let field: HTMLInputElement
+  beforeEach(() => {
+    viewport = new Viewport()
+    Object.defineProperty(globalThis, 'visualViewport', {
+      configurable: true,
+      get: () => viewport,
+    })
+    Object.defineProperty(document.documentElement, 'clientHeight', {
+      configurable: true,
+      get: () => 714,
+    })
+    field = document.createElement('input')
+    document.body.append(field)
+    field.focus()
+  })
+  afterEach(() => {
+    delete (globalThis as { visualViewport?: unknown }).visualViewport
+    delete (document.documentElement as { clientHeight?: unknown }).clientHeight
+    field.remove()
+  })
+
+  it('tells a keyboard from a pinch zoom', () => {
+    assert.equal(keyboardUp({ height: 377, scale: 1 }, 714), true)
+    assert.equal(keyboardUp({ height: 714, scale: 1 }, 714), false)
+    assert.equal(keyboardUp({ height: 357, scale: 2 }, 714), false)
+  })
+
+  it('puts the keyboard away and leaves once it has gone', () => {
+    const navigated: string[] = []
+    const client = new ApiClient({
+      signIn: '/sign-in',
+      navigate: (url): void => {
+        navigated.push(url)
+      },
+    })
+    client.leave('/')
+    assert.notEqual(document.activeElement, field)
+    assert.deepEqual(navigated, [])
+    // Part of the way down is still up.
+    viewport.height = 500
+    viewport.dispatchEvent(new Event('resize'))
+    assert.deepEqual(navigated, [])
+    viewport.height = 714
+    viewport.dispatchEvent(new Event('resize'))
+    viewport.dispatchEvent(new Event('resize'))
+    assert.deepEqual(navigated, ['/'])
+  })
+
+  it('leaves anyway when the keyboard does not go', async () => {
+    let left = 0
+    afterKeyboard(() => left++, 5)
+    assert.equal(left, 0)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(left, 1)
+    viewport.height = 714
+    viewport.dispatchEvent(new Event('resize'))
+    assert.equal(left, 1)
+  })
+
+  it('leaves at once with no keyboard, nothing focused or no visual viewport', () => {
+    let left = 0
+    viewport.height = 714
+    afterKeyboard(() => left++)
+    assert.equal(left, 1)
+    assert.equal(document.activeElement, field)
+    viewport.height = 377
+    field.blur()
+    afterKeyboard(() => left++)
+    assert.equal(left, 2)
+    field.focus()
+    delete (globalThis as { visualViewport?: unknown }).visualViewport
+    afterKeyboard(() => left++)
+    assert.equal(left, 3)
+    assert.equal(document.activeElement, field)
   })
 })

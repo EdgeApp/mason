@@ -421,7 +421,9 @@ a.m-list__row:hover, button.m-list__row:hover { background: var(--m-surface-hove
 
 .m-toast { position: fixed; z-index: var(--m-z-toast); right: var(--m-space-7); bottom: var(--m-space-7); display: flex; align-items: center; gap: var(--m-space-4); min-width: 18rem; max-width: 28rem; padding: var(--m-space-4) var(--m-space-4) var(--m-space-4) var(--m-space-5); border-radius: var(--m-radius-lg); background: var(--m-surface-overlay); border: 1px solid var(--m-border-strong); box-shadow: var(--m-shadow-3); }
 .m-toast--inline { position: static; }
-.m-toast .m-icon { color: var(--m-success-solid); }
+.m-toast > .m-icon { color: var(--m-success-solid); }
+.m-toast[data-tone='warning'] > .m-icon { color: var(--m-warning-solid); }
+.m-toast[data-tone='danger'] > .m-icon { color: var(--m-danger-solid); }
 .m-toast__text { flex: 1; font-size: 0.875rem; }
 @media (max-width: 46.49em) { .m-toast { left: var(--m-space-4); right: var(--m-space-4); bottom: calc(var(--m-tabbar-height) + var(--m-space-5)); min-width: 0; } }
 

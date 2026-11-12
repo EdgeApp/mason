@@ -1,7 +1,8 @@
 /* The web app's stylesheet, bundled by scripts/bundle-web.mjs into
    app-[hash].css: the iOS 27 library's component styles, then Mason's tokens
    (whose bridge sets the library's variables from Mason's roles), then the
-   design language's components. */
+   design language's components, then the app's own additions (shell.css). */
 @import '@ios27_design_system/react/styles.css';
 @import './tokens.css';
 @import './components.css';
+@import './shell.css';

@@ -263,9 +263,15 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       { mode: 0o700 },
     )
     const require = createRequire(import.meta.url)
-    const { MaestroD } = require(
+    // The client root is the npm package, or the maestro-d checkout holding it.
+    const client = [
       path.join(clientRoot, 'dist/cjs/index.js'),
-    ) as { MaestroD: { connect: (options: object) => Promise<Daemon> } }
+      path.join(clientRoot, 'npm/maestro-d/dist/cjs/index.js'),
+    ].find((file) => existsSync(file))
+    assert(client, `No maestro-d client under ${clientRoot}`)
+    const { MaestroD } = require(client) as {
+      MaestroD: { connect: (options: object) => Promise<Daemon> }
+    }
     daemon = await MaestroD.connect({ name: daemonName })
   })
   after(async () => {
@@ -1347,6 +1353,236 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await shows(`${drawn('stream done')} && ${windowed}`, 'the end')
     } finally {
       await m.close()
+    }
+  })
+
+  /** A value the page computes, read back through the driver as text. */
+  const value = async (b: Browser, expression: string): Promise<string> =>
+    String(
+      ((await b.script(`return String(${expression})`)) as { data?: unknown })
+        ?.data ?? '',
+    )
+
+  /** Waits until the page's expression is true, or fails saying what did not happen. */
+  const holds = async (
+    b: Browser,
+    expression: string,
+    what: string,
+  ): Promise<void> => {
+    const deadline = Date.now() + 30_000
+    for (;;) {
+      const done = await value(b, `Boolean(${expression})`).catch(() => '')
+      if (done === 'true') return
+      if (Date.now() > deadline) throw new Error(`Timed out: ${what}`)
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+  }
+
+  it('N2 Appearance moves Dark → Light → Match system from the account menu, applies before the first paint, and persists across reloads', async () => {
+    const log = 'appearance.log'
+    const b = await browser('mason-n2', c.master, '1440x900')
+    const note = (line: string): void =>
+      appendFileSync(path.join(artifacts!, log), `${line}\n`)
+    writeFileSync(path.join(artifacts!, log), '')
+    /** The theme on <html>, what storage holds, the page's canvas colour. */
+    const theme = async (): Promise<string> =>
+      String(
+        await value(
+          b,
+          "[document.documentElement.dataset.theme, localStorage.getItem('mason-appearance'), getComputedStyle(document.body).backgroundColor].join(' | ')",
+        ),
+      )
+    /** theme-boot.js ran, parser-blocking in <head>, before the first paint. */
+    const beforePaint = async (): Promise<void> => {
+      const order = String(
+        await value(
+          b,
+          "[...document.head.children].filter((e) => e.matches('script[src], link[rel=stylesheet]')).map((e) => (e.src || e.href).replace(location.origin, '') + (e.async || e.defer || e.type === 'module' ? ' (deferred)' : '')).join(', ')",
+        ),
+      )
+      note(`head order: ${order}`)
+      assert.match(
+        order,
+        /^\/assets\/web\/theme-boot\.js, \/assets\/web\/app-[^,]+\.css, \/assets\/web\/app-[^ ]+\.js \(deferred\)$/,
+      )
+      const timing = (await value(
+        b,
+        "JSON.stringify((() => { const boot = performance.getEntriesByType('resource').find((e) => e.name.endsWith('/theme-boot.js')); const paint = performance.getEntriesByType('paint')[0]; return { boot: boot && boot.responseEnd, paint: paint && paint.startTime } })())",
+      ).then((text) => JSON.parse(text))) as { boot?: number; paint?: number }
+      note(
+        `theme-boot.js loaded at ${timing.boot?.toFixed(1)} ms, first paint at ${timing.paint?.toFixed(1)} ms`,
+      )
+      assert(timing.boot != null && timing.paint != null)
+      assert(timing.boot < timing.paint, JSON.stringify(timing))
+    }
+    try {
+      await masterSignIn(b, 'paul', PASSWORDS.paul!)
+      await holds(b, "location.pathname !== '/sign-in'", 'signed in')
+      await b.open('/_web/projects')
+      await holds(
+        b,
+        "document.querySelector('h1')?.textContent === 'Projects & apps'",
+        'the shell',
+      )
+      const dark = await theme()
+      note(`$ open /_web/projects\n  ${dark}`)
+      assert.match(dark, /^dark \| {2}\| /)
+      await b.tap('button[aria-label="Your account"]')
+      await holds(
+        b,
+        "document.querySelector('[role=menu]') != null",
+        'the account menu',
+      )
+      await b.command('tapOn', { text: 'Light' })
+      await holds(
+        b,
+        "document.documentElement.dataset.theme === 'light'",
+        'the light theme',
+      )
+      const light = await theme()
+      note(`$ account menu → Appearance → Light\n  ${light}`)
+      assert.match(light, /^light \| light \| /)
+      assert.notEqual(light.split(' | ')[2], dark.split(' | ')[2])
+      await b.open('/_web/projects')
+      await holds(
+        b,
+        "document.querySelector('h1')?.textContent === 'Projects & apps'",
+        'the reload',
+      )
+      const reloaded = await theme()
+      note(`$ reload\n  ${reloaded}`)
+      assert.equal(reloaded, light)
+      await beforePaint()
+      await b.shot('appearance-light.png')
+      await b.tap('button[aria-label="Your account"]')
+      await holds(
+        b,
+        "document.querySelector('[role=menu]') != null",
+        'the account menu',
+      )
+      await b.command('tapOn', { text: 'Match system' })
+      await holds(
+        b,
+        "localStorage.getItem('mason-appearance') === 'system'",
+        'Match system',
+      )
+      const system = String(
+        await value(
+          b,
+          "matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'",
+        ),
+      )
+      await b.open('/_web/projects')
+      await holds(
+        b,
+        "document.querySelector('h1')?.textContent === 'Projects & apps'",
+        'the reload',
+      )
+      const matched = await theme()
+      note(
+        `$ account menu → Appearance → Match system; reload (the system is ${system})\n  ${matched}`,
+      )
+      assert.match(matched, new RegExp(`^${system} \\| system \\| `))
+    } finally {
+      await b.close()
+    }
+  })
+
+  it('N3 ⌘K finds a run by its number and by its commit, and Enter opens it', async () => {
+    const master = c.master.master!
+    const run = runs['build-beta@develop']
+    const sha = String(
+      (
+        master.database.db
+          .prepare('SELECT commit_sha FROM jobs WHERE id=?')
+          .get(run.id) as { commit_sha: string }
+      ).commit_sha,
+    )
+    const log = 'palette.log'
+    writeFileSync(path.join(artifacts!, log), '')
+    const note = (line: string): void =>
+      appendFileSync(path.join(artifacts!, log), `${line}\n`)
+    const b = await browser('mason-n3', c.master, '1440x900')
+    /** The palette's options, as the viewer reads them. */
+    const options = async (): Promise<string> =>
+      String(
+        await value(
+          b,
+          "[...document.querySelectorAll('[role=option]')].map((o) => (o.getAttribute('aria-selected') === 'true' ? '> ' : '  ') + o.querySelector('.m-list__main').innerText.replace(/\\n/g, ' · ')).join('\\n')",
+        ),
+      )
+    try {
+      await masterSignIn(b, 'paul', PASSWORDS.paul!)
+      await holds(b, "location.pathname !== '/sign-in'", 'signed in')
+      await b.open('/_web/projects')
+      await holds(
+        b,
+        "document.querySelector('h1')?.textContent === 'Projects & apps'",
+        'the shell',
+      )
+      // By its number: ⌘K, the number, Enter.
+      await b.command('pressKey', { key: 'Meta+k' })
+      await holds(
+        b,
+        "document.activeElement?.getAttribute('role') === 'combobox'",
+        'the palette',
+      )
+      await b.command('inputText', { text: `#${run.number}` })
+      await holds(
+        b,
+        `[...document.querySelectorAll('[role=option]')].some((o) => o.textContent.includes('Run ${run.number}'))`,
+        'the run by number',
+      )
+      note(`$ ⌘K, type #${run.number}\n${await options()}`)
+      const byNumber = String(
+        await value(
+          b,
+          "document.getElementById(document.activeElement.getAttribute('aria-activedescendant')).textContent",
+        ),
+      )
+      assert.match(byNumber, new RegExp(`Run ${run.number}\\b`))
+      await b.command('pressKey', { key: 'Enter' })
+      await holds(
+        b,
+        `location.pathname === '/_web/runs/${run.id}' && document.activeElement?.tagName === 'H1'`,
+        'the run page',
+      )
+      note(
+        `$ Enter\n  → ${String(await value(b, 'location.pathname'))}, focus on the h1 "${String(await value(b, 'document.activeElement.textContent'))}"`,
+      )
+      // By its commit: ⌘K, the SHA's first 8, Enter.
+      await b.command('pressKey', { key: 'Meta+k' })
+      await holds(
+        b,
+        "document.activeElement?.getAttribute('role') === 'combobox'",
+        'the palette',
+      )
+      await b.command('inputText', { text: sha.slice(0, 8) })
+      await holds(
+        b,
+        `[...document.querySelectorAll('[role=group][aria-label=Commits] [role=option]')].length > 0`,
+        'the commit',
+      )
+      note(`$ ⌘K, type ${sha.slice(0, 8)}\n${await options()}`)
+      await b.shot('palette-run.png')
+      await b.command('pressKey', { key: 'Enter' })
+      await holds(
+        b,
+        "location.pathname.startsWith('/_web/runs/') && document.querySelector('dialog') == null",
+        'the run from its commit',
+      )
+      const opened = String(await value(b, 'location.pathname'))
+      note(`$ Enter\n  → ${opened}`)
+      const commitOf = (
+        master.database.db
+          .prepare('SELECT commit_sha FROM jobs WHERE id=?')
+          .get(decodeURIComponent(opened.replace('/_web/runs/', ''))) as {
+          commit_sha: string
+        }
+      ).commit_sha
+      assert.equal(commitOf, sha)
+    } finally {
+      await b.close()
     }
   })
 })

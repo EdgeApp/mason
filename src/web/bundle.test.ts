@@ -45,12 +45,18 @@ describe('scripts/bundle-web.mjs', () => {
     assert.match(html, /<div id="root"><\/div>/)
   })
 
-  it('builds app.css from the library, the tokens and the components, in that order', () => {
+  it('builds app.css from the library, the tokens, the components and the app’s additions, in that order', () => {
     const css = read(names.find((name) => name.endsWith('.css'))!)
     const library = css.indexOf('--label-primary:')
     const bridge = css.indexOf('html:root:not([data-theme=light])')
     const component = css.indexOf('.m-app{')
-    assert(library >= 0 && bridge > library && component > bridge)
+    const additions = css.indexOf('.m-dialog{')
+    assert(
+      library >= 0 &&
+        bridge > library &&
+        component > bridge &&
+        additions > component,
+    )
     assert.doesNotMatch(css, /\.x-[a-z]/)
     // The fonts stay where the node serves them.
     for (const font of ['geist-variable', 'jetbrains-mono-variable'])

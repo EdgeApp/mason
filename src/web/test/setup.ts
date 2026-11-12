@@ -31,6 +31,28 @@ window.matchMedia = (query: string): MediaQueryList =>
     dispatchEvent: () => false,
   }) as MediaQueryList
 
+/**
+ * jsdom has no modal dialogs: showModal() and close() here only open and
+ * close it (and close() fires `close`), which is what the app's overlays
+ * rely on; the inert page behind is the browser's, proven end to end.
+ */
+const dialog = window.HTMLDialogElement.prototype as HTMLDialogElement & {
+  showModal?: () => void
+}
+if (typeof dialog.showModal !== 'function') {
+  dialog.showModal = function (this: HTMLDialogElement): void {
+    this.setAttribute('open', '')
+  }
+  dialog.close = function (this: HTMLDialogElement): void {
+    if (!this.hasAttribute('open')) return
+    this.removeAttribute('open')
+    this.dispatchEvent(new window.Event('close'))
+  }
+}
+
+// jsdom does not lay out or scroll; scrolling to the top is a no-op here.
+window.scrollTo = (() => undefined) as typeof window.scrollTo
+
 const install = (key: string, get: () => unknown): void => {
   Object.defineProperty(globalThis, key, { configurable: true, get })
 }
