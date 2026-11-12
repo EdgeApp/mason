@@ -619,7 +619,7 @@ describe('Notifications', () => {
       /Notice/,
     )
     await act(async () => approval.click())
-    await page('Run')
+    await page(/^Run( unavailable)?$/)
     assert.equal(where.path, '/runs/r7')
   })
 
@@ -942,7 +942,7 @@ describe('The ⌘K palette', () => {
     await act(async () => fireEvent.keyDown(input, { key: 'ArrowDown' }))
     await act(async () => fireEvent.keyDown(input, { key: 'ArrowDown' }))
     await act(async () => fireEvent.keyDown(input, { key: 'Enter' }))
-    await page('Run')
+    await page(/^Run( unavailable)?$/)
     assert.equal(where.path, '/runs/r181')
     assert.equal(screen.queryByRole('dialog', { name: 'Search' }), null)
   })
@@ -1117,7 +1117,7 @@ describe('Pages in the shell', () => {
     screen.getByRole('button', { name: 'Go back' }).click()
     cleanup()
     renderApp({ path: '/runs/1', replies: shellReplies('tester') })
-    await page('Run')
+    await page(/^Run( unavailable)?$/)
     screen.getByRole('heading', {
       level: 2,
       name: 'Run is for developers, managers and administrators',

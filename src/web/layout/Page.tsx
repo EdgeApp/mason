@@ -8,8 +8,12 @@ export interface PageProps {
   /** The trail after the node's pill; the last is this page. */
   crumbs: Crumb[]
   title: string
+  /** The `h1`'s content, when it is more than the title (a link). */
+  heading?: ReactNode
   pill?: ReactNode
+  meta?: ReactNode
   description?: ReactNode
+  details?: ReactNode
   actions?: ReactNode
   children?: ReactNode
 }
@@ -21,8 +25,11 @@ export interface PageProps {
 export function Page({
   crumbs,
   title,
+  heading,
   pill,
+  meta,
   description,
+  details,
   actions,
   children,
 }: PageProps): JSX.Element {
@@ -44,9 +51,11 @@ export function Page({
       <Breadcrumbs crumbs={crumbs} />
       <ShellBanners />
       <PageHeader
-        title={title}
+        title={heading ?? title}
         pill={pill}
+        meta={meta}
         description={description}
+        details={details}
         actions={actions}
       />
       {children}

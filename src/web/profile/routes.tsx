@@ -25,6 +25,7 @@ import { SignInPage } from '../pages/auth/SignIn.js'
 import { ArtifactsPage } from '../pages/artifacts/Artifacts.js'
 import { DashboardPage } from '../pages/dashboard/Dashboard.js'
 import { PlaceholderPage } from '../pages/Placeholder.js'
+import { RunPage } from '../pages/run/RunPage.js'
 import { SearchPage } from '../pages/search/Search.js'
 import { SkeletonText } from '../ui/Skeleton.js'
 import type { IconName } from '../ui/icons.js'
@@ -133,6 +134,7 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
     crumbs: () => [{ label: 'Search' }],
   },
   {
+    page: RunPage,
     path: '/runs/:id',
     title: () => 'Run',
     description: 'A run’s stages, steps, log and history.',

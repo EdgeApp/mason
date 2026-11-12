@@ -552,14 +552,16 @@ describe('Host web API: the pages’ reads, from its cache', function () {
     const onMaster = (
       await f.request(f.c.master, 'GET', route, f.on('master', 'developer'))
     ).json
-    for (const part of [
-      'graph',
-      'layout',
-      'history',
-      'artifacts',
-      'project',
-    ] as const)
+    for (const part of ['graph', 'layout', 'history', 'project'] as const)
       assert.deepEqual(onHost[part], onMaster[part], part)
+    // The same artifacts, downloading from the host itself.
+    assert.deepEqual(
+      onHost.artifacts.map((artifact) => artifact.url),
+      onMaster.artifacts.map((artifact: { url: string }) =>
+        artifact.url.replace(/^https?:\/\/[^/]+/, ''),
+      ),
+    )
+    assert.equal(onHost.artifacts.length > 0, true)
     assert.deepEqual(onHost.details?.buildNumber, onMaster.details.buildNumber)
     const overview = shape(
       asProjectOverview,

@@ -3,26 +3,14 @@ import { DatabaseSync } from 'node:sqlite'
 import { describe, it } from 'mocha'
 import { MasterDatabase } from '../master/database.js'
 import {
-  graphSvg,
   layoutGraph,
   stageLabel,
-  timeline,
-  timelineHtml,
   type Layout,
   type LayoutStage,
   type StageState,
 } from './graph.js'
-import { crumbTrail } from '../test/crumbs.js'
 import { ansiLine, lineAt, logHtml, plainLog } from './log.js'
-import { stylesheet } from './stylesheet.js'
-import {
-  graphFromJson,
-  runBuilds,
-  runData,
-  runTitle,
-  runView,
-  type RunViewOptions,
-} from './run.js'
+import { graphFromJson, runData } from './run.js'
 
 const at = (layout: Layout, name: string): [number, number] => {
   const bubble = layout.bubbles.find((entry) => entry.name === name)
@@ -107,7 +95,6 @@ describe('Run view', () => {
       ['build/ios/preTest', 'ios'],
       ['build/android/compile', 'android'],
     ])
-    assert.match(graphSvg(layout), /<text class="row-label"[^>]*>ios<\/text>/)
   })
 
   it('U18.1 draws matrices as rows, approvals with a hand and post stages before End', () => {
@@ -130,11 +117,11 @@ describe('Run view', () => {
       rails(layout).filter((rail) => rail.includes('notify')),
       ['approve>notify', 'notify>@end'],
     )
-    const svg = graphSvg(layout)
-    assert.match(svg, /class="bubble approval status-awaiting_approval"/)
-    assert.match(svg, /class="glyph"[^>]*>&#x[0-9a-f]+;<\/text>/)
-    assert.match(svg, /waiting for approval/)
-    assert.match(svg, /class="bubble post status-queued"/)
+    const approve = layout.bubbles.find((bubble) => bubble.name === 'approve')!
+    assert.equal(approve.kind, 'approval')
+    assert.equal(approve.status, 'awaiting_approval')
+    const notify = layout.bubbles.find((bubble) => bubble.name === 'notify')!
+    assert.deepEqual([notify.kind, notify.status], ['post', 'queued'])
   })
 
   it('U18.1 lays a needs graph out by depth: one input continues its row, several funnel only their own rails, the rest run to End', () => {
@@ -191,63 +178,23 @@ describe('Run view', () => {
       layout.bubbles.find((bubble) => bubble.name === 'ios')!.dependents,
       ['e2e'],
     )
-    const svg = graphSvg(layout, 'e2e')
-    for (const status of [
-      'succeeded',
-      'running',
-      'failed',
-      'skipped',
-      'queued',
-    ])
-      assert.match(svg, new RegExp(`status-${status}`))
-    assert.match(svg, /class="ring"/)
-    assert.match(svg, /e2e · queued · waiting for android/)
-    assert.match(svg, /ios · succeeded · on buildbox · 1m 0s/)
-    assert.match(svg, /android · running · 2m 0s/)
-    assert.match(
-      svg,
-      /class="bubble stage status-queued selected" data-stage="e2e" data-needs="ios android"/,
+    const states = Object.fromEntries(
+      layout.bubbles.map((bubble) => [bubble.name, bubble.status]),
     )
-    assert.match(svg, /href="\?stage=e2e"/)
+    assert.deepEqual(
+      ['ios', 'android', 'web', 'lint', 'e2e'].map((name) => states[name]),
+      ['succeeded', 'running', 'failed', 'skipped', 'queued'],
+    )
+    const ios = layout.bubbles.find((bubble) => bubble.name === 'ios')!
+    assert.deepEqual([ios.node, ios.took], ['buildbox', 60_000])
+    // A running stage has taken until now.
+    assert.equal(
+      layout.bubbles.find((bubble) => bubble.name === 'android')!.took,
+      120_000,
+    )
     assert.throws(
       () => layoutGraph([stage('a', ['b']), stage('b', ['a'])], []),
       /loop/,
-    )
-  })
-
-  it('U18.1 places Timeline bars by real time and highlights the critical path', () => {
-    const stages = [
-      stage('setup'),
-      stage('fast', ['setup']),
-      stage('slow', ['setup']),
-      stage('ship', ['fast', 'slow']),
-    ]
-    const data = timeline(
-      stages,
-      new Map<string, StageState>([
-        ['setup', { status: 'succeeded', started: 0, finished: 10 }],
-        ['fast', { status: 'succeeded', started: 10, finished: 20 }],
-        ['slow', { status: 'succeeded', started: 10, finished: 60 }],
-        ['ship', { status: 'running', started: 60 }],
-      ]),
-      100,
-    )
-    assert.deepEqual(
-      data.bars.map((bar) => [bar.name, bar.critical]),
-      [
-        ['setup', true],
-        ['fast', false],
-        ['slow', true],
-        ['ship', true],
-      ],
-    )
-    assert.deepEqual([data.from, data.to], [0, 100])
-    const html = timelineHtml(data)
-    assert.match(html, /left:10\.00%;width:50\.00%/)
-    assert.match(html, /slow · 50ms|slow · 0s · critical path/)
-    assert.match(
-      timelineHtml(timeline(stages, new Map(), 5)),
-      /No stage has started yet/,
     )
   })
 
@@ -284,7 +231,7 @@ describe('Run view', () => {
     assert.equal(lineAt(Buffer.from('a\nb'), 99), 2)
   })
 
-  it('U18.7 shows only the selected stage: its details, steps and log; a step shows its own lines; the header shows the whole run', () => {
+  it('U18.7 reads a run for its page: stages by name, steps, artifacts, history, its recorded graph and every workflow, the requester and the build number', () => {
     const db = new MasterDatabase(new DatabaseSync(':memory:'), () => 0).db
     db.prepare(
       "INSERT INTO projects(id,slug,name,repository,format,timeout_seconds,created_at) VALUES(1,'phones','Phones','git@github.com:example/phones.git','pipeline',3600,0)",
@@ -347,6 +294,11 @@ describe('Run view', () => {
             ],
             post: [],
           },
+          {
+            name: 'release',
+            params: { rollout: { type: 'number', min: 1, max: 100 } },
+            stages: [],
+          },
         ],
       }),
       'build',
@@ -354,6 +306,28 @@ describe('Run view', () => {
     assert.equal(graphFromJson('{', 'build'), undefined)
     assert.equal(graphFromJson(null, 'build'), undefined)
     assert.equal(graphFromJson('{"workflows":[]}', 'build'), undefined)
+    // The approval: who decides, its message and parameters.
+    assert.deepEqual(graph.approvals, {
+      approve: {
+        roles: ['manager'],
+        message: 'Ship it?',
+        params: { notes: { type: 'text' } },
+      },
+    })
+    assert.deepEqual(graph.params.seat!.choices, ['none', '1'])
+    // Every workflow the Masonfile declares, for the Request run sheet.
+    assert.deepEqual(graph.workflows, [
+      {
+        name: 'build',
+        params: {
+          seat: { type: 'choice', choices: ['none', '1'], default: 'none' },
+        },
+      },
+      {
+        name: 'release',
+        params: { rollout: { type: 'number', min: 1, max: 100 } },
+      },
+    ])
     const run = runData(db, 'r1', () => graph, {
       repository: () => 'git@github.com:example/phones.git',
       nodeName: () => 'buildbox',
@@ -362,83 +336,52 @@ describe('Run view', () => {
       runData(db, 'none', () => undefined),
       undefined,
     )
+    // Setup is not a stage the page shows.
     assert.deepEqual(
-      run.stages.map((entry) => entry.name),
-      ['test', 'build/ios', 'approve'],
+      run.stages.map((entry) => [entry.name, entry.status, entry.node ?? null]),
+      [
+        ['test', 'succeeded', 'buildbox'],
+        ['build/ios', 'running', 'buildbox'],
+        ['approve', 'awaiting_approval', null],
+      ],
     )
     assert.deepEqual(
       run.history.map((entry) => entry.number),
       [7, 6],
     )
-    const options = (extra: Partial<RunViewOptions>): RunViewOptions => ({
-      tab: 'graph',
-      now: 122_000,
-      log: { text: 'one\ntwo\n' },
-      can: { cancel: true, restart: true, request: true, approve: () => true },
-      base: '',
-      viewer: { node: 'master' },
-      ...extra,
-    })
-    const whole = runView(run, options({}))
-    // Where the run is: its project's Runs and builds, its branch there, then the run.
-    assert.deepEqual(crumbTrail(whole), [
-      'Mason Master /',
-      'Projects /projects',
-      'Phones /projects/phones',
-      'Runs and builds /projects/phones/runs',
-      'main /projects/phones/runs?branch=main',
-      'Run 7 /runs/r1 *',
-    ])
-    assert.equal(
-      crumbTrail(runView(run, options({ viewer: { node: 'host' } })))[0],
-      'Mason Host /',
+    assert.deepEqual(
+      run.history[0]!.stages.map((entry) => entry.name),
+      ['test', 'build/ios', 'approve'],
     )
-    assert.match(whole, /<h2 data-log-title>.*Whole run log<\/h2>/)
-    assert.match(whole, /data-run="r1" data-live="1"/)
-    // A live run's page says when its socket reconnects, has a step list for
-    // the stage it follows, and can jump back to its log's end.
-    assert.match(
-      whole,
-      /<span class="live-state" data-live-state role="status" hidden>/,
+    assert.deepEqual(
+      run.steps.map((entry) => [
+        entry.stage,
+        entry.id,
+        entry.title,
+        entry.logStart,
+        entry.logEnd,
+      ]),
+      [
+        ['test', 1, 'npm ci', 0, 6],
+        ['test', 2, 'npm test', 6, null],
+      ],
     )
-    assert.match(
-      whole,
-      /<ol class="steps" data-steps hidden><\/ol><div data-log>/,
+    assert.deepEqual(
+      run.artifacts.map((artifact) => ({ ...artifact })),
+      [{ stage: 'test', name: 'junit', kind: 'data', size: 2000 }],
     )
-    assert.match(
-      whole,
-      /<button type="button" class="jump" data-jump aria-label="Go to the end of the log" title="Go to the end of the log" hidden><span class="icon" aria-hidden="true">&#xe5cf;<\/span><\/button><\/div>/,
+    assert.deepEqual(
+      [run.number, run.trigger, run.requestedBy, run.description, run.params],
+      [7, 'push', 'dana', '1.0 (7)', { seat: '1' }],
     )
-    // The header: the run number when it reserved no build number, the
-    // start in the viewer's zone, how long it queued and took and where,
-    // then the commit and who asked; the branch only in the breadcrumbs.
-    assert.match(whole, /<h1><a href="\?" class="run-title">Run 7<\/a> <span/)
-    assert.match(
-      whole,
-      /<p class="run-meta"><span class="icon"[^>]*>[^<]*<\/span> <time datetime="1970-01-01T00:00:02.000Z" [^>]*data-format="date">1970-01-01 0000 UTC<\/time> · queued 1s · took 2m 0s · on <span class="mono">buildbox<\/span><\/p><p class="run-meta"><span class="icon"[^>]*>[^<]*<\/span> <span class="mono">aaaaaaaaaaaa<\/span> · Push by dana<\/p>/,
-    )
-    assert.doesNotMatch(whole, /github\.com|run-meta">[^]*fork_right|build #/)
-    assert.equal(
-      (whole.match(/>main</g) ?? []).length,
-      1,
-      'the branch is in the breadcrumbs only',
-    )
-    assert.equal(runTitle(run), 'Run 7')
-    // With the build number it reserved, that leads, and the run number follows.
+    assert.equal(run.project.repository, 'git@github.com:example/phones.git')
+    assert.equal(run.buildNumber, null)
+    // With the build number it reserved.
     const numbered = runData(db, 'r1', () => graph, {
       nodeName: () => 'buildbox',
       buildNumber: (id) => (id === 'r1' ? '26110201' : undefined),
     })!
     assert.equal(numbered.buildNumber, '26110201')
-    assert.match(
-      runView(numbered, options({})),
-      /<h1><a href="\?" class="run-title">Build 26110201<\/a> <small class="run-number">Run 7<\/small> <span/,
-    )
-    assert.equal(runTitle(numbered), 'Build 26110201 · Run 7')
-    assert.equal(
-      runTitle({ ...numbered, workflow: 'nightly' }),
-      'Build 26110201 · Run 7 · nightly',
-    )
     // A node with no name is left out, never shown by its fingerprint.
     db.prepare(
       "UPDATE job_stages SET worker='mldsa65:0123456789abcdef' WHERE job_id='r1' AND name='test'",
@@ -451,43 +394,19 @@ describe('Run view', () => {
       unnamed.stages.map((entry) => entry.node ?? null),
       [null, 'buildbox', null],
     )
-    assert.doesNotMatch(runView(unnamed, options({})), /mldsa65/)
-    db.prepare(
-      "UPDATE job_stages SET worker='abc123' WHERE job_id='r1' AND name='test'",
-    ).run()
-    // A run its push trigger did not cover says why, not as a failure.
-    assert.match(
-      runView(
-        {
-          ...run,
-          status: 'cancelled',
-          finished: 3000,
-          reason: "Not built: main is not in the push trigger's branches",
-        },
-        options({}),
-      ),
-      /<p class="state-cancelled">Not built: main is not in the push trigger&#39;s branches<\/p>/,
-    )
-    assert.match(
-      runView({ ...run, reason: 'Setup failed' }, options({})),
-      /<p class="state-failed">Setup failed<\/p>/,
-    )
+    assert.doesNotMatch(JSON.stringify(unnamed), /mldsa65/)
     // A key's requester is shown by the start of its id at most, or as the master names it.
     db.prepare("UPDATE jobs SET actor=? WHERE id='r1'").run(
       'key:830f19b00cf214361f85ac579fa12497',
     )
     const keyed = runData(db, 'r1', () => graph)!
     assert.equal(keyed.actor, 'key:830f19b00cf214361f85ac579fa12497')
-    assert.match(runView(keyed, options({})), /Push by key 830f19<\/p>/)
-    assert.doesNotMatch(runView(keyed, options({})), /830f19b/)
-    assert.match(
-      runView(
-        runData(db, 'r1', () => graph, {
-          requester: (label) => `Paul Puey · key "CI" (${label.slice(4, 10)})`,
-        })!,
-        options({}),
-      ),
-      /Push by Paul Puey · key &quot;CI&quot; \(830f19\)/,
+    assert.equal(keyed.requestedBy, 'key 830f19')
+    assert.equal(
+      runData(db, 'r1', () => graph, {
+        requester: (label) => `Paul Puey · key "CI" (${label.slice(4, 10)})`,
+      })!.requestedBy,
+      'Paul Puey · key "CI" (830f19)',
     )
     // The host's cache holds it as the master named it.
     db.exec(
@@ -500,108 +419,5 @@ describe('Run view', () => {
     )
     assert.equal(runData(db, 'r1', () => graph)!.buildNumber, '26110202')
     assert.equal(runData(db, 'r0', () => graph)!.buildNumber, null)
-    db.exec("UPDATE jobs SET actor='dana',requested_by=NULL WHERE id='r1'")
-    assert.match(whole, /1\.0 \(7\)/)
-    assert.match(whole, /on <span class="mono">buildbox<\/span>/)
-    assert.match(
-      whole,
-      /<span class="mono">seat<\/span> = <span class="mono">&quot;1&quot;<\/span>/,
-    )
-    assert.match(whole, /data-path="\/api\/v2\/runs\/r1\/cancel"/)
-    assert.match(whole, /name="seat"/)
-    assert.match(whole, /href="\/runs\/r0">Run 6/)
-    const selected = runView(run, options({ selected: 'test', logOffset: 8 }))
-    assert.match(selected, /data-stage="test" data-status="[a-z_]+"><h2>/)
-    assert.match(selected, /npm ci/)
-    assert.match(selected, /npm test/)
-    assert.doesNotMatch(selected, /Whole run log/)
-    assert.match(selected, /junit/)
-    assert.match(selected, /data-offset="8"/)
-    // A page holding none of the log (the host's) starts its live log at the end.
-    assert.match(
-      runView(run, options({ selected: 'test', logTail: true })),
-      /data-offset="tail"/,
-    )
-    assert.match(
-      selected,
-      /href="\/api\/v2\/runs\/r1\/logs\?plain=1&amp;stage=test" download/,
-    )
-    assert.match(
-      selected,
-      /<li data-name="test" data-status="succeeded"[^>]*><a href="\?stage=test" aria-current="true"/,
-    )
-    const step = runView(
-      run,
-      options({
-        selected: 'test',
-        step: 2,
-        log: { text: 'two\n', first: 2 },
-        logLines: '/x?stage=test&step=2',
-        logStart: 2,
-        logTotal: 3,
-      }),
-    )
-    assert.match(step, /Lines of this step/)
-    assert.match(step, /data-line="2">two/)
-    // The page asks for the step's other lines by number.
-    assert.match(
-      step,
-      /data-offset="-1" data-lines="\/x\?stage=test&amp;step=2" data-start="2" data-total="3"/,
-    )
-    assert.match(step, /class="step open"/)
-    // A step's lines have the button to their end too.
-    assert.match(step, /data-jump/)
-    // Hidden means hidden, though buttons are drawn inline-flex.
-    assert.match(stylesheet, /\[data-log\] \.jump\[hidden\]\{display:none\}/)
-    assert.match(selected, /data-jump/)
-    // A finished run's page has no live parts, but its log has the button to its end.
-    const finished = runView({ ...run, finished: 3000 }, options({}))
-    assert.doesNotMatch(finished, /data-live-state|data-steps/)
-    assert.match(finished, /data-jump/)
-    // The button is a circle at the log's bottom right.
-    assert.match(
-      stylesheet,
-      /\[data-log\] \.jump\{position:absolute;right:16px;bottom:16px;width:36px;height:36px;min-height:36px;padding:0;border-radius:50%/,
-    )
-    const approval = runView(run, options({ selected: 'approve' }))
-    assert.match(approval, /Ship it\?/)
-    assert.match(approval, /data-fields="stage,approve,notes"/)
-    assert.match(
-      runView(
-        run,
-        options({
-          selected: 'approve',
-          can: {
-            cancel: false,
-            restart: false,
-            request: false,
-            approve: () => false,
-          },
-        }),
-      ),
-      /Waiting for manager to approve/,
-    )
-    const timelineTab = runView(
-      run,
-      options({
-        tab: 'timeline',
-        log: { unavailable: 'Logs are on the master.' },
-      }),
-    )
-    assert.match(timelineTab, /class="timeline"/)
-    assert.match(timelineTab, /Logs are on the master\./)
-    assert.equal(runBuilds(db, run), '')
-    // The run's own builds, the default first, each other named by its variant.
-    db.exec(`INSERT INTO apps(id,slug,name,position,enabled) VALUES(1,'app.example.run','Run App',0,1);
-      INSERT INTO channels(id,app_id,platform,channel_key,formats,enabled) VALUES(1,1,'android','k','["apk"]',1);`)
-    const insert = db.prepare(
-      "INSERT INTO builds(app_id,channel_id,platform,branch,commit_hash,version,build_number,bundle_id,format,digest,size,file_key,published_at,expires_at,state,changelog,source,custom_fields,variant,run) VALUES(1,1,'android','main','x','2.0',?,'app.example.run','apk',?,1,?,0,1,'ready','','pipeline','{}',?,?)",
-    )
-    insert.run('9', 'd2', 'k2', 'arm64-v8a', 'r1')
-    insert.run('7', 'd1', 'k1', '', 'r1')
-    insert.run('8', 'd3', 'k3', '', 'r2')
-    const header = runBuilds(db, run)
-    assert.match(header, /Run App 2\.0 \(7\)[^]*Run App 2\.0 \(9\) arm64-v8a/)
-    assert.doesNotMatch(header, /\(8\)/)
   })
 })

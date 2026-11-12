@@ -7,8 +7,12 @@ export interface PageHeaderProps {
   title: ReactNode
   /** A status or kind pill beside the title. */
   pill?: ReactNode
+  /** A line of facts under the title (when, where, who). */
+  meta?: ReactNode
   /** One sentence about the page. */
   description?: ReactNode
+  /** Blocks after the description: a reason, a disclosure. */
+  details?: ReactNode
   /** The page's actions, on the right: at most one primary. */
   actions?: ReactNode
 }
@@ -17,7 +21,9 @@ export interface PageHeaderProps {
 export function PageHeader({
   title,
   pill,
+  meta,
   description,
+  details,
   actions,
 }: PageHeaderProps): JSX.Element {
   return (
@@ -29,7 +35,9 @@ export function PageHeader({
           </h1>
           {pill}
         </div>
+        {meta}
         {description != null && <p className="m-page__desc">{description}</p>}
+        {details}
       </div>
       {actions != null && <div className="m-page__actions">{actions}</div>}
     </header>

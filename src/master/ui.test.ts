@@ -523,10 +523,22 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       60_000,
       'the test stage',
     )
+    // The run page is the web app's; it reads the run, its graph, steps,
+    // history and details in one request, and its log a page at a time.
     const page = await request(c.master, 'GET', `/runs/${run}`, developer)
     assert.equal(page.status, 200)
+    assert.match(page.text, /<div id="root"><\/div>/)
+    assert.doesNotMatch(page.text, /\/assets\/run\.js/)
+    const read = await request(
+      c.master,
+      'GET',
+      `/api/v2/runs/${run}?include=graph,steps,history,details`,
+      developer,
+    )
+    assert.equal(read.status, 200, read.text)
     // The header names who requested the run, and the API names them too.
-    assert.match(page.text, /Requested by developer person<\/p>/)
+    assert.equal(read.json.details.requestedBy, 'developer person')
+    assert.equal(read.json.details.trigger, 'request')
     const shown = await request(
       c.master,
       'GET',
@@ -535,18 +547,24 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.equal(shown.json.actor, `account:${people.developer}`)
     assert.equal(shown.json.requestedBy, 'developer person')
-    assert.match(page.text, /class="pipeline-graph"/)
-    assert.match(page.text, /data-stage="android"/)
-    assert.match(page.text, /data-path="\/api\/v2\/runs\/[^/]+\/cancel"/)
-    assert.match(page.text, /src="\/assets\/run\.js"/)
+    assert(
+      read.json.layout.bubbles.some(
+        (bubble: Json) => bubble.name === 'android',
+      ),
+    )
+    assert.deepEqual(
+      read.json.history.map((entry: Json) => entry.id).includes(run),
+      true,
+    )
     const stage = await request(
       c.master,
       'GET',
-      `/runs/${run}?stage=test`,
+      `/api/v2/runs/${run}/logs?stage=test&from=0&count=500`,
       developer,
     )
-    assert.match(stage.text, /class="ansi-green">green<\/span> line/)
-    assert.match(stage.text, /second line/)
+    assert.equal(stage.status, 200, stage.text)
+    assert.match(stage.json.text, /\u001b\[32mgreen\u001b\[0m line/)
+    assert.match(stage.json.text, /second line/)
     const steps = c.master
       .master!.database.db.prepare(
         "SELECT id,log_start,log_end FROM job_steps WHERE job_id=? AND stage='test' ORDER BY id",
@@ -561,24 +579,42 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
           step.log_end >= step.log_start,
       ),
     )
+    assert.deepEqual(
+      read.json.steps
+        .filter((step: Json) => step.stage === 'test')
+        .map((step: Json) => step.id),
+      steps.map((step: Json) => step.id),
+    )
     const one = await request(
       c.master,
       'GET',
-      `/runs/${run}?stage=test&step=${steps[0].id}`,
+      `/api/v2/runs/${run}/logs?stage=test&step=${steps[0].id}&from=0`,
       developer,
     )
-    assert.match(one.text, /Lines of this step/)
-    assert.match(
-      (
-        await request(
-          c.master,
-          'GET',
-          `/runs/${run}?stage=test&step=999`,
-          developer,
-        )
-      ).text,
-      /There is no such step/,
+    assert.equal(one.status, 200, one.text)
+    const none = await request(
+      c.master,
+      'GET',
+      `/api/v2/runs/${run}/logs?stage=test&step=999&from=0`,
+      developer,
     )
+    assert.equal(none.status, 404)
+    assert.match(none.json.error, /No such step/)
+    // A stage that has written nothing (an approval, one not started) has no lines.
+    const quiet = await request(
+      c.master,
+      'GET',
+      `/api/v2/runs/${run}/logs?stage=not-started&last=1`,
+      developer,
+    )
+    assert.equal(quiet.status, 200, quiet.text)
+    assert.deepEqual(quiet.json, {
+      start: 1,
+      total: 0,
+      first: 1,
+      text: '',
+      end: 0,
+    })
     const raw = await request(
       c.master,
       'GET',
@@ -664,18 +700,19 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       run,
     )
     scripted.ws.close()
-    // A live page leaves a partial last line to the socket, which sends it once the stage settles.
+    // A live log's last page holds a partial last line; the page's socket
+    // resumes after the bytes it holds and sends the line once it is whole.
     const logFile = c.master.master!.scheduler.logFile(run, 'test')
     const whole = readFileSync(logFile)
     appendFileSync(logFile, 'partial')
     const partial = await request(
       c.master,
       'GET',
-      `/runs/${run}?stage=test`,
+      `/api/v2/runs/${run}/logs?stage=test&last=1`,
       developer,
     )
-    assert.match(partial.text, new RegExp(`data-offset="${whole.length}"`))
-    assert.doesNotMatch(partial.text, /partial/)
+    assert.equal(partial.json.end, whole.length + 'partial'.length)
+    assert.match(partial.json.text, /\npartial$/)
     const rest = await live(c.master, { authorization: `Bearer ${key.token}` })
     assert(typeof rest !== 'number')
     rest.send({ subscribe: 'run', run, stage: 'test', after: whole.length })
@@ -740,21 +777,19 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       ).status,
       200,
     )
-    assert.equal(
-      (await request(c.master, 'GET', `/runs/${run}`, signIn('tester'))).status,
-      403,
-    )
-    assert.equal(
-      (await request(c.master, 'GET', '/runs/none', developer)).status,
-      404,
-    )
-    const timeline = await request(
+    // A tester reads the 403 inside the app, and a run that does not exist
+    // its unknown-run state, each with that status.
+    const refused = await request(
       c.master,
       'GET',
-      `/runs/${run}?tab=timeline`,
-      developer,
+      `/runs/${run}`,
+      signIn('tester'),
     )
-    assert.match(timeline.text, /class="timeline"/)
+    assert.equal(refused.status, 403)
+    assert.match(refused.text, /<div id="root"><\/div>/)
+    const missing = await request(c.master, 'GET', '/runs/none', developer)
+    assert.equal(missing.status, 404)
+    assert.match(missing.text, /<div id="root"><\/div>/)
     // The Masonfile tab shows the file at a run's commit.
     const file = await request(
       c.master,
@@ -781,6 +816,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       'the run on the host',
     )
     const developer = onHost('developer')
+    // The page is the web app's, read from the host's copy.
     const page = await request(
       host,
       'GET',
@@ -788,10 +824,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       developer,
     )
     assert.equal(page.status, 200)
-    assert.match(page.text, /<meta name="mason-csrf"/)
-    assert.match(page.text, /Requested by developer person<\/p>/)
-    assert.match(page.text, /data-offset="tail"/)
-    assert.match(page.text, /<title>Run \d+ /)
+    assert.match(page.text, /<div id="root"><\/div>/)
+    const include = `/api/v2/runs/${run}?include=graph,steps,history,details`
+    const read = await request(host, 'GET', include, developer)
+    assert.equal(read.status, 200, read.text)
+    assert.equal(read.json.details.requestedBy, 'developer person')
     // The build number the run reserved reaches the host with the run, and leads its page.
     const master = c.master.master!
     master.database.db
@@ -810,46 +847,32 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       10_000,
       'the build number on the host',
     )
-    const numbered = (await request(host, 'GET', `/runs/${run}`, developer))
-      .text
-    assert.match(
-      numbered,
-      /class="run-title">Build 26110299<\/a> <small class="run-number">Run \d+<\/small>/,
+    assert.equal(
+      (await request(host, 'GET', include, developer)).json.details.buildNumber,
+      '26110299',
     )
-    assert.match(numbered, /<title>Build 26110299 · Run \d+ /)
-    assert.match(
-      (await request(c.master, 'GET', `/runs/${run}`, signIn('developer')))
-        .text,
-      /class="run-title">Build 26110299<\/a>/,
+    assert.equal(
+      (await request(c.master, 'GET', include, signIn('developer'))).json
+        .details.buildNumber,
+      '26110299',
     )
     master.database.db
       .prepare('DELETE FROM build_number_reservations WHERE reservation=?')
       .run(run)
     master.database.change('job', run)
+    // A step's lines, by number, through the host over its link.
     const step = await request(
       host,
       'GET',
-      `/runs/${run}?stage=test&step=1`,
-      developer,
+      `/api/v2/runs/${run}/logs?stage=test&step=1&from=0`,
+      { cookie: developer.cookie },
     )
-    assert.match(
-      step.text,
-      /data-lines="\/api\/v2\/runs\/[^"]+\/logs\?stage=test&amp;step=1"/,
-    )
-    // A finished run's whole log is fetched through the host, over its link;
-    // a running one's waits for the run to end.
-    const whole = (await request(host, 'GET', `/runs/${run}`, developer)).text
-    if ((c.master.master!.run(run) as Json).finished == null)
-      assert.match(whole, /The whole run’s log is shown once the run ends/)
-    else
-      assert.match(
-        whole,
-        new RegExp(`<div data-log data-lines="/api/v2/runs/${run}/logs">`),
-      )
-    assert.equal(
-      (await request(host, 'GET', `/runs/${run}`, onHost('tester'))).status,
-      403,
-    )
+    assert.equal(step.status, 200, step.text)
+    assert(step.json.start >= 1)
+    // A tester reads the 403 in the app; an unknown run its 404; nobody signed in signs in.
+    const refused = await request(host, 'GET', `/runs/${run}`, onHost('tester'))
+    assert.equal(refused.status, 403)
+    assert.match(refused.text, /<div id="root"><\/div>/)
     assert.equal(
       (await request(host, 'GET', '/runs/none', developer)).status,
       404,
@@ -1020,23 +1043,18 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
         got.push((await request(c.master, 'GET', route, session)).status)
       assert.deepEqual(got, statuses, role)
     }
-    // Backups is top-level, as the side menu has it; the run page goes
-    // through its project's Runs and builds and its branch.
+    // Backups is top-level, as the side menu has it. The run page is the web
+    // app's, whose trail goes through its project's Runs and builds and its
+    // branch (src/web/pages/run, and E2 in a browser).
     const admin = signIn('admin')
     assert.deepEqual(
       crumbTrail((await request(c.master, 'GET', '/backups', admin)).text),
       ['Mason Master /', 'Backups /backups *'],
     )
-    const runTrail = crumbTrail(
+    assert.match(
       (await request(c.master, 'GET', `/runs/${run}`, admin)).text,
+      /<div id="root"><\/div>/,
     )
-    assert.deepEqual(runTrail.slice(0, 4), [
-      'Mason Master /',
-      'Projects /projects',
-      'wizard /projects/wizard',
-      'Runs and builds /projects/wizard/runs',
-    ])
-    assert.match(runTrail.at(-1)!, new RegExp(`^Run \\d+ /runs/${run} \\*$`))
     // Projects & apps is the web app's: its links and Add project follow the
     // session's permissions, which it reads.
     const permissions = async (role: string): Promise<string[]> =>

@@ -189,7 +189,10 @@ export function runPageData(
       finished: stage.finished ?? null,
       ...(stage.node == null ? {} : { node: stage.node }),
     })),
-    artifacts: run.artifacts,
+    artifacts: run.artifacts.map((artifact) => ({
+      ...artifact,
+      url: `${reader.artifactBase()}/runs/${encodeURIComponent(run.id)}/artifacts/${encodeURIComponent(artifact.name)}`,
+    })),
   }
   if (include.has('graph') && run.graph != null) {
     const states = new Map<string, StageState>(

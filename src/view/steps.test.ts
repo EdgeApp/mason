@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'mocha'
-import { stepItems, stepTree } from './steps.js'
+import { MAX_STEP_DEPTH, stepTree } from '../shared/steps.js'
+import { stepItems } from './steps.js'
 
 const step = (
   id: number,
@@ -21,7 +22,7 @@ const step = (
   ...(parent == null ? {} : { parent }),
 })
 
-describe('Run page steps', () => {
+describe('Run page steps (the shared order; the old page script’s list until M11)', () => {
   it('lists each section followed by its own steps, indented, so sections run at once never interleave', () => {
     const steps = [
       step(1, 'npm ci'),
@@ -84,6 +85,7 @@ describe('Run page steps', () => {
       stepTree(deep).map(({ depth }) => depth),
       [0, 1, 2, 3, 4, 4, 4],
     )
+    assert.equal(MAX_STEP_DEPTH, 4)
     assert.equal(stepItems('x', []), '<li class="empty">No steps yet.</li>')
     assert.match(
       stepItems('x', [

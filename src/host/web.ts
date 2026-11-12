@@ -41,7 +41,6 @@ import {
   approvalRolesFromGraph,
   notificationsFor,
 } from '../view/notifications.js'
-import { graphFromJson, runData, runTitle, runView } from '../view/run.js'
 import { search } from '../view/search.js'
 import { page, shell, type FramedPage, type Viewer } from '../view/shell.js'
 import { escape } from '../view/html.js'
@@ -509,6 +508,9 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       res.cookie(SESSION_COOKIE, token, cookieOptions)
       res.redirect(303, '/')
     })
+  // The run page is the web app's, read from this host's copy: a tester
+  // reads its 403 inside it, and a run the host does not hold its
+  // unknown-run state, each with that status.
   router.get('/runs/:id', (req, res) => {
     const found = hostViewer(host, req)
     if (found == null) {
@@ -516,91 +518,14 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       return
     }
     if (found.viewer.role === 'tester') {
-      render(
-        res.status(403),
-        found.viewer,
-        'Run',
-        '<h1>Run</h1><p>Runs are for developers and up.</p>',
-        'catalog',
-      )
+      sendShell(res, { status: 403 })
       return
     }
-    const db = host.cache.db
-    const id = String(req.params.id)
-    const run = runData(db, id, (job) => {
-      const row = db
-        .prepare('SELECT workflow,graph FROM jobs WHERE id=?')
-        .get(job) as { workflow: string; graph: string | null } | undefined
-      return row == null ? undefined : graphFromJson(row.graph, row.workflow)
-    })
-    if (run == null) {
-      render(
-        res.status(404),
-        found.viewer,
-        'Run unavailable',
-        '<h1>Run unavailable</h1><p>There is no such run.</p>',
-        'dashboard',
-      )
-      return
-    }
-    const query = (name: string): string | undefined =>
-      typeof req.query[name] === 'string'
-        ? (req.query[name] as string)
-        : undefined
-    const stage = run.stages.some((entry) => entry.name === query('stage'))
-      ? query('stage')
-      : undefined
-    const step =
-      stage == null || query('step') == null ? undefined : Number(query('step'))
-    const logs = `/api/v2/runs/${encodeURIComponent(id)}/logs`
-    const role = found.viewer.role
-    render(
-      res,
-      found.viewer,
-      runTitle(run),
-      runView(run, {
-        ...(stage == null ? {} : { selected: stage }),
-        ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
-        tab: query('tab') === 'timeline' ? 'timeline' : 'graph',
-        now: host.now(),
-        // The logs are on the master. The page asks for the lines in view by
-        // number through the host, which forwards each request over the
-        // master's link; a running stage's new lines arrive by its live
-        // stream, relayed over the same link.
-        log:
-          stage == null && run.finished == null
-            ? {
-                unavailable:
-                  'The whole run’s log is shown once the run ends: choose a stage to follow its log here.',
-              }
-            : { text: '' },
-        ...(stage == null && run.finished == null
-          ? {}
-          : {
-              logLines:
-                stage == null
-                  ? logs
-                  : `${logs}?stage=${encodeURIComponent(stage)}${step != null && Number.isSafeInteger(step) ? `&step=${step}` : ''}`,
-            }),
-        // A running stage's page holds none of its log: the socket starts
-        // with its last part.
-        ...(run.finished == null ? { logTail: true } : {}),
-        can: {
-          cancel: true,
-          restart: true,
-          request: true,
-          approve: (name) =>
-            role === 'admin' ||
-            (
-              run.graph?.approvals[name]?.roles ?? ['admin', 'manager']
-            ).includes(role),
-        },
-        base: '',
-        viewer: found.viewer,
-      }),
-      'dashboard',
-      found.csrf,
-    )
+    const known =
+      host.cache.db
+        .prepare('SELECT 1 FROM jobs WHERE id=?')
+        .get(String(req.params.id)) != null
+    sendShell(res, known ? {} : { status: 404 })
   })
   router.get('/search', (req, res) => {
     const found = hostViewer(host, req)

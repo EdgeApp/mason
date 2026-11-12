@@ -22,8 +22,11 @@ export interface SheetProps {
   title: ReactNode
   /** The sheet's content: fields, a list. */
   children: ReactNode
-  /** The actions: Cancel and the one primary, right-aligned. */
-  footer?: ReactNode
+  /**
+   * The actions: Cancel and the one primary, right-aligned. As a function it
+   * is handed the sheet's own close, which asks first when there are changes.
+   */
+  footer?: ReactNode | ((close: () => void) => ReactNode)
   /** `large` for more than eight fields in sections. */
   size?: 'form' | 'large'
   /** Unsaved changes: closing asks first. */
@@ -107,7 +110,9 @@ export function Sheet({
           </header>
           <div className="m-formsheet__body">{children}</div>
           {footer != null && (
-            <footer className="m-formsheet__foot">{footer}</footer>
+            <footer className="m-formsheet__foot">
+              {typeof footer === 'function' ? footer(requestClose) : footer}
+            </footer>
           )}
         </div>
       </Dialog>

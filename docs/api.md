@@ -1882,12 +1882,13 @@ export const detail: ArtifactRunDetail = {
 
 **`GET /api/v2/runs/:id?include=`** answers `RunPage`: the run (status,
 times, commit, description, reason, project), its stages (each with the
-node it ran on, by name) and saved artifacts, and the parts `include` names,
+node it ran on, by name) and saved artifacts (each with the `url` it
+downloads from: the host's origin), and the parts `include` names,
 comma-separated:
 
 | Part | Adds |
 | --- | --- |
-| `graph` | `graph`, the workflow's recorded stages, post stages, approvals (who decides each, its message and parameters) and parameters; and `layout`, its bubbles and rails in columns and rows with each stage's state. A run whose graph is no longer kept has neither. |
+| `graph` | `graph`, the workflow's recorded stages, post stages, approvals (who decides each, its message and parameters), parameters, and `workflows`, every workflow of the recorded Masonfile with its parameters (each parameter as the Masonfile declares it: `type`, `choices`, `default`, `min`, `max`, `pattern`, `description`); and `layout`, its bubbles and rails in columns and rows with each stage's state. A run whose graph is no longer kept has neither. |
 | `steps` | `steps`, every stage's steps with `logStart` and `logEnd`, the byte range of their lines in the stage's log. |
 | `history` | `history`, the last 10 runs of the same branch and workflow, each with its stages' states. |
 | `details` | `details`: `trigger`, `requestedBy`, the `buildNumber` the run reserved, its `params`, the project's `repository` and the `nodes` it ran on. |

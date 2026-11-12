@@ -912,17 +912,20 @@ describe('Host cache, sign-in and offline serving', function () {
     )
     const runs = await (await developer.get('/projects/edge/runs')).text()
     assert.match(runs, /href="\/runs\/m4-run"/)
+    // The run page is the web app's, read from the host's copy: its trail
+    // starts from Mason Host (src/web/pages/run).
     const runPage = await developer.get('/runs/m4-run')
     assert.equal(runPage.status, 200)
-    // The host's run page starts its breadcrumbs from Mason Host.
-    assert.deepEqual(crumbTrail(await runPage.text()), [
-      'Mason Host /',
-      'Projects /projects',
-      'Edge /projects/edge',
-      'Runs and builds /projects/edge/runs',
-      'develop /projects/edge/runs?branch=develop',
-      'Run 4242 /runs/m4-run *',
-    ])
+    assert.match(await runPage.text(), /<div id="root"><\/div>/)
+    const read = (await (
+      await developer.get(
+        '/api/v2/runs/m4-run?include=graph,steps,history,details',
+      )
+    ).json()) as { number: number; project: { slug: string }; branch: string }
+    assert.deepEqual(
+      [read.number, read.project.slug, read.branch],
+      [4242, 'edge', 'develop'],
+    )
     const masonfile = await (
       await developer.get('/projects/edge/masonfile')
     ).text()

@@ -328,9 +328,22 @@ describe('Master web API: the pages’ reads', function () {
     assert.equal(page.details!.trigger, 'request')
     assert.equal(page.details!.repository != null, true)
     assert.deepEqual(page.details!.nodes, [page.stages[0]!.node])
-    assert.deepEqual(page.artifacts, [
-      { stage: 'compile', name: 'report.html', kind: 'report', size: 42 },
-    ])
+    // Each saved artifact downloads from the host's origin.
+    assert.deepEqual(
+      page.artifacts.map(({ url, ...rest }) => ({
+        ...rest,
+        url: url.replace(/^https?:\/\/[^/]+/, ''),
+      })),
+      [
+        {
+          stage: 'compile',
+          name: 'report.html',
+          kind: 'report',
+          size: 42,
+          url: `/runs/${f.runs.built}/artifacts/report.html`,
+        },
+      ],
+    )
     // Only the parts asked for.
     const bare = (
       await get(`/api/v2/runs/${f.runs.built}?include=`, as('developer'))

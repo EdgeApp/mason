@@ -21,12 +21,12 @@ const server = (
 }
 
 describe('The routes the app has ported and the node’s own pages', () => {
-  it('has ported Projects & apps, Artifacts and Search', () => {
+  it('has ported Projects & apps, Artifacts, Search and the run page', () => {
     assert.deepEqual(
       PAGE_ROUTES.filter((route) => route.page != null).map(
         (route) => route.path,
       ),
-      ['/projects', '/artifacts', '/search'],
+      ['/projects', '/artifacts', '/search', '/runs/:id'],
     )
   })
 

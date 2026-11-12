@@ -1,5 +1,6 @@
 import {
   asArray,
+  asBoolean,
   asNumber,
   asObject,
   asOptional,
@@ -21,12 +22,25 @@ export const runPath = (id: string, include: RunInclude[]): string =>
 export const runIncludes = ['graph', 'steps', 'history', 'details'] as const
 export type RunInclude = (typeof runIncludes)[number]
 
-/** A parameter a workflow or an approval takes. */
+/**
+ * A parameter a workflow or an approval takes: `choice` (one of `choices`),
+ * `boolean`, `number` (within `min` and `max`), `text` (any text) or
+ * `string` (one line, matching `pattern`).
+ */
 export interface ParamSpec {
   type: string
   choices?: string[]
   default?: unknown
   description?: string
+  min?: number
+  max?: number
+  pattern?: string
+}
+
+/** A workflow of the run's recorded Masonfile, for the Request run sheet. */
+export interface WorkflowSpec {
+  name: string
+  params: Record<string, ParamSpec>
 }
 
 /** A stage of a run's recorded graph. */
@@ -48,6 +62,8 @@ export interface RunGraph {
     { roles: string[]; message?: string; params: Record<string, ParamSpec> }
   >
   params: Record<string, ParamSpec>
+  /** Every workflow the recorded Masonfile declares, with its parameters. */
+  workflows?: WorkflowSpec[]
 }
 
 /** One bubble of the drawn pipeline graph. */
@@ -132,6 +148,15 @@ export interface RunDetails {
   nodes: string[]
 }
 
+/** A run's saved artifact. */
+export interface RunArtifact {
+  stage: string
+  name: string
+  kind: string
+  size: number
+  url: string
+}
+
 /** What `GET /api/v2/runs/:id?include=…` answers: the run, and the parts asked for. */
 export interface RunPage {
   id: string
@@ -147,7 +172,8 @@ export interface RunPage {
   reason: string | null
   project: { slug: string; name: string }
   stages: RunPageStage[]
-  artifacts: Array<{ stage: string; name: string; kind: string; size: number }>
+  /** Saved artifacts, each with where it downloads (the host's origin, on the master). */
+  artifacts: RunArtifact[]
   /** `include=graph`: the recorded graph and its layout with the stages' states. */
   graph?: RunGraph
   layout?: Layout
@@ -174,6 +200,9 @@ export const asParamSpec = asObject<ParamSpec>({
   choices: asOptional(asArray(asString)),
   default: asUnknown,
   description: asOptional(asString),
+  min: asOptional(asNumber),
+  max: asOptional(asNumber),
+  pattern: asOptional(asString),
 })
 
 const asMatrixValue: Cleaner<string | number | boolean> = (raw) => {
@@ -205,6 +234,11 @@ export const asRunGraph = asObject<RunGraph>({
     }),
   ),
   params: asRecord(asParamSpec),
+  workflows: asOptional(
+    asArray(
+      asObject<WorkflowSpec>({ name: asString, params: asRecord(asParamSpec) }),
+    ),
+  ),
 })
 
 export const asLayout = asObject<Layout>({
@@ -267,11 +301,12 @@ export const asRunPage = asObject<RunPage>({
     }),
   ),
   artifacts: asArray(
-    asObject({
+    asObject<RunArtifact>({
       stage: asString,
       name: asString,
       kind: asString,
       size: asNumber,
+      url: asString,
     }),
   ),
   graph: asOptional(asRunGraph),
@@ -301,3 +336,77 @@ export const asRunPage = asObject<RunPage>({
 })
 
 export { asRecord }
+
+/** Lines of a run's log one request asks for. */
+export const LOG_PAGE_LINES = 500
+
+/** Which log: the whole run's, a stage's, or one step's lines of a stage's. */
+export interface LogTarget {
+  stage?: string | undefined
+  step?: number | undefined
+}
+
+/**
+ * `GET /api/v2/runs/:id/logs`, both nodes (the host forwards it): with
+ * `from` (a line number) or `last`, a page of lines as JSON; without
+ * either, the whole log as text to download (`plain` strips its escapes).
+ */
+export function runLogsPath(
+  id: string,
+  target: LogTarget,
+  page?: { from: number } | { last: true } | { plain: true },
+): string {
+  const query = new URLSearchParams()
+  if (page != null && 'plain' in page) query.set('plain', '1')
+  if (target.stage != null) query.set('stage', target.stage)
+  if (target.stage != null && target.step != null)
+    query.set('step', String(target.step))
+  if (page != null && 'from' in page) query.set('from', String(page.from))
+  if (page != null && 'last' in page) query.set('last', '1')
+  if (page != null && !('plain' in page))
+    query.set('count', String(LOG_PAGE_LINES))
+  const text = query.toString()
+  return `/api/v2/runs/${encodeURIComponent(id)}/logs${text === '' ? '' : `?${text}`}`
+}
+
+/** A page of a run's log, by line number. */
+export interface RunLogPage {
+  /** The number of the log's first line: 1, or where a step's lines start in its stage's. */
+  start: number
+  /** The lines the log holds. */
+  total: number
+  /** The number of the first line returned. */
+  first: number
+  /** The lines, each ending in a newline but perhaps the log's last. */
+  text: string
+  /** The stage log's bytes up to the end of the text. */
+  end: number
+}
+
+export const asRunLogPage = asObject<RunLogPage>({
+  start: asNumber,
+  total: asNumber,
+  first: asNumber,
+  text: asString,
+  end: asNumber,
+})
+
+/** `POST /api/v2/runs` (request) and `/restart` answer the new run; `/approve` the run. */
+export interface RunCreated {
+  id: string
+  number: number
+}
+
+export const asRunCreated = asObject<RunCreated>({
+  id: asString,
+  number: asNumber,
+})
+
+/** `POST /api/v2/runs/:id/cancel`: whether the run was still running. */
+export const asCancelled = asObject({ cancelled: asBoolean })
+
+/** A run action's path: `/api/v2/runs` for a request, else the run's action. */
+export const runActionPath = (
+  id: string,
+  action: 'cancel' | 'restart' | 'approve',
+): string => `/api/v2/runs/${encodeURIComponent(id)}/${action}`

@@ -134,3 +134,14 @@ export function shortAge(at: number, now: number): string {
   if (days < 365) return `${Math.floor(days / 30)}mo`
   return `${Math.floor(days / 365)}y`
 }
+
+/** A duration as a clock, for stage lists and step rows: `0:21`, `4:12`, `1:05:09`. */
+export function clock(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  const two = (value: number): string => String(value).padStart(2, '0')
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  return hours > 0
+    ? `${hours}:${two(minutes)}:${two(seconds % 60)}`
+    : `${minutes}:${two(seconds % 60)}`
+}

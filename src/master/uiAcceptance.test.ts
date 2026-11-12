@@ -60,7 +60,8 @@ const STREAM_GATE = path.join(tmpdir(), `mason-e11-gate-${process.pid}`)
 /**
  * Two apps, two workflows: build-alpha publishes alpha, build-beta beta;
  * beta shares alpha's sequence. A third, stream, logs 100,000 lines (2 MB)
- * and then a line every quarter second until STREAM_GATE exists.
+ * and then a line every quarter second until STREAM_GATE exists. A fourth,
+ * release, takes a channel and waits for an administrator's approval.
  */
 export const masonfile = `
 import type { Setup, Stage } from '@mason/types'
@@ -76,6 +77,13 @@ export function setup(m: Setup) {
   m.workflow('stream', { triggers: [{ request: true }] }, (w) => {
     w.stage('stream', { on: 'master', run: streamLog })
   })
+  m.workflow('release', { triggers: [{ request: true }], params: { channel: { type: 'choice', choices: ['testers', 'store'], default: 'testers', description: 'Where the release goes.' } } }, (w) => {
+    const approved = w.approval('approve', { roles: ['admin'], message: 'Ship the release?', params: { notes: { type: 'string', description: 'What changed.' } } })
+    w.stage('ship', { needs: [approved], on: 'master', run: ship })
+  })
+}
+export async function ship(ctx: Stage) {
+  ctx.log.info('shipped to ' + ctx.run.params.channel)
 }
 export async function streamLog(ctx: Stage) {
   const { existsSync } = await import('node:fs')
@@ -760,8 +768,15 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         'Runs and builds',
         'develop*',
       ])
+      // The run page is the web app's: its trail is the app's, from the
+      // node's pill through the project's Runs and builds and the branch.
+      const appTrail = async (expected: string[]): Promise<void> => {
+        await b.script(
+          `const got = [...document.querySelectorAll('.m-crumbs li')].map((li) => li.textContent.replace(/[\\uE000-\\uF8FF]/g, '') + (li.querySelector('[aria-current="page"]') ? '*' : '')).join(' › '); if (got !== ${JSON.stringify(expected.join(' › '))}) throw new Error('The breadcrumbs are ' + got)`,
+        )
+      }
       await b.tap('table.runs tbody tr:first-child a')
-      await b.visible(`History of develop`)
+      await b.visible('History of develop')
       await at(`/runs/${latest.id}`)
       const run = `Run ${latest.number}`
       const levels = [
@@ -772,17 +787,25 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         'develop',
         run,
       ]
-      await trail([...levels.slice(0, -1), `${run}*`])
+      await appTrail([
+        'Mason Master',
+        'Projects & apps',
+        'Fixture',
+        'Runs and builds',
+        'develop',
+        `${run}*`,
+      ])
       await b.shot('breadcrumb-run-after.png')
-      // From the right back to the first: each pill opens its level.
-      await pill(`/runs/${latest.id}`)
-      await b.visible('History of develop')
-      await at(`/runs/${latest.id}`)
-      await pill('/projects/fixture/runs?branch=develop')
+      // From the right back to the first: each crumb opens its level, the
+      // server's pages with a full load until their milestones.
+      await b.tap('.m-crumbs a[href="/projects/fixture/runs?branch=develop"]')
       await b.visible('The latest runs on develop.')
       await at('/projects/fixture/runs?branch=develop')
       await trail([...levels.slice(0, 4), 'develop*'])
-      await pill('/projects/fixture/runs')
+      // Back on the run, its Runs and builds crumb, then the server's pills.
+      await b.open(`/runs/${latest.id}`)
+      await b.visible('History of develop')
+      await b.tap('.m-crumbs a[href="/projects/fixture/runs"]')
       await b.visible('The latest runs on every branch.')
       await at('/projects/fixture/runs')
       await trail([...levels.slice(0, 3), 'Runs and builds*'])
@@ -795,11 +818,6 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await at('/projects')
       // Projects & apps is the web app's, with its own trail; its node pill
       // opens the master's home, Projects & apps again.
-      const appTrail = async (expected: string[]): Promise<void> => {
-        await b.script(
-          `const got = [...document.querySelectorAll('.m-crumbs li')].map((li) => li.textContent.replace(/[\\uE000-\\uF8FF]/g, '') + (li.querySelector('[aria-current="page"]') ? '*' : '')).join(' › '); if (got !== ${JSON.stringify(expected.join(' › '))}) throw new Error('The breadcrumbs are ' + got)`,
-        )
-      }
       await appTrail(['Mason Master', 'Projects & apps*'])
       await b.tap('.m-crumbs a.m-node-pill[href="/"]')
       await b.visible('their latest builds and runs')
@@ -1260,14 +1278,18 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       'the run on the host',
     )
     const h = await browser('mason-e11-dev', host, '1280x860')
-    const pre = "document.querySelector('[data-log] pre')"
-    const button = "document.querySelector('[data-jump]')"
-    const rows = "[...document.querySelectorAll('[data-log] code .line')]"
+    // The web app's log viewer: a scrolling body, its round button to the
+    // end, and the lines in view, each numbered.
+    const pre = "document.querySelector('.m-log__body')"
+    const button = "document.querySelector('.m-log__end')"
+    const rows = "[...document.querySelectorAll('.m-log__line')]"
     /** The highest line number drawn. */
     const last = `Math.max(0, ...${rows}.map((l) => Number(l.dataset.line)))`
+    /** A drawn line's text. */
+    const lineText = "(l) => l.querySelector('.m-log__t').textContent"
     /** Whether a line with this text is drawn. */
     const drawn = (text: string): string =>
-      `${rows}.some((l) => l.textContent === ${JSON.stringify(text)})`
+      `${rows}.map(${lineText}).includes(${JSON.stringify(text)})`
     /** No more than a window of lines is in the page. */
     const windowed = `(${rows}.length > 0 && ${rows}.length < 1500)`
     const atEnd = `(${pre}.scrollHeight - ${pre}.scrollTop - ${pre}.clientHeight < 2)`
@@ -1302,7 +1324,7 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       // master over the host's link, with only a window of lines drawn and
       // no button while it follows.
       await holds(
-        `${rows}.some((l) => /^waiting \\d+$/.test(l.textContent)) && ${windowed}`,
+        `${rows}.map(${lineText}).some((t) => /^waiting \\d+$/.test(t)) && ${windowed}`,
         'the live log',
       )
       await more('new lines', `${atEnd} && ${button}.hidden && ${windowed}`)
@@ -1311,23 +1333,23 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await holds(`${drawn('stream line 1')} && ${windowed}`, 'the top')
       await holds(`!${button}.hidden`, 'the button shown')
       await h.script(
-        "document.querySelector('[data-log]').scrollIntoView({ block: 'end' })",
+        "document.querySelector('.m-log').scrollIntoView({ block: 'end' })",
       )
       await h.shot('host-live-log-button.png')
       // Halfway down: the middle of the log, still a window.
       await scrollTo(0.5)
       await holds(
-        `${rows}.some((l) => /^stream line [4-5]\\d{4}$/.test(l.textContent)) && ${windowed}`,
+        `${rows}.map(${lineText}).some((t) => /^stream line [4-5]\\d{4}$/.test(t)) && ${windowed}`,
         'the middle',
       )
       // The button goes to the end and follows again, then hides.
-      await h.tap('[data-jump]')
+      await h.tap('.m-log__end')
       await more('lines while following', `${atEnd} && ${button}.hidden`)
       // Wrapped lines are measured, and the log still scrolls to its top.
-      await h.tap('[data-wrap]')
+      await h.tap('.m-log [data-wrap]')
       await scrollTo(0)
       await holds(drawn('stream line 1'), 'the top, wrapped')
-      await h.tap('[data-wrap]')
+      await h.tap('.m-log [data-wrap]')
       // The run ends: its log is asked for a window at a time, through the host.
       writeFileSync(STREAM_GATE, '')
       await c.until(
@@ -1345,22 +1367,19 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await holds(`${drawn('stream line 1')} && ${windowed}`, 'the start')
       await holds(`${pre}.scrollTop === 0 && !${button}.hidden`, 'the button')
       await h.script(
-        "document.querySelector('[data-log]').scrollIntoView({ block: 'end' })",
+        "document.querySelector('.m-log').scrollIntoView({ block: 'end' })",
       )
       await h.shot('host-finished-log.png')
-      await h.tap('[data-jump]')
+      await h.tap('.m-log__end')
       await holds(
-        `${atEnd} && ${button}.hidden && ${rows}.some((l) => l.textContent === 'stream done') && ${windowed}`,
+        `${atEnd} && ${button}.hidden && ${drawn('stream done')} && ${windowed}`,
         'the end of the log',
       )
       // So is the whole run's, its stages one after another.
       await h.open(`/runs/${id}`)
       await holds(windowed, 'the whole run log')
-      await h.tap('[data-jump]')
-      await holds(
-        `${rows}.some((l) => l.textContent === 'stream done')`,
-        'the whole run log’s end',
-      )
+      await h.tap('.m-log__end')
+      await holds(drawn('stream done'), 'the whole run log’s end')
     } finally {
       await h.close()
       rmSync(STREAM_GATE, { force: true })
@@ -1621,6 +1640,154 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         }
       ).commit_sha
       assert.equal(commitOf, sha)
+    } finally {
+      await b.close()
+    }
+  })
+
+  it('N4 an administrator requests a run from the run page’s sheet, follows it live to its approval, approves it, and cancels another after the confirm', async () => {
+    const master = c.master.master!
+    const log = 'run-actions.log'
+    writeFileSync(path.join(artifacts!, log), '')
+    const note = (line: string): void =>
+      appendFileSync(path.join(artifacts!, log), `${line}\n`)
+    const b = await browser('mason-n4', c.master, '1440x900')
+    const status = (): Promise<string> =>
+      value(b, "document.querySelector('[data-run-status]')?.dataset.runStatus")
+    try {
+      await masterSignIn(b, 'paul', PASSWORDS.paul!)
+      await holds(b, "location.pathname !== '/sign-in'", 'signed in')
+      const from = runs['build-alpha@master']
+      await b.open(`/runs/${from.id}`)
+      await holds(
+        b,
+        "document.querySelector('[data-run-status]') != null",
+        'the run page',
+      )
+      // The keyboard: from the top, Tab walks the skip link, the shell and
+      // the run page in visual order, each stop with a visible focus ring
+      // (a graph bubble's ring is its disc's stroke).
+      const stops: string[] = []
+      await b.script('document.activeElement?.blur(); window.scrollTo(0, 0)')
+      for (let n = 0; n < 45; n++) {
+        await b.command('pressKey', { key: 'Tab' })
+        stops.push(
+          await value(
+            b,
+            "(() => { const e = document.activeElement; const s = getComputedStyle(e); const disc = e.classList?.contains('m-gbubble') ? getComputedStyle(e.querySelector('.m-gbubble__disc')).strokeWidth : ''; const ring = (s.outlineStyle !== 'none' && parseFloat(s.outlineWidth) >= 2) || s.boxShadow !== 'none' || disc === '3px'; return (ring ? 'ring ' : 'NO RING ') + e.tagName.toLowerCase() + ' ' + (e.getAttribute('aria-label') || e.textContent || e.getAttribute('placeholder') || '').replace(/[\\uE000-\\uF8FF]/g, '').replace(/\\s+/g, ' ').trim().slice(0, 60) })()",
+          ),
+        )
+      }
+      // Reduce Motion stops the running ring and the graph's fades.
+      const calm = await value(
+        b,
+        "[...document.styleSheets].flatMap((sheet) => [...sheet.cssRules]).filter((rule) => rule.media?.mediaText.includes('prefers-reduced-motion')).map((rule) => rule.cssText).filter((text) => text.includes('m-gbubble__ring') || text.includes('m-dot--live')).length",
+      )
+      writeFileSync(
+        path.join(artifacts!, 'run-tab-order.log'),
+        `$ Tab ×45 on ${origin(c.master)}/runs/${from.id} at 1440x900\n${stops.map((stop, n) => `${n + 1}. ${stop}`).join('\n')}\n$ reduced-motion rules covering the graph ring and live dot: ${calm}\n`,
+      )
+      assert.match(stops[0]!, /^ring a Skip to content$/)
+      assert.deepEqual(
+        stops.filter(
+          (stop) =>
+            stop.startsWith('NO RING') && !stop.startsWith('NO RING body'),
+        ),
+        [],
+        stops.join('\n'),
+      )
+      assert(Number(calm) >= 2, calm)
+      // The sheet: master, the release workflow, its typed parameter.
+      await b.tap('.m-page__actions button[aria-haspopup="dialog"]')
+      await holds(
+        b,
+        'document.querySelector(\'form[name="request-run"]\') != null',
+        'the sheet',
+      )
+      await b.script(
+        "const s = document.querySelector('form[name=\"request-run\"] select[name=\"workflow\"]'); if (![...s.options].some((o) => o.value === 'release')) throw new Error('The workflows are ' + [...s.options].map((o) => o.value)); Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(s, 'release'); s.dispatchEvent(new Event('change', { bubbles: true }))",
+      )
+      await holds(
+        b,
+        "document.body.textContent.includes('Parameters of release')",
+        'the release’s parameters',
+      )
+      await b.shot('request-run-sheet.png')
+      // Marks the page: a reload would lose it, so what follows is live.
+      await b.script('window.__n4 = true')
+      await b.tap('.m-formsheet__foot .m-btn--primary')
+      await holds(
+        b,
+        `location.pathname.startsWith('/runs/') && location.pathname !== '/runs/${from.id}' && window.__n4 === true`,
+        'the new run, in the same page',
+      )
+      const id = decodeURIComponent(
+        String(await value(b, 'location.pathname')).replace('/runs/', ''),
+      )
+      const job = master.run(id) as Json
+      assert.equal(job.workflow, 'release')
+      note(
+        `$ Request run: master, release, channel testers\n  → /runs/${id} (Run ${job.number})`,
+      )
+      // Followed live to its approval: the status, the bubble, the box.
+      await holds(
+        b,
+        "['running', 'awaiting_approval'].includes(document.querySelector('[data-run-status]')?.dataset.runStatus) && document.querySelector('.m-gbubble[data-stage=\"approve\"]')?.dataset.status === 'awaiting_approval' && document.querySelector('[data-approval=\"approve\"]') != null && window.__n4 === true",
+        'the approval, live',
+      )
+      note(
+        `  live: status ${await status()}, approve awaiting_approval, no reload`,
+      )
+      await b.type('[data-approval="approve"] input', 'First release')
+      await b.shot('run-approve.png')
+      await b.tap('[data-approval="approve"] .m-btn--primary')
+      await holds(
+        b,
+        "document.querySelector('[data-run-status]')?.dataset.runStatus === 'succeeded' && document.querySelector('[data-approval]') == null && window.__n4 === true",
+        'the run finished after the approval, live',
+      )
+      const approved = master.database.db
+        .prepare("SELECT status FROM job_stages WHERE job_id=? AND name='ship'")
+        .get(id) as { status: string }
+      assert.equal(approved.status, 'succeeded')
+      note(
+        `$ Approve (notes "First release")\n  live: status ${await status()}, ship ${approved.status}`,
+      )
+      // Another run, running: Cancel run asks first.
+      rmSync(STREAM_GATE, { force: true })
+      const other = await c.api('POST', '/api/v2/runs', {
+        project: 'fixture',
+        branch: 'develop',
+        workflow: 'stream',
+      })
+      assert.equal(other.status, 202, other.text)
+      await b.open(`/runs/${other.json.id}`)
+      await holds(
+        b,
+        "document.querySelector('[data-run-status]')?.dataset.runStatus === 'running'",
+        'the other run running',
+      )
+      await b.script('window.__n4 = true')
+      await b.tap('.m-page__actions .m-btn--danger')
+      await holds(
+        b,
+        "document.querySelector('[role=alertdialog]') != null",
+        'the confirm',
+      )
+      await b.shot('run-cancel-confirm.png')
+      await b.tap('[role=alertdialog] .m-btn--danger-filled')
+      await holds(
+        b,
+        "document.querySelector('[data-run-status]')?.dataset.runStatus === 'cancelled' && window.__n4 === true",
+        'the cancel, live',
+      )
+      assert.equal(
+        (master.run(String(other.json.id)) as Json).status,
+        'cancelled',
+      )
+      note(
+        `$ Cancel run → confirm "Cancel run"\n  live: status ${await status()}`,
+      )
     } finally {
       await b.close()
     }
