@@ -57,6 +57,7 @@ import { StoreCatalogSource } from '../catalog/source.js'
 import { Devices } from '../devices/store.js'
 import { Refused } from './builds.js'
 import { masonfileData, readApi } from '../node/readApi.js'
+import { sendShell } from '../node/webRoutes.js'
 import { hostAccount, hostReader, OFFLINE_TEXT } from './reads.js'
 
 const OFFLINE_BANNER = `<p class="notice" role="status">${OFFLINE_TEXT}</p>`
@@ -953,6 +954,9 @@ export function hostApp(
       people: false,
       account: false,
       frame,
+      shell: (res, options) => {
+        sendShell(res, options)
+      },
       password: hostPassword(host),
       invitation: hostInvitation(host),
     }),
@@ -977,13 +981,22 @@ export function hostApp(
   app.use((_req, res) => {
     res.status(404).send('Not found')
   })
-  const errors: ErrorRequestHandler = (error, _req, res, _next) => {
+  const errors: ErrorRequestHandler = (error, req, res, _next) => {
+    const message =
+      error instanceof Error && error.name === 'SignInRefused'
+        ? error.message
+        : 'The request is invalid or has expired. Return to sign in and try again.'
+    // The sign-in protocol's own failures are the web app's to show.
+    if (req.path.startsWith('/auth/')) {
+      sendShell(res, { status: 400, flow: { state: 'invalid', message } })
+      return
+    }
     res
       .status(400)
       .send(
         page(
           'Request could not be completed',
-          `<p>${escape(error instanceof Error && error.name === 'SignInRefused' ? error.message : 'The request is invalid or has expired. Return to sign in and try again.')}</p><a href="/auth/login">Sign in</a>`,
+          `<p>${escape(message)}</p><a href="/auth/login">Sign in</a>`,
         ),
       )
   }

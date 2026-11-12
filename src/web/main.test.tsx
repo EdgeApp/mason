@@ -114,6 +114,9 @@ describe('The web app entry', () => {
     await act(async () =>
       screen.getByRole('button', { name: 'Try again' }).click(),
     )
-    await screen.findByRole('heading', { level: 1, name: 'Set up Mason' })
+    await screen.findByRole('heading', {
+      level: 1,
+      name: 'Set up this master',
+    })
   })
 })

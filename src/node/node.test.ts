@@ -250,8 +250,13 @@ describe('Configuration-free nodes', function () {
       status: 'ready',
       role: 'master',
     })
+    // First-run setup is the web app's.
     const home = await get(url + '/', node.identity.pin)
-    assert.match(home.body, /Set up this master/)
+    assert.match(home.body, /<div id="root"><\/div>/)
+    assert.match(
+      (await get(url + '/api/v2/node', node.identity.pin)).body,
+      /"setupNeeded":true/,
+    )
     assert.equal((await get(url + '/missing', node.identity.pin)).status, 404)
     assert.equal(
       (await get(url + '/assets/style.css', node.identity.pin)).status,
@@ -271,9 +276,14 @@ describe('Configuration-free nodes', function () {
       "INSERT INTO accounts(name,username,password,role,created_at) VALUES('x','x','{}','admin',1)",
     )
     assert.equal(masterConfigured(db), true)
+    // Signed out, it opens the web app's sign-in.
     assert.match(
       (await get(url + '/', node.identity.pin)).body,
-      /<h1>Sign in<\/h1>/,
+      /<div id="root"><\/div>/,
+    )
+    assert.match(
+      (await get(url + '/api/v2/node', node.identity.pin)).body,
+      /"setupNeeded":false/,
     )
     io.stop()
     assert.equal(await done, 0)

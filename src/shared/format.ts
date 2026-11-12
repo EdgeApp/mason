@@ -90,3 +90,12 @@ export function relativeTime(
 
 /** A count with thousands separators: `1,284`. */
 export const count = (value: number): string => value.toLocaleString('en-US')
+
+/**
+ * When a throttled sign-in may try again: `Try again at 1435 PT` the same
+ * day, else with the absolute form's day (`Try again at Nov 8 0912 PT`).
+ */
+export function tryAgainAt(at: number, now: number, timeZone?: string): string {
+  const when = absoluteTime(at, now, timeZone)
+  return `Try again at ${when.replace(/^Today /, '')}`
+}

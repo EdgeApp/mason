@@ -1,5 +1,6 @@
 import type { JSX } from 'react'
 import { Link, useLocation } from 'react-router'
+import { isPasswordPath } from '../../shared/routes.js'
 import { asDashboardData, DASHBOARD_PATH } from '../../shared/api/index.js'
 import { useResource } from '../hooks/useResource.js'
 import { useProfile } from '../profile/NodeProfile.js'
@@ -105,6 +106,7 @@ export function Sidebar({ nav }: { nav: NavItem[] }): JSX.Element {
                 key={entry.key}
                 className="m-navitem"
                 to={entry.href}
+                reloadDocument={isPasswordPath(entry.href)}
                 aria-current={entry === current ? 'page' : undefined}
               >
                 <Icon name={entry.icon} />

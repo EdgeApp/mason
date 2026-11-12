@@ -1,4 +1,5 @@
 import type { JSX } from 'react'
+import { useHref } from 'react-router'
 import { useApi } from '../api/context.js'
 import {
   APPEARANCE_LABELS,
@@ -34,6 +35,7 @@ export function AccountMenu(): JSX.Element {
   const client = useApi()
   const narrow = useMedia(NARROW)
   const [appearance, setAppearance] = useAppearance()
+  const account = useHref('/account')
   const cluster = status?.cluster
   const entries: MenuEntry[] = [
     {
@@ -59,7 +61,13 @@ export function AccountMenu(): JSX.Element {
       ),
     },
     { kind: 'separator' },
-    { kind: 'item', label: 'Your account', icon: 'person', to: '/account' },
+    // A password page: entered by a full load, under its own CSP.
+    {
+      kind: 'item',
+      label: 'Your account',
+      icon: 'person',
+      run: () => client.leave(account),
+    },
     { kind: 'separator' },
     { kind: 'label', content: <p className="m-t-eyebrow">Appearance</p> },
     ...APPEARANCES.map(
@@ -80,7 +88,7 @@ export function AccountMenu(): JSX.Element {
         void client
           .signOut()
           .catch(() => undefined)
-          .then(() => client.leave(profile.signIn('/')))
+          .then(() => client.leave(profile.signedOut))
       },
     },
   ]

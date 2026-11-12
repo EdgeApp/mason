@@ -54,7 +54,6 @@ import type { Master } from './runtime.js'
 import { repository, version } from '../version.js'
 import { clientAddress } from './forward.js'
 import { ProjectNotFound } from './projects.js'
-import type { ProviderSignIn } from './providerSignIn.js'
 import { masterCatalogPages } from './catalogPages.js'
 import {
   appleSigning,
@@ -66,6 +65,7 @@ import {
   workerStatus,
 } from './reads.js'
 import { masonfileData } from '../node/readApi.js'
+import { sendShell } from '../node/webRoutes.js'
 
 /** A person as the People page and Your account draw them. */
 function personRow(person: Person): PersonRow {
@@ -143,23 +143,6 @@ function appVisible(
 }
 
 const status = '<p class="notice" role="status" data-field="status" hidden></p>'
-
-const setupPage = `<section class="card"><h2>Create the first account</h2><p>Enter the six-digit setup code this master printed in its terminal when it started. The first account is an administrator.</p><form data-mason="setup"><label for="code">Setup code</label><input id="code" name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" required><label for="username">Username</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password" minlength="12" required><p><button>Create account</button></p>${status}</form></section><section class="card"><h2>Restore from a backup</h2><p>Rebuild this master from its encrypted git backup instead. It comes back as the same master, so its nodes reconnect: stop the master the backup came from first.</p><form data-mason="restore"><label for="restore-code">Setup code</label><input id="restore-code" name="code" inputmode="numeric" pattern="[0-9]{6}" required><label for="repository">Backup repository</label><input id="repository" name="repository" placeholder="git@github.com:owner/mason-backup.git" required><label for="key">Backup key file</label><input id="key" name="key" type="file" required><label for="date">Date (optional, YYYY-MM-DD)</label><input id="date" name="date" pattern="\\d{4}-\\d{2}-\\d{2}"><p><button class="secondary">Restore</button></p>${status}</form></section>`
-
-/** The sign-in page: a button for each provider the master offers, and the password form. */
-function signInPage(signIn: ProviderSignIn): string {
-  const origin = signIn.origin()
-  const links = signIn
-    .offered()
-    .map(
-      (provider) =>
-        `<a class="button" href="${escape(`${origin!}/auth/start/${encodeURIComponent(provider.id)}?return=/`)}">Sign in with ${escape(provider.name)}</a>`,
-    )
-    .join('')
-  return `<section class="card">${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username or email and a password:</p>`}${passwordForm}</section>`
-}
-
-const passwordForm = `<form data-mason="sign-in"><label for="username">Username or email</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><p><button>Sign in</button></p>${status}</form>`
 
 function backupsPage(master: Master, session: MasterSession): string {
   const actor = sessionActor(session)
@@ -250,9 +233,9 @@ export function masterPages(
     )
   }
   app.get('/', (req, res, next) => {
+    // First-run setup and restore are the web app's.
     if (!master.configured()) {
-      hashing(res)
-      send(res, 'Set up this master', setupPage)
+      sendShell(res)
       return
     }
     const current = session(req)
@@ -1292,8 +1275,7 @@ export function masterPages(
       res.redirect(303, '/')
       return
     }
-    hashing(res)
-    send(res, 'Sign in', signInPage(master.providerSignIn))
+    sendShell(res)
   })
   app.get('/backups', (req, res) => {
     const current = session(req)

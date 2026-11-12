@@ -2,12 +2,10 @@ import type { JSX } from 'react'
 import { useLocation } from 'react-router'
 import { Page } from '../layout/Page.js'
 import type { Crumb } from '../layout/Breadcrumbs.js'
-import { BareShell } from '../layout/BareShell.js'
 import { buttonClass } from '../ui/Button.js'
 import { EmptyState } from '../ui/EmptyState.js'
 import { Icon } from '../ui/Icon.js'
 import type { IconName } from '../ui/icons.js'
-import { PageHeader } from '../ui/PageHeader.js'
 
 /** Where the node's own page for this address is: outside the app's mount. */
 function ServerLink({ label }: { label: string }): JSX.Element {
@@ -63,23 +61,5 @@ export function PlaceholderPage({
     <Page crumbs={crumbs} title={title} description={description}>
       <Coming milestone={milestone} icon={icon} />
     </Page>
-  )
-}
-
-/** A signed-out page a later milestone fills, in the bare shell. */
-export function SignedOutPlaceholder({
-  title,
-  description,
-  milestone,
-}: {
-  title: string
-  description: string
-  milestone: string
-}): JSX.Element {
-  return (
-    <BareShell>
-      <PageHeader title={title} description={description} />
-      <Coming milestone={milestone} icon="login" />
-    </BareShell>
   )
 }

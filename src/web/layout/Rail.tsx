@@ -1,5 +1,6 @@
 import type { JSX } from 'react'
 import { Link, useLocation } from 'react-router'
+import { isPasswordPath } from '../../shared/routes.js'
 import { currentNav, type NavItem } from '../profile/navigation.js'
 import { Icon } from '../ui/Icon.js'
 
@@ -21,6 +22,7 @@ export function Rail({ nav }: { nav: NavItem[] }): JSX.Element {
           key={entry.key}
           className="m-rail__item"
           to={entry.href}
+          reloadDocument={isPasswordPath(entry.href)}
           aria-current={entry === current ? 'page' : undefined}
           aria-label={entry.label === entry.short ? undefined : entry.label}
         >

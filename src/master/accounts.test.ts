@@ -24,6 +24,7 @@ import { policy, type Action } from './permissions.js'
 import { localOperator, roles, type Role } from './roles.js'
 import { masterApp } from './web.js'
 import { seedSecret } from '../test/secrets.js'
+import { assertShell } from '../test/webShell.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -247,17 +248,13 @@ describe('Master sign-in, setup, people and permissions', function () {
     )
     assert.match(home.text, /Projects &amp; apps/)
     assert.match(home.text, /This master is not backed up/)
-    // Only the pages that hash a password, and the worker, may run WebAssembly.
+    // Only the password workers may run WebAssembly: sign-in is the web
+    // app's shell, which starts its worker and compiles nothing itself.
     assert.doesNotMatch(
       home.headers.get('content-security-policy')!,
       /wasm-unsafe-eval/,
     )
-    assert.match(
-      (await request(c.master, 'GET', '/sign-in')).headers.get(
-        'content-security-policy',
-      )!,
-      /script-src 'self' 'wasm-unsafe-eval'/,
-    )
+    assertShell(await request(c.master, 'GET', '/sign-in'))
     const bundle = await request(c.master, 'GET', '/assets/password-worker.js')
     assert.equal(bundle.status, 200)
     assert.match(bundle.headers.get('content-type')!, /javascript/)
@@ -395,10 +392,12 @@ describe('Master sign-in, setup, people and permissions', function () {
       quiet,
     )
     try {
-      const page = await request(node, 'GET', '/')
-      assert.match(page.text, /Set up this master/)
-      assert.match(page.text, /data-mason="setup"/)
-      assert.match(page.text, /data-mason="restore"/)
+      // Setup and restore are the web app's (its node info says setup is needed).
+      assertShell(await request(node, 'GET', '/'))
+      assert.equal(
+        (await request(node, 'GET', '/api/v2/node')).json.setupNeeded,
+        true,
+      )
       // Before the first account: sign-in and backups lead to setup; other pages are 404.
       assert.equal(
         (await request(node, 'GET', '/sign-in')).headers.get('location'),
@@ -460,9 +459,11 @@ describe('Master sign-in, setup, people and permissions', function () {
       assert.equal(signedOut.headers.get('location'), '/sign-in')
       assert.equal((await request(node, 'GET', '/backups')).status, 303)
       assert.equal((await request(node, 'GET', '/api/v2/projects')).status, 401)
-      assert.match(
-        (await request(node, 'GET', '/sign-in')).text,
-        /data-mason="sign-in"/,
+      assertShell(await request(node, 'GET', '/sign-in'))
+      assertShell(await request(node, 'GET', '/sign-in?signed_out=1'))
+      assert.equal(
+        (await request(node, 'GET', '/api/v2/node')).json.setupNeeded,
+        false,
       )
       const home = await request(node, 'GET', '/', { cookie })
       assert.equal(home.status, 200)

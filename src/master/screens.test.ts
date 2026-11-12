@@ -92,6 +92,7 @@ export const BETA = 'com.example.beta-with-a-longer-id'
 export const SCREENS: Screen[] = [
   // Signed out.
   { name: 'setup', path: '/', as: 'none', node: 'fresh-master' },
+  { name: 'restore', path: '/?restore', as: 'none', node: 'fresh-master' },
   { name: 'sign-in', path: '/sign-in', as: 'none', node: 'master' },
   { name: 'invite', path: '/auth/invite#{invite}', as: 'none', node: 'master' },
   { name: 'host-sign-in', path: '/auth/login', as: 'none', node: 'host' },
@@ -820,10 +821,14 @@ describe('Every Mason screen at three widths', function () {
     const who = SIGN_IN[viewer]
     const form = node === c.master ? '/sign-in' : '/auth/login'
     await b.open(origin(node) + (node === c.master ? form : `${form}?return=/`))
-    await until(b, "document.querySelector('#username') != null", 'the form')
-    await b.type('#username', who)
-    await b.type('#password', PASSWORDS[who]!)
-    await b.tap('form[data-mason="sign-in"] button')
+    await until(
+      b,
+      "document.querySelector('#sign-in-username') != null",
+      'the form',
+    )
+    await b.type('#sign-in-username', who)
+    await b.type('#sign-in-password', PASSWORDS[who]!)
+    await b.tap('form[name="sign-in"] button[type="submit"]')
     await until(
       b,
       `location.pathname !== ${JSON.stringify(form)}`,

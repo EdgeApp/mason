@@ -13,7 +13,13 @@ import {
   shellContentSecurityPolicy,
 } from './csp.js'
 import { nodeWebApp } from './webApp.js'
-import { WEB_ASSETS, webAppRoutes, webBundlesDir } from './webRoutes.js'
+import { assertShell } from '../test/webShell.js'
+import {
+  sendShell,
+  WEB_ASSETS,
+  webAppRoutes,
+  webBundlesDir,
+} from './webRoutes.js'
 
 /** Serves an app on a free port and returns its origin and a closer. */
 async function serve(
@@ -145,6 +151,36 @@ describe('The React app on a node', () => {
       )
   })
 
+  it('answers the shell at a node’s own address with a status and a provider sign-in’s state, escaped', async () => {
+    const app = express()
+    app.get('/plain', (_req, res) => sendShell(res))
+    app.get('/flow', (_req, res) =>
+      sendShell(res, {
+        status: 403,
+        flow: { state: 'failed', message: 'No "x" <b>&</b> here' },
+      }),
+    )
+    const { origin, server } = await serve(app)
+    servers.push(server)
+    const read = async (
+      route: string,
+    ): Promise<{ status: number; headers: Headers; text: string }> => {
+      const reply = await fetch(origin + route)
+      return {
+        status: reply.status,
+        headers: reply.headers,
+        text: await reply.text(),
+      }
+    }
+    assert.equal(assertShell(await read('/plain')), undefined)
+    const flow = await read('/flow')
+    assert.deepEqual(assertShell(flow, 403), {
+      state: 'failed',
+      message: 'No "x" <b>&</b> here',
+    })
+    assert.doesNotMatch(flow.text, /<b>/)
+  })
+
   it('says so when the app is not built', async () => {
     const empty = mkdtempSync(
       path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'web-'),
@@ -157,6 +193,11 @@ describe('The React app on a node', () => {
       const reply = await fetch(`${origin}/_web/runs`)
       assert.equal(reply.status, 503)
       assert.match(await reply.text(), /not built/)
+      const shell = express()
+      shell.get('/sign-in', (_req, res) => sendShell(res, { dir: empty }))
+      const bare = await serve(shell)
+      servers.push(bare.server)
+      assert.equal((await fetch(`${bare.origin}/sign-in`)).status, 503)
       assert.equal(
         (await fetch(`${origin}${WEB_ASSETS}/theme-boot.js`)).status,
         404,

@@ -153,9 +153,9 @@ pages, not API routes, and are limited to 120 requests a minute per address:
 - `GET /auth/callback/:id` uses that state once, has the master exchange the
   code with the provider, and signs in the enabled person whose email, or
   whose address for that method, is the verified email the provider
-  asserts, ignoring case. It sets the session cookie and answers a page that
-  moves on to the return path from the master's own origin, since a
-  SameSite=Strict cookie is not sent on the provider's redirect. A provider
+  asserts, ignoring case. It sets the session cookie and answers the web
+  app, which moves on to the return path from the master's own origin, since
+  a SameSite=Strict cookie is not sent on the provider's redirect. A provider
   that does not assert a verified email, an address nobody has, or a
   disabled person is refused (403, with the reason). A method address that
   is a person's for that method wins over another person's email. An
@@ -165,6 +165,14 @@ pages, not API routes, and are limited to 120 requests a minute per address:
 
 Without the `master` setting these pages answer 404 and the master offers
 only username and password.
+
+Where these routes answer a page (signed in, refused, unavailable, and on
+the host the account switch), the page is the web app's shell, with the
+state in `<meta name="mason-flow" content="…">`: a JSON object whose
+`state` is `signedIn` (`next`), `failed` (`message`), `unavailable`,
+`invalid` (`message`, the host's refusals), `switch` (`name`, `provider`,
+`csrf`, `return`), `switchUnavailable` or `chooseAccount` (`provider`,
+`target`). The status codes above are unchanged.
 
 ### Requests through the host
 

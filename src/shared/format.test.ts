@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'mocha'
-import { absoluteTime, count, relativeTime } from './format.js'
+import { absoluteTime, count, relativeTime, tryAgainAt } from './format.js'
 
 const at = (iso: string): number => Date.parse(iso)
 
@@ -46,5 +46,16 @@ describe('The design language’s formats', () => {
   it('writes counts with thousands separators', () => {
     assert.equal(count(1284), '1,284')
     assert.equal(count(7), '7')
+  })
+
+  it('says when a throttled sign-in may try again: the clock the same day, else with the day', () => {
+    assert.equal(
+      tryAgainAt(at('2026-11-12T22:35:00Z'), now, zone),
+      'Try again at 1435 PT',
+    )
+    assert.equal(
+      tryAgainAt(at('2026-11-13T17:12:00Z'), now, zone),
+      'Try again at Nov 13 0912 PT',
+    )
   })
 })

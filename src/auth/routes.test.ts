@@ -12,8 +12,18 @@ import { createApp } from '../server.js'
 import { Accounts, randomToken } from './accounts.js'
 import { Providers } from './providers.js'
 import { fixture } from './providers.test.js'
-import type { Request, Response as ExpressResponse } from 'express'
-import { authLimiter, csrf, returnPath, SESSION_COOKIE } from './routes.js'
+import express, {
+  type Request,
+  type Response as ExpressResponse,
+} from 'express'
+import type { SignInFlow } from '../shared/api/index.js'
+import {
+  authLimiter,
+  authRoutes,
+  csrf,
+  returnPath,
+  SESSION_COOKIE,
+} from './routes.js'
 import { crumbTrail } from '../test/crumbs.js'
 
 class Browser {
@@ -661,6 +671,76 @@ describe('Mason login routes and administrator controls', () => {
       ).status,
       400,
     )
+  })
+  it('hands sign-in, invitations and the provider switch’s pages to a node’s web app', async () => {
+    const shown: Array<{ status?: number; flow?: SignInFlow }> = []
+    const app = express()
+    app.use(express.urlencoded({ extended: false }))
+    app.use(
+      authRoutes(
+        store,
+        new Providers(store.config.origin, env.configs, env.transport),
+        accounts,
+        {
+          shell: (res, options = {}) => {
+            shown.push(options)
+            res.status(options.status ?? 200).json(options.flow ?? null)
+          },
+          invitation: {
+            lookup: async () => ({ name: 'Ada' }),
+            accept: async () => {
+              throw new Error('Not here')
+            },
+          },
+        },
+      ),
+    )
+    const listening = app.listen(0, '127.0.0.1')
+    await once(listening, 'listening')
+    try {
+      const web = new Browser(
+        `http://127.0.0.1:${(listening.address() as AddressInfo).port}`,
+      )
+      // Sign-in and the invitation page are the app's; its address is still checked.
+      assert.equal((await web.get('/auth/login?return=/apps')).status, 200)
+      assert.equal((await web.get('/auth/invite')).status, 200)
+      assert.deepEqual(shown, [{}, {}])
+      assert.equal(
+        (await web.get('/auth/login?return=https://hostile.example.test'))
+          .status,
+        500,
+      )
+      // Signed in, another provider asks first, with the session's proof.
+      await login(web)
+      const proof = context(web).session.csrf
+      assert.deepEqual(
+        await (await web.get('/auth/start/second?return=/apps')).json(),
+        {
+          state: 'switch',
+          name: context(web).account.name,
+          provider: {
+            id: 'second',
+            name: env.configs.find((config) => config.id === 'second')!.name,
+          },
+          csrf: proof,
+          return: '/apps',
+        },
+      )
+      assert.deepEqual(await (await web.get('/auth/start/plain')).json(), {
+        state: 'switchUnavailable',
+      })
+      // Confirmed, the app links to the provider's account chooser.
+      const choose = (await (
+        await web.post('/auth/switch/second', { csrf: proof, return: '/apps' })
+      ).json()) as Extract<SignInFlow, { state: 'chooseAccount' }>
+      assert.equal(choose.state, 'chooseAccount')
+      const callback = await env.authorize(choose.target)
+      const switched = await web.get(callback.href)
+      assert.equal(switched.headers.get('location'), '/apps')
+    } finally {
+      listening.close()
+      await once(listening, 'close')
+    }
   })
   it('limits login requests and exposes no secret details on malformed requests', async () => {
     const anonymous = new Browser(browser.origin)

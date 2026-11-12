@@ -38,6 +38,8 @@ import { Outbox } from './outbox.js'
 import { HostCache } from './cache.js'
 import { proofLog } from '../test/proofLog.js'
 import { crumbTrail } from '../test/crumbs.js'
+import { assertShell } from '../test/webShell.js'
+import type { NodeInfo } from '../shared/api/index.js'
 import { migrateMaster } from '../master/schema.js'
 import { entities, type Change } from '../master/changes.js'
 import { seedLegacySecrets } from '../test/secrets.js'
@@ -687,13 +689,36 @@ describe('Host cache, sign-in and offline serving', function () {
       2000,
       'the disabled method on the host',
     )
+    // The web app's sign-in offers what the host's description lists.
     const login = await browser().get('/auth/login?return=/&signed_out=1')
-    const page = await login.text()
-    assert.match(page, /Sign in with first/)
-    assert.doesNotMatch(page, /Sign in with second/)
-    assert.equal(
-      (await browser().get('/auth/start/second?return=/')).status,
-      400,
+    assertShell({
+      status: login.status,
+      headers: login.headers,
+      text: await login.text(),
+    })
+    const node = (await (
+      await browser().get('/api/v2/node')
+    ).json()) as NodeInfo
+    assert.deepEqual(
+      node.signIn.providers.map((provider) => provider.id),
+      ['first'],
+    )
+    // The sign-in protocol's refusals are the web app's to show.
+    const refused = await browser().get('/auth/start/second?return=/')
+    assert.deepEqual(
+      assertShell(
+        {
+          status: refused.status,
+          headers: refused.headers,
+          text: await refused.text(),
+        },
+        400,
+      ),
+      {
+        state: 'invalid',
+        message:
+          'The request is invalid or has expired. Return to sign in and try again.',
+      },
     )
     // The host never holds the disabled method's client secret.
     const stored = JSON.stringify(runtime().cache.setting('signIn'))
@@ -1174,14 +1199,13 @@ describe('Host cache, sign-in and offline serving', function () {
       'Hugo on the host',
     )
     const hugoBrowser = browser()
+    // The web app's sign-in; the old pages' worker stays for Your account.
     const login = await hugoBrowser.get('/auth/login?return=/apps')
-    const form = await login.text()
-    assert.match(form, /data-session="\/auth\/password"/)
-    assert.match(form, /data-return="\/apps"/)
-    assert.match(
-      login.headers.get('content-security-policy')!,
-      /'wasm-unsafe-eval'/,
-    )
+    assertShell({
+      status: login.status,
+      headers: login.headers,
+      text: await login.text(),
+    })
     assert.equal(
       (await hugoBrowser.get('/assets/password-worker.js')).status,
       200,

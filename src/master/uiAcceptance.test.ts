@@ -359,9 +359,9 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
   ): Promise<void> => {
     await b.open('/sign-in')
     await b.visible('^Sign in$')
-    await b.type('#username', identifier)
-    await b.type('#password', password)
-    await b.tap('form[data-mason="sign-in"] button')
+    await b.type('#sign-in-username', identifier)
+    await b.type('#sign-in-password', password)
+    await b.tap('form[name="sign-in"] button[type="submit"]')
   }
   /** The host's sign-in form, checked by the master over the link. */
   const hostSignIn = async (
@@ -372,9 +372,9 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
   ): Promise<void> => {
     await b.open(`/auth/login?return=${encodeURIComponent(destination)}`)
     await b.visible('^Sign in$')
-    await b.type('#username', identifier)
-    await b.type('#password', password)
-    await b.tap('form[data-mason="sign-in"] button')
+    await b.type('#sign-in-username', identifier)
+    await b.type('#sign-in-password', password)
+    await b.tap('form[name="sign-in"] button[type="submit"]')
   }
   /** A request to a node, written to a proof log as a `$` line and its answer. */
   const logged = async (

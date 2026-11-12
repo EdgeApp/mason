@@ -6,6 +6,8 @@ import { fixture } from '../auth/providers.test.js'
 import { pinnedFetch } from '../node/pinnedFetch.js'
 import { cluster, type Cluster } from '../test/cluster.js'
 import { proofLog } from '../test/proofLog.js'
+import { assertShell } from '../test/webShell.js'
+import type { NodeInfo, SignInFlow } from '../shared/api/index.js'
 import { localOperator } from './roles.js'
 
 const admin = localOperator
@@ -52,6 +54,17 @@ class Browser {
     }
     return response
   }
+}
+
+/** A reply that is the web app's shell: the provider sign-in state it carries, if any. */
+async function shell(
+  reply: Awaited<ReturnType<typeof pinnedFetch>>,
+  status = 200,
+): Promise<SignInFlow | undefined> {
+  return assertShell(
+    { status: reply.status, headers: reply.headers, text: await reply.text() },
+    status,
+  )
 }
 
 describe('Provider sign-in on the master', function () {
@@ -123,13 +136,18 @@ describe('Provider sign-in on the master', function () {
 
   it('M1.1 without the master address the sign-in page offers only a password, and the provider routes are unavailable', async () => {
     const b = new Browser(c)
-    const page = await (await b.get('/sign-in')).text()
-    assert.match(page, /data-mason="sign-in"/)
-    assert.doesNotMatch(page, /Sign in with/)
-    const start = await b.get('/auth/start/first')
-    assert.equal(start.status, 404)
-    assert.match(await start.text(), /only its username and password/)
-    assert.equal((await b.get('/auth/callback/first?state=x')).status, 404)
+    // The web app draws the page from the node's description: no providers.
+    assert.equal(await shell(await b.get('/sign-in')), undefined)
+    const node = (await (await b.get('/api/v2/node')).json()) as NodeInfo
+    assert.deepEqual(node.signIn, { password: true, providers: [] })
+    assert.equal(node.masterOrigin, undefined)
+    assert.deepEqual(await shell(await b.get('/auth/start/first'), 404), {
+      state: 'unavailable',
+    })
+    assert.deepEqual(
+      await shell(await b.get('/auth/callback/first?state=x'), 404),
+      { state: 'unavailable' },
+    )
   })
 
   it('M1.2 the master area takes an https origin or nothing', async () => {
@@ -155,14 +173,15 @@ describe('Provider sign-in on the master', function () {
 
   it('M1.3 the sign-in page offers each enabled method at the master address, and Settings shows each method’s callbacks', async () => {
     const b = new Browser(c)
-    const page = await (await b.get('/sign-in')).text()
-    for (const id of ['first', 'second', 'plain'])
-      assert(
-        page.includes(`href="${origin}/auth/start/${id}?return=/"`),
-        `${id} is offered`,
-      )
-    assert.doesNotMatch(page, /Sign in with Off/)
-    assert.match(page, /data-mason="sign-in"/)
+    // The web app's sign-in starts each offered method at the master address.
+    await shell(await b.get('/sign-in'))
+    const node = (await (await b.get('/api/v2/node')).json()) as NodeInfo
+    assert.equal(node.masterOrigin, origin)
+    assert.deepEqual(
+      node.signIn.providers.map((provider) => provider.id),
+      ['first', 'second', 'plain'],
+    )
+    assert.equal(node.signIn.password, true)
     const settings = await c.api('GET', '/api/v2/settings/master')
     assert.deepEqual(settings.json, { origin })
     // An administrator signed in with a provider sees each method's callbacks.
@@ -198,10 +217,9 @@ describe('Provider sign-in on the master', function () {
 
     const b = new Browser(c)
     const done = await signIn(b, 'first')
-    assert.equal(done.status, 200)
-    const html = await done.text()
-    assert.match(html, /<meta http-equiv="refresh" content="0;url=\/nodes">/)
     const set = done.headers.getSetCookie().join('\n')
+    // The web app moves on from the master's own origin.
+    assert.deepEqual(await shell(done), { state: 'signedIn', next: '/nodes' })
     assert.match(set, /__Host-mason-master=[^;]+;.*HttpOnly/)
     assert.match(set, /SameSite=Strict/)
     assert.match(set, /__Host-mason-master-oauth=;/, 'the flow cookie goes')
@@ -236,9 +254,9 @@ describe('Provider sign-in on the master', function () {
       reason: RegExp,
     ): Promise<void> => {
       const b = new Browser(c)
-      const reply = await signIn(b, 'second', claims)
-      assert.equal(reply.status, 403)
-      assert.match(await reply.text(), reason)
+      const flow = await shell(await signIn(b, 'second', claims), 403)
+      assert.equal(flow?.state, 'failed')
+      assert.match((flow as { message: string }).message, reason)
       assert.equal(b.cookies.get('__Host-mason-master'), undefined)
     }
     await refusal(
@@ -254,9 +272,14 @@ describe('Provider sign-in on the master', function () {
 
     const b = new Browser(c)
     assert.equal((await b.get('/auth/start/off')).status, 400)
-    const disabled = await b.get('/auth/callback/off?state=x&code=y')
-    assert.equal(disabled.status, 400)
-    assert.match(await disabled.text(), /invalid or has expired/)
+    const expired = {
+      state: 'failed',
+      message: 'The sign-in is invalid or has expired.',
+    }
+    assert.deepEqual(
+      await shell(await b.get('/auth/callback/off?state=x&code=y'), 400),
+      expired,
+    )
     // A method disabled while a browser is at the provider signs nobody in.
     const midway = new Browser(c)
     const begun = await midway.get('/auth/start/second?return=/')
@@ -274,8 +297,7 @@ describe('Provider sign-in on the master', function () {
       ],
     })
     const late = await midway.get(back.pathname + back.search)
-    assert.equal(late.status, 400)
-    assert.match(await late.text(), /invalid or has expired/)
+    assert.deepEqual(await shell(late, 400), expired)
     assert.equal(midway.cookies.get('__Host-mason-master'), undefined)
     assert.equal((await midway.get('/api/v2/session')).status, 401)
     await settings.set(admin, 'signIn', enabled)
@@ -287,9 +309,7 @@ describe('Provider sign-in on the master', function () {
     const route = callback.pathname + callback.search
     const flow = b.cookies.get('__Host-mason-master-oauth')!
     b.cookies.delete('__Host-mason-master-oauth')
-    const missing = await b.get(route)
-    assert.equal(missing.status, 400)
-    assert.match(await missing.text(), /invalid or has expired/)
+    assert.deepEqual(await shell(await b.get(route), 400), expired)
     b.cookies.set('__Host-mason-master-oauth', 'x'.repeat(43))
     assert.equal((await b.get(route)).status, 400)
     b.cookies.set('__Host-mason-master-oauth', flow)
@@ -427,7 +447,8 @@ describe('Provider sign-in on the master', function () {
   it('M1.8 the master address cleared takes the buttons away again', async () => {
     await c.master.master!.settings.set(admin, 'master', {})
     const b = new Browser(c)
-    assert.doesNotMatch(await (await b.get('/sign-in')).text(), /Sign in with/)
+    const node = (await (await b.get('/api/v2/node')).json()) as NodeInfo
+    assert.deepEqual(node.signIn.providers, [])
     assert.equal((await b.get('/auth/start/first')).status, 404)
   })
 })

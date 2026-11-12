@@ -11,7 +11,10 @@ import type { Crumb } from '../layout/Breadcrumbs.js'
 import { useShell } from '../layout/ShellContext.js'
 import { Forbidden } from '../pages/errors/Forbidden.js'
 import { NotFound } from '../pages/errors/NotFound.js'
-import { PlaceholderPage, SignedOutPlaceholder } from '../pages/Placeholder.js'
+import { InvitePage } from '../pages/auth/Invite.js'
+import { SetupPage } from '../pages/auth/Setup.js'
+import { SignInPage } from '../pages/auth/SignIn.js'
+import { PlaceholderPage } from '../pages/Placeholder.js'
 import type { IconName } from '../ui/icons.js'
 import { homeFor, navItem } from './navigation.js'
 import { useProfile } from './NodeProfile.js'
@@ -263,62 +266,24 @@ function Home(): JSX.Element {
   return <Navigate to={homeFor(nav)} replace />
 }
 
-/** The signed-out pages, in the bare shell. */
-const SIGNED_OUT: ReadonlyArray<{
-  path: string
-  title: string
-  description: string
-  node?: 'master' | 'host'
-}> = [
-  {
-    path: '/sign-in',
-    title: 'Sign in',
-    description: 'Sign in to Mason.',
-    node: 'master',
-  },
-  { path: '/auth/login', title: 'Sign in', description: 'Sign in to Mason.' },
-  {
-    path: '/auth/invite',
-    title: 'Accept your invitation',
-    description: 'Choose how you sign in to Mason.',
-  },
-]
-
 /** The whole app's routes for a node. */
 export function AppRoutes({ node }: { node: NodeInfo }): JSX.Element {
   const profile = useProfile()
+  // A master with no account yet: first-run setup, wherever it was opened.
   if (node.setupNeeded)
     return (
       <Routes>
-        <Route
-          path="*"
-          element={
-            <SignedOutPlaceholder
-              title="Set up Mason"
-              description="Create the first administrator, or restore a backup."
-              milestone="M5"
-            />
-          }
-        />
+        <Route path="*" element={<SetupPage />} />
       </Routes>
     )
   return (
     <Routes>
-      {SIGNED_OUT.filter(
-        (page) => page.node == null || page.node === profile.role,
-      ).map((page) => (
-        <Route
-          key={page.path}
-          path={page.path}
-          element={
-            <SignedOutPlaceholder
-              title={page.title}
-              description={page.description}
-              milestone="M5"
-            />
-          }
-        />
-      ))}
+      {/* Signed out, in the bare shell: each node's own sign-in, and invitations on both. */}
+      <Route
+        path={profile.role === 'master' ? '/sign-in' : '/auth/login'}
+        element={<SignInPage node={node} />}
+      />
+      <Route path="/auth/invite" element={<InvitePage />} />
       <Route element={<AppShell />}>
         <Route index element={<Home />} />
         {routesFor(profile.role).map((route) => (

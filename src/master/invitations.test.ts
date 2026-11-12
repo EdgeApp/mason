@@ -10,6 +10,7 @@ import {
 } from '../auth/passwordProtocol.js'
 import { startNode, type RunningNode } from '../node/serve.js'
 import { cluster, type Cluster } from '../test/cluster.js'
+import { assertShell } from '../test/webShell.js'
 import { localOperator } from './roles.js'
 
 const admin = localOperator
@@ -212,13 +213,9 @@ describe('Invitation links', function () {
     })
     const token = tokenOf(made.json.invitation.url)
     const b = onMaster()
+    // The web app's page, which hashes in its worker; the token stays in the fragment.
     const page = await b.send('GET', '/auth/invite')
-    assert.equal(page.status, 200)
-    assert.match(page.text, /data-mason="invite"/)
-    assert.match(
-      page.headers.get('content-security-policy')!,
-      /'wasm-unsafe-eval'/,
-    )
+    assertShell(page)
     assert.doesNotMatch(page.text, new RegExp(token))
     // Another origin's page may not use or even look up a token.
     const foreign = await b.send(
@@ -348,13 +345,7 @@ describe('Invitation links', function () {
     })
     const token = tokenOf(made.json.invitation.url)
     const b = onHost()
-    const page = await b.send('GET', '/auth/invite')
-    assert.equal(page.status, 200)
-    assert.match(page.text, /data-lookup="\/auth\/invite\/lookup"/)
-    assert.match(
-      page.headers.get('content-security-policy')!,
-      /'wasm-unsafe-eval'/,
-    )
+    assertShell(await b.send('GET', '/auth/invite'))
     const foreign = await b.send(
       'POST',
       '/auth/invite/lookup',

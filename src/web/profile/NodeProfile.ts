@@ -14,6 +14,8 @@ export interface NodeProfile {
   version: string
   /** Where a 401 sends the browser (a full load, under its own CSP), given where it was. */
   signIn: (from: string) => string
+  /** Where signing out leaves for: sign-in, saying so. */
+  signedOut: string
   /** The top bar's cluster chips, from the master's workers. */
   clusterChips: boolean
   /** Seeding build numbers and Secrets live on the master only. */
@@ -28,6 +30,7 @@ export const masterProfile = (version: string): NodeProfile => ({
   short: 'Master',
   version,
   signIn: () => '/sign-in',
+  signedOut: '/sign-in?signed_out=1',
   clusterChips: true,
   secrets: true,
   admin: true,
@@ -39,6 +42,7 @@ export const hostProfile = (version: string): NodeProfile => ({
   short: 'Host',
   version,
   signIn: (from) => `/auth/login?return=${encodeURIComponent(from)}`,
+  signedOut: '/auth/login?signed_out=1',
   clusterChips: false,
   secrets: false,
   admin: false,

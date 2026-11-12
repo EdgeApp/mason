@@ -6,7 +6,7 @@ import express, {
   type Response,
   type RequestHandler,
 } from 'express'
-import { masterContentSecurityPolicy } from '../node/webApp.js'
+import type { SignInFlow } from '../shared/api/index.js'
 import { Store } from '../store.js'
 import { asId, integer, object, text } from '../validation.js'
 import { breadcrumbs, escape, type Crumb } from '../view/html.js'
@@ -43,18 +43,6 @@ export function returnPath(value: unknown): string {
   )
     throw new Error('Invalid return path')
   return path
-}
-/**
- * The page an invitation link opens. Its token is the link's fragment, so it
- * never reaches a server log; the page's script reads it, says whom it is
- * for, and sends it with the username and the client hash of the password.
- */
-export function invitationPage(): string {
-  return shell({
-    title: 'Choose your password',
-    body: `<h1>Choose your password</h1><section class="card"><form data-mason="invite" data-lookup="/auth/invite/lookup" data-accept="/auth/invite" data-return="/"><p data-field="welcome">Choose a username and a password to sign in to Mason.</p><label for="username">Username</label><input id="username" name="username" autocomplete="username" pattern="[A-Za-z0-9][A-Za-z0-9._\\-]{0,63}" maxlength="64" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password" required><label for="confirm">Confirm the password</label><input id="confirm" name="confirm" type="password" autocomplete="new-password" required><p><small>At least 8 characters with uppercase, lowercase and a number, or 17 characters or more.</small></p><button>Set password and sign in</button><p data-field="status" hidden></p></form></section>`,
-    scripts: ['/assets/master.js'],
-  })
 }
 /** A JSON post from this origin's own page; a token alone is not enough. */
 export function sameOrigin(req: Request, origin: string | undefined): void {
@@ -158,7 +146,18 @@ export function authLimiter(now: () => number): RequestHandler {
     next()
   }
 }
+/** Answers the web app's shell, with a provider sign-in's state when there is one. */
+export type ShellSender = (
+  res: Response,
+  options?: { status?: number; flow?: SignInFlow },
+) => void
+
 export interface AuthOptions {
+  /**
+   * The web app, on a host: it draws sign-in, invitations and the provider
+   * switch's pages. Without it (the standalone server) those are pages.
+   */
+  shell?: ShellSender
   /** Who an identity signs in as; the legacy server creates accounts, a host only matches its cache. */
   login?: (
     identity: Identity,
@@ -283,6 +282,11 @@ export function authRoutes(
   )
   router.get('/auth/login', (req, res) => {
     const destination = returnPath(req.query.return)
+    // The web app hashes the password (Argon2id in its worker) before it leaves.
+    if (options.shell != null) {
+      options.shell(res)
+      return
+    }
     if (
       configured().length === 1 &&
       options.password == null &&
@@ -301,23 +305,11 @@ export function authRoutes(
           `<a class="button" href="/auth/start/${escape(provider.id)}?return=${encodeURIComponent(destination)}">Sign in with ${escape(provider.name)}</a>`,
       )
       .join('')
-    if (options.password == null) {
-      res.send(
-        page(
-          'Sign in',
-          `<section class="card"><p>Sign in to request access to app builds. Access is managed by this Mason server.</p><div class="stack">${links || '<p>No sign-in provider is configured.</p>'}</div></section>`,
-        ),
-      )
-      return
-    }
-    // The browser hashes the password (Argon2id in WebAssembly) before it leaves.
-    res.set('Content-Security-Policy', masterContentSecurityPolicy)
     res.send(
-      shell({
-        title: 'Sign in',
-        body: `<h1>Sign in</h1><section class="card"><p>Sign in to app builds and run logs with your Mason account.</p>${links === '' ? '' : `<div class="stack">${links}</div><p>Or with a username or email and a password:</p>`}<form data-mason="sign-in" data-parameters="/auth/password/parameters" data-session="/auth/password" data-return="${escape(destination)}"><label for="username">Username or email</label><input id="username" name="username" autocomplete="username" required><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required><button>Sign in</button><p data-field="status" hidden></p></form></section>`,
-        scripts: ['/assets/master.js'],
-      }),
+      page(
+        'Sign in',
+        `<section class="card"><p>Sign in to request access to app builds. Access is managed by this Mason server.</p><div class="stack">${links || '<p>No sign-in provider is configured.</p>'}</div></section>`,
+      ),
     )
   })
   if (options.password != null) {
@@ -362,10 +354,11 @@ export function authRoutes(
       }
       res.status(400).json({ error: message })
     }
-    router.get('/auth/invite', (_req, res) => {
-      res.set('Content-Security-Policy', masterContentSecurityPolicy)
-      res.send(invitationPage())
-    })
+    // The web app reads the token from the fragment, then drops it.
+    if (options.shell != null)
+      router.get('/auth/invite', (_req, res) => {
+        options.shell!(res)
+      })
     router.post('/auth/invite/lookup', json, async (req, res) => {
       try {
         sameOrigin(req, store.config.origin)
@@ -408,7 +401,23 @@ export function authRoutes(
       confirmed ? req.body.return : req.query.return,
     )
     if (context != null && !confirmed) {
-      if (provider.type === 'oauth2' && provider.switchParameters == null) {
+      const switchable =
+        provider.type !== 'oauth2' || provider.switchParameters != null
+      if (options.shell != null) {
+        options.shell(res, {
+          flow: switchable
+            ? {
+                state: 'switch',
+                name: context.account.name,
+                provider: { id, name: provider.name },
+                csrf: context.session.csrf,
+                return: destination,
+              }
+            : { state: 'switchUnavailable' },
+        })
+        return
+      }
+      if (!switchable) {
         res.send(
           framed(
             req,
@@ -437,8 +446,12 @@ export function authRoutes(
       switchAccount: confirmed,
     })
     res.cookie(FLOW_COOKIE, browser, { ...cookieOptions, maxAge: 600000 })
-    if (confirmed) {
-      // A link avoids browsers applying form-action to an external redirect.
+    // A link avoids browsers applying form-action to an external redirect.
+    if (confirmed && options.shell != null)
+      options.shell(res, {
+        flow: { state: 'chooseAccount', provider: provider.name, target },
+      })
+    else if (confirmed) {
       res.send(
         page(
           'Choose an account',

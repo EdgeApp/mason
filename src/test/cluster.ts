@@ -114,6 +114,8 @@ export interface Cluster {
     options?: {
       hostOptions?: NodeOptions['hostOptions']
       testEndpoints?: boolean
+      /** The web listener's certificate and key files, instead of the node's own. */
+      web?: { cert: string; key: string }
     },
   ): Promise<RunningNode>
   hosts: Map<string, RunningNode>
@@ -296,6 +298,9 @@ export async function cluster(
         listen: '127.0.0.1',
         heartbeatMs: 0,
         ...(hostSpec.testEndpoints ? { testEndpoints: true } : {}),
+        ...(hostSpec.web == null
+          ? {}
+          : { webCert: hostSpec.web.cert, webKey: hostSpec.web.key }),
         ...(hostSpec.hostOptions == null
           ? {}
           : { hostOptions: hostSpec.hostOptions }),

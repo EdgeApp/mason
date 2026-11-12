@@ -1,6 +1,6 @@
 import express, { Router, type Response } from 'express'
-import { cookie, invitationPage, sameOrigin } from '../auth/routes.js'
-import { masterContentSecurityPolicy } from '../node/webApp.js'
+import { cookie, sameOrigin } from '../auth/routes.js'
+import { sendShell } from '../node/webRoutes.js'
 import { Conflict } from './api.js'
 import { sessionCookieOptions } from './accountsApi.js'
 import { MASTER_SESSION_COOKIE, type MasterAuth } from './auth.js'
@@ -43,7 +43,7 @@ function refused(res: Response, error: unknown): void {
 }
 
 /**
- * The invitation page on the master and the two requests its script makes:
+ * The invitation page on the master (the web app's) and the two requests it makes:
  * whom the token is for, and using it to set the username and password,
  * which signs the person in to the master.
  */
@@ -59,8 +59,8 @@ export function invitationRoutes(master: {
       res.redirect(303, '/')
       return
     }
-    res.set('Content-Security-Policy', masterContentSecurityPolicy)
-    res.send(invitationPage())
+    // The web app reads the token from the fragment, then drops it.
+    sendShell(res)
   })
   router.post('/auth/invite/lookup', json, (req, res) => {
     try {

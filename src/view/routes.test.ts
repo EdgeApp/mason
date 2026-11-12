@@ -6,7 +6,10 @@ import { SESSION_COOKIE } from '../auth/routes.js'
 import { MASTER_SESSION_COOKIE } from '../master/auth.js'
 import { MASONFILE_COPIES } from '../master/scheduler.js'
 import { localOperator } from '../master/roles.js'
-import { contentSecurityPolicy } from '../node/webApp.js'
+import {
+  contentSecurityPolicy,
+  shellContentSecurityPolicy,
+} from '../node/csp.js'
 import { pinnedFetch } from '../node/pinnedFetch.js'
 import type { RunningNode } from '../node/serve.js'
 import { cluster, type Cluster } from '../test/cluster.js'
@@ -138,11 +141,12 @@ describe('Pages on the master and the host', function () {
       for (const resource of resources(reply.text))
         assert.match(resource, /^\/(?!\/)/, `${route} loads ${resource}`)
       assert.match(reply.csp, /font-src 'self'/)
-      // Only the sign-in pages compile the password hash.
+      // No page compiles the password hash: the sign-in pages are the web
+      // app's shell, which only starts the worker that does.
+      assert.doesNotMatch(reply.csp, /wasm-unsafe-eval/, route)
       assert.equal(
-        /wasm-unsafe-eval/.test(reply.csp),
-        (node === c.master && route === '/sign-in') ||
-          (node === host && route === '/auth/login'),
+        reply.csp === shellContentSecurityPolicy,
+        route === '/sign-in' || route === '/auth/login',
         route,
       )
     }

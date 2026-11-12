@@ -5,7 +5,12 @@
 import { StrictMode, useEffect, useState, type JSX } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'
-import { asNodeInfo, NODE_PATH, type NodeInfo } from '../shared/api/index.js'
+import {
+  asNodeInfo,
+  NODE_PATH,
+  type NodeInfo,
+  type SignInFlow,
+} from '../shared/api/index.js'
 import { ApiClient, ApiError } from './api/client.js'
 import { ApiProvider } from './api/context.js'
 import {
@@ -15,6 +20,7 @@ import {
 } from './layout/NodeStates.js'
 import { browserLiveWindow, LiveClient, liveUrl } from './live/LiveClient.js'
 import { LiveProvider } from './live/LiveProvider.js'
+import { FlowPage, readFlow } from './pages/auth/Flow.js'
 import {
   masterProfile,
   profileFor,
@@ -38,11 +44,25 @@ export interface AppProps {
   client: ApiClient
   live?: LiveClient
   basename?: string
+  /** A provider sign-in's state the node answered this address with. */
+  flow?: SignInFlow
 }
 
 /** The app for a node: its profile, client, live updates, toasts and routes. */
-export function App({ node, client, live, basename }: AppProps): JSX.Element {
+export function App({
+  node,
+  client,
+  live,
+  basename,
+  flow,
+}: AppProps): JSX.Element {
   const profile = profileFor(node)
+  if (flow != null)
+    return (
+      <ProfileContext.Provider value={profile}>
+        <FlowPage flow={flow} />
+      </ProfileContext.Provider>
+    )
   if (node.state === 'waitingForMaster')
     return (
       <ProfileContext.Provider value={profile}>
@@ -75,6 +95,7 @@ export function Root({
   client,
   live,
   basename,
+  flow,
   onNode,
 }: Omit<AppProps, 'node'> & {
   /** Told which node this is, once it answers. */
@@ -101,6 +122,7 @@ export function Root({
         client={client}
         {...(live == null ? {} : { live })}
         {...(basename == null ? {} : { basename })}
+        {...(flow == null ? {} : { flow })}
       />
     )
   if (failure != null)
@@ -132,6 +154,7 @@ export function start(
     signIn = profileFor(node).signIn
   }
   const live = new LiveClient(liveUrl(win.location), browserLiveWindow(win))
+  const flow = readFlow(doc)
   const root = createRoot(element)
   root.render(
     <StrictMode>
@@ -139,6 +162,7 @@ export function start(
         client={client}
         live={live}
         onNode={onNode}
+        {...(flow == null ? {} : { flow })}
         {...(basenameFor(win.location.pathname) == null
           ? {}
           : { basename: basenameFor(win.location.pathname)! })}

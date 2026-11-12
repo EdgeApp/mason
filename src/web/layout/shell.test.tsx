@@ -109,12 +109,15 @@ describe('The app shell’s navigation per node and role', () => {
         .getAttribute('aria-current'),
       'page',
     )
+    // People hashes passwords: it is entered by a full load, under its own CSP.
+    const people = within(sheet).getByRole('link', { name: 'People' })
+    assert.equal(people.getAttribute('href'), '/people')
     await act(async () =>
-      within(sheet).getByRole('link', { name: 'People' }).click(),
+      within(sheet).getByRole('link', { name: 'Groups' }).click(),
     )
-    await page('People')
+    await page('Groups')
     assert.equal(screen.queryByRole('dialog'), null)
-    assert.equal(where.path, '/people')
+    assert.equal(where.path, '/groups')
   })
 
   it('gives a tester on the host only Install apps and Devices, two tabs and no More, and sends them home to Install apps', async () => {
@@ -382,7 +385,8 @@ describe('The top bar', () => {
   it('shows the narrow back chevron named by the parent crumb, and the title once the h1 scrolls under the bar', async () => {
     renderApp({ path: '/projects/fixture/masonfile' })
     await page('Masonfile')
-    const back = screen.getByRole('link', { name: 'Back to fixture' })
+    // The page sets the chevron in an effect, after its heading renders.
+    const back = await screen.findByRole('link', { name: 'Back to fixture' })
     assert.equal(back.getAttribute('href'), '/projects/fixture')
     const bar = document.querySelector('.m-topbar')!
     const title = bar.querySelector('.m-topbar__title')!
@@ -676,7 +680,7 @@ describe('The account menu', () => {
   beforeEach(() => localStorage.clear())
 
   it('names the viewer, role and node, opens Your account, and switches Appearance at once and for later', async () => {
-    renderApp({ path: '/projects', replies: shellReplies('admin') })
+    const app = renderApp({ path: '/projects', replies: shellReplies('admin') })
     await page('Projects & apps')
     const avatar = screen.getByRole('button', { name: 'Your account' })
     assert.equal(avatar.textContent, 'P')
@@ -715,12 +719,13 @@ describe('The account menu', () => {
     assert.equal(localStorage.getItem(APPEARANCE_KEY), 'system')
     assert.equal(document.documentElement.dataset.theme, 'dark')
     await act(async () => avatar.click())
+    // Your account hashes passwords: it is entered by a full load.
     await act(async () =>
       within(screen.getByRole('menu'))
         .getByRole('menuitem', { name: 'Your account' })
         .click(),
     )
-    await page('Your account')
+    assert.deepEqual(app.left, ['/account'])
   })
 
   it('signs out: ends the session, then leaves for the node’s sign-in with a full load', async () => {
@@ -741,7 +746,7 @@ describe('The account menu', () => {
     )
     await until(() => app.left.length > 0, 'the sign-out')
     assert(app.node.requests.includes('DELETE /api/v2/session'))
-    assert.deepEqual(app.left, ['/auth/login?return=%2F'])
+    assert.deepEqual(app.left, ['/auth/login?signed_out=1'])
   })
 
   it('still leaves when the node cannot end the session', async () => {
@@ -759,7 +764,7 @@ describe('The account menu', () => {
       screen.getByRole('menuitem', { name: 'Sign out' }).click(),
     )
     await until(() => app.left.length > 0, 'the sign-out')
-    assert.deepEqual(app.left, ['/sign-in'])
+    assert.deepEqual(app.left, ['/sign-in?signed_out=1'])
   })
 
   it('carries the cluster’s health on narrow, as an action sheet', async () => {
@@ -1182,21 +1187,23 @@ describe('Pages in the shell', () => {
     assert.equal(again.left.length, 0)
   })
 
-  it('shows the signed-out pages in the bare shell, and setup before anything on a fresh master', async () => {
+  it('shows the signed-out pages in the bare shell, each node its own sign-in, and setup before anything on a fresh master', async () => {
     renderApp({ path: '/sign-in', replies: {} })
     await page('Sign in')
     assert(document.querySelector('.m-bare') != null)
-    screen.getByRole('heading', { name: 'Coming in M5' })
+    cleanup()
+    renderApp({ node: nodeInfo('host'), path: '/auth/login', replies: {} })
+    await page('Sign in')
     cleanup()
     renderApp({ node: nodeInfo('host'), path: '/auth/invite', replies: {} })
-    await page('Accept your invitation')
+    await page('Choose your password')
     cleanup()
     renderApp({
       node: nodeInfo('master', { setupNeeded: true }),
       path: '/projects',
       replies: {},
     })
-    await page('Set up Mason')
+    await page('Set up this master')
   })
 })
 

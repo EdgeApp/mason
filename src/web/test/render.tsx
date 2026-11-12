@@ -18,6 +18,7 @@ import { Invalidations, LiveProvider } from '../live/LiveProvider.js'
 import { profileFor, ProfileContext } from '../profile/NodeProfile.js'
 import { AppRoutes } from '../profile/routes.js'
 import { ToastProvider } from '../ui/Toast.js'
+import { HasherContext, type Hasher } from '../workers/hasher.js'
 import { FakeLiveWindow } from './fakeLiveSocket.js'
 
 /** The permissions a role holds, from the master's own policy table, as GET /api/v2/session answers them. */
@@ -175,12 +176,13 @@ export function dashboard(
   }
 }
 
-/** Where the router is: the test's view of the address. */
-export const where: { path: string } = { path: '' }
+/** Where the router is: the test's view of the address (and its fragment). */
+export const where: { path: string; hash: string } = { path: '', hash: '' }
 
 function Location(): null {
   const location = useLocation()
   where.path = `${location.pathname}${location.search}`
+  where.hash = location.hash
   return null
 }
 
@@ -202,6 +204,40 @@ export interface HarnessOptions {
   element?: ReactNode
   /** The element's route pattern, for useParams. */
   route?: string
+  /** The password hasher; a fake that never hashes, by default. */
+  hasher?: Hasher
+}
+
+/** A hasher that answers at once: `hash:<password>`, and new passwords with fixed parameters. */
+export function fakeHasher(): Hasher & {
+  calls: string[]
+  fail?: string
+} {
+  const fake: Hasher & { calls: string[]; fail?: string } = {
+    calls: [],
+    hash: async (password, parameters) => {
+      fake.calls.push(`hash ${password} ${parameters.salt}`)
+      if (fake.fail != null) throw new Error(fake.fail)
+      return `hash:${password}`
+    },
+    create: async (password) => {
+      fake.calls.push(`new ${password}`)
+      if (fake.fail != null) throw new Error(fake.fail)
+      return {
+        clientHash: `new:${password}`,
+        clientParameters: {
+          algorithm: 'argon2id',
+          version: 19,
+          memoryKiB: 32768,
+          iterations: 6,
+          parallelism: 4,
+          hashLength: 32,
+          salt: '07'.repeat(16),
+        },
+      }
+    },
+  }
+  return fake
 }
 
 /** Renders the app's routes (or one element) for a node, at an address. */
@@ -220,27 +256,29 @@ export function renderApp(options: HarnessOptions = {}): Harness {
   const liveClient = new LiveClient('wss://mason.test/live', live)
   const invalidations = new Invalidations()
   const tree: JSX.Element = (
-    <ApiProvider client={client}>
-      <ProfileContext.Provider value={profileFor(info)}>
-        <LiveProvider client={liveClient} invalidations={invalidations}>
-          <ToastProvider>
-            <MemoryRouter initialEntries={[options.path ?? '/']}>
-              <Location />
-              {options.element == null ? (
-                <AppRoutes node={info} />
-              ) : (
-                <Routes>
-                  <Route
-                    path={options.route ?? '*'}
-                    element={options.element}
-                  />
-                </Routes>
-              )}
-            </MemoryRouter>
-          </ToastProvider>
-        </LiveProvider>
-      </ProfileContext.Provider>
-    </ApiProvider>
+    <HasherContext.Provider value={options.hasher ?? fakeHasher()}>
+      <ApiProvider client={client}>
+        <ProfileContext.Provider value={profileFor(info)}>
+          <LiveProvider client={liveClient} invalidations={invalidations}>
+            <ToastProvider>
+              <MemoryRouter initialEntries={[options.path ?? '/']}>
+                <Location />
+                {options.element == null ? (
+                  <AppRoutes node={info} />
+                ) : (
+                  <Routes>
+                    <Route
+                      path={options.route ?? '*'}
+                      element={options.element}
+                    />
+                  </Routes>
+                )}
+              </MemoryRouter>
+            </ToastProvider>
+          </LiveProvider>
+        </ProfileContext.Provider>
+      </ApiProvider>
+    </HasherContext.Provider>
   )
   const result = render(tree)
   return { ...result, client, node, live, liveClient, invalidations, left }

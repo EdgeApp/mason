@@ -1,7 +1,7 @@
 // Bundles the React web app with esbuild into lib/web/bundles/:
 //   app-[hash].js            src/web/main.tsx and everything it imports
 //   app-[hash].css           src/web/theme/app.css (library, tokens, components)
-//   password-worker-[hash].js  the Argon2id worker
+//   password-worker-[hash].js  the Argon2id worker (src/web/workers/password.ts)
 //   theme-boot.js            unhashed; index.html loads it first, synchronously
 //   index.html               the shell, naming the hashed files
 // The fonts stay where assetRoutes serves them (/assets/fonts/…). The server
@@ -43,7 +43,7 @@ const scripts = await build({
   ...common,
   entryPoints: {
     app: 'src/web/main.tsx',
-    'password-worker': 'src/browser/passwordWorker.ts',
+    'password-worker': 'src/web/workers/password.ts',
   },
   entryNames: '[name]-[hash]',
   format: 'esm',
@@ -70,7 +70,7 @@ await build({
 })
 
 const app = output(scripts, 'src/web/main.tsx')
-const worker = output(scripts, 'src/browser/passwordWorker.ts')
+const worker = output(scripts, 'src/web/workers/password.ts')
 const css = output(styles, 'src/web/theme/app.css')
 writeFileSync(
   path.join(outdir, 'index.html'),

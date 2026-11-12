@@ -1,0 +1,54 @@
+/* Forms in the React app (DESIGN-LANGUAGE.md §12): the iOS 27 library's
+   TextField drawn as components.css draws .m-input, Mason's file drop zone
+   and the signed-out pages' header. Tokens only (--m-*). */
+
+/* The library's text field, with Mason's label, help and error around it. */
+.m-textfield { gap: 0; }
+.m-textfield .ios27-textfield-input { min-height: var(--m-control-md); padding: 0 var(--m-space-4); border-radius: var(--m-radius-md); border: 1px solid var(--m-border-control); background: var(--m-surface-sunken); color: var(--m-text); font-family: var(--m-font-sans); font-size: 0.9375rem; line-height: 1.375rem; }
+.m-textfield .ios27-textfield-input::placeholder { color: var(--m-text-tertiary); }
+.m-textfield .ios27-textfield-input:hover { border-color: var(--m-text-tertiary); }
+.m-textfield .ios27-textfield-input:focus-visible { outline: 2px solid var(--m-focus-ring); outline-offset: 1px; border-color: var(--m-focus-ring); box-shadow: 0 0 0 5px var(--m-accent-glow); }
+.m-textfield .ios27-textfield-input[aria-invalid='true'] { border-color: var(--m-danger-solid); }
+.m-textfield .ios27-textfield-input[readonly] { background: transparent; border-style: dashed; }
+.m-textfield--mono .ios27-textfield-input { font-family: var(--m-font-mono); font-size: 0.8125rem; }
+.m-textfield--code { max-width: 10rem; }
+.m-textfield--code .ios27-textfield-input { letter-spacing: 0.3em; }
+.m-textfield--end .ios27-textfield-input { padding-right: 3rem; }
+@media (max-width: 46.49em), (pointer: coarse) {
+  .m-textfield .ios27-textfield-input, .m-textfield--mono .ios27-textfield-input { font-size: 1rem; min-height: var(--m-target-min); }
+}
+@media (forced-colors: active) { .m-textfield .ios27-textfield-input { border: 1px solid CanvasText; } }
+.m-input--date { max-width: 12rem; }
+
+/* A field's trailing button (show the password) sits inside the input. */
+.m-field__control { position: relative; }
+/* Show password: a toggle, tinted while the password shows. */
+.m-reveal[aria-pressed='true'] { background: var(--m-surface-hover); color: var(--m-accent); }
+
+/* Hidden but read and focusable: the file input inside its drop zone. */
+.m-vh { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+/* The drop zone is the file input's label: a press opens the picker. */
+.m-dropzone { padding: var(--m-space-5); cursor: pointer; }
+.m-dropzone:focus-within { outline: 2px solid var(--m-focus-ring); outline-offset: 2px; }
+.m-dropzone:hover { border-color: var(--m-text-tertiary); }
+.m-dropzone[aria-invalid='true'] { border-color: var(--m-danger-solid); }
+.m-dropzone__choose { color: var(--m-text-link); font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+
+/* The signed-out pages: the brand mark over a centred title. */
+.m-signin__head { display: flex; flex-direction: column; gap: var(--m-space-3); align-items: center; text-align: center; }
+.m-signin__mark { border-radius: 0.875rem; box-shadow: var(--m-shadow-glow); }
+.m-signin__note { text-align: center; margin: 0; }
+.m-signin__wide { width: 100%; }
+
+/* A card naming a state: its glyph, what happened, and the way on. */
+.m-statecard__row { display: flex; gap: var(--m-space-4); align-items: flex-start; }
+.m-glyphbox--success { color: var(--m-success-solid); }
+.m-glyphbox--warning { color: var(--m-warning-solid); }
+.m-glyphbox--danger { color: var(--m-danger-solid); }
+
+/* A form's progress line is a live region that exists before it speaks;
+   while empty it takes no room in its stack. */
+.m-formstatus { margin: 0; }
+.m-stack > .m-formstatus:empty { margin-top: calc(var(--m-space-5) * -1); }
+.m-signin__intro { margin: 0; }

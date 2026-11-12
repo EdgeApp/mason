@@ -1,5 +1,6 @@
 import { useState, type JSX } from 'react'
 import { Link, useLocation } from 'react-router'
+import { isPasswordPath } from '../../shared/routes.js'
 import { currentNav, tabBar, type NavItem } from '../profile/navigation.js'
 import { Icon } from '../ui/Icon.js'
 import { Sheet } from '../ui/Sheet.js'
@@ -28,6 +29,7 @@ export function TabBar({
             key={entry.key}
             className="m-tabbar__item"
             to={entry.href}
+            reloadDocument={isPasswordPath(entry.href)}
             aria-current={entry === current ? 'page' : undefined}
             aria-label={entry.label === entry.short ? undefined : entry.label}
           >
@@ -67,6 +69,7 @@ export function TabBar({
               <Link
                 className="m-list__row"
                 to={entry.href}
+                reloadDocument={isPasswordPath(entry.href)}
                 aria-current={entry === current ? 'page' : undefined}
                 onClick={() => setMore(false)}
               >
