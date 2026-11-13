@@ -18,6 +18,7 @@ import { localOperator } from './roles.js'
 import { declaredApps, slugFor } from './wizard.js'
 import { seedSecret } from '../test/secrets.js'
 import { crumbTrail } from '../test/crumbs.js'
+import { assertShell, type ShellReply } from '../test/webShell.js'
 
 // Rows and replies are read field by field.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -27,6 +28,7 @@ interface Reply {
   text: string
   json: Json
   type: string
+  headers: ShellReply['headers']
 }
 
 const masonfile = `
@@ -100,7 +102,12 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       text,
       json,
       type: response.headers.get('content-type') ?? '',
+      headers: response.headers,
     }
+  }
+  /** Asserts a reply is the web app's shell with that status. */
+  const shell = (reply: Reply, status = 200): void => {
+    assertShell(reply, status)
   }
   const signIn = (role: string): { cookie: string; csrf: string } => {
     const { token, session } = c.master.master!.auth.start(
@@ -239,13 +246,14 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       body: { repository },
     })
     assert.equal(refused.status, 403)
-    assert.equal(
-      (await request(c.master, 'GET', '/projects/new', signIn('developer')))
-        .status,
+    // The wizard is the web app's: a developer reads its 403 inside it, and
+    // a manager drives it through the wizard's routes.
+    shell(
+      await request(c.master, 'GET', '/projects/new', signIn('developer')),
       403,
     )
-    const page = await request(c.master, 'GET', '/projects/new', manager)
-    assert.match(page.text, /data-path="\/api\/v2\/projects\/check"/)
+    shell(await request(c.master, 'GET', '/projects/new', manager))
+    assert.equal((await request(c.master, 'GET', '/projects/new')).status, 303)
     const checked = await request(c.master, 'POST', '/api/v2/projects/check', {
       ...manager,
       body: { repository },
@@ -275,10 +283,22 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       ).status,
       201,
     )
-    assert.match(
-      (await request(c.master, 'GET', '/projects/new?slug=wizard', manager))
-        .text,
-      /Read the Masonfile on master/,
+    // Step 2 reads the Masonfile on the project's default branch.
+    shell(await request(c.master, 'GET', '/projects/new?slug=wizard', manager))
+    const saved = await request(
+      c.master,
+      'GET',
+      '/api/v2/projects/wizard',
+      manager,
+    )
+    assert.equal(saved.status, 200, saved.text)
+    assert.deepEqual(
+      [
+        saved.json.repository,
+        saved.json.defaultBranch,
+        saved.json.webhookSecret,
+      ],
+      [repository, 'master', { set: false }],
     )
     const started = await request(
       c.master,
@@ -308,14 +328,8 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       { bundleId: 'app.example.wizard', platforms: ['android', 'ios'] },
     ])
     assert.deepEqual(Object.keys(discovered.triggers), ['build', 'release'])
-    const apps = await request(
-      c.master,
-      'GET',
-      '/projects/new?slug=wizard',
-      manager,
-    )
-    assert.match(apps.text, /value="app\.example\.wizard"/)
-    assert.match(apps.text, /Android/)
+    // The read-only triggers step shows each workflow's triggers as declared.
+    assert.deepEqual(discovered.triggers.release, [{ request: true }])
     const owned = await request(
       c.master,
       'POST',
@@ -369,22 +383,24 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       `${origin(host)}/api/webhooks/github/wizard`,
     )
     assert.match(hooks[0]!.body.config.secret, /^[0-9a-f]{48}$/)
+    // The project now holds what each step set, as the wizard reads it back.
     const third = await request(
       c.master,
       'GET',
-      '/projects/new?slug=wizard',
+      '/api/v2/projects/wizard',
       manager,
     )
-    assert.match(third.text, /Branches and triggers/)
-    assert.match(third.text, /The project has a webhook secret/)
-    // Done opens the new project on Projects & apps, at /projects.
-    assert.match(
-      third.text,
-      /<a class="button" href="\/projects\?project=wizard">Done<\/a>/,
+    assert.deepEqual(third.json.webhookSecret, { set: true })
+    assert.deepEqual(
+      third.json.apps.map((app: Json) => app.bundleId),
+      ['app.example.wizard'],
     )
-    assert.match(
-      third.text,
-      /<span class="mono">release<\/span> <small class="mono">\[\{&quot;request&quot;:true\}\]<\/small>/,
+    assert.deepEqual(
+      third.json.rules.map((rule: Json) => [rule.pattern, rule.mode]),
+      [
+        ['master', 'automatic'],
+        ['*', 'request'],
+      ],
     )
     // The discovery run never shows among the project's runs.
     assert.doesNotMatch(
@@ -790,15 +806,29 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     const missing = await request(c.master, 'GET', '/runs/none', developer)
     assert.equal(missing.status, 404)
     assert.match(missing.text, /<div id="root"><\/div>/)
-    // The Masonfile tab shows the file at a run's commit.
+    // The Masonfile tab is the web app's; it shows the file at a run's
+    // commit, the newest by default.
+    shell(
+      await request(c.master, 'GET', '/projects/wizard/masonfile', developer),
+    )
+    const commits = await request(
+      c.master,
+      'GET',
+      '/api/v2/projects/wizard/masonfile/commits',
+      developer,
+    )
+    assert.equal(commits.status, 200, commits.text)
+    assert(commits.json.length > 0)
     const file = await request(
       c.master,
       'GET',
-      '/projects/wizard/masonfile',
+      '/api/v2/projects/wizard/masonfile',
       developer,
     )
-    assert.match(file.text, /m\.apiVersion\(1\)/)
-    assert.match(file.text, /<\/span><span class="line" data-line="2">/)
+    assert.equal(file.status, 200, file.text)
+    assert.equal(file.json.commit, commits.json[0].sha)
+    assert.equal(file.json.file, 'Masonfile.ts')
+    assert.match(file.json.text, /m\.apiVersion\(1\)/)
     const api = await request(
       c.master,
       'GET',
@@ -1114,91 +1144,183 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       ).status,
       200,
     )
-    const projectPage = (
-      await request(c.master, 'GET', '/projects/wizard', manager2)
-    ).text
-    assert.match(projectPage, /app\.example\.ui<\/td><td class="mono">YYMMDDCC/)
-    assert.match(projectPage, /master<\/span> 26102107/)
-    assert.match(projectPage, /data-path="\/api\/v2\/build-numbers\/seed"/)
-    // Secrets are on their own tab, not the overview.
-    assert.doesNotMatch(projectPage, /SIGNING_TOKEN/)
-    assert.doesNotMatch(
-      projectPage,
-      /data-path="\/api\/v2\/projects\/wizard\/secrets"|data-secrets/,
+    // A project's pages are the web app's: its Overview reads the project's
+    // details, its sequences and whether the viewer may set where one stands.
+    shell(await request(c.master, 'GET', '/projects/wizard', manager2))
+    const overview = async (role: string): Promise<Json> => {
+      const reply = await request(
+        c.master,
+        'GET',
+        '/api/v2/projects/wizard/overview',
+        signIn(role),
+      )
+      assert.equal(reply.status, 200, reply.text)
+      return reply.json
+    }
+    const managerOverview = await overview('manager')
+    const sequence = managerOverview.buildNumbers.find(
+      (entry: Json) => entry.key === 'app.example.ui',
     )
-    assert(!projectPage.includes('secret-value-fixture'))
-    const developerProject = (
-      await request(c.master, 'GET', '/projects/wizard', signIn('developer'))
-    ).text
-    assert.match(developerProject, /master<\/td><td>automatic/)
-    assert.doesNotMatch(developerProject, /build-numbers\/seed/)
-    assert.doesNotMatch(
-      developerProject,
-      /data-path="\/api\/v2\/projects\/wizard\/secrets"/,
+    assert.equal(sequence.format, 'YYMMDDCC')
+    assert.deepEqual(sequence.last, [{ branch: 'master', value: '26102107' }])
+    assert.equal(managerOverview.canSeed, true)
+    // The master has a Secrets tab; secrets are on it, not the overview.
+    assert.equal(managerOverview.secrets, true)
+    assert.doesNotMatch(JSON.stringify(managerOverview), /SIGNING_TOKEN/)
+    assert(!JSON.stringify(managerOverview).includes('secret-value-fixture'))
+    shell(
+      await request(c.master, 'GET', '/projects/wizard', signIn('developer')),
     )
-    // To a tester projects do not exist.
+    const developerOverview = await overview('developer')
+    assert.deepEqual(
+      developerOverview.rules.find((rule: Json) => rule.pattern === 'master'),
+      { pattern: 'master', mode: 'automatic' },
+    )
+    assert.equal(developerOverview.canSeed, false)
     assert.equal(
-      (await request(c.master, 'GET', '/projects/wizard', signIn('tester')))
-        .status,
-      404,
+      (
+        await request(c.master, 'POST', '/api/v2/build-numbers/seed', {
+          ...signIn('developer'),
+          body: {
+            project: 'wizard',
+            key: 'app.example.ui',
+            branch: 'master',
+            last: '26102108',
+          },
+        })
+      ).status,
+      403,
     )
-    // The Secrets tab: names and configs for developers, controls and the audit for managers.
+    // To a tester projects do not exist: every page under /projects is the
+    // master's not-found page, and the reads refuse them.
+    const testerRoutes = [
+      '/projects/wizard',
+      '/projects/wizard/runs',
+      '/projects/wizard/masonfile',
+      '/projects/wizard/secrets',
+    ]
+    for (const route of testerRoutes)
+      assert.equal(
+        (await request(c.master, 'GET', route, signIn('tester'))).status,
+        404,
+        route,
+      )
+    assert.equal(
+      (
+        await request(
+          c.master,
+          'GET',
+          '/api/v2/projects/wizard/overview',
+          signIn('tester'),
+        )
+      ).status,
+      403,
+    )
+    // The Secrets tab: names and configs for developers, contents and the
+    // audit for managers; values never appear in the list.
+    shell(await request(c.master, 'GET', '/projects/wizard/secrets', manager2))
     const managerSecrets = await request(
       c.master,
       'GET',
-      '/projects/wizard/secrets',
+      '/api/v2/projects/wizard/secrets',
       manager2,
     )
-    assert.equal(managerSecrets.status, 200)
-    assert.match(managerSecrets.text, /aria-current="page">Secrets</)
-    assert.match(managerSecrets.text, /data-secret-name|SIGNING_TOKEN/)
-    assert.match(managerSecrets.text, /data-secret-edit/)
-    assert.match(managerSecrets.text, /<h2><span[^>]*>[^<]*<\/span>Audit<\/h2>/)
-    assert.match(managerSecrets.text, /src="\/assets\/secrets\.js"/)
+    assert.equal(managerSecrets.status, 200, managerSecrets.text)
+    assert(
+      managerSecrets.json.some(
+        (secret: Json) => secret.name === 'SIGNING_TOKEN',
+      ),
+    )
     assert(!managerSecrets.text.includes('secret-value-fixture'))
-    const developerSecrets = (
+    const audit = await request(
+      c.master,
+      'GET',
+      '/api/v2/projects/wizard/secrets/audit',
+      manager2,
+    )
+    assert.equal(audit.status, 200, audit.text)
+    assert(Array.isArray(audit.json))
+    const backups = await request(
+      c.master,
+      'GET',
+      '/api/v2/projects/wizard/secrets/backups',
+      manager2,
+    )
+    assert.equal(backups.status, 200, backups.text)
+    assert.equal(typeof backups.json.backupsConfigured, 'boolean')
+    shell(
       await request(
         c.master,
         'GET',
         '/projects/wizard/secrets',
         signIn('developer'),
-      )
-    ).text
-    assert.match(developerSecrets, /SIGNING_TOKEN/)
-    assert.doesNotMatch(
-      developerSecrets,
-      /data-secret-edit|Audit|data-secrets|assets\/secrets\.js/,
+      ),
+    )
+    const developerSecrets = await request(
+      c.master,
+      'GET',
+      '/api/v2/projects/wizard/secrets',
+      signIn('developer'),
+    )
+    assert.equal(developerSecrets.status, 200, developerSecrets.text)
+    assert(
+      developerSecrets.json.some(
+        (secret: Json) => secret.name === 'SIGNING_TOKEN',
+      ),
+    )
+    assert(!developerSecrets.text.includes('secret-value-fixture'))
+    assert.equal(
+      (
+        await request(
+          c.master,
+          'GET',
+          '/api/v2/projects/wizard/secrets/audit',
+          signIn('developer'),
+        )
+      ).status,
+      403,
+    )
+    shell(
+      await request(c.master, 'GET', '/projects/nope/secrets', manager2),
+      404,
     )
     assert.equal(
       (
         await request(
           c.master,
           'GET',
-          '/projects/wizard/secrets',
-          signIn('tester'),
+          '/api/v2/projects/nope/secrets',
+          manager2,
         )
       ).status,
-      404,
-    )
-    assert.equal(
-      (await request(c.master, 'GET', '/projects/nope/secrets', manager2))
-        .status,
       404,
     )
     assert.equal(
       (await request(c.master, 'GET', '/projects/wizard/secrets')).status,
       303,
     )
-    // Runs and builds is a project tab: the project's runs, under the same tabs.
-    const runsTab = await request(
-      c.master,
-      'GET',
-      '/projects/wizard/runs',
-      signIn('developer'),
+    // Runs and builds is a project tab: the project's runs.
+    shell(
+      await request(
+        c.master,
+        'GET',
+        '/projects/wizard/runs',
+        signIn('developer'),
+      ),
     )
-    assert.equal(runsTab.status, 200)
-    assert.match(runsTab.text, /aria-current="page">Runs and builds</)
-    assert.match(runsTab.text, /<table class="list runs">|No runs yet/)
+    const runsOf = async (query = ''): Promise<Json> => {
+      const reply = await request(
+        c.master,
+        'GET',
+        `/api/v2/projects/wizard/runs${query}`,
+        signIn('developer'),
+      )
+      assert.equal(reply.status, 200, reply.text)
+      return reply.json
+    }
+    const runsTab = await runsOf()
+    assert.equal(runsTab.name, 'wizard')
+    assert(runsTab.runs.some((entry: Json) => entry.id === run))
     // The branches the build's push trigger names lead the list, a glob by its branches with runs.
     const db = c.master.master!.database.db
     const project = c.master.master!.projects.get('wizard')
@@ -1223,16 +1345,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       1,
     )
     const order = async (): Promise<string[]> =>
-      [
-        ...(
-          await request(
-            c.master,
-            'GET',
-            '/projects/wizard/runs',
-            signIn('developer'),
-          )
-        ).text.matchAll(/runs\?branch=([^"]+)"/g),
-      ].map((match) => decodeURIComponent(match[1]!))
+      (await runsOf()).branches.map((entry: Json) => entry.branch)
     assert.deepEqual((await order()).slice(0, 3), [
       'develop',
       'release/1',
@@ -1252,74 +1365,40 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       (await order()).slice(0, automatic.length),
       automatic.filter((pattern) => !pattern.includes('*')),
     )
-    assert.match(
-      (
-        await request(
-          c.master,
-          'GET',
-          '/projects/wizard/runs?branch=release%2F1',
-          signIn('developer'),
-        )
-      ).text,
-      /<td class="mono">26110201<\/td>/,
+    // A branch's runs lead with the build number each reserved.
+    shell(
+      await request(
+        c.master,
+        'GET',
+        '/projects/wizard/runs?branch=release%2F1',
+        signIn('developer'),
+      ),
     )
+    const release = await runsOf('?branch=release%2F1')
+    assert.equal(release.branch, 'release/1')
     assert.deepEqual(
-      crumbTrail(
-        (
-          await request(
-            c.master,
-            'GET',
-            '/projects/wizard/runs?branch=release%2F1',
-            signIn('developer'),
-          )
-        ).text,
-      ).slice(-2),
-      [
-        'Runs and builds /projects/wizard/runs',
-        'release/1 /projects/wizard/runs?branch=release%2F1 *',
-      ],
+      release.runs.map((entry: Json) => [entry.id, entry.buildNumber]),
+      [['m2-a', '26110201']],
     )
     db.prepare("DELETE FROM jobs WHERE id IN ('m2-a','m2-b')").run()
     db.prepare('DELETE FROM push_triggers WHERE project_id=?').run(project.id)
-    assert.match(
-      (
-        await request(
-          c.master,
-          'GET',
-          '/projects/wizard/runs?branch=master',
-          signIn('developer'),
-        )
-      ).text,
-      /The latest runs on master/,
-    )
+    const onMaster = await runsOf('?branch=master')
+    assert.equal(onMaster.branch, 'master')
+    assert(onMaster.runs.every((entry: Json) => entry.branch === 'master'))
+    shell(await request(c.master, 'GET', '/projects/nope/runs', manager2), 404)
     assert.equal(
-      (
-        await request(
-          c.master,
-          'GET',
-          '/projects/wizard/runs',
-          signIn('tester'),
-        )
-      ).status,
-      404,
-    )
-    assert.equal(
-      (await request(c.master, 'GET', '/projects/nope/runs', manager2)).status,
+      (await request(c.master, 'GET', '/api/v2/projects/nope/runs', manager2))
+        .status,
       404,
     )
     assert.equal(
       (await request(c.master, 'GET', '/projects/wizard/runs')).status,
       303,
     )
-    assert.doesNotMatch(projectPage, /src="\/assets\/secrets\.js"/)
-    assert.match(projectPage, /aria-current="page">Overview</)
     const bundle = await request(c.master, 'GET', '/assets/secrets.js')
     assert.equal(bundle.status, 200)
     assert.match(bundle.text, /data-secrets/)
-    assert.equal(
-      (await request(c.master, 'GET', '/projects/none', manager2)).status,
-      404,
-    )
+    shell(await request(c.master, 'GET', '/projects/none', manager2), 404)
     // A developer may not cancel others' runs from a page without the controls of a manager either way; testers see no runs.
     // A tester's home is Install apps (catalogRelay.test.ts follows it).
     assert.equal(

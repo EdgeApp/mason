@@ -1,7 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite'
 import { isGlob, matches } from '../master/rules.js'
 import { duration, escape, runName } from './html.js'
-import { icon, type IconName } from './icons.js'
 import type { Viewer } from './shell.js'
 import type {
   DashboardData,
@@ -21,49 +20,6 @@ export type Platform = (typeof platforms)[number]
  */
 const leadsItsBuild = (b: string): string =>
   `(${b}.variant='' OR NOT EXISTS (SELECT 1 FROM builds d WHERE d.run=${b}.run AND d.app_id=${b}.app_id AND d.platform=${b}.platform AND d.state='ready' AND d.deleted_at IS NULL AND (d.variant='' OR d.variant<${b}.variant)))`
-
-const platformNames: Record<Platform, string> = {
-  ios: 'iOS',
-  android: 'Android',
-  macos: 'macOS',
-  windows: 'Windows',
-  tvos: 'tvOS',
-}
-const platformIcons: Record<Platform, IconName> = {
-  ios: 'ios',
-  android: 'android',
-  macos: 'desktop_mac',
-  windows: 'desktop_windows',
-  // The icon font holds no TV glyph; tvOS shares Apple's.
-  tvos: 'ios',
-}
-
-/** A platform chip. */
-export function platformChip(platform: string): string {
-  const known = (platforms as readonly string[]).includes(platform)
-    ? (platform as Platform)
-    : undefined
-  return `<span class="platform">${known == null ? '' : icon(platformIcons[known])}${escape(known == null ? platform : platformNames[known])}</span>`
-}
-
-/** An app ID's platforms as chips, left-justified and back to back. */
-export function platformChips(list: readonly string[]): string {
-  return `<span class="app-platforms">${list.map(platformChip).join('')}</span>`
-}
-
-/**
- * One row of an `app-grid`, whose columns line up across its rows: the app
- * ID, linking to its page over the whole row, with `under` below it, then
- * `cells`. Links inside the cells sit above the row's link.
- */
-export function appGridRow(
-  href: string,
-  appId: string,
-  under: string,
-  cells: readonly string[],
-): string {
-  return `<div class="app-grid-row" role="row"><div role="cell"><a class="row-link" href="${escape(href)}">${escape(appId)}</a>${under}</div>${cells.map((cell) => `<div role="cell">${cell}</div>`).join('')}</div>`
-}
 
 /** A run status as a dot and its word. */
 export function statusDot(status: string): string {

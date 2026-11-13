@@ -134,69 +134,7 @@ export function breadcrumbs(
     .join('')}</ol></nav>`
 }
 
-/** The first levels of every project page: Projects, then the project. */
-export function projectCrumbs(slug: string, name: string): Crumb[] {
-  return [
-    { label: 'Projects', href: '/projects' },
-    { label: name, href: `/projects/${encodeURIComponent(slug)}` },
-  ]
-}
-
-/**
- * A project's Runs and builds, then the branch picked there: the branch's
- * runs are `?branch=`, and Runs and builds itself is All branches.
- */
-export function runsCrumbs(
-  slug: string,
-  name: string,
-  branch?: string,
-): Crumb[] {
-  const runs = `/projects/${encodeURIComponent(slug)}/runs`
-  return [
-    ...projectCrumbs(slug, name),
-    { label: 'Runs and builds', href: runs },
-    ...(branch == null
-      ? []
-      : [
-          {
-            label: branch,
-            href: `${runs}?branch=${encodeURIComponent(branch)}`,
-          },
-        ]),
-  ]
-}
-
 /** Where an app ID's pages are: `/projects/:slug/apps/:appId`, its Runs and builds. */
 export function appPath(slug: string, appId: string): string {
   return `/projects/${encodeURIComponent(slug)}/apps/${encodeURIComponent(appId)}`
-}
-
-/**
- * An app ID's pages, one level below its project: the app ID, then its tab
- * (Runs and builds, which is the app ID's own page, or Build numbers), then
- * the branch picked on Runs and builds.
- */
-export function appCrumbs(
-  slug: string,
-  name: string,
-  appId: string,
-  tab: 'runs' | 'build-numbers',
-  branch?: string,
-): Crumb[] {
-  const base = appPath(slug, appId)
-  return [
-    ...projectCrumbs(slug, name),
-    { label: appId, href: base },
-    tab === 'runs'
-      ? { label: 'Runs and builds', href: base }
-      : { label: 'Build numbers', href: `${base}/build-numbers` },
-    ...(tab === 'runs' && branch != null
-      ? [
-          {
-            label: branch,
-            href: `${base}?branch=${encodeURIComponent(branch)}`,
-          },
-        ]
-      : []),
-  ]
 }

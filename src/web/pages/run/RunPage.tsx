@@ -44,6 +44,7 @@ import {
   ApprovalBox,
   CancelAction,
   RequestSheet,
+  runTarget,
   runHref,
   type Unavailable,
 } from './actions.js'
@@ -507,7 +508,7 @@ function RunScreen({
       <History data={data} now={now} />
       {canRequest && (
         <RequestSheet
-          run={data}
+          target={runTarget(data)}
           open={requesting}
           onClose={() => setRequesting(false)}
         />

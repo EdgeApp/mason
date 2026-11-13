@@ -567,12 +567,32 @@ describe('Host web API: the pages’ reads, from its cache', function () {
       asProjectOverview,
       (await get('/api/v2/projects/reads/overview', as('manager'))).json,
     )
-    // The host's copy is read-only, with no Secrets tab.
+    // The host's copy is read-only, with no Secrets tab; Request run reads
+    // the workflows of the Masonfile its copy of the latest run recorded.
     assert.deepEqual([overview.canSeed, overview.secrets], [false, false])
-    shape(
+    assert.deepEqual(
+      overview.workflows?.map((workflow) => workflow.name),
+      ['build', 'release'],
+    )
+    const runs = shape(
       asProjectRuns,
       (await get('/api/v2/projects/reads/runs', as('developer'))).json,
     )
+    assert.equal(runs.more, false)
+    const newest = shape(
+      asProjectRuns,
+      (await get('/api/v2/projects/reads/runs?limit=1', as('developer'))).json,
+    )
+    assert.deepEqual(
+      [newest.runs.map((run) => run.id), newest.more],
+      [[runs.runs[0]!.id], true],
+    )
+    const refused = await get(
+      '/api/v2/projects/reads/runs?limit=0',
+      as('developer'),
+    )
+    assert.equal(refused.status, 400)
+    assert.equal(refused.json.error, 'limit is a whole number from 1 to 500')
     shape(
       asProjectApp,
       (await get(`/api/v2/projects/reads/apps/${ALPHA}`, as('developer'))).json,

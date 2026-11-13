@@ -25,6 +25,12 @@ import { SignInPage } from '../pages/auth/SignIn.js'
 import { ArtifactsPage } from '../pages/artifacts/Artifacts.js'
 import { DashboardPage } from '../pages/dashboard/Dashboard.js'
 import { PlaceholderPage } from '../pages/Placeholder.js'
+import { AppBuildNumbersPage } from '../pages/projects/BuildNumbers.js'
+import { MasonfilePage } from '../pages/projects/Masonfile.js'
+import { ProjectOverviewPage } from '../pages/projects/Overview.js'
+import { AppRunsPage, ProjectRunsPage } from '../pages/projects/Runs.js'
+import { SecretsPage } from '../pages/projects/Secrets.js'
+import { WizardPage } from '../pages/projects/Wizard.js'
 import { RunPage } from '../pages/run/RunPage.js'
 import { SearchPage } from '../pages/search/Search.js'
 import { SkeletonText } from '../ui/Skeleton.js'
@@ -84,6 +90,7 @@ const app = (params: Params): Crumb => ({
 
 /** A project's or an app ID's page. */
 function projectPage(
+  page: ComponentType,
   path: string,
   title: string,
   description: string,
@@ -91,6 +98,7 @@ function projectPage(
   masterOnly = false,
 ): PageRoute {
   return {
+    page,
     path,
     title: () => title,
     description,
@@ -150,6 +158,7 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
   },
   {
     ...projectPage(
+      WizardPage,
       '/projects/new',
       'Add a project',
       'Read a repository’s Masonfile and add it.',
@@ -160,24 +169,28 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
     least: 'manager',
   },
   projectPage(
+    ProjectOverviewPage,
     '/projects/:slug',
     'Overview',
     'The project’s app IDs, branch rules and build numbers.',
     (p) => [PROJECTS, { label: p.slug ?? '' }],
   ),
   projectPage(
+    ProjectRunsPage,
     '/projects/:slug/runs',
     'Runs and builds',
     'The project’s branches and runs.',
     (p) => [PROJECTS, project(p), { label: 'Runs and builds' }],
   ),
   projectPage(
+    MasonfilePage,
     '/projects/:slug/masonfile',
     'Masonfile',
     'The Masonfile at a commit.',
     (p) => [PROJECTS, project(p), { label: 'Masonfile' }],
   ),
   projectPage(
+    SecretsPage,
     '/projects/:slug/secrets',
     'Secrets',
     'The project’s secret values and files, and who read them.',
@@ -185,12 +198,14 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
     true,
   ),
   projectPage(
+    AppRunsPage,
     '/projects/:slug/apps/:appId',
     'Runs and builds',
     'An app ID’s runs and builds.',
     (p) => [PROJECTS, project(p), { label: p.appId ?? '' }],
   ),
   projectPage(
+    AppBuildNumbersPage,
     '/projects/:slug/apps/:appId/build-numbers',
     'Build numbers',
     'An app ID’s build-number sequence.',

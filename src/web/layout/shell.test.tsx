@@ -16,6 +16,7 @@ import {
   where,
   type Harness,
 } from '../test/render.js'
+import { overviewFixture, runsFixture } from '../test/projects.js'
 import { APPEARANCE_KEY } from '../theme/theme-boot.js'
 import { glyph } from '../ui/icons.js'
 import { opensPalette } from './AppShell.js'
@@ -165,9 +166,11 @@ describe('The app shell’s navigation per node and role', () => {
           { slug: 'fixture', name: 'Fixture', running: 2 },
           { slug: 'website', name: 'website' },
         ]),
+        '/api/v2/projects/fixture/overview': overviewFixture(),
+        '/api/v2/projects/fixture/runs': runsFixture(),
       }),
     })
-    await page('Runs and builds')
+    await page('Fixture')
     assert.equal(
       sidebar().querySelector('.m-sidebar__brand')!.textContent,
       'Masonv0.6.0',
@@ -383,14 +386,19 @@ describe('The top bar', () => {
   })
 
   it('shows the narrow back chevron named by the parent crumb, and the title once the h1 scrolls under the bar', async () => {
-    renderApp({ path: '/projects/fixture/masonfile' })
-    await page('Masonfile')
+    renderApp({
+      path: '/projects/fixture/masonfile',
+      replies: shellReplies('admin', 'master', {
+        '/api/v2/projects/fixture/overview': overviewFixture(),
+      }),
+    })
+    await page('Fixture')
     // The page sets the chevron in an effect, after its heading renders.
-    const back = await screen.findByRole('link', { name: 'Back to fixture' })
+    const back = await screen.findByRole('link', { name: 'Back to Fixture' })
     assert.equal(back.getAttribute('href'), '/projects/fixture')
     const bar = document.querySelector('.m-topbar')!
     const title = bar.querySelector('.m-topbar__title')!
-    assert.equal(title.textContent, 'Masonfile')
+    assert.equal(title.textContent, 'Fixture · Masonfile')
     assert.equal(bar.getAttribute('data-scrolled'), null)
     assert.equal(title.getAttribute('aria-hidden'), 'true')
     Object.defineProperty(window, 'scrollY', { configurable: true, value: 200 })
@@ -991,8 +999,9 @@ describe('The ⌘K palette', () => {
     const option = await screen.findByRole('option')
     screen.getByText('1 result')
     fireEvent.mouseMove(option)
+    app.node.set('/api/v2/projects/fixture/overview', overviewFixture())
     await act(async () => option.click())
-    await page('Overview')
+    await page('Fixture')
     assert.equal(where.path, '/projects/fixture')
   })
 
@@ -1068,22 +1077,14 @@ describe('Pages in the shell', () => {
   })
 
   it('draws a page a later milestone ports: breadcrumbs from the node’s pill, its header and what is coming', async () => {
-    renderApp({
-      path: '/projects/fixture/apps/com.example.alpha/build-numbers',
-    })
-    await page('Build numbers')
+    renderApp({ path: '/groups/7' })
+    await page('Group')
     const crumbs = screen.getByRole('navigation', { name: 'Breadcrumb' })
     assert.deepEqual(
       within(crumbs)
         .getAllByRole('listitem')
         .map((item) => item.textContent!.replace(glyph('lan'), '')),
-      [
-        'Mason Master',
-        'Projects & apps',
-        'fixture',
-        'com.example.alpha',
-        'Build numbers',
-      ],
+      ['Mason Master', 'Groups', 'Group'],
     )
     assert.equal(
       within(crumbs)
@@ -1092,15 +1093,15 @@ describe('Pages in the shell', () => {
       '/',
     )
     assert.equal(
-      within(crumbs).getByText('Build numbers').getAttribute('aria-current'),
+      within(crumbs).getByText('Group').getAttribute('aria-current'),
       'page',
     )
-    screen.getByRole('heading', { name: 'Coming in M8' })
+    screen.getByRole('heading', { name: 'Coming in M9' })
     assert.equal(
       screen
         .getByRole('link', { name: /Open the current page/ })
         .getAttribute('href'),
-      '/projects/fixture/apps/com.example.alpha/build-numbers',
+      '/groups/7',
     )
   })
 

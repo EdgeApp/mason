@@ -9,24 +9,17 @@ import {
   field,
   groupsView,
   groupView,
-  masonfileView,
   nodesView,
   accountView,
   peopleView,
-  projectRunsView,
-  projectTabs,
-  projectView,
-  secretsView,
   settingsView,
-  wizardView,
 } from './admin.js'
 import {
   artifactRunData,
   artifactsListData,
   projectRunsData,
-  projectRunsTable,
 } from './artifacts.js'
-import { bytes, dashboardData, platformChip } from './dashboard.js'
+import { bytes, dashboardData } from './dashboard.js'
 import {
   ago,
   breadcrumbs,
@@ -707,7 +700,6 @@ describe('Design system and views', () => {
     assert.deepEqual([empty.queue, empty.builds, empty.projects], [[], [], []])
     assert.equal(bytes(999), '999 B')
     assert.equal(bytes(2_500_000_000_000_000), '2500.0 TB')
-    assert.match(platformChip('linux'), />linux</)
   })
 
   it('M11 a project card: the header opens the project, each app ID row its page, and each branch’s latest build its run, push branches first, six then +N more', () => {
@@ -910,7 +902,7 @@ describe('Design system and views', () => {
       db,
       viewer: viewer('admin'),
       now: NOW,
-      appVisible: () => true,
+      appVisible: (): boolean => true,
     }
     const html = [
       JSON.stringify(dashboardData(source)),
@@ -1096,37 +1088,25 @@ describe('Design system and views', () => {
         ['run-5', '', '', NOW - 40 * HOUR],
       ],
     )
-    const html = projectRunsView(
-      { viewer: viewer('developer'), slug: 'phones', name: 'Phones', ...all },
-      NOW,
+    // Fifty runs by default; a limit answers the newest that many and
+    // whether older runs are left.
+    assert.equal(all.more, false)
+    const two = projectRunsData(source, 'phones', { pinned, limit: 2 })
+    assert.deepEqual(
+      two.runs.map((run) => run.id),
+      ['run-3', 'run-2'],
     )
-    // All branches: Runs and builds is the current pill.
-    assert.deepEqual(crumbTrail(html), [
-      'Mason Master /',
-      'Projects /projects',
-      'Phones /projects/phones',
-      'Runs and builds /projects/phones/runs *',
-    ])
-    // All branches first and current, then the pinned branches, a divider, the rest.
-    assert.match(
-      html,
-      /<ul class="tree"><li><a href="\/projects\/phones\/runs" aria-current="true"><span>[^]*All branches<\/span><\/a><\/li><li><a href="\/projects\/phones\/runs\?branch=develop"><span class="mono">develop<\/span><small>No runs yet<\/small><\/a><\/li><li><a href="\/projects\/phones\/runs\?branch=main"><span class="mono">main<\/span><small><time [^>]*data-format="since">5:00 ago<\/time><\/small><\/a><\/li><li><a href="\/projects\/phones\/runs\?branch=feature%2Flogin">[^]*<li class="divider" role="separator"><\/li><li><a href="\/projects\/phones\/runs\?branch=old%2Fbranch">/,
+    assert.equal(two.more, true)
+    const four = projectRunsData(source, 'phones', { pinned, limit: 4 })
+    assert.equal(four.runs.length, 4)
+    assert.equal(four.more, false)
+    // A run's workflow and branch come with it, for its row.
+    assert.deepEqual(
+      all.runs
+        .filter((run) => run.id === 'run-5')
+        .map((run) => [run.number, run.workflow, run.branch, run.status]),
+      [[1, 'nightly', 'old/branch', 'queued']],
     )
-    assert.match(
-      html,
-      /<thead><tr><th>Status<\/th><th>Version<\/th><th>Build number<\/th><th>Started<\/th><\/tr><\/thead>/,
-    )
-    assert.doesNotMatch(html, /Artifacts|Every branch/)
-    // A row links its run and keeps its status live; every branch's names its branch.
-    assert.match(
-      html,
-      /<tr data-run-id="run-2" data-status="failed"><td><a href="\/runs\/run-2"><span class="dot failed"[^>]*><\/span> <span data-status-text>failed<\/span><\/a><small>Run 2 · <span class="mono">main<\/span><\/small><\/td><td class="mono">—<\/td><td class="mono">26110201<\/td><td><time datetime="[^"]+" title="[^"]+" data-at="\d+" data-format="since">5:00 ago<\/time><\/td><\/tr>/,
-    )
-    assert.match(
-      html,
-      /<small>Run 1 · nightly · <span class="mono">old\/branch/,
-    )
-    assert.match(html, /data-format="since">2026-10-20 0600 UTC<\/time>/)
     const main = projectRunsData(source, 'phones', {
       branch: 'main',
       pinned: [],
@@ -1135,45 +1115,13 @@ describe('Design system and views', () => {
       main.branches.map((entry) => entry.branch),
       ['feature/login', 'main', 'old/branch'],
     )
-    const selected = projectRunsView(
-      {
-        viewer: viewer('developer', 'host'),
-        slug: 'phones',
-        name: 'Phones',
-        branch: 'main',
-        ...main,
-      },
-      NOW,
-    )
-    // A branch picked: its pill is current, and Runs and builds returns to All branches.
-    assert.deepEqual(crumbTrail(selected), [
-      'Mason Host /',
-      'Projects /projects',
-      'Phones /projects/phones',
-      'Runs and builds /projects/phones/runs',
-      'main /projects/phones/runs?branch=main *',
-    ])
-    // The layout is the same: the branches on the left, then that branch's runs table.
-    assert(
-      selected.includes(
-        `<section class="panel"><h2><span class="mono">main</span></h2>${projectRunsTable(main.runs, NOW, false)}</section></div>`,
-      ),
-    )
-    assert.match(
-      selected,
-      /<div class="runs-columns"><nav class="panel branch-list" aria-label="Branches">/,
-    )
-    assert.match(selected, /The latest runs on main/)
-    assert.match(
-      selected,
-      /href="\/projects\/phones\/runs\?branch=main" aria-current="true"/,
-    )
-    assert.doesNotMatch(selected, /divider/)
-    assert.match(selected, /<small>Run 2<\/small>/)
+    // With no pinned branches there is no pinned group.
+    assert(main.branches.every((entry) => !entry.pinned))
     assert.deepEqual(
       main.runs.map((run) => run.id),
       ['run-2', 'run-1'],
     )
+    assert.equal(main.more, false)
   })
 
   it('M2 writes times as hours and minutes ago within a day, else the date, 24-hour time and zone', () => {
@@ -2086,362 +2034,6 @@ describe('Settings page', () => {
   })
 })
 
-describe('Project tabs and the Secrets tab', () => {
-  const variants = [
-    {
-      id: 1,
-      name: 'API_TOKEN',
-      kind: 'value' as const,
-      configs: [],
-      text: true,
-      masked: true,
-      bytes: 9,
-    },
-    {
-      id: 2,
-      name: 'API_TOKEN',
-      kind: 'value' as const,
-      configs: ['develop', 'maestro'],
-      text: true,
-      masked: false,
-      bytes: 9,
-    },
-    {
-      id: 3,
-      name: 'config.json',
-      kind: 'file' as const,
-      configs: [],
-      text: true,
-      masked: true,
-      bytes: 20,
-      pathEnv: 'CONFIG_FILE',
-      destination: 'config/app.json',
-    },
-    {
-      id: 4,
-      name: 'release.jks',
-      kind: 'file' as const,
-      configs: ['beta'],
-      text: false,
-      masked: true,
-      bytes: 2048,
-    },
-  ]
-  const row = (html: string, id: number): string =>
-    html.split(`data-secret-id="${id}"`)[1]!.split('</tr>')[0]!
-
-  it('U18.13 the project pages share four tabs, the current one marked', () => {
-    const tabs = projectTabs('my app', 'secrets')
-    assert.deepEqual(
-      [
-        ...tabs.matchAll(/<a href="([^"]+)"( aria-current="page")?>([^<]+)</g),
-      ].map((match) => [match[1], match[2] != null, match[3]]),
-      [
-        ['/projects/my%20app', false, 'Overview'],
-        ['/projects/my%20app/runs', false, 'Runs and builds'],
-        ['/projects/my%20app/masonfile', false, 'Masonfile'],
-        ['/projects/my%20app/secrets', true, 'Secrets'],
-      ],
-    )
-    const overview = projectView({
-      viewer: viewer('developer'),
-      slug: 'app',
-      name: 'App',
-      repository: 'https://github.com/a/app',
-      defaultBranch: 'master',
-      format: 'pipeline',
-      apps: [],
-      rules: [],
-      webhook: false,
-      buildNumbers: [],
-      canSeed: false,
-    })
-    assert.match(
-      overview,
-      /href="\/projects\/app" aria-current="page">Overview/,
-    )
-    assert.doesNotMatch(overview, /data-secrets|Save secrets/)
-    assert.deepEqual(crumbTrail(overview), [
-      'Mason Master /',
-      'Projects /projects',
-      'App /projects/app *',
-    ])
-    const masonfile = masonfileView({
-      viewer: viewer('developer', 'host'),
-      slug: 'app',
-      name: 'App',
-      commits: [],
-    })
-    assert.match(
-      masonfile,
-      /href="\/projects\/app\/masonfile" aria-current="page">Masonfile/,
-    )
-    assert.deepEqual(crumbTrail(masonfile), [
-      'Mason Host /',
-      'Projects /projects',
-      'App /projects/app',
-      'Masonfile /projects/app/masonfile *',
-    ])
-    const runs = projectRunsView(
-      {
-        viewer: viewer('developer'),
-        slug: 'app',
-        name: 'App',
-        branches: [],
-        runs: [],
-      },
-      NOW,
-    )
-    assert.match(
-      runs,
-      /href="\/projects\/app\/runs" aria-current="page">Runs and builds/,
-    )
-    assert.match(runs, /No runs yet/)
-  })
-
-  it('M10 the App IDs card is a grid of App ID, Platforms and Apple team, each row linking to its app ID page', () => {
-    const overview = (
-      apps: Parameters<typeof projectView>[0]['apps'],
-      node: 'master' | 'host' = 'master',
-    ): string =>
-      projectView({
-        viewer: viewer('developer', node),
-        slug: 'my app',
-        name: 'App',
-        repository: 'https://github.com/a/app',
-        defaultBranch: 'master',
-        format: 'pipeline',
-        apps,
-        rules: [],
-        webhook: false,
-        buildNumbers: [],
-        canSeed: false,
-      })
-    const apps = [
-      {
-        bundleId: 'com.example.alpha',
-        platforms: ['ios', 'android'],
-        apple: { team: 'ABCDE12345' },
-      },
-      { bundleId: 'com.example.beta-with-a-longer-id', platforms: ['macos'] },
-      { bundleId: 'a&b', platforms: [] },
-    ]
-    for (const node of ['master', 'host'] as const) {
-      const html = overview(apps, node)
-      const card = html.slice(
-        html.indexOf('App IDs</h2>'),
-        html.indexOf('Branch rules'),
-      )
-      assert.doesNotMatch(card, /<ul|<li/)
-      assert.match(
-        card,
-        /^App IDs<\/h2><div class="app-grid" role="table" aria-label="App IDs"><div class="app-grid-row app-grid-head" role="row"><span role="columnheader">App ID<\/span><span role="columnheader">Platforms<\/span><span role="columnheader">Apple team<\/span><\/div>/,
-      )
-      // One row per app ID, three cells each: its link, its chips back to back, its team.
-      const rows = [
-        ...card.matchAll(
-          /<div class="app-grid-row" role="row"><div role="cell"><a class="row-link" href="([^"]+)">([^<]+)<\/a><\/div><div role="cell"><span class="app-platforms">(.*?)<\/span><\/div><div role="cell">(.*?)<\/div><\/div>/g,
-        ),
-      ].map((match) => ({
-        href: match[1],
-        id: match[2],
-        chips: match[3],
-        team: match[4],
-      }))
-      assert.deepEqual(rows, [
-        {
-          href: '/projects/my%20app/apps/com.example.alpha',
-          id: 'com.example.alpha',
-          chips: platformChip('ios') + platformChip('android'),
-          team: '<span class="mono">ABCDE12345</span>',
-        },
-        {
-          href: '/projects/my%20app/apps/com.example.beta-with-a-longer-id',
-          id: 'com.example.beta-with-a-longer-id',
-          chips: platformChip('macos'),
-          team: '',
-        },
-        {
-          href: '/projects/my%20app/apps/a%26b',
-          id: 'a&amp;b',
-          chips: '',
-          team: '',
-        },
-      ])
-    }
-    assert.match(overview([]), /App IDs<\/h2><p>None\.<\/p><\/section>/)
-    // The columns: the app ID's at least 12rem, the chips' as wide as the widest row's, the team's the rest.
-    assert.match(
-      stylesheet,
-      /\.app-grid\{display:grid;grid-template-columns:minmax\(12rem,max-content\) max-content 1fr;/,
-    )
-    assert.match(
-      stylesheet,
-      /\.app-grid-row\{display:grid;grid-column:1\/-1;grid-template-columns:subgrid;/,
-    )
-    assert.match(
-      stylesheet,
-      /\.app-platforms\{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-start;/,
-    )
-    assert.match(
-      stylesheet,
-      /\.app-grid \.row-link::after\{content:'';position:absolute;inset:0\}/,
-    )
-  })
-
-  it('U18.13 a manager sees the add buttons, Edit or Replace then Delete per row, the editor and the audit', () => {
-    const html = secretsView({
-      slug: 'app',
-      name: 'App',
-      format: 'pipeline',
-      secrets: variants,
-      canChange: true,
-      backups: true,
-      audit: [
-        {
-          name: 'API_TOKEN',
-          configs: ['develop'],
-          action: 'configs changed',
-          who: 'Mia Manager',
-          address: '10.0.0.5',
-          at: Date.UTC(2026, 9, 29, 12),
-          detail: 'all → develop',
-        },
-      ],
-    })
-    assert.deepEqual(crumbTrail(html), [
-      'Mason Master /',
-      'Projects /projects',
-      'App /projects/app',
-      'Secrets /projects/app/secrets *',
-    ])
-    assert.match(
-      html,
-      /data-secret-add="value"><span[^>]*>[^<]*<\/span>Add secret value/,
-    )
-    assert.match(
-      html,
-      /data-secret-add="file"><span[^>]*>[^<]*<\/span>Add secret file/,
-    )
-    assert.match(html, /ctx\.secret\(name\)/)
-    assert.match(html, /await ctx\.writeSecretFile\(name, directory\)/)
-    assert.match(html, /data-secrets="\/api\/v2\/projects\/app\/secrets"/)
-    // A value: Edit before Delete; in edit, Save before Cancel.
-    const value = row(html, 1)
-    assert(
-      value.indexOf('data-secret-edit') < value.indexOf('data-secret-delete'),
-    )
-    assert(
-      value.indexOf('data-secret-save') < value.indexOf('data-secret-cancel'),
-    )
-    assert.match(value, /data-secret-value hidden/)
-    assert.match(
-      value,
-      /<button type="button" class="pill" data-secret-pill[^>]*>all</,
-    )
-    assert.match(row(html, 2), />develop<\/button><button[^>]*>maestro</)
-    assert.match(row(html, 2), /not masked/)
-    // A text file edits in the editor; a binary file is only replaced.
-    assert.match(row(html, 3), /data-kind="file"[^]*data-secret-edit>/)
-    assert.match(row(html, 3), /→ \$CONFIG_FILE/)
-    assert.match(row(html, 3), /at config\/app\.json/)
-    assert.doesNotMatch(row(html, 4), /data-secret-edit>/)
-    assert.match(row(html, 4), /data-secret-replace/)
-    assert.match(html, /data-secret-editor hidden role="dialog"/)
-    assert.match(html, /<input type="file" data-secret-file hidden>/)
-    assert.match(html, /data-secret-add-form="value" hidden/)
-    assert.match(
-      html,
-      /<input type="checkbox" data-secret-show> Show the value/,
-    )
-    assert.match(row(html, 4), /2\.0 KB/)
-    assert.match(row(html, 3), /20 B · text/)
-    assert.match(html, /data-secret-add-form="file" hidden/)
-    assert.match(html, /data-secret-drop/)
-    assert.doesNotMatch(html, /name="masked"|name="pathEnv"/)
-    assert.match(html, /<td>Mia Manager<\/td>/)
-    assert.match(html, /configs changed <small class="hint">all → develop/)
-    assert.match(html, /data-at="1793275200000">2026-10-29 12:00:00 UTC</)
-    // Script projects add values unmasked and files with a path variable.
-    const script = secretsView({
-      slug: 's',
-      name: 'S',
-      format: 'script',
-      secrets: [],
-      canChange: true,
-      backups: true,
-      audit: [],
-    })
-    assert.match(script, /name="masked" checked/)
-    assert.match(script, /name="pathEnv"/)
-    // A script project's tab: its own help, a path for the name, no configs anywhere.
-    assert.match(script, /This is a script project/)
-    assert.match(script, /Path in the checkout/)
-    assert.doesNotMatch(script, /name="configs"|data-secret-configs-input/)
-    assert.match(script, /No secrets yet/)
-    assert.match(script, /Nothing yet/)
-    // A script project's variant: plain "all", no configs control, and still Edit and Delete.
-    const scripted = secretsView({
-      slug: 's',
-      name: 'S',
-      format: 'script',
-      secrets: [variants[0]!],
-      canChange: true,
-      backups: true,
-      audit: [],
-    })
-    const scriptRow = row(scripted, 1)
-    assert.match(scriptRow, /<span class="pill">all<\/span>/)
-    assert.doesNotMatch(
-      scriptRow,
-      /data-secret-pill(?!s)|data-secret-configs-input/,
-    )
-    assert.match(scriptRow, /data-secret-edit/)
-    assert.match(scriptRow, /data-secret-delete/)
-  })
-
-  it('U18.13 without backups a manager is told to configure them, may not add, and may still view and edit', () => {
-    const html = secretsView({
-      slug: 'app',
-      name: 'App',
-      format: 'pipeline',
-      secrets: variants,
-      canChange: true,
-      backups: false,
-      audit: [],
-    })
-    assert.match(html, /Configure backups before changing secrets/)
-    assert.match(html, /data-secret-add="value" disabled/)
-    assert.doesNotMatch(html, /data-secret-add-form/)
-    assert.match(row(html, 1), /data-secret-edit/)
-  })
-
-  it('U18.13 a developer sees names and configs only', () => {
-    const html = secretsView({
-      slug: 'app',
-      name: 'App',
-      format: 'pipeline',
-      secrets: variants,
-      canChange: false,
-      backups: true,
-    })
-    assert.match(html, /API_TOKEN/)
-    assert.match(html, /<span class="pill">maestro<\/span>/)
-    for (const control of [
-      'data-secrets',
-      'data-secret-add',
-      'data-secret-edit',
-      'data-secret-replace',
-      'data-secret-delete',
-      'data-secret-editor',
-      'data-secret-value',
-      'data-secret-pill ',
-      'Audit',
-    ])
-      assert(!html.includes(control), control)
-  })
-})
-
 describe('People and groups pages', () => {
   const people: Array<{
     id: number
@@ -2689,49 +2281,6 @@ describe('People and groups pages', () => {
     assert.deepEqual(
       crumbTrail(cloudView({ accounts: [], canChange: true, now: NOW })),
       ['Mason Master /', 'Cloud /cloud *'],
-    )
-    assert.deepEqual(
-      crumbTrail(wizardView({ owned: [], rules: [], webhook: false })),
-      ['Mason Master /', 'Projects /projects', 'New /projects/new *'],
-    )
-    assert.deepEqual(
-      crumbTrail(
-        wizardView({
-          slug: 'my app',
-          repository: 'git@github.com:a/app.git',
-          owned: [],
-          rules: [],
-          webhook: false,
-        }),
-      ),
-      [
-        'Mason Master /',
-        'Projects /projects',
-        'New /projects/new?slug=my%20app *',
-      ],
-    )
-    // Labels are escaped; so are the project's own pages' hrefs.
-    assert.deepEqual(
-      crumbTrail(
-        projectView({
-          viewer: viewer('developer', 'host'),
-          slug: 'a&b',
-          name: '<Odd> & "Co"',
-          repository: '',
-          defaultBranch: 'master',
-          format: 'pipeline',
-          apps: [],
-          rules: [],
-          webhook: false,
-          buildNumbers: [],
-          canSeed: false,
-        }),
-      ),
-      [
-        'Mason Host /',
-        'Projects /projects',
-        '&lt;Odd&gt; &amp; &quot;Co&quot; /projects/a%26b *',
-      ],
     )
   })
 

@@ -21,12 +21,24 @@ const server = (
 }
 
 describe('The routes the app has ported and the node’s own pages', () => {
-  it('has ported Projects & apps, Artifacts, Search and the run page', () => {
+  it('has ported Projects & apps, Artifacts, Search, the run page and the project pages', () => {
     assert.deepEqual(
       PAGE_ROUTES.filter((route) => route.page != null).map(
         (route) => route.path,
       ),
-      ['/projects', '/artifacts', '/search', '/runs/:id'],
+      [
+        '/projects',
+        '/artifacts',
+        '/search',
+        '/runs/:id',
+        '/projects/new',
+        '/projects/:slug',
+        '/projects/:slug/runs',
+        '/projects/:slug/masonfile',
+        '/projects/:slug/secrets',
+        '/projects/:slug/apps/:appId',
+        '/projects/:slug/apps/:appId/build-numbers',
+      ],
     )
   })
 

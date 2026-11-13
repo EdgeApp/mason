@@ -258,6 +258,10 @@ export interface FileInputProps extends Frame {
   onChange: (file: File | undefined) => void
   /** The drop zone's words: "Choose the key file". */
   choose: string
+  /** A line under the prompt: what it takes ("Up to 5 MiB."). */
+  hint?: ReactNode
+  /** What follows the chosen file's name (its size). */
+  describe?: (file: File) => string
   id?: string
   name?: string
   accept?: string
@@ -276,6 +280,8 @@ export function FileInput({
   file,
   onChange,
   choose,
+  hint,
+  describe,
   id,
   name,
   accept,
@@ -317,9 +323,13 @@ export function FileInput({
           ) : (
             <span>
               <strong className="m-t-mono">{file.name}</strong>
+              {describe != null && ` · ${describe(file)}`}
               <br />
               <span className="m-dropzone__choose">Choose another file</span>
             </span>
+          )}
+          {hint != null && (
+            <span className="m-t-subhead m-secondary">{hint}</span>
           )}
           <input
             id={described.id}

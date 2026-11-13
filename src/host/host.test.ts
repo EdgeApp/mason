@@ -37,7 +37,6 @@ import { LinkError, type Link } from '../link/link.js'
 import { Outbox } from './outbox.js'
 import { HostCache } from './cache.js'
 import { proofLog } from '../test/proofLog.js'
-import { crumbTrail } from '../test/crumbs.js'
 import { assertShell } from '../test/webShell.js'
 import type { NodeInfo } from '../shared/api/index.js'
 import { migrateMaster } from '../master/schema.js'
@@ -889,10 +888,21 @@ describe('Host cache, sign-in and offline serving', function () {
     await signIn(developer, 'first', { email: 'dev@example.com' })
     const all = await (await developer.get('/')).text()
     assert.match(all, /Zcash/, 'developers see every app')
-    // The project's Overview, as on the master.
-    assert.match(
-      await (await developer.get('/projects/edge')).text(),
-      /<nav class="tabs" aria-label="Project">/,
+    // A project's pages are the web app's; its Overview reads the host's
+    // copy, read-only and with no Secrets tab.
+    const shell = async (route: string): Promise<void> => {
+      const page = await developer.get(route)
+      assert.equal(page.status, 200, route)
+      assert.equal(page.headers.get('cache-control'), 'no-store', route)
+      assert.match(await page.text(), /<div id="root"><\/div>/, route)
+    }
+    await shell('/projects/edge')
+    const overview = (await (
+      await developer.get('/api/v2/projects/edge/overview')
+    ).json()) as { slug: string; canSeed: boolean; secrets: boolean }
+    assert.deepEqual(
+      [overview.slug, overview.canSeed, overview.secrets],
+      ['edge', false, false],
     )
     // Runs and builds lists each run, which opens its page on the host.
     const master = c.master.master!.database
@@ -910,8 +920,11 @@ describe('Host cache, sign-in and offline serving', function () {
       10000,
       'the run on the host',
     )
-    const runs = await (await developer.get('/projects/edge/runs')).text()
-    assert.match(runs, /href="\/runs\/m4-run"/)
+    await shell('/projects/edge/runs')
+    const runs = (await (
+      await developer.get('/api/v2/projects/edge/runs')
+    ).json()) as { runs: Array<{ id: string }> }
+    assert(runs.runs.some((run) => run.id === 'm4-run'))
     // The run page is the web app's, read from the host's copy: its trail
     // starts from Mason Host (src/web/pages/run).
     const runPage = await developer.get('/runs/m4-run')
@@ -926,14 +939,11 @@ describe('Host cache, sign-in and offline serving', function () {
       [read.number, read.project.slug, read.branch],
       [4242, 'edge', 'develop'],
     )
-    const masonfile = await (
-      await developer.get('/projects/edge/masonfile')
-    ).text()
-    assert.deepEqual(crumbTrail(masonfile).slice(-2), [
-      'Edge /projects/edge',
-      'Masonfile /projects/edge/masonfile *',
-    ])
-    assert.equal(crumbTrail(masonfile)[0], 'Mason Host /')
+    await shell('/projects/edge/masonfile')
+    assert.equal(
+      (await developer.get('/api/v2/projects/edge/masonfile/commits')).status,
+      200,
+    )
     master.db.prepare("DELETE FROM jobs WHERE id='m4-run'").run()
     master.change('job', 'm4-run', 'delete')
   })

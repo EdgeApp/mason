@@ -9,7 +9,9 @@ import {
   asCancelled,
   asRunCreated,
   runActionPath,
+  type ParamSpec,
   type RunPage,
+  type WorkflowSpec,
 } from '../../../shared/api/index.js'
 import { useApi } from '../../api/context.js'
 import { Alert } from '../../ui/Alert.js'
@@ -165,25 +167,56 @@ export function ApprovalBox({
   )
 }
 
+/** What Request run starts from: a run's project, branch and workflow, or a project's default branch. */
+export interface RequestTarget {
+  /** Tells one sheet's fields from another's. */
+  id: string
+  project: { slug: string; name: string }
+  branch: string
+  workflow: string
+  /** The workflows the recorded Masonfile declares; none: the workflow is typed. */
+  workflows?: WorkflowSpec[] | undefined
+  /** The parameters of `workflow` when the list does not hold it. */
+  params?: Record<string, ParamSpec> | undefined
+}
+
+/** A run's Request run: its own branch and workflow. */
+export const runTarget = (run: RunPage): RequestTarget => ({
+  id: run.id,
+  project: run.project,
+  branch: run.branch,
+  workflow: run.workflow,
+  workflows: run.graph?.workflows,
+  params: workflowParams(run, run.workflow),
+})
+
+/** The parameters a workflow of the target takes. */
+const paramsOf = (
+  target: RequestTarget,
+  workflow: string,
+): Record<string, ParamSpec> =>
+  target.workflows?.find((entry) => entry.name === workflow)?.params ??
+  (workflow === target.workflow ? (target.params ?? {}) : {})
+
 /** The Request run sheet: branch, workflow and that workflow's typed parameters. */
 export function RequestSheet({
-  run,
+  target,
   open,
   onClose,
 }: {
-  run: RunPage
+  target: RequestTarget
   open: boolean
   onClose: () => void
 }): JSX.Element {
   const client = useApi()
   const toast = useToast()
   const navigate = useNavigate()
-  const workflows = run.graph?.workflows?.map((entry) => entry.name)
-  const [branch, setBranch] = useState(run.branch)
-  const [workflow, setWorkflow] = useState(run.workflow)
-  const specs = workflowParams(run, workflow)
+  const workflows = target.workflows?.map((entry) => entry.name)
+  const [branch, setBranch] = useState(target.branch)
+  const [workflow, setWorkflow] = useState(target.workflow)
+  const specs = paramsOf(target, workflow)
   const [values, setValues] = useState<ParamTexts>(() =>
-    paramDefaults(workflowParams(run, run.workflow)),
+    paramDefaults(paramsOf(target, target.workflow)),
   )
   const [errors, setErrors] = useState<ParamTexts>({})
   const [branchError, setBranchError] = useState<string | undefined>()
@@ -192,16 +225,16 @@ export function RequestSheet({
   const error = useRef<HTMLParagraphElement>(null)
   const initial = useRef(
     JSON.stringify([
-      run.branch,
-      run.workflow,
-      paramDefaults(workflowParams(run, run.workflow)),
+      target.branch,
+      target.workflow,
+      paramDefaults(paramsOf(target, target.workflow)),
     ]),
   )
   const dirty = JSON.stringify([branch, workflow, values]) !== initial.current
   const reset = (): void => {
-    setBranch(run.branch)
-    setWorkflow(run.workflow)
-    setValues(paramDefaults(workflowParams(run, run.workflow)))
+    setBranch(target.branch)
+    setWorkflow(target.workflow)
+    setValues(paramDefaults(paramsOf(target, target.workflow)))
     setErrors({})
     setBranchError(undefined)
     setFailed(undefined)
@@ -222,7 +255,7 @@ export function RequestSheet({
     try {
       const created = await client.post('/api/v2/runs', asRunCreated, {
         body: {
-          project: run.project.slug,
+          project: target.project.slug,
           branch: branch.trim(),
           workflow,
           ...(Object.keys(typed.params).length > 0
@@ -244,7 +277,7 @@ export function RequestSheet({
       setBusy(false)
     }
   }
-  const formId = `request-run-${run.id}`
+  const formId = `request-run-${target.id}`
   return (
     <Sheet
       open={open}
@@ -276,7 +309,7 @@ export function RequestSheet({
         onSubmit={(event) => void submit(event)}
       >
         <p className="m-t-callout m-secondary">
-          A new run of <strong>{run.project.name}</strong>.
+          A new run of <strong>{target.project.name}</strong>.
         </p>
         <div className="m-grid-2">
           <TextInput
@@ -301,9 +334,7 @@ export function RequestSheet({
                 value={workflow}
                 onChange={(event) => {
                   setWorkflow(event.target.value)
-                  setValues(
-                    paramDefaults(workflowParams(run, event.target.value)),
-                  )
+                  setValues(paramDefaults(paramsOf(target, event.target.value)))
                   setErrors({})
                 }}
               >
@@ -320,7 +351,7 @@ export function RequestSheet({
               value={workflow}
               onChange={(value) => {
                 setWorkflow(value)
-                setValues(paramDefaults(workflowParams(run, value)))
+                setValues(paramDefaults(paramsOf(target, value)))
               }}
               name="workflow"
               mono

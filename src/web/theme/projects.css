@@ -1,0 +1,66 @@
+/* A project's pages (screen-02-project, 02b-app-id, 03-runs, 06-secrets,
+   06b-secrets-files, 07-masonfile, 08-wizard): their arrangements of the
+   design language's components, on tokens only. */
+
+.m-card--narrow { max-width: 48rem; }
+.m-grid--start { align-items: start; }
+.m-flush { margin: 0; }
+.m-kv--sm { font-size: 0.8125rem; }
+.m-table .m-left { text-align: left; }
+
+/* Overview: the App IDs table and Build numbers. */
+.m-appids__id { flex-wrap: nowrap; align-items: center; }
+.m-appids__glyph { width: 2rem; height: 2rem; }
+.m-appids__link { font-weight: 600; color: var(--m-text); }
+.m-appids__link:hover { color: var(--m-text-link); }
+.m-buildnumbers__last { gap: var(--m-space-1); }
+.m-buildnumbers__default { flex-wrap: nowrap; align-items: flex-start; }
+.m-buildnumbers__default .m-icon { color: var(--m-text-tertiary); }
+
+/* Runs and builds: the branch list and the runs. */
+.m-sidelist__eyebrow { padding: var(--m-space-3) var(--m-space-4) 0; }
+.m-sidelist__name { font-weight: 600; display: block; }
+.m-runs__run { flex-wrap: nowrap; align-items: center; color: var(--m-text); }
+.m-runs__run:hover { text-decoration: none; }
+.m-runs__run:hover .m-t-headline { text-decoration: underline; }
+
+/* Masonfile: the commit picker and the code viewer. */
+.m-masonfile__picker { align-items: flex-end; }
+.m-masonfile__commit { flex: 1 1 16rem; max-width: 28rem; }
+.m-masonfile__code { margin: 0; }
+.m-masonfile__code:focus-visible { outline: 2px solid var(--m-focus-ring); outline-offset: 2px; }
+
+/* Secrets: the table, its edit block and errors, and the editor. */
+.m-secrets__add { align-items: center; flex-wrap: wrap; }
+.m-secrets__intro { padding-bottom: 0; }
+.m-secrets__name { flex-wrap: nowrap; align-items: flex-start; }
+.m-secrets__name > .m-icon { color: var(--m-text-tertiary); margin-top: 2px; }
+.m-secrets__title { font-weight: 600; }
+.m-secrets__detail { display: block; }
+.m-table .m-secrets__editrow > td { padding: 0; }
+.m-table .m-secrets__errorrow > td { padding-top: 0; }
+.m-input--end { padding-right: 3rem; }
+.m-editor .m-formsheet__head h2 { flex: 0 1 auto; }
+.m-editor__spacer { flex: 1; }
+.m-editor__foot { justify-content: space-between; flex-wrap: wrap; }
+.m-editor__error { padding: var(--m-space-3) var(--m-space-6) 0; }
+
+/* Add a project. */
+.m-wizard__apps { gap: 0; }
+.m-wizard__app { width: 100%; padding: var(--m-space-4) 0; border-top: 1px solid var(--m-border-subtle); }
+.m-wizard__id { font-weight: 600; }
+.m-wizard__team { max-width: 16rem; }
+.m-wizard__reading { flex-wrap: nowrap; }
+
+/* A stacked Secrets or Runs table keeps its actions reachable on touch. */
+@media (pointer: coarse) {
+  .m-runs__run, .m-appids__link { min-height: var(--m-target-min); }
+}
+.m-editor .m-formsheet__head > h2 { min-width: 0; }
+/* On a phone a secret's name takes the row; its actions go below it. */
+@container table (max-width: 29.99rem) {
+  .m-secrets td[data-actions] { grid-column: 1 / -1; grid-row: auto; }
+  .m-secrets td[data-actions] .m-table__actions { justify-content: flex-start; }
+}
+/* An app ID as a page's title: mono at the title's size. */
+.m-t-mono.m-title-mono { font-size: inherit; line-height: inherit; font-weight: inherit; }

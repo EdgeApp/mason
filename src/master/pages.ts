@@ -1,5 +1,4 @@
 import { locationsWithUsage } from './storageApi.js'
-import { reservedBuildNumber } from './buildNumbers.js'
 import type express from 'express'
 import { cookie } from '../auth/routes.js'
 import {
@@ -9,26 +8,18 @@ import {
 } from '../node/webApp.js'
 import { escape } from '../view/html.js'
 import {
-  appBuildNumbersView,
-  appMissingView,
   groupsView,
   groupView,
   head,
-  masonfileView,
   nodesView,
   accountView,
   peopleView,
   type PersonRow,
-  projectRunsView,
-  projectView,
-  secretsView,
   cloudView,
   settingsView,
   type SignInMethodView,
-  wizardView,
   type NodeRow,
 } from '../view/admin.js'
-import { projectRunsData } from '../view/artifacts.js'
 import { fqdn } from './cloud/hosts.js'
 import { DEFAULT_MONTHLY_BUDGET } from './cloud/pools.js'
 import { methodsOf } from './hostSettings.js'
@@ -38,29 +29,24 @@ import {
   notificationsFor,
 } from '../view/notifications.js'
 import { search } from '../view/search.js'
-import { discovery } from './wizard.js'
 import { shell, type Viewer } from '../view/shell.js'
 import { apps } from './adminApi.js'
 import { MASTER_SESSION_COOKIE, type MasterSession } from './auth.js'
 import { can } from './permissions.js'
 import type { Person } from './people.js'
-import { projectDetails, pushBranches } from './projectDetails.js'
 import { sessionActor } from './auth.js'
 import type { Master } from './runtime.js'
 import { repository, version } from '../version.js'
-import { clientAddress } from './forward.js'
-import { ProjectNotFound } from './projects.js'
+import { ProjectNotFound, type Project } from './projects.js'
 import { masterCatalogPages } from './catalogPages.js'
 import {
   appleSigning,
   appVisibleTo,
   backupNotice,
   cluster,
-  masterReader,
   runningStage,
   workerStatus,
 } from './reads.js'
-import { masonfileData } from '../node/readApi.js'
 import { sendShell } from '../node/webRoutes.js'
 
 /** A person as the People page and Your account draw them. */
@@ -175,7 +161,6 @@ export function masterPages(
 ): void {
   const session = (req: express.Request): MasterSession | undefined =>
     master.auth.session(cookie(req, MASTER_SESSION_COOKIE))
-  const reader = masterReader(master, context)
   const send = (
     res: express.Response,
     title: string,
@@ -627,32 +612,6 @@ export function masterPages(
     true,
     ['/assets/people.js'],
   )
-  guarded(
-    '/projects/new',
-    'projects.change',
-    'Add a project',
-    'dashboard',
-    (_current, req) => {
-      const slug =
-        typeof req.query.slug === 'string' ? req.query.slug : undefined
-      if (slug == null)
-        return wizardView({ owned: [], rules: [], webhook: false })
-      const project = master.projects.get(slug)
-      const found = discovery(master, project.id)
-      return wizardView({
-        slug,
-        repository: project.repository,
-        defaultBranch: project.defaultBranch,
-        ...(found == null ? {} : { discovery: found }),
-        owned: project.apps.map((entry) => entry.bundleId),
-        rules: project.rules.map((rule) => ({
-          pattern: rule.pattern,
-          mode: rule.mode,
-        })),
-        webhook: project.webhookSecret.set,
-      })
-    },
-  )
   guarded('/groups', 'groups.read', 'Groups', 'groups', (current) => {
     const actor = sessionActor(current)
     return groupsView({
@@ -720,329 +679,72 @@ export function masterPages(
       ['/assets/groups.js'],
     )
   })
-  /**
-   * The project a project page is about, for a signed-in developer or more;
-   * otherwise the page answers (sign-in, 403 or 404) and this returns nothing.
-   */
-  const projectFor = (
+  // A project's pages are the web app's: a role without projects.read reads
+  // their 403 inside it, and a project (or one of its app IDs) that does not
+  // exist its unknown state, each with that status. The add-project wizard
+  // is for those who may change projects.
+  const projectShell = (
     req: express.Request,
     res: express.Response,
-    title: string,
-  ):
-    | {
-        current: MasterSession
-        actor: ReturnType<typeof sessionActor>
-        project: ReturnType<Master['projects']['get']>
-      }
-    | undefined => {
+    action: 'projects.read' | 'projects.change',
+    exists: () => boolean,
+  ): void => {
     const current = session(req)
     if (current == null) {
       res.redirect(303, master.configured() ? '/sign-in' : '/')
-      return undefined
+      return
     }
-    const actor = sessionActor(current)
-    if (!can(actor, 'projects.read')) {
-      send(
-        res,
-        title,
-        '<p>Projects are for developers and up.</p>',
-        current,
-        403,
-      )
-      return undefined
+    if (!can(sessionActor(current), action)) {
+      sendShell(res, { status: 403 })
+      return
     }
+    sendShell(res, exists() ? {} : { status: 404 })
+  }
+  /** The enabled project at `:slug`, if any. */
+  const projectAt = (req: express.Request): Project | undefined => {
     try {
-      return {
-        current,
-        actor,
-        project: master.projects.get(String(req.params.slug)),
-      }
+      return master.projects.get(String(req.params.slug))
     } catch (error) {
       if (!(error instanceof ProjectNotFound)) throw error
-      send(
-        res,
-        title,
-        '<p class="empty-state">There is no such project.</p>',
-        current,
-        404,
-      )
       return undefined
     }
   }
-  app.get('/projects/:slug', (req, res, next) => {
-    if (req.params.slug === 'new') {
-      next()
-      return
-    }
-    const found = projectFor(req, res, 'Project')
-    if (found == null) return
-    const { current, actor, project } = found
-    send(
-      res,
-      project.name,
-      projectView({
-        viewer: viewerOf(current),
-        slug: project.slug,
-        name: project.name,
-        ...projectDetails(project, master.buildNumbers, master.pushes),
-        canSeed: can(actor, 'buildNumbers.seed'),
-      }),
-      current,
-      200,
-      'dashboard',
-    )
+  app.get('/projects/new', (req, res) => {
+    projectShell(req, res, 'projects.change', () => true)
   })
-  app.get('/projects/:slug/runs', (req, res) => {
-    const found = projectFor(req, res, 'Runs and builds')
-    if (found == null) return
-    const { current, project } = found
-    const branch =
-      typeof req.query.branch === 'string' && req.query.branch !== ''
-        ? req.query.branch
-        : undefined
-    const now = master.database.now()
-    const pinned = pushBranches(project, master.pushes)
-    const { branches, runs } = projectRunsData(
-      {
-        db: master.database.db,
-        viewer: viewerOf(current),
-        now,
-        appVisible: appVisible(master, current),
-        artifactBase: '',
-        reserved: (run): string | undefined =>
-          reservedBuildNumber(master.database.db, run),
-      },
-      project.slug,
-      { ...(branch == null ? {} : { branch }), pinned },
-    )
-    send(
-      res,
-      `${project.name} · Runs and builds`,
-      projectRunsView(
-        {
-          viewer: viewerOf(current),
-          slug: project.slug,
-          name: project.name,
-          ...(branch == null ? {} : { branch }),
-          branches,
-          runs,
-        },
-        now,
-      ),
-      current,
-      200,
-      'dashboard',
-    )
-  })
-  /**
-   * The app ID an app ID page is about, with its project: the project's own
-   * app ID, enabled, that the viewer may see; otherwise the page answers 404
-   * under the project, and this returns nothing.
-   */
-  const appFor = (
-    req: express.Request,
-    res: express.Response,
-    title: string,
-  ):
-    | (NonNullable<ReturnType<typeof projectFor>> & {
-        details: ReturnType<typeof projectDetails>
-        app: { id: number; bundleId: string; name: string; platforms: string[] }
+  app.get(
+    [
+      '/projects/:slug',
+      '/projects/:slug/runs',
+      '/projects/:slug/masonfile',
+      '/projects/:slug/secrets',
+    ],
+    (req, res) => {
+      projectShell(req, res, 'projects.read', () => projectAt(req) != null)
+    },
+  )
+  app.get(
+    [
+      '/projects/:slug/apps/:appId',
+      '/projects/:slug/apps/:appId/build-numbers',
+    ],
+    (req, res) => {
+      projectShell(req, res, 'projects.read', () => {
+        const project = projectAt(req)
+        const app = project?.apps.find(
+          (entry) => entry.bundleId === String(req.params.appId),
+        )
+        const current = session(req)!
+        return (
+          app != null &&
+          master.database.db
+            .prepare('SELECT 1 FROM apps WHERE id=? AND enabled=1')
+            .get(app.id) != null &&
+          appVisible(master, current)(app.id)
+        )
       })
-    | undefined => {
-    const found = projectFor(req, res, title)
-    if (found == null) return undefined
-    const { current, project } = found
-    const bundleId = String(req.params.appId)
-    const app = project.apps.find((entry) => entry.bundleId === bundleId)
-    const enabled =
-      app != null &&
-      master.database.db
-        .prepare('SELECT 1 FROM apps WHERE id=? AND enabled=1')
-        .get(app.id) != null
-    if (app == null || !enabled || !appVisible(master, current)(app.id)) {
-      send(
-        res,
-        title,
-        appMissingView(viewerOf(current), project.slug, project.name),
-        current,
-        404,
-        'dashboard',
-      )
-      return undefined
-    }
-    return {
-      ...found,
-      details: projectDetails(project, master.buildNumbers, master.pushes),
-      app: {
-        id: app.id,
-        bundleId: app.bundleId,
-        name: app.name,
-        platforms: app.platforms,
-      },
-    }
-  }
-  app.get('/projects/:slug/apps/:appId', (req, res) => {
-    const found = appFor(req, res, 'Runs and builds')
-    if (found == null) return
-    const { current, project, details } = found
-    const branch =
-      typeof req.query.branch === 'string' && req.query.branch !== ''
-        ? req.query.branch
-        : undefined
-    const now = master.database.now()
-    const { branches, runs } = projectRunsData(
-      {
-        db: master.database.db,
-        viewer: viewerOf(current),
-        now,
-        appVisible: appVisible(master, current),
-        artifactBase: '',
-        reserved: (run): string | undefined =>
-          reservedBuildNumber(master.database.db, run),
-      },
-      project.slug,
-      {
-        ...(branch == null ? {} : { branch }),
-        pinned: details.pinned,
-        app: found.app.bundleId,
-      },
-    )
-    send(
-      res,
-      `${found.app.bundleId} · Runs and builds`,
-      projectRunsView(
-        {
-          viewer: viewerOf(current),
-          slug: project.slug,
-          name: project.name,
-          ...(branch == null ? {} : { branch }),
-          branches,
-          runs,
-          app: found.app,
-        },
-        now,
-      ),
-      current,
-      200,
-      'dashboard',
-    )
-  })
-  app.get('/projects/:slug/apps/:appId/build-numbers', (req, res) => {
-    const found = appFor(req, res, 'Build numbers')
-    if (found == null) return
-    const { current, actor, project, details } = found
-    send(
-      res,
-      `${found.app.bundleId} · Build numbers`,
-      appBuildNumbersView({
-        viewer: viewerOf(current),
-        slug: project.slug,
-        name: project.name,
-        app: found.app,
-        projectApps: details.apps.map((entry) => entry.bundleId),
-        buildNumbers: details.buildNumbers,
-        canSeed: can(actor, 'buildNumbers.seed'),
-      }),
-      current,
-      200,
-      'dashboard',
-    )
-  })
-  app.get('/projects/:slug/secrets', (req, res) => {
-    const found = projectFor(req, res, 'Secrets')
-    if (found == null) return
-    const { current, actor, project } = found
-    const caller = { actor, address: clientAddress(req) }
-    send(
-      res,
-      `${project.name} · Secrets`,
-      secretsView({
-        slug: project.slug,
-        name: project.name,
-        format: project.format,
-        secrets: project.secrets,
-        canChange: can(actor, 'secrets.change'),
-        backups: master.backups.status().configured,
-        ...(can(actor, 'secrets.read')
-          ? { audit: master.secrets.audit(caller, project.slug) }
-          : {}),
-      }),
-      current,
-      200,
-      'dashboard',
-      // The tab's script is for those who may view and change secrets.
-      can(actor, 'secrets.read') ? ['/assets/secrets.js'] : [],
-    )
-  })
-  app.get('/projects/:slug/masonfile', (req, res, next) => {
-    // The wizard's path is not a project.
-    if (req.params.slug === 'new') {
-      next()
-      return
-    }
-    const current = session(req)
-    if (current == null) {
-      res.redirect(303, master.configured() ? '/sign-in' : '/')
-      return
-    }
-    if (!can(sessionActor(current), 'projects.read')) {
-      send(
-        res,
-        'Masonfile',
-        '<p>The Masonfile is for developers and up.</p>',
-        current,
-        403,
-      )
-      return
-    }
-    const slug = String(req.params.slug)
-    let project
-    try {
-      project = master.projects.get(slug)
-    } catch {
-      send(
-        res,
-        'Masonfile',
-        '<p class="empty-state">There is no such project.</p>',
-        current,
-        404,
-      )
-      return
-    }
-    const commit =
-      typeof req.query.commit === 'string' ? req.query.commit : undefined
-    const entry = project.entrypoint ?? 'Masonfile.ts'
-    masonfileData(reader, reader.project(slug)!, commit).then(
-      (data) => {
-        send(
-          res,
-          `${project.name} · Masonfile`,
-          masonfileView({
-            viewer: viewerOf(current),
-            slug,
-            name: project.name,
-            commits: data.commits,
-            ...(data.commit == null ? {} : { commit: data.commit }),
-            file: data.file ?? entry,
-            ...(data.text == null ? {} : { text: data.text }),
-            ...(data.error == null ? {} : { error: data.error }),
-          }),
-          current,
-          200,
-          'dashboard',
-        )
-      },
-      (error: unknown) => {
-        send(
-          res,
-          'Masonfile',
-          `<p class="state-failed">${escape((error as Error).message)}</p>`,
-          current,
-          400,
-        )
-      },
-    )
-  })
+    },
+  )
   app.get('/search', (req, res) => {
     const current = session(req)
     if (current == null) {

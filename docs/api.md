@@ -1740,7 +1740,7 @@ first sync and once past its offline grace window.
 | `GET /api/v2/artifacts/runs/:id` | One run's stages, tests, published builds and saved artifacts. | `runs.read` |
 | `GET /api/v2/runs/:id?include=graph,steps,history,details` | The run page. | `runs.read` |
 | `GET /api/v2/projects/:slug/overview` | A project's details. | `projects.read` |
-| `GET /api/v2/projects/:slug/runs?branch=&app=` | A project's or an app ID's Runs and builds. | `projects.read` |
+| `GET /api/v2/projects/:slug/runs?branch=&app=&limit=` | A project's or an app ID's Runs and builds. | `projects.read` |
 | `GET /api/v2/projects/:slug/apps/:appId` | An app ID and its build-number sequence. | `projects.read` |
 | `GET /api/v2/projects/:slug/masonfile/commits` | The commits the Masonfile tab offers. | `projects.read` |
 | `GET /api/v2/projects/:slug/masonfile?commit=` | The Masonfile at a commit. | `projects.read` |
@@ -1908,14 +1908,18 @@ const page: RunPage = await get(runPath(id, ['graph', 'steps', 'history', 'detai
 platforms and Apple team, branch rules, webhook, signing label, the pinned
 branches its push trigger builds, and its build-number sequences) with its
 `slug`, `name`, the app IDs' names, `canSeed` (a holder of
-`buildNumbers.seed` on the master; never on a host) and `secrets` (whether
-the node has a Secrets tab: the master's). The host answers from the copy
-of the details the master sends it.
+`buildNumbers.seed` on the master; never on a host), `secrets` (whether
+the node has a Secrets tab: the master's) and, once a run recorded a
+Masonfile graph, `workflows`: that Masonfile's workflows with their
+parameters (from the project's latest run on its default branch, else its
+latest run), which Request run offers. The host answers from the copy of the
+details the master sends it.
 
 **`GET /api/v2/projects/:slug/runs`** answers the branch list (pinned
-first, then the 200 most recently run) and the latest 50 runs, each with
-its version and the build number it reserved (else those it published).
-`?branch=` narrows the runs; `?app=<app ID>` narrows both to the runs
+first, then the 200 most recently run) and the latest runs (50, or
+`?limit=` from 1 to 500), each with its version and the build number it
+reserved (else those it published), and `more`, whether older runs are
+left. `?branch=` narrows the runs; `?app=<app ID>` narrows both to the runs
 whose workflow publishes that app ID and adds the app ID's heading; an app
 ID the project does not have, that is disabled, or that the caller may not
 see is 404.
@@ -2139,9 +2143,14 @@ public address; other platforms still download from the master.
 
 ### Project and app ID pages
 
-A project's pages are served on both nodes to developers and up, signed in
-with that node's session; the host draws them from the copy the master
-sends it, read only. To a tester they answer 404.
+A project's pages are the web app's on both nodes: each address answers the
+app's shell to developers and up, signed in with that node's session, and
+the app reads the project through the routes in
+[Project pages](#project-pages); the host answers them from the copy the
+master sends it, read only. A project (or an app ID of it) the node does not
+hold, or the viewer may not see, answers the shell with 404. To a tester
+they answer 404. `/projects/new`, the add-project wizard, is the master's,
+for holders of `projects.change` (others read its 403 inside the app).
 
 | Method and path | What it shows |
 | --- | --- |
@@ -2150,6 +2159,7 @@ sends it, read only. To a tester they answer 404.
 | `GET /projects/:slug/runs` | Runs and builds: its branches and the latest runs, `?branch=` for one. |
 | `GET /projects/:slug/masonfile` | The Masonfile at a run's commit, `?commit=`. |
 | `GET /projects/:slug/secrets` | Secrets (the master only). |
+| `GET /projects/new` | Add a project: the repository, its app IDs, its branches and triggers (the master only). |
 | `GET /projects/:slug/apps/:appId` | An app ID's Runs and builds, `?branch=` for one branch. |
 | `GET /projects/:slug/apps/:appId/build-numbers` | An app ID's Build numbers. |
 
@@ -2159,8 +2169,9 @@ graph the run recorded; its branch list holds only the branches with such
 a run, those the push trigger builds first. Its Build numbers shows the
 sequence the app ID takes its numbers from — one whose `apps` lists it,
 else its own key, else the default scheme (`N`, across branches) — and on
-the master, to a holder of `buildNumbers.seed`, a form preset to that
-sequence that posts `POST /api/v2/build-numbers/seed`. An app ID that is not
+the master, to a holder of `buildNumbers.seed`, *Set where it stands*, a
+sheet preset to that sequence that posts `POST /api/v2/build-numbers/seed`
+(on the Overview the sheet starts with a sequence to choose). An app ID that is not
 the project's, or that is disabled, answers 404 under the project.
 
 ### The host's GitHub webhook

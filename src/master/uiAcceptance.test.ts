@@ -5,6 +5,7 @@
 // from lib/: a real checkout needs lib/worker/gitProxy.js. Each scenario
 // writes the screenshots and logs that prove it into MASON_ARTIFACTS.
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
   appendFileSync,
@@ -616,7 +617,12 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await hostSignIn(h, 'dev', PASSWORDS.dev!, '/projects/fixture')
       await h.visible('App IDs')
       await h.visible('Build numbers')
-      await h.gone('^Secrets$')
+      // The host keeps no secrets, and sets no build numbers.
+      await holds(
+        h,
+        "document.querySelectorAll('nav.m-tabs a').length === 3 && ![...document.querySelectorAll('nav.m-tabs a')].some((a) => a.textContent.includes('Secrets'))",
+        'the tabs without Secrets',
+      )
       await h.gone('Set where it stands')
       await h.shot('host-project-after.png')
       await h.open('/projects/fixture/runs?branch=develop')
@@ -1044,20 +1050,39 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await b.visible(`^${BETA.replaceAll('.', '\\.')}$`)
       await b.visible('^Runs and builds$')
       // Only build-beta's runs, one per branch it ran on.
-      await b.script(
-        `const rows = [...document.querySelectorAll('table.runs tbody tr')].map((row) => row.querySelector('small').textContent); if (rows.length !== 2 || rows.some((text) => !text.includes('build-beta'))) throw new Error('The runs are ' + rows.join(' | '))`,
+      await holds(
+        b,
+        "document.querySelectorAll('table.m-runs tbody tr').length === 2",
+        'build-beta’s two runs',
       )
       await b.script(
-        `const ids = [...document.querySelectorAll('table.runs tbody tr')].map((row) => row.dataset.runId).sort().join(); if (ids !== ${JSON.stringify([runs['build-beta@master'].id, runs['build-beta@develop'].id].sort().join())}) throw new Error('The runs are ' + ids)`,
+        `const rows = [...document.querySelectorAll('table.m-runs tbody tr')].map((row) => row.querySelector('.m-t-headline').textContent); if (rows.length !== 2 || rows.some((text) => !text.includes('build-beta'))) throw new Error('The runs are ' + rows.join(' | '))`,
+      )
+      await b.script(
+        `const ids = [...document.querySelectorAll('table.m-runs tbody tr')].map((row) => row.dataset.runId).sort().join(); if (ids !== ${JSON.stringify([runs['build-beta@master'].id, runs['build-beta@develop'].id].sort().join())}) throw new Error('The runs are ' + ids)`,
       )
       await b.shot('app-id-runs.png')
-      await b.tap(`nav.tabs a[href="${page}/build-numbers"]`)
-      await b.visible('^Shared with: com\\.example\\.alpha$')
-      await b.type('#seed-last', last)
+      await b.tap(`nav.m-tabs a[href="${page}/build-numbers"]`)
+      await holds(
+        b,
+        `document.querySelector('[data-shared]')?.textContent === 'Shared with${ALPHA}'`,
+        'shared with alpha',
+      )
+      await b.tap('.m-card__header button[aria-haspopup="dialog"]')
+      await holds(
+        b,
+        'document.querySelector(\'form[name="seed"]\') != null',
+        'the sheet',
+      )
+      await b.type('form[name="seed"] input[name="last"]', last)
       await b.shot('app-id-build-numbers.png')
-      await b.tap('form[data-path="/api/v2/build-numbers/seed"] button')
-      // The form reloads the page with the new number.
-      await b.visible(`^${last}$`)
+      await b.tap('.m-formsheet__foot .m-btn--primary')
+      // The sheet closes and the facts read again with the new number.
+      await holds(
+        b,
+        `document.querySelector('form[name="seed"]') == null && document.querySelector('dl.m-kv')?.textContent.includes(${JSON.stringify(last)})`,
+        'the new number',
+      )
     } finally {
       await b.close()
     }
@@ -1076,20 +1101,23 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     const h = await browser('mason-e8-dev', host, '1280x860')
     try {
       await hostSignIn(h, 'dev', PASSWORDS.dev!, `${page}/build-numbers`)
-      await h.visible('^Shared with: com\\.example\\.alpha$')
-      await h.visible(`^${last}$`)
+      await holds(
+        h,
+        `document.querySelector('[data-shared]')?.textContent === 'Shared with${ALPHA}' && document.querySelector('dl.m-kv')?.textContent.includes(${JSON.stringify(last)})`,
+        'the number on the host',
+      )
       await h.gone('Set where it stands')
     } finally {
       await h.close()
     }
   })
 
-  it('E10 the App IDs card starts every row’s platform chips at one left edge, back to back, and each row links to its app ID page', async () => {
+  it('E10 the App IDs table starts every row’s platform chips at one left edge under its header, a chip’s gap apart, and each row links to its app ID page', async () => {
     const log = 'app-ids-card-alignment.log'
     rmSync(path.join(artifacts!, log), { force: true })
     // Each App IDs row: its link, the left edge of its Platforms cell and of
     // each chip, and the gaps between adjacent chips, in CSS pixels.
-    const measure = `return JSON.stringify({ head: document.querySelector('.app-grid-head [role=columnheader]:nth-child(2)').getBoundingClientRect().left, rows: [...document.querySelectorAll('.app-grid-row:not(.app-grid-head)')].map((row) => { const link = row.querySelector('a.row-link'); const chips = [...row.querySelectorAll('.app-platforms .platform')].map((chip) => chip.getBoundingClientRect()); return { id: link.textContent, href: link.getAttribute('href'), cell: row.querySelector('.app-platforms').getBoundingClientRect().left, lefts: chips.map((box) => box.left), gaps: chips.slice(1).map((box, i) => box.left - chips[i].right) } }) })`
+    const measure = `return JSON.stringify({ head: document.querySelector('table.m-appids thead th:nth-child(2)').getBoundingClientRect().left, rows: [...document.querySelectorAll('table.m-appids tbody tr')].map((row) => { const link = row.querySelector('a.m-appids__link'); const chips = [...row.querySelectorAll('.m-appids__platforms .m-chip')].map((chip) => chip.getBoundingClientRect()); return { id: link.textContent, href: link.getAttribute('href'), cell: row.querySelector('td:nth-child(2)').getBoundingClientRect().left, lefts: chips.map((box) => box.left), gaps: chips.slice(1).map((box, i) => box.left - chips[i].right) } }) })`
     const b = await browser('mason-e10-paul', c.master, '1280x860')
     try {
       await masterSignIn(b, 'paul', PASSWORDS.paul!)
@@ -1134,15 +1162,53 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         ],
       )
       // One left edge for the Platforms column, header included, whatever the app ID's length.
+      const first = measured.rows[0]!.lefts[0]!
       for (const row of measured.rows) {
         assert.equal(row.cell, measured.head, row.id)
-        assert.equal(row.lefts[0], measured.head, row.id)
-        for (const gap of row.gaps) assert(gap >= 0 && gap <= 4, `${gap}px`)
+        assert.equal(row.lefts[0], first, row.id)
+        assert(row.lefts[0]! > row.cell, row.id)
+        for (const gap of row.gaps) assert(gap >= 0 && gap <= 12, `${gap}px`)
       }
       await b.shot('app-ids-card-after.png')
-      // The row is its app ID page's link.
+      // The keyboard: from the top, Tab walks the skip link, the shell and
+      // the Overview in visual order, each stop with a visible focus ring;
+      // Reduce Motion calms the sheets and the editor.
+      const stops: string[] = []
+      await b.script('document.activeElement?.blur(); window.scrollTo(0, 0)')
+      for (let n = 0; n < 40; n++) {
+        await b.command('pressKey', { key: 'Tab' })
+        stops.push(
+          await value(
+            b,
+            "(() => { const e = document.activeElement; const s = getComputedStyle(e); const ring = (s.outlineStyle !== 'none' && parseFloat(s.outlineWidth) >= 2) || s.boxShadow !== 'none'; return (ring ? 'ring ' : 'NO RING ') + e.tagName.toLowerCase() + ' ' + (e.getAttribute('aria-label') || e.textContent || '').replace(/[\\uE000-\\uF8FF]/g, '').replace(/\\s+/g, ' ').trim().slice(0, 60) })()",
+          ),
+        )
+      }
+      const calm = await value(
+        b,
+        "[...document.styleSheets].flatMap((sheet) => [...sheet.cssRules]).filter((rule) => rule.media?.mediaText.includes('prefers-reduced-motion')).map((rule) => rule.cssText).filter((text) => text.includes('m-formsheet') && text.includes('m-editor')).length",
+      )
+      writeFileSync(
+        path.join(artifacts!, 'project-tab-order.log'),
+        `$ Tab ×40 on ${origin(c.master)}/projects/fixture at 1280x860\n${stops.map((stop, n) => `${n + 1}. ${stop}`).join('\n')}\n$ reduced-motion rules covering the sheets and the editor: ${calm}\n`,
+      )
+      assert.match(stops[0]!, /^ring a Skip to content$/)
+      assert.deepEqual(
+        stops.filter(
+          (stop) =>
+            stop.startsWith('NO RING') && !stop.startsWith('NO RING body'),
+        ),
+        [],
+        stops.join('\n'),
+      )
+      assert(
+        stops.some((stop) => stop.includes(`a ${ALPHA}`)),
+        stops.join('\n'),
+      )
+      assert(Number(calm) >= 1, calm)
+      // The app ID opens its page.
       await b.tap(
-        `.app-grid a.row-link[href="/projects/fixture/apps/${ALPHA}"]`,
+        `table.m-appids a.m-appids__link[href="/projects/fixture/apps/${ALPHA}"]`,
       )
       await b.visible('^Shared with|^Runs and builds$')
       await b.script(
@@ -1790,6 +1856,154 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       )
     } finally {
       await b.close()
+    }
+  })
+
+  it('N5 an administrator adds a secret value and a secret file, edits the file in the editor and deletes the value after the confirm; the host has no Secrets tab', async () => {
+    const master = c.master.master!
+    const log = 'secrets.log'
+    writeFileSync(path.join(artifacts!, log), '')
+    const note = (line: string): void =>
+      appendFileSync(path.join(artifacts!, log), `${line}\n`)
+    // Secrets are kept only once backups are: a bare repository here.
+    const bare = path.join(root, 'backup.git')
+    execFileSync('git', ['init', '-q', '--bare', bare])
+    await master.settings.set(localOperator, 'backup', {
+      repository: bare,
+      branch: 'backups',
+    })
+    const stored = (name: string): { contents: string } | undefined =>
+      master.database.db
+        .prepare(
+          "SELECT s.contents FROM project_secrets s JOIN projects p ON p.id=s.project_id WHERE p.slug='fixture' AND s.name=?",
+        )
+        .get(name) as { contents: string } | undefined
+    /** Sets a React-controlled field's value as typing would. */
+    const fill = async (
+      b: Browser,
+      css: string,
+      text: string,
+    ): Promise<void> => {
+      await b.script(
+        `const e = document.querySelector(${JSON.stringify(css)}); Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e), 'value').set.call(e, ${JSON.stringify(text)}); e.dispatchEvent(new Event('input', { bubbles: true }))`,
+      )
+    }
+    const b = await browser('mason-n5', c.master, '1440x900')
+    try {
+      await masterSignIn(b, 'paul', PASSWORDS.paul!)
+      await holds(b, "location.pathname !== '/sign-in'", 'signed in')
+      await b.open('/projects/fixture/secrets')
+      await holds(
+        b,
+        "document.querySelector('.m-secrets__add') != null && !document.querySelector('.m-secrets__add button').disabled",
+        'the Secrets tab with backups configured',
+      )
+      // A value.
+      await b.tap('.m-secrets__add button:nth-of-type(1)')
+      await holds(
+        b,
+        'document.querySelector(\'form[name="secret-value"]\') != null',
+        'the Add value sheet',
+      )
+      await fill(b, 'form[name="secret-value"] input[name="name"]', 'N5_TOKEN')
+      await fill(
+        b,
+        'form[name="secret-value"] input[name="configs"]',
+        'release',
+      )
+      await fill(
+        b,
+        'form[name="secret-value"] input[name="value"]',
+        'n5-s3cret',
+      )
+      await b.tap('.m-formsheet__foot .m-btn--primary')
+      await holds(
+        b,
+        'document.querySelector(\'tr[data-secret="N5_TOKEN"]\') != null && document.querySelector(\'form[name="secret-value"]\') == null',
+        'the value in the table',
+      )
+      assert.equal(stored('N5_TOKEN')?.contents, 'n5-s3cret')
+      note('$ Add value N5_TOKEN (release)\n  → row N5_TOKEN, stored')
+      // A file, its text pasted.
+      await b.tap('.m-secrets__add button:nth-of-type(2)')
+      await holds(
+        b,
+        'document.querySelector(\'form[name="secret-file"]\') != null',
+        'the Add file sheet',
+      )
+      await fill(
+        b,
+        'form[name="secret-file"] textarea[name="text"]',
+        '{\n  "channel": "testers"\n}\n',
+      )
+      await fill(b, 'form[name="secret-file"] input[name="name"]', 'n5.json')
+      await b.tap('.m-formsheet__foot .m-btn--primary')
+      await holds(
+        b,
+        'document.querySelector(\'tr[data-secret="n5.json"]\') != null && document.querySelector(\'form[name="secret-file"]\') == null',
+        'the file in the table',
+      )
+      note('$ Add file n5.json (pasted text)\n  → row n5.json · 27 B · text')
+      // The file in the editor.
+      await b.tap('button[aria-label="Edit n5.json"]')
+      await holds(
+        b,
+        "document.querySelector('.m-editor textarea')?.value.includes('testers')",
+        'the editor with the file',
+      )
+      await fill(b, '.m-editor textarea', '{\n  "channel": "store"\n}\n')
+      await b.shot('secrets-file-editor.png')
+      await b.tap('.m-editor .m-btn--primary')
+      await holds(
+        b,
+        "document.querySelector('.m-editor') == null",
+        'the editor closed after Save',
+      )
+      assert.equal(
+        Buffer.from(stored('n5.json')!.contents, 'base64').toString('utf8'),
+        '{\n  "channel": "store"\n}\n',
+      )
+      note('$ Edit n5.json in the editor → Save\n  → stored "channel": "store"')
+      // Delete the value, after the confirm.
+      await b.tap('button[aria-label="Delete N5_TOKEN"]')
+      await holds(
+        b,
+        "document.querySelector('[role=alertdialog]')?.textContent.includes('Delete N5_TOKEN?')",
+        'the delete confirm',
+      )
+      await b.shot('secrets-delete-confirm.png')
+      await b.tap('[role=alertdialog] .m-btn--danger-filled')
+      await holds(
+        b,
+        "document.querySelector('tr[data-secret=\"N5_TOKEN\"]') == null && document.querySelector('[role=alertdialog]') == null",
+        'the value gone',
+      )
+      assert.equal(stored('N5_TOKEN'), undefined)
+      // The audit holds each change.
+      await holds(
+        b,
+        "['Added', 'Edited', 'Deleted'].every((word) => [...document.querySelectorAll('section[aria-labelledby=audit-title] td')].some((td) => td.textContent === word))",
+        'the audit',
+      )
+      note(
+        '$ Delete N5_TOKEN → confirm "Delete"\n  → row gone, audit: Added, Added, Edited, Deleted',
+      )
+    } finally {
+      await b.close()
+    }
+    const h = await browser('mason-n5-dev', host, '1280x860')
+    try {
+      await hostSignIn(h, 'dev', PASSWORDS.dev!, '/projects/fixture')
+      await holds(
+        h,
+        "document.querySelectorAll('nav.m-tabs a').length === 3 && ![...document.querySelectorAll('nav.m-tabs a')].some((a) => a.textContent.includes('Secrets'))",
+        'the host’s tabs without Secrets',
+      )
+      note(
+        '$ the host, /projects/fixture as dev\n  → tabs Overview, Runs and builds, Masonfile (no Secrets)',
+      )
+    } finally {
+      await h.close()
     }
   })
 

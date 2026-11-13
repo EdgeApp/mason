@@ -6,7 +6,7 @@ import { SESSION_COOKIE } from '../auth/routes.js'
 import { pinnedFetch } from '../node/pinnedFetch.js'
 import type { RunningNode } from '../node/serve.js'
 import { cluster, type Cluster } from '../test/cluster.js'
-import { crumbTrail } from '../test/crumbs.js'
+import { assertShell, type ShellReply } from '../test/webShell.js'
 import { MASTER_SESSION_COOKIE } from './auth.js'
 import { localOperator } from './roles.js'
 
@@ -52,6 +52,7 @@ interface Reply {
   status: number
   text: string
   json: Json
+  headers: ShellReply['headers']
 }
 
 describe('App ID pages on the master and the host', function () {
@@ -100,7 +101,12 @@ describe('App ID pages on the master and the host', function () {
     } catch {
       json = undefined
     }
-    return { status: response.status, text, json }
+    return {
+      status: response.status,
+      text,
+      json,
+      headers: response.headers,
+    }
   }
   const onMaster = (person: string): { cookie: string; csrf: string } => {
     const { token, session } = c.master.master!.auth.start(
@@ -116,27 +122,36 @@ describe('App ID pages on the master and the host', function () {
     ['master', c.master, (): { cookie: string } => onMaster('dev')],
     ['host', host, (): { cookie: string } => onHost('dev')],
   ]
-  /** The branch list's links, in order, with `|` between the pinned group and the rest. */
-  const branchList = (html: string): string[] => {
-    const nav =
-      /<nav class="panel branch-list" aria-label="Branches">([^]*?)<\/nav>/.exec(
-        html,
-      )?.[1] ?? ''
-    return [
-      ...nav.matchAll(/<li class="divider"|<a href="[^"]*\?branch=([^"]+)"/g),
-    ].map((match) => (match[1] == null ? '|' : decodeURIComponent(match[1])))
+  /** Asserts a reply is the web app's shell with that status. */
+  const shell = (reply: Reply, status: number, what: string): void => {
+    assert.equal(reply.status, status, what)
+    assertShell(reply, status)
   }
-  /** The runs the table lists, by id. */
-  const runIds = (html: string): string[] =>
-    [...html.matchAll(/<tr data-run-id="([^"]+)"/g)].map((match) => match[1]!)
-  const tabs = (html: string): string[] =>
-    [
-      ...(
-        /<nav class="tabs" aria-label="App ID">([^]*?)<\/nav>/.exec(
-          html,
-        )?.[1] ?? ''
-      ).matchAll(/<a href="([^"]+)"( aria-current="page")?>([^<]+)<\/a>/g),
-    ].map((match) => `${match[3]} ${match[1]}${match[2] == null ? '' : ' *'}`)
+  /** A JSON read that answers 200. */
+  const read = async (
+    node: RunningNode,
+    route: string,
+    who: { cookie: string },
+  ): Promise<Json> => {
+    const reply = await request(node, route, who)
+    assert.equal(reply.status, 200, `${route}: ${reply.text}`)
+    return reply.json
+  }
+  /** The branch list, in order, with `|` between the pinned group and the rest. */
+  const branchList = (branches: Json[]): string[] => {
+    const pinned = branches
+      .filter((entry) => entry.pinned)
+      .map((entry) => String(entry.branch))
+    const rest = branches
+      .filter((entry) => !entry.pinned)
+      .map((entry) => String(entry.branch))
+    return pinned.length > 0 && rest.length > 0
+      ? [...pinned, '|', ...rest]
+      : [...pinned, ...rest]
+  }
+  /** The runs a list holds, by id. */
+  const runIds = (list: Json): string[] =>
+    (list.runs as Json[]).map((run) => String(run.id))
   /** Waits until the host's copy has the master's latest project details. */
   const hostDetails = async (
     test: (details: Json) => boolean,
@@ -296,98 +311,82 @@ describe('App ID pages on the master and the host', function () {
     await c?.close()
   })
 
-  it('serves both tabs on both nodes, under the app ID’s heading, tabs and breadcrumbs', async () => {
+  it('serves both tabs on both nodes as the web app, which reads the app ID’s heading', async () => {
     for (const [name, node, who] of nodes()) {
-      const root = name === 'host' ? 'Mason Host /' : 'Mason Master /'
-      const page = await request(node, `/projects/fixture/apps/${ALPHA}`, who())
-      assert.equal(page.status, 200, `${name}: ${page.text.slice(0, 300)}`)
-      assert.match(page.text, new RegExp(`<h1>${ALPHA}</h1>`))
-      // Its name, then a chip per platform.
-      assert.match(
-        page.text,
-        /<p>Alpha · <span class="platform">[^]*?Android<\/span> <span class="platform">[^]*?iOS<\/span><\/p>/,
-      )
-      assert.deepEqual(tabs(page.text), [
-        `Runs and builds /projects/fixture/apps/${ALPHA} *`,
-        `Build numbers /projects/fixture/apps/${ALPHA}/build-numbers`,
-      ])
-      // Only two tabs: none of the project's.
-      assert.doesNotMatch(page.text, /aria-label="Project"/)
-      assert.deepEqual(crumbTrail(page.text), [
-        root,
-        'Projects /projects',
-        'Fixture /projects/fixture',
-        `${ALPHA} /projects/fixture/apps/${ALPHA}`,
-        `Runs and builds /projects/fixture/apps/${ALPHA} *`,
-      ])
-      // The side menu has Projects & apps current.
-      assert.match(page.text, /<a href="\/projects" aria-current="page"/)
-      const branch = await request(
+      for (const suffix of ['', '?branch=develop', '/build-numbers'])
+        shell(
+          await request(
+            node,
+            `/projects/fixture/apps/${ALPHA}${suffix}`,
+            who(),
+          ),
+          200,
+          `${name} ${suffix}`,
+        )
+      // Its project, its name and its platforms head both tabs.
+      const app = await read(
         node,
-        `/projects/fixture/apps/${ALPHA}?branch=develop`,
+        `/api/v2/projects/fixture/apps/${ALPHA}`,
         who(),
       )
-      assert.equal(branch.status, 200, name)
-      assert.deepEqual(crumbTrail(branch.text).slice(-3), [
-        `${ALPHA} /projects/fixture/apps/${ALPHA}`,
-        `Runs and builds /projects/fixture/apps/${ALPHA}`,
-        `develop /projects/fixture/apps/${ALPHA}?branch=develop *`,
-      ])
-      assert.match(branch.text, /<h2><span class="mono">develop<\/span><\/h2>/)
-      const numbers = await request(
+      assert.deepEqual(
+        [app.slug, app.name, app.app.bundleId, app.app.name, app.app.platforms],
+        ['fixture', 'Fixture', ALPHA, 'Alpha', ['android', 'ios']],
+        name,
+      )
+      const runsList = await read(
         node,
-        `/projects/fixture/apps/${ALPHA}/build-numbers`,
+        `/api/v2/projects/fixture/runs?app=${ALPHA}&branch=develop`,
         who(),
       )
-      assert.equal(numbers.status, 200, name)
-      assert.deepEqual(tabs(numbers.text), [
-        `Runs and builds /projects/fixture/apps/${ALPHA}`,
-        `Build numbers /projects/fixture/apps/${ALPHA}/build-numbers *`,
-      ])
-      assert.deepEqual(crumbTrail(numbers.text), [
-        root,
-        'Projects /projects',
-        'Fixture /projects/fixture',
-        `${ALPHA} /projects/fixture/apps/${ALPHA}`,
-        `Build numbers /projects/fixture/apps/${ALPHA}/build-numbers *`,
-      ])
-      // Names are escaped.
-      const delta = await request(
+      assert.equal(runsList.branch, 'develop', name)
+      assert.deepEqual(runsList.app, app.app, name)
+      // Names come as they are; the page escapes them.
+      const delta = await read(
         node,
-        `/projects/fixture/apps/${DELTA}`,
+        `/api/v2/projects/fixture/apps/${DELTA}`,
         who(),
       )
-      assert.match(delta.text, /<p>Delta &lt;one&gt; · /)
+      assert.equal(delta.app.name, 'Delta <one>')
     }
   })
 
   it('answers 404 under the project for another project’s app ID, an unknown one and a hidden one; testers have no app ID pages', async () => {
     for (const [name, node, who] of nodes())
-      for (const appId of [OTHER, 'com.example.none', HIDDEN])
+      for (const appId of [OTHER, 'com.example.none', HIDDEN]) {
         for (const suffix of ['', '/build-numbers']) {
           const route = `/projects/fixture/apps/${appId}${suffix}`
+          shell(await request(node, route, who()), 404, `${name} ${route}`)
+        }
+        for (const route of [
+          `/api/v2/projects/fixture/apps/${appId}`,
+          `/api/v2/projects/fixture/runs?app=${appId}`,
+        ]) {
           const reply = await request(node, route, who())
           assert.equal(reply.status, 404, `${name} ${route}`)
-          assert.match(reply.text, /There is no such app ID in this project/)
-          // In the project's shell: its breadcrumbs, Projects & apps current.
-          assert.deepEqual(crumbTrail(reply.text).slice(1), [
-            'Projects /projects',
-            'Fixture /projects/fixture *',
-          ])
-          assert.match(reply.text, /<a href="\/projects" aria-current="page"/)
+          assert.match(reply.json.error, /No such app ID in this project/)
         }
+      }
+    // An unknown project is unknown on both nodes.
+    for (const [name, node, who] of nodes())
+      shell(
+        await request(node, `/projects/none/apps/${ALPHA}`, who()),
+        404,
+        name,
+      )
     // The other project's own page has it.
-    assert.equal(
-      (
-        await request(
-          c.master,
-          `/projects/other/apps/${OTHER}`,
-          onMaster('dev'),
-        )
-      ).status,
+    shell(
+      await request(c.master, `/projects/other/apps/${OTHER}`, onMaster('dev')),
       200,
+      'other',
     )
-    // A tester who may install alpha still has no project pages.
+    await read(
+      c.master,
+      `/api/v2/projects/other/apps/${OTHER}`,
+      onMaster('dev'),
+    )
+    // A tester who may install alpha still has no project pages: to a
+    // tester projects do not exist on either node.
     for (const [node, who] of [
       [c.master, onMaster('tess')],
       [host, onHost('tess')],
@@ -398,6 +397,15 @@ describe('App ID pages on the master and the host', function () {
             .status,
           404,
         )
+    for (const [node, who] of [
+      [c.master, onMaster('tess')],
+      [host, onHost('tess')],
+    ] as const)
+      assert.equal(
+        (await request(node, `/api/v2/projects/fixture/apps/${ALPHA}`, who))
+          .status,
+        403,
+      )
     // Signed out, the page asks for a sign-in.
     assert.equal(
       (await request(c.master, `/projects/fixture/apps/${ALPHA}`)).status,
@@ -411,13 +419,11 @@ describe('App ID pages on the master and the host', function () {
 
   it('lists only the runs whose workflow publishes the app ID, a post stage counting, and only the branches that ran one', async () => {
     for (const [name, node, who] of nodes()) {
-      const alpha = await request(
-        node,
-        `/projects/fixture/apps/${ALPHA}`,
-        who(),
-      )
+      const runsOf = async (query: string): Promise<Json> =>
+        await read(node, `/api/v2/projects/fixture/runs?${query}`, who())
+      const alpha = await runsOf(`app=${ALPHA}`)
       assert.deepEqual(
-        new Set(runIds(alpha.text)),
+        new Set(runIds(alpha)),
         new Set([
           runs['build-alpha@master'],
           runs['build-alpha@develop'],
@@ -425,17 +431,21 @@ describe('App ID pages on the master and the host', function () {
         ]),
         name,
       )
-      assert.doesNotMatch(alpha.text, /build-beta/)
+      assert(
+        alpha.runs.every((run: Json) => run.workflow !== 'build-beta'),
+        name,
+      )
+      assert.equal(alpha.more, false)
       // develop is pinned and ran alpha; release ran only beta and hotfix
       // nothing, so neither is listed; nograph's run has no graph.
       assert.deepEqual(
-        branchList(alpha.text),
+        branchList(alpha.branches),
         ['develop', '|', 'feature/post', 'master'],
         name,
       )
-      const beta = await request(node, `/projects/fixture/apps/${BETA}`, who())
+      const beta = await runsOf(`app=${BETA}`)
       assert.deepEqual(
-        new Set(runIds(beta.text)),
+        new Set(runIds(beta)),
         new Set([
           runs['build-beta@master'],
           runs['build-beta@develop'],
@@ -444,133 +454,99 @@ describe('App ID pages on the master and the host', function () {
         name,
       )
       // Pinned in the push trigger's order; hotfix has no beta run either.
-      assert.deepEqual(branchList(beta.text), [
+      assert.deepEqual(branchList(beta.branches), [
         'develop',
         'release',
         '|',
         'master',
       ])
       // One branch: its alpha runs only.
-      const develop = await request(
-        node,
-        `/projects/fixture/apps/${ALPHA}?branch=develop`,
-        who(),
-      )
-      assert.deepEqual(runIds(develop.text), [runs['build-alpha@develop']])
-      const release = await request(
-        node,
-        `/projects/fixture/apps/${ALPHA}?branch=release`,
-        who(),
-      )
-      assert.match(release.text, /No runs yet/)
+      const develop = await runsOf(`app=${ALPHA}&branch=develop`)
+      assert.deepEqual(runIds(develop), [runs['build-alpha@develop']])
+      const release = await runsOf(`app=${ALPHA}&branch=release`)
+      assert.deepEqual(release.runs, [])
       // No run of the project publishes gamma.
-      const gamma = await request(
-        node,
-        `/projects/fixture/apps/${GAMMA}`,
-        who(),
-      )
-      assert.equal(gamma.status, 200)
-      assert.deepEqual(branchList(gamma.text), [])
-      assert.match(gamma.text, /No runs yet/)
+      const gamma = await runsOf(`app=${GAMMA}`)
+      assert.deepEqual(gamma.branches, [])
+      assert.deepEqual(gamma.runs, [])
       // The project's own Runs and builds still lists every run and pinned branch.
-      const project = await request(node, '/projects/fixture/runs', who())
-      assert.deepEqual(branchList(project.text).slice(0, 4), [
+      shell(
+        await request(node, '/projects/fixture/runs', who()),
+        200,
+        `${name} runs`,
+      )
+      const project = await runsOf('')
+      assert.deepEqual(branchList(project.branches).slice(0, 4), [
         'develop',
         'release',
         'hotfix',
         '|',
       ])
-      assert(runIds(project.text).includes('no-graph'), name)
-      assert(runIds(project.text).includes(runs['build-beta@release']!), name)
+      assert(runIds(project).includes('no-graph'), name)
+      assert(runIds(project).includes(runs['build-beta@release']!), name)
+      // A limit answers the newest runs and whether older ones are left.
+      const two = await runsOf('limit=2')
+      assert.deepEqual(runIds(two), runIds(project).slice(0, 2), name)
+      assert.equal(two.more, true, name)
+      assert.equal(project.more, false, name)
     }
   })
 
   it('shows the sequence each app ID takes its numbers from: its own, a shared one, or the default scheme', async () => {
     for (const [name, node, who] of nodes()) {
-      const page = async (appId: string): Promise<string> => {
-        const reply = await request(
-          node,
-          `/projects/fixture/apps/${appId}/build-numbers`,
-          who(),
-        )
-        assert.equal(reply.status, 200, `${name} ${appId}`)
-        return reply.text
-      }
-      const alpha = await page(ALPHA)
-      assert.match(
-        alpha,
-        new RegExp(
-          `<dt>Sequence</dt><dd class="mono">${ALPHA}</dd><dt>Format</dt><dd class="mono">YYMMDDCC</dd><dt>Scope</dt><dd>across branches</dd>`,
-        ),
+      const numbers = async (appId: string): Promise<Json> =>
+        await read(node, `/api/v2/projects/fixture/apps/${appId}`, who())
+      const alpha = await numbers(ALPHA)
+      assert.deepEqual(
+        [alpha.sequence.key, alpha.sequence.format, alpha.sequence.scope],
+        [ALPHA, 'YYMMDDCC', 'app'],
+        name,
       )
-      assert.match(
-        alpha,
-        new RegExp(
-          `<p data-shared>Shared with: <span class="mono">${BETA}</span></p>`,
-        ),
-      )
+      assert.deepEqual(alpha.shared, [BETA], name)
       // Both runs of each took a number from alpha's sequence.
-      assert.match(
-        alpha,
-        /<dt>Last issued<\/dt><dd><span class="mono">\d{8}<\/span><\/dd>/,
+      assert.equal(alpha.sequence.last.length, 1, name)
+      assert.match(alpha.sequence.last[0].value, /^\d{8}$/)
+      const beta = await numbers(BETA)
+      assert.equal(beta.sequence.key, ALPHA, name)
+      assert.deepEqual(beta.shared, [ALPHA], name)
+      const gamma = await numbers(GAMMA)
+      assert.deepEqual(
+        [gamma.sequence.key, gamma.sequence.format, gamma.sequence.scope],
+        [GAMMA, 'N', 'branch'],
+        name,
       )
-      const beta = await page(BETA)
-      assert.match(
-        beta,
-        new RegExp(`<dt>Sequence</dt><dd class="mono">${ALPHA}</dd>`),
-      )
-      assert.match(
-        beta,
-        new RegExp(
-          `<p data-shared>Shared with: <span class="mono">${ALPHA}</span></p>`,
-        ),
-      )
-      const gamma = await page(GAMMA)
-      assert.match(
-        gamma,
-        new RegExp(
-          `<dt>Sequence</dt><dd class="mono">${GAMMA}</dd><dt>Format</dt><dd class="mono">N</dd><dt>Scope</dt><dd>per branch</dd>`,
-        ),
-      )
-      assert.doesNotMatch(gamma, /Shared with/)
-      assert.match(gamma, /<dt>Last issued<\/dt><dd>None yet\.<\/dd>/)
-      const delta = await page(DELTA)
-      assert.match(
-        delta,
-        /takes the default scheme: <span class="mono">N<\/span>, across branches/,
-      )
+      assert.deepEqual(gamma.shared, [], name)
+      assert.deepEqual(gamma.sequence.last, [], name)
+      const delta = await numbers(DELTA)
+      assert.equal(delta.sequence, undefined, name)
+      assert.deepEqual(delta.shared, [], name)
+      assert.deepEqual(delta.defaultScheme, { format: 'N', scope: 'app' })
       // Nothing here to set: a developer, or the host.
-      for (const html of [alpha, beta, gamma, delta])
-        assert.doesNotMatch(html, /build-numbers\/seed|Set where it stands/)
+      for (const app of [alpha, beta, gamma, delta])
+        assert.equal(app.canSeed, false, name)
     }
   })
 
   it('lets a manager on the master set where the app ID’s sequence stands, refuses a developer, and the host shows it read-only', async () => {
     const mgr = onMaster('mgr')
-    const form = await request(
+    shell(
+      await request(
+        c.master,
+        `/projects/fixture/apps/${BETA}/build-numbers`,
+        mgr,
+      ),
+      200,
+      'beta',
+    )
+    // Beta's sequence is alpha's, which a manager on the master may set.
+    const form = await read(
       c.master,
-      `/projects/fixture/apps/${BETA}/build-numbers`,
+      `/api/v2/projects/fixture/apps/${BETA}`,
       mgr,
     )
-    assert.equal(form.status, 200)
-    // Preset to beta's sequence, alpha's: no sequence to choose.
-    assert.match(form.text, /data-path="\/api\/v2\/build-numbers\/seed"/)
-    assert.match(form.text, /data-fields="project,key,last"/)
-    assert.match(
-      form.text,
-      /<input type="hidden" name="project" value="fixture"><input type="hidden" name="key" value="com\.example\.alpha">/,
-    )
-    assert.doesNotMatch(form.text, /<select id="seed-key"|name="branch"/)
-    assert.match(form.text, /Set where it stands/)
-    // A per-branch sequence asks for the branch.
-    const gamma = await request(
-      c.master,
-      `/projects/fixture/apps/${GAMMA}/build-numbers`,
-      mgr,
-    )
-    assert.match(gamma.text, /data-fields="project,key,branch,last"/)
-    assert.match(gamma.text, /<input id="seed-branch" name="branch" required>/)
-    // Set per branch, each branch's number has its own line.
+    assert.equal(form.canSeed, true)
+    assert.equal(form.sequence.key, ALPHA)
+    // A per-branch sequence asks for the branch: each branch's number has its own line.
     for (const [branch, last] of [
       ['develop', '7'],
       ['master', '12'],
@@ -585,26 +561,21 @@ describe('App ID pages on the master and the host', function () {
         ).status,
         200,
       )
-    assert.match(
-      (
-        await request(
-          c.master,
-          `/projects/fixture/apps/${GAMMA}/build-numbers`,
-          mgr,
-        )
-      ).text,
-      /<dt>Last issued<\/dt><dd><span class="mono">develop<\/span> <span class="mono">7<\/span><br><span class="mono">master<\/span> <span class="mono">12<\/span><\/dd>/,
+    const gamma = await read(
+      c.master,
+      `/api/v2/projects/fixture/apps/${GAMMA}`,
+      mgr,
     )
+    assert.equal(gamma.sequence.scope, 'branch')
+    assert.deepEqual(gamma.sequence.last, [
+      { branch: 'develop', value: '7' },
+      { branch: 'master', value: '12' },
+    ])
     // The default scheme has no sequence to set.
-    assert.doesNotMatch(
-      (
-        await request(
-          c.master,
-          `/projects/fixture/apps/${DELTA}/build-numbers`,
-          mgr,
-        )
-      ).text,
-      /Set where it stands/,
+    assert.equal(
+      (await read(c.master, `/api/v2/projects/fixture/apps/${DELTA}`, mgr))
+        .sequence,
+      undefined,
     )
     const body = { project: 'fixture', key: ALPHA, last: '99123199' }
     const dev = onMaster('dev')
@@ -620,13 +591,16 @@ describe('App ID pages on the master and the host', function () {
       body,
     })
     assert.equal(seeded.status, 200, seeded.text)
-    const after = await request(
+    const after = await read(
       c.master,
-      `/projects/fixture/apps/${BETA}/build-numbers`,
+      `/api/v2/projects/fixture/apps/${BETA}`,
       mgr,
     )
-    assert.match(after.text, /<span class="mono">99123199<\/span>/)
-    // The host has it from the change feed, with no form.
+    assert.deepEqual(
+      after.sequence.last.map((entry: Json) => entry.value),
+      ['99123199'],
+    )
+    // The host has it from the change feed, and no one may set it there.
     await hostDetails(
       (details) =>
         details.buildNumbers.some(
@@ -637,14 +611,25 @@ describe('App ID pages on the master and the host', function () {
       'the new number on the host',
     )
     for (const person of ['dev', 'mgr']) {
-      const hosted = await request(
+      shell(
+        await request(
+          host,
+          `/projects/fixture/apps/${BETA}/build-numbers`,
+          onHost(person),
+        ),
+        200,
+        person,
+      )
+      const hosted = await read(
         host,
-        `/projects/fixture/apps/${BETA}/build-numbers`,
+        `/api/v2/projects/fixture/apps/${BETA}`,
         onHost(person),
       )
-      assert.equal(hosted.status, 200)
-      assert.match(hosted.text, /<span class="mono">99123199<\/span>/)
-      assert.doesNotMatch(hosted.text, /build-numbers\/seed|data-mason="api"/)
+      assert.deepEqual(
+        hosted.sequence.last.map((entry: Json) => entry.value),
+        ['99123199'],
+      )
+      assert.equal(hosted.canSeed, false, person)
     }
   })
 

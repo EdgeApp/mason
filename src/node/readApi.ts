@@ -17,6 +17,8 @@ import {
   NOTIFICATIONS_PATH,
   QUEUE_PATH,
   runIncludes,
+  RUNS_LIMIT,
+  RUNS_PAGE,
   SEARCH_PATH,
   STATUS_PATH,
   type AccountInfo,
@@ -35,6 +37,7 @@ import {
   type RunPage,
   type SearchResult,
   type StatusInfo,
+  type WorkflowSpec,
 } from '../shared/api/index.js'
 import { appBuildNumbers } from '../view/admin.js'
 import {
@@ -227,6 +230,26 @@ export function runPageData(
       ],
     }
   return page
+}
+
+/**
+ * The workflows of the Masonfile a project's latest run recorded, the
+ * default branch's first, for Request run; none when no kept graph has them.
+ */
+export function latestWorkflows(
+  reader: NodeReader,
+  project: ProjectRecord,
+): WorkflowSpec[] | undefined {
+  const jobs = reader.db
+    .prepare(
+      "SELECT id FROM jobs WHERE project_id=? AND workflow NOT LIKE '@%' ORDER BY branch=? DESC, created DESC LIMIT 5",
+    )
+    .all(project.id, project.details.defaultBranch) as Array<{ id: string }>
+  for (const job of jobs) {
+    const workflows = reader.graphOf(job.id)?.workflows
+    if (workflows != null && workflows.length > 0) return workflows
+  }
+  return undefined
 }
 
 /**
@@ -451,6 +474,7 @@ export function readApi(reader: NodeReader): Router {
     '/api/v2/projects/:slug/overview',
     (req, _res, actor): ProjectOverview => {
       const found = project(req, actor)
+      const workflows = latestWorkflows(reader, found)
       return {
         ...found.details,
         slug: found.slug,
@@ -458,6 +482,7 @@ export function readApi(reader: NodeReader): Router {
         appNames: found.appNames,
         canSeed: reader.canSeed(actor),
         secrets: reader.node === 'master',
+        ...(workflows == null ? {} : { workflows }),
       }
     },
   )
@@ -468,13 +493,18 @@ export function readApi(reader: NodeReader): Router {
       allow(actor, 'projects.read', { project: found.slug, branch })
     const bundleId = text(req, 'app')
     const app = bundleId == null ? undefined : appOf(found, actor, bundleId)
-    const { branches, runs } = projectRunsData(
+    const asked = text(req, 'limit')
+    const limit = asked == null ? RUNS_PAGE : Number(asked)
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > RUNS_LIMIT)
+      throw new Error(`limit is a whole number from 1 to ${RUNS_LIMIT}`)
+    const { branches, runs, more } = projectRunsData(
       { ...source(actor), reserved: (run) => reader.reserved(run) },
       found.slug,
       {
         ...(branch == null ? {} : { branch }),
         pinned: found.details.pinned,
         ...(app == null ? {} : { app: app.bundleId }),
+        limit,
       },
     )
     return {
@@ -484,6 +514,7 @@ export function readApi(reader: NodeReader): Router {
       ...(app == null ? {} : { app }),
       branches,
       runs,
+      more,
     }
   })
   get('/api/v2/projects/:slug/apps/:appId', (req, _res, actor): ProjectApp => {

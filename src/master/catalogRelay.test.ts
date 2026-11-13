@@ -443,6 +443,13 @@ describe('Install apps and Devices on the master, through the host', function ()
       ).status,
       404,
     )
+    // A developer reads the wizard's 403 inside the web app.
+    assertShell(
+      await request(c.master, '/projects/new', {
+        cookie: onMaster('dev').cookie,
+      }),
+      403,
+    )
   })
 
   it('M7 lands developers on Projects & apps on the master and on Install apps on the host', async () => {
@@ -466,10 +473,17 @@ describe('Install apps and Devices on the master, through the host', function ()
         cookie: who.cookie,
       })
       assertShell(projects)
-      const project = await request(node, '/projects/relay', {
-        cookie: who.cookie,
-      })
-      assert.equal(project.status, 200, name)
+      // A project's pages are the web app's too.
+      for (const route of [
+        '/projects/relay',
+        '/projects/relay/runs',
+        '/projects/relay/masonfile',
+      ])
+        assertShell(await request(node, route, { cookie: who.cookie }))
+      assertShell(
+        await request(node, '/projects/none', { cookie: who.cookie }),
+        404,
+      )
     }
     // Signed out, /projects asks for a sign-in on both nodes.
     assert.equal(

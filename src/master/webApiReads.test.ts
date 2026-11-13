@@ -402,11 +402,33 @@ describe('Master web API: the pages’ reads', function () {
       [[ALPHA, [BETA]]],
     )
     assert.equal((await get(route, as('manager'))).json.canSeed, true)
+    // The workflows of the Masonfile the latest run recorded, with their
+    // parameters, for Request run.
+    assert.deepEqual(
+      developer.workflows?.map((workflow) => workflow.name),
+      ['build', 'release'],
+    )
+    assert.deepEqual(developer.workflows?.[0]?.params, {})
     assert.equal(
       (await get('/api/v2/projects/nope/overview', as('admin'))).status,
       404,
     )
     assert.equal((await get(route, { key: f.keys.scoped })).status, 403)
+    // A project no run has recorded a Masonfile for has none to offer.
+    const m = master.master!
+    m.saveProject(localOperator, 'unrun', {
+      name: 'Unrun',
+      repository: 'https://github.com/fixtures/unrun',
+    })
+    try {
+      const unrun = shape(
+        asProjectOverview,
+        (await get('/api/v2/projects/unrun/overview', as('developer'))).json,
+      )
+      assert.equal('workflows' in unrun, false)
+    } finally {
+      m.projects.remove(localOperator, 'unrun')
+    }
   })
 
   it('GET /api/v2/projects/:slug/runs: branches, pinned first, and runs with build numbers, for the project or an app ID', async () => {
@@ -447,6 +469,26 @@ describe('Master web API: the pages’ reads', function () {
       (await get(`${route}?app=com.example.none`, as('admin'))).status,
       404,
     )
+    // Fifty runs by default; a limit answers the newest that many and
+    // whether older runs are left.
+    assert.equal(runs.more, false)
+    const newest = shape(
+      asProjectRuns,
+      (await get(`${route}?limit=1`, as('developer'))).json,
+    )
+    assert.deepEqual(
+      newest.runs.map((run) => run.id),
+      [runs.runs[0]!.id],
+    )
+    assert.equal(newest.more, true)
+    const every = (await get(`${route}?limit=500`, as('developer'))).json
+    assert.equal(every.runs.length, runs.runs.length)
+    assert.equal(every.more, false)
+    for (const limit of ['0', '501', '1.5', 'ten', '-1']) {
+      const refused = await get(`${route}?limit=${limit}`, as('developer'))
+      assert.equal(refused.status, 400, `limit=${limit}: ${refused.text}`)
+      assert.equal(refused.json.error, 'limit is a whole number from 1 to 500')
+    }
   })
 
   it('GET /api/v2/projects/:slug/apps/:appId: the app ID, its sequence and the app IDs sharing it', async () => {

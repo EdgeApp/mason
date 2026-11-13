@@ -1,6 +1,4 @@
 import type { DatabaseSync } from 'node:sqlite'
-import { runHref, statusDot } from './dashboard.js'
-import { escape, localTime } from './html.js'
 import type { Viewer } from './shell.js'
 import { isGlob, matches } from '../master/rules.js'
 import { downloadOnly } from '../validation.js'
@@ -325,8 +323,14 @@ export function projectRunsData(
     reserved?: (run: string) => string | undefined
   },
   project: string,
-  options: { branch?: string; pinned: string[]; app?: string },
-): { branches: BranchItem[]; runs: ProjectRunRow[] } {
+  options: {
+    branch?: string
+    pinned: string[]
+    app?: string
+    /** The most runs answered: 50 by default. */
+    limit?: number
+  },
+): { branches: BranchItem[]; runs: ProjectRunRow[]; more: boolean } {
   const { db } = source
   const app =
     options.app == null ? undefined : publishing(db, project, options.app)
@@ -353,18 +357,20 @@ export function projectRunsData(
       for (const entry of latest)
         if (matches(pattern, entry.branch)) add(entry.branch, true, entry.at)
   for (const entry of latest) add(entry.branch, false, entry.at)
-  const runs = (
-    db
-      .prepare(
-        `${runSelect} WHERE p.slug=? AND j.workflow NOT LIKE '@%' AND (? IS NULL OR j.branch=?)${filter} ORDER BY j.created DESC LIMIT 50`,
-      )
-      .all(
-        project,
-        options.branch ?? null,
-        options.branch ?? null,
-        ...appArgs,
-      ) as unknown as RunRow[]
-  ).map((run) => {
+  const limit = options.limit ?? 50
+  // One more than asked, to know whether older runs are left.
+  const rows = db
+    .prepare(
+      `${runSelect} WHERE p.slug=? AND j.workflow NOT LIKE '@%' AND (? IS NULL OR j.branch=?)${filter} ORDER BY j.created DESC LIMIT ?`,
+    )
+    .all(
+      project,
+      options.branch ?? null,
+      options.branch ?? null,
+      ...appArgs,
+      limit + 1,
+    ) as unknown as RunRow[]
+  const runs = rows.slice(0, limit).map((run) => {
     const builds = runBuilds(source, run)
     const versions = [...new Set(builds.map((build) => build.version))]
     const numbers = [...new Set(builds.map((build) => build.build_number))]
@@ -379,20 +385,5 @@ export function projectRunsData(
       buildNumber: source.reserved?.(run.id) ?? numbers.join(', '),
     }
   })
-  return { branches, runs }
-}
-
-/** The Runs and builds tab's runs table: status, version, build number and when each started. */
-export function projectRunsTable(
-  rows: ProjectRunRow[],
-  now: number,
-  every: boolean,
-): string {
-  if (rows.length === 0) return '<p class="empty-state">No runs yet.</p>'
-  return `<table class="list runs"><thead><tr><th>Status</th><th>Version</th><th>Build number</th><th>Started</th></tr></thead><tbody>${rows
-    .map(
-      (run) =>
-        `<tr data-run-id="${escape(run.id)}" data-status="${escape(run.status)}"><td><a href="${runHref(run.id)}">${statusDot(run.status)} <span data-status-text>${escape(run.status)}</span></a><small>Run ${run.number}${run.workflow === 'build' ? '' : ` · ${escape(run.workflow)}`}${every ? ` · <span class="mono">${escape(run.branch)}</span>` : ''}</small></td><td class="mono">${run.version === '' ? '—' : escape(run.version)}</td><td class="mono">${run.buildNumber === '' ? '—' : escape(run.buildNumber)}</td><td>${localTime(run.at, now, 'since')}</td></tr>`,
-    )
-    .join('')}</tbody></table>`
+  return { branches, runs, more: rows.length > limit }
 }

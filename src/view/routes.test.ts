@@ -374,10 +374,11 @@ describe('Pages on the master and the host', function () {
     // The master still shows that Masonfile, from its mirror (review 2.harness-review.3).
     const tab = await get(
       c.master,
-      `/projects/views/masonfile?commit=${commit}`,
+      `/api/v2/projects/views/masonfile?commit=${commit}`,
       onMaster('developer'),
     )
-    assert.match(tab.text, /export function setup/)
+    assert.equal(tab.status, 200, tab.text)
+    assert.match(JSON.parse(tab.text).text, /export function setup/)
     assert.doesNotMatch(tab.text, /Mason keeps no copy/)
     // Only the newest commits' copies stay: past the limit the oldest go.
     const fill = master.database.db.prepare(
@@ -459,35 +460,65 @@ describe('Pages on the master and the host', function () {
       10_000,
       'the Masonfile on the host',
     )
-    // The Overview's App IDs card and Build numbers read the same on both
-    // nodes; the host has no Secrets tab and no seed form.
-    const onTheMaster = await get(
+    // A project's pages are the web app's on both nodes, which reads the
+    // Overview's App IDs and Build numbers the same from each; the host has
+    // no Secrets tab and no seed form.
+    const shell = (reply: Reply, status = 200): void => {
+      assert.equal(reply.status, status, reply.text.slice(0, 300))
+      assert.equal(reply.cache, 'no-store')
+      assert.equal(reply.csp, shellContentSecurityPolicy)
+      assert.match(reply.text, /<div id="root"><\/div>/)
+    }
+    const read = async (
+      node: RunningNode,
+      route: string,
+      cookie: string,
+    ): Promise<Json> => {
+      const reply = await get(node, route, cookie)
+      assert.equal(reply.status, 200, reply.text)
+      return JSON.parse(reply.text)
+    }
+    shell(await get(c.master, '/projects/views', onMaster('manager')))
+    shell(await get(host, '/projects/views', onHost('manager')))
+    const onTheMaster = await read(
       c.master,
-      '/projects/views',
+      '/api/v2/projects/views/overview',
       onMaster('manager'),
     )
-    const onTheHost = await get(host, '/projects/views', onHost('manager'))
-    assert.equal(onTheHost.status, 200, onTheHost.text.slice(0, 300))
-    const card = (html: string): string =>
-      html.slice(html.indexOf('App IDs'), html.indexOf('id="build-numbers"'))
-    assert.equal(card(onTheHost.text), card(onTheMaster.text))
-    assert.match(onTheMaster.text, /\/projects\/views\/secrets/)
-    assert.doesNotMatch(onTheHost.text, /\/projects\/views\/secrets/)
-    assert.match(onTheMaster.text, /Set where it stands/)
-    assert.doesNotMatch(onTheHost.text, /Set where it stands/)
-    assert.match(onTheHost.text, /<td class="mono">app\.example\.views<\/td>/)
-    const runs = await get(host, '/projects/views/runs', onHost('developer'))
-    assert.equal(runs.status, 200)
-    assert.match(runs.text, /Runs and builds/)
+    const onTheHost = await read(
+      host,
+      '/api/v2/projects/views/overview',
+      onHost('manager'),
+    )
+    for (const field of ['apps', 'appNames', 'buildNumbers', 'repository'])
+      assert.deepEqual(onTheHost[field], onTheMaster[field], field)
+    assert.deepEqual(
+      onTheHost.appNames.map((app: Json) => app.bundleId),
+      ['app.example.views'],
+    )
+    assert.deepEqual([onTheMaster.secrets, onTheHost.secrets], [true, false])
+    assert.deepEqual([onTheMaster.canSeed, onTheHost.canSeed], [true, false])
+    shell(await get(host, '/projects/views/runs', onHost('developer')))
+    const runs = await read(
+      host,
+      '/api/v2/projects/views/runs',
+      onHost('developer'),
+    )
+    assert.equal(runs.name, onTheMaster.name)
+    assert(runs.runs.some((entry: Json) => entry.id === run.json.id))
     // The Masonfile shows from the copy, also while the link is down.
-    let offline = ''
+    shell(await get(host, '/projects/views/masonfile', onHost('developer')))
+    let offline: Reply | undefined
     await c.drop('host', 2000, async () => {
-      offline = (
-        await get(host, '/projects/views/masonfile', onHost('developer'))
-      ).text
+      offline = await get(
+        host,
+        '/api/v2/projects/views/masonfile',
+        onHost('developer'),
+      )
     })
-    assert.match(offline, /export function setup/)
-    // Testers reach apps through Install apps, not project pages.
+    assert.equal(offline!.status, 200, offline!.text)
+    assert.match(JSON.parse(offline!.text).text, /export function setup/)
+    // Testers reach apps through Install apps: to them projects do not exist.
     for (const route of [
       '/projects/views',
       '/projects/views/runs',
@@ -499,7 +530,21 @@ describe('Pages on the master and the host', function () {
         route,
       )
     assert.equal(
-      (await get(host, '/projects/nothing', onHost('developer'))).status,
+      (await get(host, '/api/v2/projects/views/overview', onHost('tester')))
+        .status,
+      403,
+    )
+    // A project the host does not hold is the app's unknown state.
+    shell(await get(host, '/projects/nothing', onHost('developer')), 404)
+    shell(await get(host, '/projects/nothing/runs', onHost('developer')), 404)
+    assert.equal(
+      (
+        await get(
+          host,
+          '/api/v2/projects/nothing/overview',
+          onHost('developer'),
+        )
+      ).status,
       404,
     )
   })

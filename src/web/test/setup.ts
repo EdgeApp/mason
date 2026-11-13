@@ -57,8 +57,9 @@ const install = (key: string, get: () => unknown): void => {
   Object.defineProperty(globalThis, key, { configurable: true, get })
 }
 // What Node already defines (navigator, Event, fetch …) is replaced only
-// where the page needs jsdom's own.
-for (const key of ['window', 'self', 'document', 'navigator'])
+// where the page needs jsdom's own: React builds a FormData of a jsdom form
+// when a submit starts a navigation.
+for (const key of ['window', 'self', 'document', 'navigator', 'FormData'])
   install(key, () =>
     key === 'window' || key === 'self' ? window : window[key as keyof Window],
   )

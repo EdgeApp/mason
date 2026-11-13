@@ -1,18 +1,26 @@
 import {
   asArray,
   asBoolean,
+  asEither,
+  asNull,
   asNumber,
   asObject,
   asOptional,
   asString,
+  asUnknown,
 } from 'cleaners'
+import { asParamSpec, asRecord, type WorkflowSpec } from './runs.js'
 
 /** `GET /api/v2/projects/:slug/overview`, both nodes. */
 export const projectOverviewPath = (slug: string): string =>
   `/api/v2/projects/${encodeURIComponent(slug)}/overview`
-/** `GET /api/v2/projects/:slug/runs?branch=&app=`, both nodes. */
+/** `GET /api/v2/projects/:slug/runs?branch=&app=&limit=`, both nodes. */
 export const projectRunsPath = (slug: string): string =>
   `/api/v2/projects/${encodeURIComponent(slug)}/runs`
+/** How many runs Runs and builds asks for at first, and how many more each *Show more* adds. */
+export const RUNS_PAGE = 50
+/** The most runs one request answers. */
+export const RUNS_LIMIT = 500
 /** `GET /api/v2/projects/:slug/apps/:appId`, both nodes. */
 export const projectAppPath = (slug: string, appId: string): string =>
   `/api/v2/projects/${encodeURIComponent(slug)}/apps/${encodeURIComponent(appId)}`
@@ -65,6 +73,11 @@ export interface ProjectOverview extends ProjectDetails {
   canSeed: boolean
   /** Whether the node has a Secrets tab: the master only. */
   secrets: boolean
+  /**
+   * The workflows of the Masonfile its latest run recorded (on the default
+   * branch when it has one), with their parameters, for Request run.
+   */
+  workflows?: WorkflowSpec[]
 }
 
 /** A branch in the Runs and builds list; `pinned` ones are those its push trigger builds. */
@@ -103,6 +116,8 @@ export interface ProjectRuns {
   app?: AppHeading
   branches: BranchItem[]
   runs: ProjectRunRow[]
+  /** Whether older runs are left beyond `limit`. */
+  more: boolean
 }
 
 /** What `GET /api/v2/projects/:slug/apps/:appId` answers. */
@@ -167,6 +182,11 @@ export const asProjectOverview = asObject<ProjectOverview>({
   appNames: asArray(asObject({ bundleId: asString, name: asString })),
   canSeed: asBoolean,
   secrets: asBoolean,
+  workflows: asOptional(
+    asArray(
+      asObject<WorkflowSpec>({ name: asString, params: asRecord(asParamSpec) }),
+    ),
+  ),
 })
 
 export const asAppHeading = asObject<AppHeading>({
@@ -200,6 +220,7 @@ export const asProjectRuns = asObject<ProjectRuns>({
       buildNumber: asString,
     }),
   ),
+  more: asBoolean,
 })
 
 export const asProjectApp = asObject<ProjectApp>({
@@ -220,4 +241,108 @@ export const asMasonfileText = asObject<MasonfileText>({
   commit: asString,
   file: asString,
   text: asString,
+})
+
+/** `POST /api/v2/build-numbers/seed`, the master: where a sequence stands. */
+export const SEED_PATH = '/api/v2/build-numbers/seed'
+
+/** What *Set where it stands* sends. */
+export interface SeedRequest {
+  project: string
+  key: string
+  /** A per-branch sequence's branch. */
+  branch?: string
+  last: string
+}
+
+/** `GET`, `PUT /api/v2/projects/:slug`, the master: the project itself. */
+export const projectPath = (slug: string): string =>
+  `/api/v2/projects/${encodeURIComponent(slug)}`
+/** `POST /api/v2/projects/check`, the master: wizard step 1. */
+export const PROJECT_CHECK_PATH = '/api/v2/projects/check'
+/** `GET`, `POST /api/v2/projects/:slug/discover`, the master: wizard step 2. */
+export const discoverPath = (slug: string): string =>
+  `/api/v2/projects/${encodeURIComponent(slug)}/discover`
+/** `POST /api/v2/projects/:slug/wizard/apps|rules`, the master. */
+export const wizardPath = (slug: string, step: 'apps' | 'rules'): string =>
+  `/api/v2/projects/${encodeURIComponent(slug)}/wizard/${step}`
+/** `POST /api/v2/projects/:slug/webhook`, the master. */
+export const webhookPath = (slug: string): string =>
+  `/api/v2/projects/${encodeURIComponent(slug)}/webhook`
+
+/** What the wizard reads of `GET /api/v2/projects/:slug`. */
+export interface ProjectRecordView {
+  slug: string
+  name: string
+  repository: string
+  defaultBranch: string
+  format: string
+  webhookSecret: { set: boolean }
+  apps: Array<{ bundleId: string }>
+  rules: Array<{ pattern: string; mode: string }>
+}
+
+/** What `POST /api/v2/projects/check` answers: the repository the master can read. */
+export interface RepositoryCheck {
+  repository: string
+  slug: string
+  defaultBranch: string
+}
+
+/** An app ID a Masonfile declares. */
+export interface DeclaredApp {
+  bundleId: string
+  platforms: string[]
+  bundleIds?: string[]
+}
+
+/** What `GET /api/v2/projects/:slug/discover` answers: the latest discovery run, if any. */
+export interface Discovery {
+  run: string
+  status: string
+  reason: string | null
+  apps?: DeclaredApp[]
+  triggers?: Record<string, unknown[]>
+}
+
+export const asProjectRecordView = asObject<ProjectRecordView>({
+  slug: asString,
+  name: asString,
+  repository: asString,
+  defaultBranch: asString,
+  format: asString,
+  webhookSecret: asObject({ set: asBoolean }),
+  apps: asArray(asObject({ bundleId: asString })),
+  rules: asArray(asObject({ pattern: asString, mode: asString })),
+})
+
+export const asRepositoryCheck = asObject<RepositoryCheck>({
+  repository: asString,
+  slug: asString,
+  defaultBranch: asString,
+})
+
+export const asDiscovery = asEither(
+  asNull,
+  asObject<Discovery>({
+    run: asString,
+    status: asString,
+    reason: asEither(asString, asNull),
+    apps: asOptional(
+      asArray(
+        asObject<DeclaredApp>({
+          bundleId: asString,
+          platforms: asArray(asString),
+          bundleIds: asOptional(asArray(asString)),
+        }),
+      ),
+    ),
+    triggers: asOptional(asRecord(asArray(asUnknown))),
+  }),
+)
+
+/** What the webhook route answers. */
+export const asWebhookCreated = asObject({
+  created: asUnknown,
+  url: asString,
 })

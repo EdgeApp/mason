@@ -26,16 +26,8 @@ import {
   testBanner,
   type WebAppContext,
 } from '../node/webApp.js'
-import {
-  accountView,
-  appBuildNumbersView,
-  appMissingView,
-  masonfileView,
-  projectRunsView,
-  projectView,
-} from '../view/admin.js'
-import { storedDetails, type ProjectDetails } from '../master/projectDetails.js'
-import { projectRunsData } from '../view/artifacts.js'
+import { accountView } from '../view/admin.js'
+import { storedDetails } from '../master/projectDetails.js'
 import {
   approvalNotifications,
   approvalRolesFromGraph,
@@ -54,7 +46,7 @@ import { catalogApi } from '../catalog/api.js'
 import { StoreCatalogSource } from '../catalog/source.js'
 import { Devices } from '../devices/store.js'
 import { Refused } from './builds.js'
-import { masonfileData, readApi } from '../node/readApi.js'
+import { readApi } from '../node/readApi.js'
 import { sendShell } from '../node/webRoutes.js'
 import { hostAccount, hostReader, OFFLINE_TEXT } from './reads.js'
 
@@ -153,7 +145,6 @@ function hostFrame(host: HostRuntime, context: WebAppContext): Frame {
  */
 function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
   const router = express.Router()
-  const reader = hostReader(host, context)
   const visible =
     (accountId: number) =>
     (appId: number): boolean =>
@@ -202,256 +193,66 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
     )
   })
   /**
-   * A project's pages on the host: the master's views over the copy the
-   * master sends, read-only, for developers and up and only for a project
-   * with an app they may see. Testers reach apps through Install apps.
+   * A project's pages on the host are the web app's, read from the copy the
+   * master sends, for developers and up and only for a project with an app
+   * they may see: a project or app ID the host does not hold (or the viewer
+   * may not see) answers its unknown state with that status.
    */
-  const projectPage = (
+  const projectShell = (
     req: express.Request,
     res: express.Response,
-  ):
-    | {
-        found: NonNullable<ReturnType<typeof hostViewer>>
-        project: { id: number; slug: string; name: string }
-        details: ProjectDetails
-      }
-    | undefined => {
+    app?: string,
+  ): void => {
     const found = hostViewer(host, req)
     if (found == null) {
       signIn(req, res)
-      return undefined
+      return
     }
+    // A tester never gets here: the 404 above answers them.
     const db = host.cache.db
     const row = db
-      .prepare(
-        'SELECT id,slug,name,details FROM projects WHERE slug=? AND enabled=1',
-      )
+      .prepare('SELECT id,details FROM projects WHERE slug=? AND enabled=1')
       .get(String(req.params.slug)) as
-      | { id: number; slug: string; name: string; details: string | null }
+      | { id: number; details: string | null }
       | undefined
-    const details = storedDetails(row?.details)
-    const sees =
+    const apps =
+      row == null
+        ? []
+        : (
+            db
+              .prepare(
+                'SELECT a.id,a.slug,a.enabled FROM apps a JOIN project_apps pa ON pa.app_id=a.id WHERE pa.project_id=?',
+              )
+              .all(row.id) as Array<{
+              id: number
+              slug: string
+              enabled: number
+            }>
+          ).filter((entry) => visible(found.accountId)(entry.id))
+    // An app ID page needs that app ID, enabled.
+    const known =
       row != null &&
-      (
-        db
-          .prepare('SELECT app_id FROM project_apps WHERE project_id=?')
-          .all(row.id) as Array<{ app_id: number }>
-      ).some((app) => host.cache.store.visible(found.accountId, app.app_id))
-    if (
-      row == null ||
-      details == null ||
-      !sees ||
-      found.viewer.role === 'tester'
-    ) {
-      render(
-        res.status(404),
-        found.viewer,
-        'Project',
-        '<p class="empty-state">There is no such project.</p>',
-        'dashboard',
-      )
-      return undefined
-    }
-    return {
-      found,
-      project: { id: row.id, slug: row.slug, name: row.name },
-      details,
-    }
+      storedDetails(row.details) != null &&
+      apps.length > 0 &&
+      (app == null ||
+        apps.some((entry) => entry.slug === app && entry.enabled === 1))
+    sendShell(res, known ? {} : { status: 404 })
   }
-  /** What a project's or an app ID's Runs and builds reads on the host. */
-  const runsSource = (
-    found: NonNullable<ReturnType<typeof hostViewer>>,
-    now: number,
-  ): Parameters<typeof projectRunsData>[0] => ({
-    db: host.cache.db,
-    viewer: found.viewer,
-    now,
-    appVisible: visible(found.accountId),
-    artifactBase: '',
-    // The app build number each run reserved, which the master replicates.
-    reserved: (run): string | undefined =>
-      (
-        host.cache.db
-          .prepare('SELECT build_number FROM jobs WHERE id=?')
-          .get(run) as { build_number: string | null } | undefined
-      )?.build_number ?? undefined,
-  })
-  router.get('/projects/:slug', (req, res) => {
-    const page = projectPage(req, res)
-    if (page == null) return
-    render(
-      res,
-      page.found.viewer,
-      page.project.name,
-      projectView({
-        viewer: page.found.viewer,
-        slug: page.project.slug,
-        name: page.project.name,
-        ...page.details,
-        canSeed: false,
-        secrets: false,
-      }),
-      'dashboard',
-    )
-  })
-  router.get('/projects/:slug/runs', (req, res) => {
-    const page = projectPage(req, res)
-    if (page == null) return
-    const branch =
-      typeof req.query.branch === 'string' && req.query.branch !== ''
-        ? req.query.branch
-        : undefined
-    const now = host.now()
-    const { branches, runs } = projectRunsData(
-      runsSource(page.found, now),
-      page.project.slug,
-      { ...(branch == null ? {} : { branch }), pinned: page.details.pinned },
-    )
-    render(
-      res,
-      page.found.viewer,
-      `${page.project.name} · Runs and builds`,
-      projectRunsView(
-        {
-          viewer: page.found.viewer,
-          slug: page.project.slug,
-          name: page.project.name,
-          ...(branch == null ? {} : { branch }),
-          branches,
-          runs,
-          secrets: false,
-        },
-        now,
-      ),
-      'dashboard',
-    )
-  })
-  /**
-   * An app ID page's project and app ID: the project's own, enabled app ID
-   * that the viewer may see; otherwise 404 under the project.
-   */
-  const appPage = (
-    req: express.Request,
-    res: express.Response,
-  ):
-    | (NonNullable<ReturnType<typeof projectPage>> & {
-        app: { id: number; bundleId: string; name: string; platforms: string[] }
-      })
-    | undefined => {
-    const page = projectPage(req, res)
-    if (page == null) return undefined
-    const row = host.cache.db
-      .prepare(
-        'SELECT a.id,a.slug,a.name FROM apps a JOIN project_apps pa ON pa.app_id=a.id WHERE pa.project_id=? AND a.slug=? AND a.enabled=1',
-      )
-      .get(page.project.id, String(req.params.appId)) as
-      | { id: number; slug: string; name: string }
-      | undefined
-    if (row == null || !visible(page.found.accountId)(row.id)) {
-      render(
-        res.status(404),
-        page.found.viewer,
-        'App ID unavailable',
-        appMissingView(page.found.viewer, page.project.slug, page.project.name),
-        'dashboard',
-      )
-      return undefined
-    }
-    return {
-      ...page,
-      app: {
-        id: row.id,
-        bundleId: row.slug,
-        name: row.name,
-        platforms:
-          page.details.apps.find((entry) => entry.bundleId === row.slug)
-            ?.platforms ?? [],
-      },
-    }
-  }
-  router.get('/projects/:slug/apps/:appId', (req, res) => {
-    const page = appPage(req, res)
-    if (page == null) return
-    const branch =
-      typeof req.query.branch === 'string' && req.query.branch !== ''
-        ? req.query.branch
-        : undefined
-    const now = host.now()
-    const { branches, runs } = projectRunsData(
-      runsSource(page.found, now),
-      page.project.slug,
-      {
-        ...(branch == null ? {} : { branch }),
-        pinned: page.details.pinned,
-        app: page.app.bundleId,
-      },
-    )
-    render(
-      res,
-      page.found.viewer,
-      `${page.app.bundleId} · Runs and builds`,
-      projectRunsView(
-        {
-          viewer: page.found.viewer,
-          slug: page.project.slug,
-          name: page.project.name,
-          ...(branch == null ? {} : { branch }),
-          branches,
-          runs,
-          app: page.app,
-        },
-        now,
-      ),
-      'dashboard',
-    )
-  })
-  router.get('/projects/:slug/apps/:appId/build-numbers', (req, res) => {
-    const page = appPage(req, res)
-    if (page == null) return
-    render(
-      res,
-      page.found.viewer,
-      `${page.app.bundleId} · Build numbers`,
-      appBuildNumbersView({
-        viewer: page.found.viewer,
-        slug: page.project.slug,
-        name: page.project.name,
-        app: page.app,
-        projectApps: page.details.apps.map((entry) => entry.bundleId),
-        buildNumbers: page.details.buildNumbers,
-        // The host keeps a read-only copy: sequences are set on the master.
-        canSeed: false,
-      }),
-      'dashboard',
-    )
-  })
-  router.get('/projects/:slug/masonfile', (req, res) => {
-    const page = projectPage(req, res)
-    if (page == null) return
-    const commit =
-      typeof req.query.commit === 'string' ? req.query.commit : undefined
-    void masonfileData(reader, reader.project(page.project.slug)!, commit).then(
-      (data) => {
-        render(
-          res,
-          page.found.viewer,
-          `${page.project.name} · Masonfile`,
-          masonfileView({
-            viewer: page.found.viewer,
-            slug: page.project.slug,
-            name: page.project.name,
-            commits: data.commits,
-            ...(data.commit == null ? {} : { commit: data.commit }),
-            ...(data.file == null ? {} : { file: data.file }),
-            ...(data.text == null ? {} : { text: data.text }),
-            ...(data.error == null ? {} : { error: data.error }),
-            secrets: false,
-          }),
-          'dashboard',
-        )
-      },
-    )
-  })
+  router.get(
+    ['/projects/:slug', '/projects/:slug/runs', '/projects/:slug/masonfile'],
+    (req, res) => {
+      projectShell(req, res)
+    },
+  )
+  router.get(
+    [
+      '/projects/:slug/apps/:appId',
+      '/projects/:slug/apps/:appId/build-numbers',
+    ],
+    (req, res) => {
+      projectShell(req, res, String(req.params.appId))
+    },
+  )
   // Your account: the person's own record from the cache; changes go to the
   // master over the link, so the page is read-only while it is down.
   router.get('/account', (req, res) => {
