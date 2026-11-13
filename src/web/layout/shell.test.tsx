@@ -1077,14 +1077,14 @@ describe('Pages in the shell', () => {
   })
 
   it('draws a page a later milestone ports: breadcrumbs from the node’s pill, its header and what is coming', async () => {
-    renderApp({ path: '/groups/7' })
-    await page('Group')
+    renderApp({ path: '/apps/7' })
+    await page('App')
     const crumbs = screen.getByRole('navigation', { name: 'Breadcrumb' })
     assert.deepEqual(
       within(crumbs)
         .getAllByRole('listitem')
         .map((item) => item.textContent!.replace(glyph('lan'), '')),
-      ['Mason Master', 'Groups', 'Group'],
+      ['Mason Master', 'Install apps', 'App'],
     )
     assert.equal(
       within(crumbs)
@@ -1093,15 +1093,15 @@ describe('Pages in the shell', () => {
       '/',
     )
     assert.equal(
-      within(crumbs).getByText('Group').getAttribute('aria-current'),
+      within(crumbs).getByText('App').getAttribute('aria-current'),
       'page',
     )
-    screen.getByRole('heading', { name: 'Coming in M9' })
+    screen.getByRole('heading', { name: 'Coming in M10' })
     assert.equal(
       screen
         .getByRole('link', { name: /Open the current page/ })
         .getAttribute('href'),
-      '/groups/7',
+      '/apps/7',
     )
   })
 

@@ -26,7 +26,6 @@ import {
   testBanner,
   type WebAppContext,
 } from '../node/webApp.js'
-import { accountView } from '../view/admin.js'
 import { storedDetails } from '../master/projectDetails.js'
 import {
   approvalNotifications,
@@ -48,7 +47,7 @@ import { Devices } from '../devices/store.js'
 import { Refused } from './builds.js'
 import { readApi } from '../node/readApi.js'
 import { sendShell } from '../node/webRoutes.js'
-import { hostAccount, hostReader, OFFLINE_TEXT } from './reads.js'
+import { hostReader, OFFLINE_TEXT } from './reads.js'
 
 const OFFLINE_BANNER = `<p class="notice" role="status">${OFFLINE_TEXT}</p>`
 
@@ -73,7 +72,7 @@ function offlineBanner(host: HostRuntime): RequestHandler {
 function hostViewer(
   host: HostRuntime,
   req: express.Request,
-): { viewer: Viewer; accountId: number; csrf: string } | undefined {
+): { viewer: Viewer; accountId: number } | undefined {
   const context = sessionContext(req, host.accounts)
   if (context == null) return undefined
   const row = host.cache.db
@@ -85,7 +84,6 @@ function hostViewer(
   if (row == null || role == null) return undefined
   return {
     accountId: context.account.id,
-    csrf: context.session.csrf,
     viewer: {
       name: row.name,
       role,
@@ -155,18 +153,13 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
     title: string,
     body: string,
     active: string,
-    csrf?: string,
-    scripts: string[] = [],
   ): void => {
     res.send(
       hostShell(host, context, viewer, {
         title,
         body,
         active,
-        scripts: ['/assets/run.js', ...scripts],
-        ...(csrf == null
-          ? {}
-          : { head: `<meta name="mason-csrf" content="${escape(csrf)}">` }),
+        scripts: ['/assets/run.js'],
       }),
     )
   }
@@ -253,38 +246,14 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       projectShell(req, res, String(req.params.appId))
     },
   )
-  // Your account: the person's own record from the cache; changes go to the
+  // Your account is the web app's, read from the cache; changes go to the
   // master over the link, so the page is read-only while it is down.
   router.get('/account', (req, res) => {
-    const found = hostViewer(host, req)
-    if (found == null) {
+    if (hostViewer(host, req) == null) {
       signIn(req, res)
       return
     }
-    const account = hostAccount(host, found.accountId)
-    res.set('Content-Security-Policy', masterContentSecurityPolicy)
-    render(
-      res,
-      found.viewer,
-      'Your account',
-      accountView({
-        viewer: found.viewer,
-        person: {
-          id: account.id,
-          name: account.name,
-          role: account.role,
-          ...(account.username == null ? {} : { username: account.username }),
-          password: account.password,
-          emails: account.emails,
-        },
-        signOut: found.viewer.signOut,
-        editable: account.editable,
-        passwordHere: account.passwordHere,
-      }),
-      'account',
-      found.csrf,
-      ['/assets/master.js', '/assets/people.js'],
-    )
+    sendShell(res)
   })
   // Projects & apps and Artifacts are the web app's, read from this host's
   // copy; a tester reads the 403 inside it on Artifacts (and the 404 above

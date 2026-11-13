@@ -130,6 +130,8 @@ describe('Pages on the master and the host', function () {
       [c.master, '/', onMaster('admin')],
       [c.master, '/artifacts', onMaster('developer')],
       [c.master, '/sign-in', undefined],
+      [c.master, '/account', onMaster('tester')],
+      [c.master, '/people', onMaster('admin')],
       [host, '/', onHost('developer')],
       [host, '/apps', onHost('tester')],
       [host, '/artifacts', onHost('admin')],
@@ -143,11 +145,18 @@ describe('Pages on the master and the host', function () {
       assert.match(reply.csp, /font-src 'self'/)
       // No page compiles the password hash: the sign-in pages are the web
       // app's shell, which only starts the worker that does. Projects & apps
-      // (the master's home) and Artifacts are the shell too.
+      // (the master's home), Artifacts, Your account and People (which set
+      // passwords) are the shell too.
       assert.doesNotMatch(reply.csp, /wasm-unsafe-eval/, route)
       assert.equal(
         reply.csp === shellContentSecurityPolicy,
-        ['/sign-in', '/auth/login', '/artifacts'].includes(route) ||
+        [
+          '/sign-in',
+          '/auth/login',
+          '/artifacts',
+          '/account',
+          '/people',
+        ].includes(route) ||
           (node === c.master && route === '/'),
         route,
       )

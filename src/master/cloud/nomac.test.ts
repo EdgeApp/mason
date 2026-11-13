@@ -10,7 +10,6 @@ import { openTunnel, type GatewayAccess } from '../../link/sshGateway.js'
 import { createCertificate, certificateHash } from '../../node/certificate.js'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeNoMac } from '../../test/fakeNoMac.js'
-import { nodesView } from '../../view/admin.js'
 import { ProviderError } from './digitalocean.js'
 import { NoMac } from './nomac.js'
 import { nomacLimits } from './pools.js'
@@ -424,28 +423,23 @@ export async function build(ctx: Stage) {
     await settings.set({ role: 'admin', label: 'paul' }, 'cloud', {
       pools: [pool()],
     })
-    // The Nodes page offers a NoMac pool without region, size or image, and no NoMac host.
-    const html = nodesView({
-      nodes: [],
-      types: {},
-      pools: [],
-      host: 'https://builds.example.test',
-      budget: { monthly: 200 },
-      canChange: true,
-      poolAccounts: [{ id: 'mac', name: 'NoMac', provider: 'nomac' }],
-    })
-    assert.match(
-      html,
-      /<details class="action add-pool" id="add-pool-mac"><summary class="button">.*Add a pool on NoMac<\/summary>/,
+    // The Nodes page offers a NoMac pool without region, size or image, and
+    // no NoMac host: NoMac has no catalog to choose from and no DNS.
+    const accounts = await c.api('GET', '/api/v2/cloud/accounts')
+    assert.deepEqual(
+      (accounts.json as Json[]).map((entry) => [entry.id, entry.provider]),
+      [['mac', 'nomac']],
     )
-    // NoMac pools default to the macOS cloud type.
-    assert.match(html, /id="new-mac-name" name="name" value="macos-cloud"/)
-    assert.match(html, /id="new-mac-type" name="type" value="macos-arm64"/)
-    assert.match(html, /one Apple silicon Mac with Xcode at a time/)
-    assert.match(html, /id="new-mac-maxNodes"[^>]*max="1"/)
-    assert.match(html, /id="new-mac-maxHoursPerNode"[^>]*value="8"[^>]*max="8"/)
-    assert.doesNotMatch(html, /id="new-mac-(region|size|image)"/)
-    assert.doesNotMatch(html, /id="add-host-mac"/)
+    const catalog = await c.api('GET', '/api/v2/cloud/accounts/mac/catalog')
+    assert.equal(catalog.status, 400)
+    assert.equal(
+      catalog.json.error,
+      "Account mac's provider has no regions or sizes to choose",
+    )
+    assert.deepEqual(
+      (await c.api('GET', '/api/v2/cloud/accounts/mac/domains')).json,
+      [],
+    )
   })
 
   it('U7.3/U7.7/U7.8 a run starts a Mac, its setup and stage run there over the gateway, a dropped tunnel re-dials, and the idle Mac is stopped', async () => {

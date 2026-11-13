@@ -12,6 +12,10 @@ import { localOperator } from './roles.js'
 
 const admin = localOperator
 
+// Replies are read field by field.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Json = any
+
 /** A browser on the master's listener: its cookies, no redirects followed. */
 class Browser {
   readonly cookies = new Map<string, string>()
@@ -196,12 +200,26 @@ describe('Provider sign-in on the master', function () {
       200,
     )
     env.setClaims({})
-    const shown = await (await ada.get('/settings')).text()
-    for (const id of ['first', 'second', 'plain', 'off']) {
-      assert(shown.includes(`https://builds.example.test/auth/callback/${id}`))
-      assert(shown.includes(`${origin}/auth/callback/${id}`))
+    // Settings is the web app's: it draws each method's callback at the
+    // host's and the master's address from the areas it reads.
+    await shell(await ada.get('/settings'))
+    const read = async (route: string): Promise<Json> => {
+      const reply = await ada.get(route)
+      assert.equal(reply.status, 200, route)
+      return await reply.json()
     }
-    assert.match(shown, /name="origin" value="https:\/\/127\.0\.0\.1:/)
+    assert.deepEqual(
+      ((await read('/api/v2/settings/signIn')).methods as Json[]).map(
+        (method) => method.id,
+      ),
+      ['first', 'second', 'plain', 'off'],
+    )
+    assert.equal(
+      (await read('/api/v2/settings/host')).origin,
+      'https://builds.example.test',
+    )
+    assert.equal((await read('/api/v2/settings/master')).origin, origin)
+    assert.match(origin, /^https:\/\/127\.0\.0\.1:/)
   })
 
   it('M1.4 a verified email that is a person’s signs them in on the master; the flow moves to the master address first', async () => {
@@ -437,11 +455,22 @@ describe('Provider sign-in on the master', function () {
       200,
     )
     env.setClaims({})
-    const page = await (await mona.get('/settings')).text()
-    assert(page.includes(`${origin}/auth/callback/first`), 'callbacks shown')
-    assert.doesNotMatch(page, /data-path="\/api\/v2\/settings\/signIn/)
-    assert.doesNotMatch(page, /data-path="\/api\/v2\/settings\/master"/)
-    assert.match(page, /Only an administrator changes sign-in/)
+    // A manager reads the methods and the master address, whose callbacks
+    // Settings shows, but only an administrator changes sign-in.
+    await shell(await mona.get('/settings'))
+    const methods = await mona.get('/api/v2/settings/signIn')
+    assert.equal(methods.status, 200)
+    assert(
+      ((await methods.json()) as { methods: Json[] }).methods.some(
+        (method) => method.id === 'first',
+      ),
+    )
+    const masterArea = await mona.get('/api/v2/settings/master')
+    assert.deepEqual(await masterArea.json(), { origin })
+    const session = (await (await mona.get('/api/v2/session')).json()) as {
+      permissions: string[]
+    }
+    assert(!session.permissions.includes('signIn.change'))
   })
 
   it('M1.8 the master address cleared takes the buttons away again', async () => {

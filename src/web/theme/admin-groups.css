@@ -1,0 +1,57 @@
+/* groups pages (DESIGN-LANGUAGE.md §14), on tokens only: the Groups list
+   and a group's sections with their pickers (screen-14-groups), the Cloud
+   account cards (screen-11-cloud) and Backups (screen-15-backups). */
+
+/* The picker: its field fills the bar, and "Nothing matches." sits like a row. */
+.m-picker__field {
+  flex: 1;
+  min-width: 0;
+}
+.m-picker__empty {
+  margin: 0;
+  padding: var(--m-space-4) var(--m-space-5);
+}
+
+/* A group's sections: the picker over the rows, a refusal under the header. */
+.m-group {
+  align-items: start;
+}
+.m-group__picker {
+  padding-bottom: var(--m-space-3);
+}
+.m-group__error {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.m-group__none {
+  margin: 0;
+}
+
+/* Cloud: the header aligns its glyph box to the name's first line; Remove sits apart. */
+.m-cloud {
+  align-items: start;
+}
+.m-cloud__head {
+  align-items: flex-start;
+}
+.m-cloud__line {
+  margin: 0;
+}
+.m-cloud__actions {
+  justify-content: flex-start;
+}
+.m-cloud__remove {
+  margin-left: auto;
+}
+
+/* Backups. */
+.m-backups {
+  align-items: start;
+}
+.m-backups__intro,
+.m-backups__state {
+  margin: 0;
+}
+.m-backups__state--failed {
+  color: var(--m-danger-text);
+}

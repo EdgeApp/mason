@@ -21,7 +21,7 @@ const server = (
 }
 
 describe('The routes the app has ported and the node’s own pages', () => {
-  it('has ported Projects & apps, Artifacts, Search, the run page and the project pages', () => {
+  it('has ported Projects & apps, Artifacts, Search, the run page, the project pages and administration', () => {
     assert.deepEqual(
       PAGE_ROUTES.filter((route) => route.page != null).map(
         (route) => route.path,
@@ -38,22 +38,30 @@ describe('The routes the app has ported and the node’s own pages', () => {
         '/projects/:slug/secrets',
         '/projects/:slug/apps/:appId',
         '/projects/:slug/apps/:appId/build-numbers',
+        '/nodes',
+        '/cloud',
+        '/settings',
+        '/people',
+        '/groups',
+        '/groups/:id',
+        '/backups',
+        '/account',
       ],
     )
   })
 
   it('leaves for the node’s own page at an address it has not ported, outside the mount', async () => {
     const pages = server('/projects')
-    renderApp({ path: '/nodes?tab=pools', server: pages })
+    renderApp({ path: '/devices?tab=mine', server: pages })
     await screen.findByRole('status', { name: 'Opening the page' })
     await until(() => pages.went.length === 1, 'the full load')
-    assert.deepEqual(pages.went, ['/nodes?tab=pools'])
+    assert.deepEqual(pages.went, ['/devices?tab=mine'])
   })
 
   it('draws the placeholder, never a full load, where the node answered the app itself', async () => {
-    const pages = server('/nodes')
-    renderApp({ path: '/nodes', server: pages })
-    await screen.findByRole('heading', { name: 'Coming in M9' })
+    const pages = server('/devices')
+    renderApp({ path: '/devices', server: pages })
+    await screen.findByRole('heading', { name: 'Coming in M10' })
     assert.deepEqual(pages.went, [])
   })
 

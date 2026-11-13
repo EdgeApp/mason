@@ -3,7 +3,9 @@
 // the node follows the running stage, and says so with that stage's steps;
 // the page then shows that stage's log. A log line longer than a frame comes
 // in pieces marked partial, held until the rest arrives. Each reconnect
-// resumes after the last byte received, so no line is lost or repeated.
+// resumes the shown stage (chosen or followed) after the last byte
+// received, so no line is lost or repeated; a followed resume still moves
+// on to the next running stage.
 import { useEffect, useRef, useState } from 'react'
 import type { LiveRun, LiveStage, LiveStep } from '../../../shared/live.js'
 import type { LiveFrame, LiveSubscribe } from '../../live/LiveClient.js'
@@ -69,19 +71,33 @@ export class RunLive {
     this.shown = stage
   }
 
-  /** The subscribe message, as of now. */
+  /**
+   * The subscribe message, as of now. One with no offset gets the log
+   * afresh (or none), so a held partial line goes.
+   */
   message(): LiveSubscribe {
-    if (this.stage == null) return { subscribe: 'run', run: this.run }
+    const message = this.resume()
+    if (message.after == null) this.carry = undefined
+    return message
+  }
+
+  private resume(): LiveSubscribe {
+    const run = this.run
+    if (this.stage == null)
+      return this.shown == null || this.offset == null
+        ? { subscribe: 'run', run }
+        : {
+            subscribe: 'run',
+            run,
+            stage: this.shown,
+            follow: true,
+            after: this.offset,
+          }
     if (this.step != null)
-      return { subscribe: 'run', run: this.run, stage: this.stage, log: false }
+      return { subscribe: 'run', run, stage: this.stage, log: false }
     return this.offset == null
-      ? { subscribe: 'run', run: this.run, stage: this.stage, tail: true }
-      : {
-          subscribe: 'run',
-          run: this.run,
-          stage: this.stage,
-          after: this.offset,
-        }
+      ? { subscribe: 'run', run, stage: this.stage, tail: true }
+      : { subscribe: 'run', run, stage: this.stage, after: this.offset }
   }
 
   private set(next: Partial<LiveRunState>): void {

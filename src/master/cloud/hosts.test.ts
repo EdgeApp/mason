@@ -14,7 +14,6 @@ import { after, before, describe, it } from 'mocha'
 import { nodeMain, type MainIO } from '../../node/main.js'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeCloud } from '../../test/fakeCloud.js'
-import { cloudView, nodesView, type CloudHostView } from '../../view/admin.js'
 import { clusterCheck, formatCheck } from '../clusterCheck.js'
 import { localOperator } from '../roles.js'
 import type { CloudProvider } from './digitalocean.js'
@@ -431,23 +430,11 @@ describe('Mason hosts on DigitalOcean', function () {
         options: { version?: string; updateTimeoutMs?: number }
       }
     ).options
-  const panel = (): string =>
-    nodesView({
-      nodes: [],
-      types: {},
-      pools: [],
-      budget: { monthly: 0 },
-      canChange: true,
-      cloudHosts: [
-        {
-          ...row(),
-          labels: [],
-          dnsName: undefined,
-          certificate: undefined,
-          space: undefined,
-        } as CloudHostView,
-      ],
-    })
+  /** The host as the Nodes page reads it. */
+  const listed = async (): Promise<Json> =>
+    ((await c.api('GET', '/api/v2/cloud/hosts')).json as Json[]).find(
+      (entry) => entry.name === 'e2e',
+    )
 
   it('U2.2 a host that cannot update itself stays ready and says why', async () => {
     const running = row().version
@@ -463,7 +450,7 @@ describe('Mason hosts on DigitalOcean', function () {
       const report = await clusterCheck(c.master.master!)
       assert(report.nodes[0]!.problems.includes(refused.error))
       assert.match(formatCheck(report), /Something needs a person/)
-      assert.match(panel(), /updates only by hand/)
+      assert.match((await listed()).error, /updates only by hand/)
     } finally {
       follows().version = undefined
     }
@@ -504,8 +491,10 @@ describe('Mason hosts on DigitalOcean', function () {
       formatCheck(report),
       /… host {3}\S+ .*updating to 99\.0\.0[\s\S]*Updating \S+ to the master’s release; check again in a few minutes\.$/,
     )
-    assert.match(panel(), /data-state="updating"/)
-    assert.match(panel(), /Updating to Mason 99\.0\.0, as the master asked/)
+    // The Nodes page shows it updating to the master's release.
+    const shown = await listed()
+    assert.equal(shown.state, 'updating')
+    assert.equal(shown.version, '99.0.0')
     // The updater restarts the host into the release; the master's dialer links it again.
     follows().version = running
     c.master.master!.registry.link(fingerprint)!.close()
@@ -771,30 +760,19 @@ describe('A host made while its account changes', function () {
 
   it('M2.17 an administrator replaces the key on the Cloud page; a host whose key changed anyway is not reconciled with it', async () => {
     const master = c.master.master!
-    const page = cloudView({
-      accounts: master.cloudAccounts.list(localOperator),
-      canChange: true,
-      now: 0,
-    })
-    assert.match(page, /No administrator entered this key/)
-    assert.match(
-      page,
-      /data-path="\/api\/v2\/cloud\/accounts\/do\/key" data-method="PUT"/,
-    )
+    // The Cloud page says no administrator entered this key.
+    const keyed = async (): Promise<boolean> =>
+      ((await c.api('GET', '/api/v2/cloud/accounts')).json as Json[]).find(
+        (account) => account.id === 'do',
+      ).adminKeyed
+    assert.equal(await keyed(), false)
     const replaced = await c.api('PUT', '/api/v2/cloud/accounts/do/key', {
       key: ` ${ADMIN}\n`,
     })
     assert.equal(replaced.status, 200, replaced.text)
     assert.equal(replaced.json.adminKeyed, true)
     assert.equal(master.cloudAccounts.get('do')!.key, ADMIN)
-    assert.match(
-      cloudView({
-        accounts: master.cloudAccounts.list(localOperator),
-        canChange: true,
-        now: 0,
-      }),
-      /entered by an administrator, so a host may be made in it/,
-    )
+    assert.equal(await keyed(), true)
     assert.equal(
       (await c.api('PUT', '/api/v2/cloud/accounts/none/key', { key: ADMIN }))
         .status,

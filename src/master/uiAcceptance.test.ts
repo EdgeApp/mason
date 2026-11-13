@@ -484,46 +484,63 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     }
   })
 
-  it('E4 an administrator edits a row in place, saves it through the modal, and cancels a removal', async () => {
+  it('E4 an administrator edits a row in its edit block, saves it through the confirm, and cancels a removal', async () => {
     const b = await browser('mason-e4-paul', c.master, '1280x860')
     const row = (key: string): string => `tr[data-person="${people[key]}"]`
+    const edit = 'form[name="person-edit"]'
     try {
       await masterSignIn(b, 'paul', PASSWORDS.paul!)
-      await b.visible('^Backups$|^Projects & apps$|^Install apps$')
+      await holds(b, "location.pathname !== '/sign-in'", 'signed in')
       await b.open('/people')
-      await b.visible('^People$')
+      await holds(
+        b,
+        `document.querySelector('${row('nora')}') != null`,
+        'Nora’s row',
+      )
       await b.visible('nora@example.test')
       await b.shot('people-after.png')
-      // The name: tap, type, keep.
-      await b.tap(`${row('nora')} [data-edit="name"]`)
+      // The row becomes its edit block: a new name, an added and a removed address, a new role.
+      await b.tap(`${row('nora')} button[aria-label="Edit Nora Tester"]`)
+      await holds(
+        b,
+        `document.querySelector('${edit}') != null`,
+        'the edit block',
+      )
+      await fill(b, `${edit} input[name="name"]`, 'Nora Renamed')
+      await b.tap(`${edit} button[aria-label="Add an email address"]`)
+      await holds(
+        b,
+        'document.querySelector(\'form[name="add-email"]\') != null',
+        'the Add an email address sheet',
+      )
+      await fill(
+        b,
+        'form[name="add-email"] input[name="email"]',
+        'nora2@example.test',
+      )
       await b.script(
-        `const input = document.querySelector('${row('nora')} [data-input="name"]'); input.value = 'Nora Renamed'; input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`,
+        'document.querySelector(\'form[name="add-email"]\').requestSubmit()',
       )
-      await b.visible('^Save$')
-      // Add an address through the modal.
-      await b.tap(`${row('nora')} [data-add-email]`)
-      await b.visible('^Add an email address$')
-      await b.type('#new-email', 'nora2@example.test')
-      await b.tap('[data-email-form] button[value="add"]')
-      await b.visible('nora2@example.test')
-      // × on her first address; a new role.
-      await b.tap(
-        `${row('nora')} li[data-email="nora@example.test"] [data-remove-email]`,
+      await holds(
+        b,
+        `document.querySelector('${edit} li[data-email="nora2@example.test"]') != null`,
+        'the added address',
       )
-      await b.script(
-        `const select = document.querySelector('${row('nora')} [data-role]'); select.value = 'developer'; select.dispatchEvent(new Event('change', { bubbles: true }))`,
-      )
-      await b.tap(`${row('nora')} [data-row-action]`)
+      await b.tap(`${edit} button[aria-label="Remove nora@example.test"]`)
+      await fill(b, `${edit} select[name="role"]`, 'developer')
+      await b.tap(`${edit} button[type="submit"]`)
       await b.visible('^Save changes to Nora Tester\\?$')
       await b.visible('Name: Nora Tester → Nora Renamed')
       await b.visible('Email added: nora2@example.test')
       await b.visible('Email removed: nora@example.test')
       await b.visible('Role: tester → developer')
       await b.shot('people-save-confirm.png')
-      await b.tap('[data-confirm-accept]')
-      // The page reloads with the saved row: the removed address is gone.
-      await b.gone('^nora@example\\.test$')
-      await b.visible('Nora Renamed')
+      await press(b, 'Save', '[role=alertdialog]')
+      await holds(
+        b,
+        `document.querySelector('${edit}') == null && document.querySelector('${row('nora')}')?.textContent.includes('Nora Renamed')`,
+        'the saved row',
+      )
       const saved = c.master.master!.people.get(localOperator, people.nora!)
       assert.equal(saved.name, 'Nora Renamed')
       assert.equal(saved.role, 'developer')
@@ -531,10 +548,14 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         { email: 'nora2@example.test', confirmed: true },
       ])
       // Remove, then Cancel: Dev stays.
-      await b.tap(`${row('dev')} [data-row-action]`)
+      await b.tap(`${row('dev')} button[aria-label="Remove Dev Developer"]`)
       await b.visible('^Remove Dev Developer\\?$')
-      await b.tap('[data-confirm-dialog] [data-close]')
-      await b.gone('^Remove Dev Developer\\?$')
+      await press(b, 'Cancel', '[role=alertdialog]')
+      await holds(
+        b,
+        "document.querySelector('[role=alertdialog]') == null",
+        'the confirm closed',
+      )
       assert.equal(
         c.master.master!.people.get(localOperator, people.dev!).disabled,
         false,
@@ -546,21 +567,38 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
 
   it('E5 a tester changes her own name and adds an email from Your account on the host, stays signed in, and the master has it', async () => {
     const h = await browser('mason-e5-tess', host, '1280x860')
+    const form = 'form[name="account"]'
     try {
       await hostSignIn(h, 'tess', PASSWORDS.tess!, '/account')
-      await h.visible('^Your account$')
-      await h.tap('section.account [data-edit="name"]')
-      await h.script(
-        `const input = document.querySelector('section.account [data-input="name"]'); input.value = 'Tess Self'; input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))`,
+      await holds(
+        h,
+        `document.querySelector('${form}') != null`,
+        'Your account',
       )
-      await h.tap('section.account [data-add-email]')
-      await h.type('#new-email', 'tess.self@example.test')
-      await h.tap('[data-email-form] button[value="add"]')
-      await h.tap('section.account [data-row-action]')
+      await fill(h, `${form} input[name="name"]`, 'Tess Self')
+      await h.tap(`${form} button[aria-label="Add an email address"]`)
+      await holds(
+        h,
+        'document.querySelector(\'form[name="add-email"]\') != null',
+        'the Add an email address sheet',
+      )
+      await fill(
+        h,
+        'form[name="add-email"] input[name="email"]',
+        'tess.self@example.test',
+      )
+      await h.script(
+        'document.querySelector(\'form[name="add-email"]\').requestSubmit()',
+      )
+      await holds(
+        h,
+        `document.querySelector('${form} li[data-email="tess.self@example.test"]') != null`,
+        'the added address',
+      )
+      await h.tap(`${form} button[type="submit"]`)
       await h.visible('Email added: tess.self@example.test')
-      await h.tap('[data-confirm-accept]')
-      // The page reloads as soon as the master accepts; the host's copy
-      // follows over the change feed, so the page is read once that is in.
+      await press(h, 'Save', '[role=alertdialog]')
+      // The master takes the change; the host's copy follows over the change feed.
       await c.until(
         () =>
           host
@@ -571,14 +609,14 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         10_000,
         'her change on the host',
       )
-      // Its own reload may still be landing: the page is opened once more.
-      await h.open('/account').catch(async () => await h.open('/account'))
-      await h.visible('unconfirmed')
-      await h.visible('Tess Self')
-      await h.shot('account-page-host.png')
-      // Still signed in: the page reloads as hers.
+      // Still signed in: the page reads as hers, the new address unconfirmed.
       await h.open('/account')
-      await h.visible('^Your account$')
+      await holds(
+        h,
+        `document.querySelector('${form} input[name="name"]')?.value === 'Tess Self' && document.querySelector('${form} li[data-email="tess.self@example.test"]')?.textContent.includes('Unconfirmed')`,
+        'her saved account',
+      )
+      await h.shot('account-page-host.png')
     } finally {
       await h.close()
     }
@@ -588,25 +626,185 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       email: 'tess.self@example.test',
       confirmed: false,
     })
-    // On the master, the account icon is a link to Your account.
+    // On the master, the account menu opens Your account.
     const m = await browser('mason-e5-paul', c.master, '1280x860')
     try {
       await masterSignIn(m, 'paul', PASSWORDS.paul!)
-      await m.visible('^Backups$|^Projects & apps$|^Install apps$')
+      await holds(m, "location.pathname !== '/sign-in'", 'signed in')
       await m.open('/projects/fixture')
       await m.visible('App IDs')
-      // A link takes focus and shows its ring; the old menu trigger was a <summary>.
-      await m.script(
-        'document.querySelector(\'a.account[href="/account"]\').focus()',
+      await m.tap('button[aria-label="Your account"]')
+      await holds(
+        m,
+        "document.querySelector('[role=menu]') != null",
+        'the account menu',
       )
       await m.shot('account-menu-after.png')
-      await m.tap('a[aria-label="Your account"]')
-      await m.visible('^Your account$')
+      await press(m, 'Your account', '[role=menu]')
+      await holds(
+        m,
+        "location.pathname === '/account' && document.querySelector('form[name=\"account\"]') != null",
+        'Your account',
+      )
       await m.shot('account-page.png')
       await m.open('/people')
       await m.visible('Tess Self')
     } finally {
       await m.close()
+    }
+  })
+
+  it('N6 an administrator adds a person with an invitation, invites again, changes the role in the edit block and removes them after the confirm', async () => {
+    const master = c.master.master!
+    const log = 'people.log'
+    writeFileSync(path.join(artifacts!, log), '')
+    const note = (line: string): void =>
+      appendFileSync(path.join(artifacts!, log), `${line}\n`)
+    const added = ():
+      | { id: number; role: string; disabled: number }
+      | undefined =>
+      master.database.db
+        .prepare(
+          "SELECT id, role, disabled FROM accounts WHERE name='Nia Newcomer'",
+        )
+        .get() as { id: number; role: string; disabled: number } | undefined
+    const b = await browser('mason-n6', c.master, '1440x900')
+    try {
+      await masterSignIn(b, 'paul', PASSWORDS.paul!)
+      await holds(b, "location.pathname !== '/sign-in'", 'signed in')
+      await b.open('/people')
+      await holds(
+        b,
+        `document.querySelector('tr[data-person="${people.paul}"]') != null`,
+        'the People table',
+      )
+      // The keyboard, on People and on Settings: from the top, Tab walks the
+      // skip link, the shell and the page in visual order, each stop with a
+      // visible ring; Reduce Motion calms the large sheets and the alerts.
+      const walks: string[] = []
+      for (const page of ['/people', '/settings']) {
+        if (page !== '/people') {
+          await b.open(page)
+          await holds(b, "document.querySelector('h1') != null", page)
+        }
+        await b.script('document.activeElement?.blur(); window.scrollTo(0, 0)')
+        const stops: string[] = []
+        for (let n = 0; n < 40; n++) {
+          await b.command('pressKey', { key: 'Tab' })
+          stops.push(
+            await value(
+              b,
+              "(() => { const e = document.activeElement; const s = getComputedStyle(e); const ring = (s.outlineStyle !== 'none' && parseFloat(s.outlineWidth) >= 2) || s.boxShadow !== 'none'; return (ring ? 'ring ' : 'NO RING ') + e.tagName.toLowerCase() + ' ' + (e.getAttribute('aria-label') || e.textContent || e.getAttribute('placeholder') || '').replace(/[\\uE000-\\uF8FF]/g, '').replace(/\\s+/g, ' ').trim().slice(0, 60) })()",
+            ),
+          )
+        }
+        assert.match(stops[0]!, /^ring a Skip to content$/)
+        assert.deepEqual(
+          stops.filter(
+            (stop) =>
+              stop.startsWith('NO RING') && !stop.startsWith('NO RING body'),
+          ),
+          [],
+          page,
+        )
+        walks.push(
+          `$ Tab ×40 on ${origin(c.master)}${page} at 1440x900\n${stops.map((stop, n) => `${n + 1}. ${stop}`).join('\n')}`,
+        )
+      }
+      const calm = await value(
+        b,
+        "[...document.styleSheets].flatMap((sheet) => [...sheet.cssRules]).filter((rule) => rule.media?.mediaText.includes('prefers-reduced-motion')).map((rule) => rule.cssText).filter((text) => text.includes('m-largesheet') && text.includes('m-alert')).length",
+      )
+      assert(Number(calm) > 0)
+      writeFileSync(
+        path.join(artifacts!, 'people-tab-order.log'),
+        `${walks.join('\n\n')}\n$ reduced-motion rules covering the large sheets and the alerts: ${calm}\n`,
+      )
+      await b.open('/people')
+      await holds(
+        b,
+        `document.querySelector('tr[data-person="${people.paul}"]') != null`,
+        'the People table again',
+      )
+      // Add, with an invitation link.
+      await press(b, 'Add a person')
+      const add = 'form[name="person-add"]'
+      await holds(
+        b,
+        `document.querySelector('${add}') != null`,
+        'the Add a person sheet',
+      )
+      await fill(b, `${add} input[name="name"]`, 'Nia Newcomer')
+      await fill(b, `${add} input[name="email-0"]`, 'nia@example.test')
+      await b.tap(`${add} input[name="invite"]`)
+      await b.shot('people-add-sheet.png')
+      await press(b, 'Add', 'dialog[open]')
+      await holds(
+        b,
+        "[...document.querySelectorAll('dialog[open] .m-copy code')].some((e) => e.textContent.includes('/auth/invite#'))",
+        'the invitation link',
+      )
+      const person = added()
+      assert(person != null)
+      assert.equal(person.role, 'tester')
+      note(
+        `$ Add a person Nia Newcomer, nia@example.test, Make an invitation link\n  → account ${person.id}, tester, link shown once`,
+      )
+      await press(b, 'Done', 'dialog[open]')
+      const row = `tr[data-person="${person.id}"]`
+      await holds(b, `document.querySelector('${row}') != null`, 'her row')
+      // Invite again from her row.
+      await b.tap(`${row} button[aria-label="Invite Nia Newcomer again"]`)
+      await holds(
+        b,
+        "document.querySelector('dialog[open]')?.textContent.includes('Make the link')",
+        'the Invite sheet',
+      )
+      await press(b, 'Make the link', 'dialog[open]')
+      await holds(
+        b,
+        "[...document.querySelectorAll('dialog[open] .m-copy code')].some((e) => e.textContent.includes('/auth/invite#'))",
+        'the new link',
+      )
+      note(
+        '$ Invite Nia Newcomer again → Make the link\n  → a new link, the earlier one replaced',
+      )
+      await press(b, 'Done', 'dialog[open]')
+      // The role, in her row's edit block.
+      await b.tap(`${row} button[aria-label="Edit Nia Newcomer"]`)
+      const edit = 'form[name="person-edit"]'
+      await holds(
+        b,
+        `document.querySelector('${edit}') != null`,
+        'the edit block',
+      )
+      await fill(b, `${edit} select[name="role"]`, 'developer')
+      await b.shot('people-edit-block.png')
+      await b.tap(`${edit} button[type="submit"]`)
+      await b.visible('Role: tester → developer')
+      await press(b, 'Save', '[role=alertdialog]')
+      await holds(
+        b,
+        `document.querySelector('${edit}') == null`,
+        'the saved row',
+      )
+      assert.equal(added()!.role, 'developer')
+      note(
+        '$ Edit Nia Newcomer: Role tester → developer → confirm "Save"\n  → role developer',
+      )
+      // Remove, after the confirm.
+      await b.tap(`${row} button[aria-label="Remove Nia Newcomer"]`)
+      await b.visible('^Remove Nia Newcomer\\?$')
+      await b.visible('Every API key they created is revoked.')
+      await b.shot('people-remove-confirm.png')
+      await press(b, 'Remove', '[role=alertdialog]')
+      await holds(b, `document.querySelector('${row}') == null`, 'her row gone')
+      assert.equal(added()!.disabled, 1)
+      note(
+        '$ Remove Nia Newcomer → confirm "Remove"\n  → row gone, account disabled',
+      )
+    } finally {
+      await b.close()
     }
   })
 
@@ -1488,6 +1686,22 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         ?.data ?? '',
     )
 
+  /** Sets a React-controlled field's value as typing would (a select's too). */
+  const fill = async (b: Browser, css: string, text: string): Promise<void> => {
+    await b.script(
+      `const e = document.querySelector(${JSON.stringify(css)}); Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e), 'value').set.call(e, ${JSON.stringify(text)}); e.dispatchEvent(new Event(e.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }))`,
+    )
+  }
+  /** Presses the button whose words are `text` (its icon's glyph aside), inside `scope` (the page by default). */
+  const press = async (
+    b: Browser,
+    text: string,
+    scope = 'document',
+  ): Promise<void> => {
+    await b.script(
+      `const button = [...${scope === 'document' ? 'document' : `document.querySelector(${JSON.stringify(scope)})`}.querySelectorAll('button, [role=menuitem]')].find((e) => e.textContent.replace(/[\\uE000-\\uF8FF]/g, '').trim() === ${JSON.stringify(text)} && !e.disabled); if (button == null) throw new Error('No button ' + ${JSON.stringify(text)}); button.click()`,
+    )
+  }
   /** Waits until the page's expression is true, or fails saying what did not happen. */
   const holds = async (
     b: Browser,
@@ -1878,16 +2092,6 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
           "SELECT s.contents FROM project_secrets s JOIN projects p ON p.id=s.project_id WHERE p.slug='fixture' AND s.name=?",
         )
         .get(name) as { contents: string } | undefined
-    /** Sets a React-controlled field's value as typing would. */
-    const fill = async (
-      b: Browser,
-      css: string,
-      text: string,
-    ): Promise<void> => {
-      await b.script(
-        `const e = document.querySelector(${JSON.stringify(css)}); Object.getOwnPropertyDescriptor(Object.getPrototypeOf(e), 'value').set.call(e, ${JSON.stringify(text)}); e.dispatchEvent(new Event('input', { bubbles: true }))`,
-      )
-    }
     const b = await browser('mason-n5', c.master, '1440x900')
     try {
       await masterSignIn(b, 'paul', PASSWORDS.paul!)

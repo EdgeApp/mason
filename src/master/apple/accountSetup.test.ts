@@ -75,6 +75,10 @@ function harness(options: { createFails?: Error } = {}): {
   return { apple, setup, keys, certificates }
 }
 
+// Replies are read field by field.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Json = any
+
 describe('Apple setup from an Apple ID', () => {
   it('U8.1 with one team, makes the key named for this master, stores it, and makes the distribution certificate', async () => {
     const { apple, setup, keys, certificates } = harness()
@@ -339,9 +343,9 @@ describe('Apple setup on a master', function () {
     await apple.close()
   })
 
-  /** Settings as a manager sees it. */
+  /** Settings → Apple as a manager reads it: the page is the web app's. */
   let settingsToken: string | undefined
-  const settingsPage = async (): Promise<string> => {
+  const settingsPage = async (): Promise<Json> => {
     const master = c.master.master!
     if (settingsToken == null) {
       const person = (
@@ -353,12 +357,18 @@ describe('Apple setup on a master', function () {
       ).id
       settingsToken = master.auth.start(person, '127.0.0.1').token
     }
-    const page = await pinnedFetch(
-      `${c.master.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:')}/settings`,
-      { headers: { cookie: `${MASTER_SESSION_COOKIE}=${settingsToken}` } },
-      c.master.web!.certificate!.pin,
-    )
-    return await page.text()
+    const get = async (route: string): ReturnType<typeof pinnedFetch> =>
+      await pinnedFetch(
+        `${c.master.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:')}${route}`,
+        { headers: { cookie: `${MASTER_SESSION_COOKIE}=${settingsToken}` } },
+        c.master.web!.certificate!.pin,
+      )
+    const page = await get('/settings')
+    assert.equal(page.status, 200)
+    assert.match(await page.text(), /<div id="root"><\/div>/)
+    const signing = await get('/api/v2/apple/signing')
+    assert.equal(signing.status, 200)
+    return await signing.json()
   }
   const setups = (): Array<{ target: string; via: string }> =>
     c.master
@@ -462,15 +472,23 @@ describe('Apple setup on a master', function () {
     assert.equal(distribution('ABCDE12345'), undefined)
     assert.deepEqual(setups(), [])
     const failed = await settingsPage()
+    // The team's failure is shown with its own button to set it up again.
     assert.match(
-      failed,
-      /class="state-failed"><span[^>]*>[^<]*<\/span> Signing for Example Team \(ABCDE12345\) is not set up: Apple allows no more/,
+      failed.failures.ABCDE12345,
+      /^Signing for Example Team \(ABCDE12345\) is not set up: Apple allows no more/,
     )
-    assert.match(failed, /sets up its team by itself/)
-    // It has its own button to set it up again.
-    assert.match(
-      failed,
-      /is not set up: Apple allows no more[^<]*<\/p><form[^>]*data-path="\/api\/v2\/apple\/setup"[^>]*><input type="hidden" name="team" value="ABCDE12345"><button>[^]*?Set up Example Team<\/button>/,
+    assert(
+      failed.setup.teams.some(
+        (team: Json) =>
+          team.id === 'ABCDE12345' && team.name === 'Example Team',
+      ),
+    )
+    // Its key may be stored, but it holds no distribution certificate.
+    assert.equal(
+      (failed.setup.configured as Json[]).find(
+        (team) => team.id === 'ABCDE12345',
+      )?.certificate,
+      undefined,
     )
     connect.refuseCertificates = undefined
 
@@ -514,26 +532,28 @@ describe('Apple setup on a master', function () {
       )
 
     // The Settings page says what is set up, and offers checking again.
-    const html = await settingsPage()
-    assert.match(html, /Signing for a team/)
-    assert.match(html, /data-path="\/api\/v2\/apple\/setup"/)
-    assert.match(html, /<option value="ABCDE12345">Example Team \(ABCDE12345\)/)
-    assert.match(
-      html,
-      /Signing is set up for Example Team \(<span class="mono">ABCDE12345<\/span>\): App Store Connect API key <span class="mono">Mason [^<]+<\/span> \(<span class="mono">FAKEKEY123<\/span>\), Apple Distribution: Fake Team \(ABCDE12345\), expires \d{4}-\d{2}-\d{2}\./,
+    const signing = await settingsPage()
+    assert.deepEqual(signing.setup.teams, [
+      { id: 'ABCDE12345', name: 'Example Team' },
+    ])
+    assert.match(signing.setup.keyName, /^Mason /)
+    const team = signing.setup.configured.find(
+      (entry: Json) => entry.id === 'ABCDE12345',
     )
-    assert.match(html, /Check signing again/)
-    assert.doesNotMatch(html, /Set up signing/)
-    assert.doesNotMatch(html, /is not set up/)
-    // Signed in, the Apple ID form waits behind "Sign in again", filled in.
-    assert.match(
-      html,
-      /<details class="reveal"><summary class="button secondary">[^<]*(<[^>]+>[^<]*)*Sign in again<\/summary><form[^>]*data-path="\/api\/v2\/apple\/session"/,
+    assert.equal(team.name, 'Example Team')
+    assert.equal(team.keyId, 'FAKEKEY123')
+    assert.equal(
+      team.certificate.name,
+      'Apple Distribution: Fake Team (ABCDE12345)',
     )
-    assert.match(html, /id="apple-id"[^>]*value="builds@example\.com"/)
+    assert.equal(typeof team.certificate.expiresAt, 'number')
+    assert.deepEqual(signing.failures, {})
+    // Signed in, the Apple ID form is filled in for signing in again.
+    assert.equal(signing.signedIn, true)
+    assert.equal(signing.appleId, 'builds@example.com')
     // A website that refuses is shown, not a broken page.
     web.refuse = 403
-    assert.match(await settingsPage(), /class="state-failed">Apple refused/)
+    assert.match((await settingsPage()).setup.error, /Apple refused/)
     web.refuse = undefined
   })
 
@@ -646,17 +666,13 @@ describe('Apple setup on a master', function () {
     await settled(from)
     assert(!web.calls.slice(from).some((call) => call.includes('/iris/')))
     assert.deepEqual(stored(), {})
-    let html = await settingsPage()
-    for (const [id, name] of [
-      ['ABCDE12345', 'Example Team'],
-      ['ZYXWV98765', 'Other Team'],
-    ])
-      assert.match(
-        html,
-        new RegExp(
-          `Signing is not set up for ${name} \\(<span class="mono">${id}</span>\\)\\.</p><form[^>]*data-path="/api/v2/apple/setup"[^>]*><input type="hidden" name="team" value="${id}"><button>[^]*?Set up ${name}</button>`,
-        ),
-      )
+    let signing = await settingsPage()
+    // Each team is offered, not set up, with its own Set up button.
+    assert.deepEqual(
+      (signing.setup.teams as Json[]).map((team) => team.id).sort(),
+      ['ABCDE12345', 'ZYXWV98765'],
+    )
+    assert.deepEqual(signing.setup.configured, [])
 
     // An app ID assigned to a team makes it one this master uses.
     master.projects.save(admin, 'edge', {
@@ -693,10 +709,12 @@ describe('Apple setup on a master', function () {
         .map((row) => row.target),
       ['ZYXWV98765', 'ABCDE12345'],
     )
-    html = await settingsPage()
-    assert.match(html, /Signing is set up for Example Team/)
-    assert.match(html, /Signing is set up for Other Team/)
-    assert.doesNotMatch(html, /is not set up/)
+    signing = await settingsPage()
+    assert.deepEqual(
+      (signing.setup.configured as Json[]).map((team) => team.name).sort(),
+      ['Example Team', 'Other Team'],
+    )
+    assert.deepEqual(signing.failures, {})
     // With several teams, checking again names one.
     const unnamed = await c.api('POST', '/api/v2/apple/setup', {})
     assert.equal(unnamed.status, 400)
@@ -743,8 +761,8 @@ describe('Apple setup on a master', function () {
     web.refuse = undefined
     // Settings shows it, though Apple answers again, until a sign-in reads the teams.
     assert.match(
-      await settingsPage(),
-      /class="state-failed"><span[^>]*>[^<]*<\/span> Mason could not read the Apple ID’s teams/,
+      (await settingsPage()).failures[''],
+      /^Mason could not read the Apple ID’s teams/,
     )
     const from = web.calls.length
     await signInTrusted()
@@ -772,9 +790,9 @@ describe('Apple setup on a master', function () {
     assert.match(session.json.notice, /has lapsed: sign in again/)
     assert.match(session.json.error, /401 from \/olympus\/v1\/session/)
     assert(master.notices().some((notice) => /has lapsed/.test(notice)))
-    const html = await settingsPage()
-    assert.match(html, /Not signed in\./)
-    assert.doesNotMatch(html, /Signing for a team/)
+    const lapsed = await settingsPage()
+    assert.equal(lapsed.signedIn, false)
+    assert.equal(lapsed.setup, undefined)
     // A sign-in whose setup Apple answers 401 ends the same way, with no team notice.
     await signInTrusted()
     await c.until(

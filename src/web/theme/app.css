@@ -10,3 +10,8 @@
 @import './pages.css';
 @import './run.css';
 @import './projects.css';
+@import './admin.css';
+@import './admin-nodes.css';
+@import './admin-settings.css';
+@import './admin-people.css';
+@import './admin-groups.css';

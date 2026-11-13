@@ -561,18 +561,19 @@ describe('Invitation links', function () {
       ).status,
       200,
     )
-    const page = await b.send('GET', '/people')
-    assert.equal(page.status, 200)
-    assert.match(page.text, />Invite again<\/button>/)
-    assert.match(page.text, /<small class="hint">Expires <time/)
-    assert(
-      page.text.includes(
-        `data-path="/api/v2/people/${made.json.id}/invitation" data-method="DELETE"`,
-      ),
+    // People is the web app's: it reads each person's pending link and its
+    // expiry, never the link itself, and offers Invite again from it.
+    assertShell(await b.send('GET', '/people'))
+    const listed = await b.send('GET', '/api/v2/people')
+    assert.equal(listed.status, 200)
+    const paula = (listed.json as Array<Record<string, unknown>>).find(
+      (person) => person.id === made.json.id,
+    )!
+    assert.equal(
+      (paula.invitation as { expiresAt: number }).expiresAt,
+      made.json.invitation.expiresAt,
     )
-    assert.match(page.text, /data-then="link"/)
-    assert.match(page.text, /name="invite" type="checkbox"/)
-    assert(!page.text.includes(tokenOf(made.json.invitation.url)))
+    assert(!listed.text.includes(tokenOf(made.json.invitation.url)))
   })
 
   /** An administrator's browser session on the master, and its CSRF proof. */
@@ -700,10 +701,8 @@ describe('Invitation links', function () {
       identifier: 'ivy.mail@example.test',
       clientHash: chosen.clientHash,
     })
-    assert.match(
-      (await ivy.send('GET', '/account')).text,
-      /data-open="password-own">Change password</,
-    )
+    assertShell(await ivy.send('GET', '/account'))
+    assert.equal((await ivy.send('GET', '/api/v2/account')).json.password, true)
     const wrong = await onHost().send('POST', '/auth/password', {
       identifier: 'ivy.mail@example.test',
       clientHash: '0'.repeat(64),
@@ -780,20 +779,26 @@ describe('Invitation links', function () {
     assert.equal(master().people.get(admin, target.json.id).password, true)
   })
 
-  it('M4.5 the People page lets an administrator set a password, and loads the password hashing it needs', async () => {
+  it('M4.5 the People page lets an administrator set a password, and the password worker alone compiles the hashing', async () => {
     const { b } = await adminSession()
     const page = await b.send('GET', '/people')
-    assert.match(
+    assertShell(page)
+    // The page itself may not compile WebAssembly; its password worker may.
+    assert.doesNotMatch(
       page.headers.get('content-security-policy')!,
       /'wasm-unsafe-eval'/,
     )
-    assert.match(
+    const worker = /<meta name="mason-password-worker" content="([^"]+)">/.exec(
       page.text,
-      /<form data-mason="person-password" data-path="\/api\/v2\/people\/\d+">/,
+    )![1]!
+    const script = await b.send('GET', worker)
+    assert.equal(script.status, 200)
+    assert.match(
+      script.headers.get('content-security-policy')!,
+      /'wasm-unsafe-eval'/,
     )
-    assert.match(page.text, /Change password/)
-    assert.match(page.text, /<form data-mason="person-add">/)
-    assert.match(page.text, /name="confirm" type="password"/)
+    const session = await b.send('GET', '/api/v2/session')
+    assert(session.json.permissions.includes('people.change'))
   })
 
   it('M4.6 setting a password, by an administrator or by the person, ends their invitation link', async () => {

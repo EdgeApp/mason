@@ -22,6 +22,15 @@ import { NotFound } from '../pages/errors/NotFound.js'
 import { InvitePage } from '../pages/auth/Invite.js'
 import { SetupPage } from '../pages/auth/Setup.js'
 import { SignInPage } from '../pages/auth/SignIn.js'
+import { AccountPage } from '../pages/account/Account.js'
+import { BackupsPage } from '../pages/admin/backups/Backups.js'
+import { BackupsFirst } from '../pages/admin/backups/BackupsFirst.js'
+import { CloudPage } from '../pages/admin/cloud/Cloud.js'
+import { GroupPage } from '../pages/admin/groups/Group.js'
+import { GroupsPage } from '../pages/admin/groups/Groups.js'
+import { NodesPage } from '../pages/admin/nodes/Nodes.js'
+import { PeoplePage } from '../pages/admin/people/People.js'
+import { SettingsPage } from '../pages/admin/settings/Settings.js'
 import { ArtifactsPage } from '../pages/artifacts/Artifacts.js'
 import { DashboardPage } from '../pages/dashboard/Dashboard.js'
 import { PlaceholderPage } from '../pages/Placeholder.js'
@@ -211,31 +220,51 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
     'An app ID’s build-number sequence.',
     (p) => [PROJECTS, project(p), app(p), { label: 'Build numbers' }],
   ),
-  destination(
-    'nodes',
-    'The workers and the host, their checks and pools.',
-    'M9',
-  ),
-  destination('cloud', 'Cloud accounts and their checks.', 'M9'),
-  destination(
-    'settings',
-    'Apple, signing, keys, GitHub, the host, storage, sign-in and node types.',
-    'M9',
-  ),
-  destination('people', 'Who signs in, their roles and emails.', 'M9'),
-  destination('groups', 'Which testers install which apps.', 'M9'),
+  {
+    ...destination(
+      'nodes',
+      'The workers and the host, their checks and pools.',
+      'M9',
+    ),
+    page: NodesPage,
+  },
+  {
+    ...destination('cloud', 'Cloud accounts and their checks.', 'M9'),
+    page: CloudPage,
+  },
+  {
+    ...destination(
+      'settings',
+      'Apple, signing, keys, GitHub, the host, storage, sign-in and node types.',
+      'M9',
+    ),
+    page: SettingsPage,
+  },
+  {
+    ...destination('people', 'Who signs in, their roles and emails.', 'M9'),
+    page: PeoplePage,
+  },
+  {
+    ...destination('groups', 'Which testers install which apps.', 'M9'),
+    page: GroupsPage,
+  },
   {
     ...destination('groups', 'A group’s apps and members.', 'M9'),
+    page: GroupPage,
     path: '/groups/:id',
     title: () => 'Group',
     crumbs: () => [{ label: 'Groups', to: '/groups' }, { label: 'Group' }],
   },
-  destination(
-    'backups',
-    'Encrypted copies of this master, kept in a git repository.',
-    'M9',
-  ),
   {
+    ...destination(
+      'backups',
+      'Encrypted copies of this master, kept in a git repository.',
+      'M9',
+    ),
+    page: BackupsPage,
+  },
+  {
+    page: AccountPage,
     path: '/account',
     title: () => 'Your account',
     description: 'Your name, emails, Appearance and password.',
@@ -354,7 +383,11 @@ function Home(): JSX.Element {
     profile.role === 'master' &&
     session.permissions.includes('projects.read')
   )
-    return <DashboardPage />
+    return (
+      <BackupsFirst>
+        <DashboardPage />
+      </BackupsFirst>
+    )
   if (server != null && server.here !== '/')
     return <ServerPage placeholder={() => <></>} />
   return <Navigate to={homeFor(nav)} replace />

@@ -255,8 +255,73 @@ describe('Run page, live', () => {
     })
   })
 
+  it('resumes a followed stage after the last byte it received, so a long line cut by a drop joins once', async () => {
+    const app = open('/runs/r1', {
+      [RUN_PATH]: running(),
+      '/api/v2/runs/r1/logs': logOf(40),
+    })
+    await heading('Build 26110902')
+    await act(async () => app.live.socket.accept())
+    const steps = {
+      event: 'steps',
+      data: { stage: 'build/ios', steps: [] },
+    } as const
+    await frame(app, steps)
+    await until(() => lines().includes('line 40'), 'the followed stage’s end')
+    await frame(app, {
+      event: 'log',
+      data: { stage: 'build/ios', offset: 900, first: 41, text: 'line 41\n' },
+    })
+    await frame(app, {
+      event: 'log',
+      data: {
+        stage: 'build/ios',
+        offset: 950,
+        first: 42,
+        text: 'a very lo',
+        partial: true,
+      },
+    })
+    // A drop mid-line: the resume names the followed stage and the byte
+    // the page reached, still following.
+    await act(async () => app.live.socket.drop(1006))
+    await act(async () => {
+      app.live.tick()
+    })
+    await act(async () => app.live.socket.accept())
+    assert.deepEqual(runMessages(app).at(-1), {
+      subscribe: 'run',
+      run: 'r1',
+      stage: 'build/ios',
+      follow: true,
+      after: 950,
+      key: 'run:r1',
+    })
+    // The node sends the same stage's steps and the rest of the line.
+    await frame(app, steps)
+    await frame(app, {
+      event: 'log',
+      data: { stage: 'build/ios', offset: 960, first: 42, text: 'ng line\n' },
+    })
+    await frame(app, {
+      event: 'log',
+      data: { stage: 'build/ios', offset: 968, first: 43, text: 'line 43\n' },
+    })
+    await until(() => lines().includes('line 43'), 'the tail')
+    assert.deepEqual(lines().slice(-4), [
+      'line 40',
+      'line 41',
+      'a very long line',
+      'line 43',
+    ])
+  })
+
   it('counts a running stage’s time up each second', async () => {
-    open('/runs/r1?stage=build%2Fios', { [RUN_PATH]: running() })
+    // Started a minute ago now, not when the fixtures loaded: past an hour
+    // the time reads in minutes and would not move each second.
+    const run = running()
+    run.stages[1] = { ...run.stages[1]!, started: Date.now() - 60_000 }
+    open('/runs/r1?stage=build%2Fios', { [RUN_PATH]: run })
     await heading('Build 26110902')
     const facts = (): string => text(document.querySelector('.m-kv')!)
     assert.match(facts(), /Running/)
@@ -290,10 +355,34 @@ describe('Run page, live', () => {
       event: 'log',
       data: { stage: 'a', offset: 3, first: 1, text: 'x\n' },
     })
+    live.apply({
+      event: 'log',
+      data: { stage: 'a', offset: 5, first: 2, text: 'y', partial: true },
+    })
+    // A resume follows on from the shown stage's last byte.
+    assert.deepEqual(live.message(), {
+      subscribe: 'run',
+      run: 'r1',
+      stage: 'a',
+      follow: true,
+      after: 5,
+    })
+    live.apply({
+      event: 'log',
+      data: { stage: 'a', offset: 7, first: 2, text: 'z\n' },
+    })
     live.apply({ event: 'steps', data: { stage: 'b', steps: [] } })
+    // A new stage followed has none of its log yet: no offset.
+    assert.deepEqual(live.message(), { subscribe: 'run', run: 'r1' })
     live.apply({ event: 'error', data: { error: 'nope' } })
     live.apply({ event: 'gone' })
-    assert.deepEqual(calls, ['follow a', 'log a 1 x\n', 'follow b', 'stale'])
+    assert.deepEqual(calls, [
+      'follow a',
+      'log a 1 x\n',
+      'log a 2 yz\n',
+      'follow b',
+      'stale',
+    ])
     assert.equal(state!.following, 'b')
     assert.equal(state!.ended, true)
   })

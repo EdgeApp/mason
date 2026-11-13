@@ -2174,6 +2174,31 @@ sheet preset to that sequence that posts `POST /api/v2/build-numbers/seed`
 (on the Overview the sheet starts with a sequence to choose). An app ID that is not
 the project's, or that is disabled, answers 404 under the project.
 
+### Administration pages
+
+Administration is the web app's on the master: each address answers the
+app's shell to a role that holds its permission, signed in with the
+master's session, and the app reads and changes it through the routes
+above. A role without the permission reads the 403 inside the app; signed
+out, each address sends to sign in.
+
+| Method and path | What it shows | Permission |
+| --- | --- | --- |
+| `GET /nodes` | Nodes: paired nodes, the host, cloud hosts and nodes, pools, storage. | `nodes.read` |
+| `GET /cloud` | Cloud accounts and their checks. | `settings.read` |
+| `GET /settings` | Settings: API keys, GitHub, Apple, sign-in methods, the host, node types, the budget. | `settings.read` |
+| `GET /people` | People. | `people.read` |
+| `GET /groups` | Groups. | `groups.read` |
+| `GET /groups/:id` | A group's apps and members; an unknown or malformed id answers the shell with 404. | `groups.read` |
+| `GET /backups` | Backups: the repository, the deploy key, the last run and the backup key. | `settings.read` |
+| `GET /account` | Your account, on both nodes. | anyone signed in |
+
+The host answers only `/account` among them, from its cache; signed out it
+sends to `/auth/login` and back. An administrator who has not confirmed the
+backup key is sent to Backups by the web app, once per browser session
+(`keyConfirmed` in `GET /api/v2/settings/backup`); *Skip for now* goes on
+to Projects & apps for the rest of that session.
+
 ### The host's GitHub webhook
 
 `POST /api/webhooks/github/<project>` is served by the host, not the

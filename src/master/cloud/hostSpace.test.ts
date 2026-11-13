@@ -5,7 +5,6 @@ import { after, before, describe, it } from 'mocha'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeCloud } from '../../test/fakeCloud.js'
 import { FakeSpaces } from '../../test/fakeSpaces.js'
-import { nodesView } from '../../view/admin.js'
 import { localOperator } from '../roles.js'
 import type { CloudHostRow } from './hosts.js'
 
@@ -200,71 +199,24 @@ describe('Host storage on DigitalOcean Spaces', function () {
     const before = cloud.spacesCalls.length
     assert.equal((await reconcile('e2e')).state, 'ready')
     assert.equal(cloud.spacesCalls.length, before, 'no Spaces calls')
-    // The page offers the Space's storage and its removal choice.
-    const html = nodesView({
-      nodes: [],
-      types: {},
-      pools: [],
-      host: 'https://127.0.0.1',
-      cloudHosts: [
-        {
-          name: 'e2e',
-          state: 'ready',
-          account: 'do',
-          region: 'sfo3',
-          size: 's-1vcpu-1gb',
-          address: '127.0.0.1',
-          origin: 'https://127.0.0.1',
-          error: null,
-          space: { bucket: 'mason-e2e', region: 'sfo3' },
-        },
-        {
-          name: 'other',
-          state: 'ready',
-          account: 'do',
-          region: 'nyc3',
-          size: 's-1vcpu-1gb',
-          address: null,
-          origin: null,
-          error: null,
-        },
-      ],
-      storage: {
-        driver: 's3',
-        bucket: 'mason-e2e',
-        endpoint: spaces.endpoint,
-        locations: c.master.master!.storageLocations.list(),
-      },
-      budget: { monthly: 200 },
-      canChange: true,
-      canChangeHosts: true,
-    })
-    assert.match(
-      html,
-      /Builds Space <span class="mono">mason-e2e<\/span> \(sfo3\)/,
+    // The page offers the Space's storage and its removal choice: the host
+    // names its Space, and the Space is the storage row new builds go to,
+    // made for that host, with the disk a row to switch to.
+    assert.equal(listed.space_region, 'sfo3')
+    const stored = (await c.api('GET', '/api/v2/storage')).json
+    assert.equal(stored.driver, 's3')
+    assert.equal(stored.s3.bucket, 'mason-e2e')
+    const location = (stored.locations as Json[]).find(
+      (entry) => entry.bucket === 'mason-e2e',
     )
-    assert.match(html, /Also delete the Space and every build in it/)
-    // The Space is a storage row new builds go to; the disk is a row to switch to.
-    assert.match(
-      html,
-      /<tr data-location="space-mason-e2e-[^"]+"><td><span class="mono">mason-e2e<\/span> · sfo3 · made for host e2e<\/td><td>[^<]*<span class="icon"[^>]*>[^<]*<\/span> New builds go here<\/td>/,
+    assert.deepEqual(
+      [location.kind, location.region, location.host, location.active],
+      ['space', 'sfo3', 'e2e', true],
     )
-    assert.match(
-      html,
-      /<tr data-location="disk"><td>Host’s disk<\/td><td><form data-mason="api" data-path="\/api\/v2\/storage\/disk"[\s\S]*?Use for new builds/,
-    )
-    assert.match(html, /value="mason-other"/)
-    assert.match(
-      nodesView({
-        nodes: [],
-        types: {},
-        pools: [],
-        host: 'https://h',
-        budget: { monthly: 1 },
-        canChange: true,
-        canChangeHosts: true,
-      }),
-      /<tr data-location="disk"><td>Host’s disk<\/td><td><span class="icon"[^>]*>[^<]*<\/span> New builds go here<\/td>/,
+    assert.equal(
+      (stored.locations as Json[]).find((entry) => entry.kind === 'disk')
+        .active,
+      false,
     )
   })
 
@@ -632,49 +584,26 @@ describe('Host storage on DigitalOcean Spaces', function () {
     await c.api('POST', '/api/v2/storage/disk', {})
   })
 
-  it('U4.4 the Storage card makes a new Space from a DigitalOcean account, uses an existing one, or the disk', () => {
-    const html = nodesView({
-      nodes: [],
-      types: {},
-      pools: [],
-      host: 'https://h',
-      storage: { driver: 's3', bucket: 'b', endpoint: 'https://sfo3.example' },
-      poolAccounts: [
-        { id: 'do', name: 'DigitalOcean', provider: 'digitalocean' },
-        { id: 'mac', name: 'NoMac', provider: 'nomac' },
-      ],
-      budget: { monthly: 1 },
-      canChange: true,
-      canChangeHosts: true,
-    })
-    const card = html.slice(html.indexOf('id="storage"'))
-    assert.match(
-      card,
-      /<details class="action" id="storage-new"><summary class="button">.*Make a new Space<\/summary>/,
+  it('U4.4 the Storage card makes a new Space only from a DigitalOcean account, in a region with Spaces', async () => {
+    // The card's account menu lists the DigitalOcean accounts.
+    assert.deepEqual(
+      ((await c.api('GET', '/api/v2/cloud/accounts')).json as Json[]).map(
+        (account) => [account.id, account.provider],
+      ),
+      [['do', 'digitalocean']],
+    )
+    const refused = async (body: Json): Promise<string> => {
+      const reply = await c.api('POST', '/api/v2/storage/space/new', body)
+      assert.equal(reply.status, 400, reply.text)
+      return reply.json.error
+    }
+    assert.equal(
+      await refused({ account: 'nope', bucket: 'mason-u44', region: 'sfo3' }),
+      'nope is not a DigitalOcean account',
     )
     assert.match(
-      card,
-      /billed by use from \$5 a month for 250 GB, so there is no machine size to choose/,
-    )
-    assert.match(
-      card,
-      /data-path="\/api\/v2\/storage\/space\/new" data-fields="account,bucket,region,use"/,
-    )
-    assert.match(
-      card,
-      /<select id="new-space-account" name="account"><option value="do">DigitalOcean<\/option><\/select>/,
-    )
-    assert.match(
-      card,
-      /<details class="action" id="storage-existing"><summary class="button">.*Add an existing Space<\/summary>/,
-    )
-    assert.match(
-      card,
-      /<input id="new-space-use" name="use" type="checkbox" data-kind="checkbox" checked> Use it for new builds/,
-    )
-    assert.match(
-      card,
-      /<th>Location<\/th><th>New builds<\/th><th>Files<\/th><th>Size<\/th>/,
+      await refused({ account: 'do', bucket: 'mason-u44', region: 'abc1' }),
+      /^abc1 has no Spaces; choose one of sfo3, /,
     )
   })
 

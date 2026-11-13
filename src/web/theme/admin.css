@@ -1,0 +1,14 @@
+/* The administration pages' shared pieces (screen-09 … screen-15), on tokens
+   only: copy-field labels, boxed disclosures and large-sheet sections. Each
+   page's own arrangements follow in its file. */
+.m-copy__label {
+  flex: none;
+  min-width: 4rem;
+}
+.m-disclosure--boxed {
+  border: 1px solid var(--m-border);
+  border-radius: var(--m-radius-lg);
+}
+.m-disclosure--boxed > .m-disclosure__body {
+  padding-left: var(--m-space-5);
+}

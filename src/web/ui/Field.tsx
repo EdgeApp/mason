@@ -348,6 +348,241 @@ export function FileInput({
   )
 }
 
+export interface SelectInputProps extends Frame {
+  value: string
+  onChange: (value: string) => void
+  /** The choices: a value and its words, or a plain value shown as itself. */
+  options: ReadonlyArray<string | { value: string; label: string }>
+  id?: string
+  name?: string
+  mono?: boolean
+  required?: boolean
+  disabled?: boolean
+}
+
+/** One option of 4–15 (DESIGN-LANGUAGE.md §10), with its label, help and error. */
+export function SelectInput({
+  label,
+  optional,
+  help,
+  error,
+  value,
+  onChange,
+  options,
+  id,
+  name,
+  mono = false,
+  required = false,
+  disabled = false,
+}: SelectInputProps): JSX.Element {
+  return (
+    <FieldFrame
+      label={label}
+      optional={optional ?? false}
+      help={help}
+      error={error}
+      id={id}
+    >
+      {(described) => (
+        <select
+          id={described.id}
+          name={name}
+          className={cx('m-select', mono && 'm-input--mono')}
+          value={value}
+          required={required}
+          disabled={disabled}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          aria-invalid={described.invalid || undefined}
+          aria-describedby={described.describedBy}
+        >
+          {options.map((option) => {
+            const entry =
+              typeof option === 'string'
+                ? { value: option, label: option }
+                : option
+            return (
+              <option key={entry.value} value={entry.value}>
+                {entry.label}
+              </option>
+            )
+          })}
+        </select>
+      )}
+    </FieldFrame>
+  )
+}
+
+export interface TextAreaInputProps extends Frame {
+  value: string
+  onChange: (value: string) => void
+  id?: string
+  name?: string
+  mono?: boolean
+  rows?: number
+  placeholder?: string
+  required?: boolean
+  maxLength?: number
+}
+
+/** Several lines: a private key, a list of packages. */
+export function TextAreaInput({
+  label,
+  optional,
+  help,
+  error,
+  value,
+  onChange,
+  id,
+  name,
+  mono = false,
+  rows,
+  placeholder,
+  required = false,
+  maxLength,
+}: TextAreaInputProps): JSX.Element {
+  return (
+    <FieldFrame
+      label={label}
+      optional={optional ?? false}
+      help={help}
+      error={error}
+      id={id}
+    >
+      {(described) => (
+        <textarea
+          id={described.id}
+          name={name}
+          className={cx('m-textarea', mono && 'm-textarea--mono')}
+          value={value}
+          rows={rows}
+          placeholder={placeholder}
+          required={required}
+          maxLength={maxLength}
+          spellCheck={mono ? false : undefined}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          aria-invalid={described.invalid || undefined}
+          aria-describedby={described.describedBy}
+        />
+      )}
+    </FieldFrame>
+  )
+}
+
+export interface CheckboxInputProps {
+  label: ReactNode
+  checked: boolean
+  onChange: (checked: boolean) => void
+  /** Below the box: what checking it does. */
+  help?: ReactNode
+  name?: string
+  disabled?: boolean
+}
+
+/** An option submitted with a form (a setting that applies at once is a toggle). */
+export function CheckboxInput({
+  label,
+  checked,
+  onChange,
+  help,
+  name,
+  disabled = false,
+}: CheckboxInputProps): JSX.Element {
+  const helpId = useId()
+  return (
+    <div className="m-field">
+      <label className="m-check">
+        <input
+          type="checkbox"
+          name={name}
+          checked={checked}
+          disabled={disabled}
+          onChange={(event) => onChange(event.currentTarget.checked)}
+          aria-describedby={help == null ? undefined : helpId}
+        />
+        <span>{label}</span>
+      </label>
+      {help != null && (
+        <p className="m-field__help" id={helpId}>
+          {help}
+        </p>
+      )}
+    </div>
+  )
+}
+
+export interface StepperInputProps extends Frame {
+  value: number
+  onChange: (value: number) => void
+  min: number
+  max: number
+  /** What one step is of, for the buttons' names: "slots" → "Fewer slots". */
+  unit: string
+  id?: string
+  name?: string
+}
+
+/** A small integer range (slots, machines): − and + around the number. */
+export function StepperInput({
+  label,
+  optional,
+  help,
+  error,
+  value,
+  onChange,
+  min,
+  max,
+  unit,
+  id,
+  name,
+}: StepperInputProps): JSX.Element {
+  const [text, setText] = useState<string | undefined>(undefined)
+  const clamp = (n: number): number => Math.min(max, Math.max(min, n))
+  return (
+    <FieldFrame
+      label={label}
+      optional={optional ?? false}
+      help={help}
+      error={error}
+      id={id}
+    >
+      {(described) => (
+        <div className="m-stepper" role="group" aria-label={String(unit)}>
+          <button
+            type="button"
+            aria-label={`Fewer ${unit}`}
+            disabled={value <= min}
+            onClick={() => onChange(clamp(value - 1))}
+          >
+            −
+          </button>
+          <input
+            id={described.id}
+            name={name}
+            inputMode="numeric"
+            value={text ?? String(value)}
+            aria-invalid={described.invalid || undefined}
+            aria-describedby={described.describedBy}
+            onChange={(event) => {
+              const typed = event.currentTarget.value
+              setText(typed)
+              if (/^\d+$/.test(typed)) onChange(clamp(Number(typed)))
+            }}
+            onBlur={() => setText(undefined)}
+          />
+          <button
+            type="button"
+            aria-label={`More ${unit}`}
+            disabled={value >= max}
+            onClick={() => onChange(clamp(value + 1))}
+          >
+            +
+          </button>
+        </div>
+      )}
+    </FieldFrame>
+  )
+}
+
 /** A form's own failure, under its fields: what the node said, announced; focus moves to it. */
 export const FormError = forwardRef<
   HTMLParagraphElement,
