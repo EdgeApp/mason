@@ -340,7 +340,30 @@ export function releaseCreateArgs(
   ]
 }
 
-/** `scripts/release.ts --version <x.y.z> --out <dir> [--platform <p>]… [--publish <tag> [--prerelease]]`. */
+/**
+ * The version a release is cut as: the checkout's package.json version, or a
+ * prerelease of it (`1.0.0-dev.2`), so the repository always carries the
+ * version it ships. A published release's tag is `v<version>`, and a
+ * prerelease version is always published as a prerelease.
+ */
+export function releaseVersion(
+  repoVersion: string,
+  options: { version?: string; tag?: string; prerelease?: boolean } = {},
+): { version: string; prerelease: boolean } {
+  const version = options.version ?? repoVersion
+  if (version !== repoVersion && !version.startsWith(`${repoVersion}-`))
+    throw new Error(
+      `package.json says ${repoVersion}: release ${repoVersion} or a prerelease of it such as ${repoVersion}-dev.1, not ${version}`,
+    )
+  if (options.tag != null && options.tag !== `v${version}`)
+    throw new Error(`Tag ${version} as v${version}, not ${options.tag}`)
+  return {
+    version,
+    prerelease: version.includes('-') || options.prerelease === true,
+  }
+}
+
+/** `scripts/release.ts --out <dir> [--version <package.json version[-pre]>] [--platform <p>]… [--publish v<version> [--prerelease]]`. */
 export async function releaseMain(
   argv: string[],
   repo: string,
@@ -355,14 +378,23 @@ export async function releaseMain(
     const i = argv.indexOf(flag)
     return i < 0 ? undefined : argv[i + 1]
   }
-  const version = value('--version')
   const out = value('--out')
-  if (version == null || out == null) {
+  if (out == null) {
     console.error(
-      'Usage: scripts/release.ts --version <x.y.z> --out <dir> [--platform <p>]… [--publish <tag> [--repo <owner/name>] [--prerelease]]',
+      'Usage: scripts/release.ts --out <dir> [--version <package.json version[-pre]>] [--platform <p>]… [--publish v<version> [--repo <owner/name>] [--prerelease]]',
     )
     return 2
   }
+  const pkg = JSON.parse(
+    readFileSync(path.join(repo, 'package.json'), 'utf8'),
+  ) as Parameters<typeof releasesRepository>[0] & { version: string }
+  const tag = value('--publish')
+  const asked = value('--version')
+  const { version, prerelease } = releaseVersion(pkg.version, {
+    ...(asked == null ? {} : { version: asked }),
+    ...(tag == null ? {} : { tag }),
+    prerelease: argv.includes('--prerelease'),
+  })
   const chosen = argv.flatMap((arg, i) =>
     arg === '--platform' ? [argv[i + 1] as ReleasePlatform] : [],
   )
@@ -377,26 +409,18 @@ export async function releaseMain(
     log: (text) => process.stdout.write(text),
     ...overrides.build,
   })
-  const tag = value('--publish')
   const gh =
     overrides.gh ??
     (async (args: string[]): Promise<void> => {
       await run('gh', args, { env: process.env })
     })
   // The GitHub repository: --repo, or the checkout's package.json.
-  const publishTo =
-    value('--repo') ??
-    releasesRepository(
-      JSON.parse(
-        readFileSync(path.join(repo, 'package.json'), 'utf8'),
-      ) as Parameters<typeof releasesRepository>[0],
-    )
+  const publishTo = value('--repo') ?? releasesRepository(pkg)
   if (tag != null && publishTo == null)
     throw new Error(
       'Name the GitHub repository to publish to with --repo owner/name, or in package.json',
     )
   if (tag != null && publishTo != null) {
-    const prerelease = argv.includes('--prerelease')
     await gh(releaseCreateArgs(tag, publishTo, version, files, prerelease))
     console.log(`Published ${tag}${prerelease ? ' as a prerelease' : ''}`)
   }

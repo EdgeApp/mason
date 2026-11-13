@@ -284,14 +284,14 @@ import type { NodeInfo } from '@mason/api'
 
 export const host: NodeInfo = {
   role: 'host',
-  version: '0.1.0',
+  version: '1.0.0',
   masterOrigin: 'https://mason.example.test',
   hostOrigin: 'https://builds.example.test',
   setupNeeded: false,
   signIn: { password: true, providers: [{ id: 'google', name: 'Google' }] },
   state: 'ok',
   testEndpoints: false,
-  release: { repository: 'EdgeApp/mason', version: '0.1.0' },
+  release: { repository: 'EdgeApp/mason', version: '1.0.0' },
 }
 ```
 
