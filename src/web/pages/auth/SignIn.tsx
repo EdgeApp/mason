@@ -2,8 +2,8 @@
 // button per provider the node offers, then the username-or-email and
 // password form. The password is hashed with Argon2id in the worker; only
 // the hash goes to the node (the host relays it to the master), and a
-// signed-in browser leaves with a full load so the next page's own CSP
-// applies.
+// signed-in browser leaves with a full load, so the next page starts in a
+// fresh document.
 import { useEffect, useRef, useState, type FormEvent, type JSX } from 'react'
 import { useLocation } from 'react-router'
 import type { NodeInfo } from '../../../shared/api/index.js'

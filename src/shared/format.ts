@@ -145,3 +145,23 @@ export function clock(ms: number): string {
     ? `${hours}:${two(minutes)}:${two(seconds % 60)}`
     : `${minutes}:${two(seconds % 60)}`
 }
+
+/** A run as pages and lists name it: `Run 12`, with its workflow when that is not `build`. */
+export function runName(workflow: string, number: number): string {
+  return `Run ${number}${workflow === 'build' ? '' : ` · ${workflow}`}`
+}
+
+/** Escapes text for XML and HTML content and attribute values (the install manifest, the registration profile). */
+export function escape(value: string | number): string {
+  return String(value).replace(
+    /[&<>"']/g,
+    (character) =>
+      ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;',
+      })[character]!,
+  )
+}

@@ -42,7 +42,7 @@ export interface ApiClientOptions {
   signIn: string | (() => string)
   /** The page's fetch; a test supplies its own. */
   fetch?: typeof fetch
-  /** How the browser leaves for sign-in: a full load, so its own CSP applies. */
+  /** How the browser leaves for sign-in: a full load (`PASSWORD_PATHS`). */
   navigate?: (url: string) => void
 }
 
@@ -181,8 +181,8 @@ export class ApiClient {
 
   /**
    * Leaves the app with a full document load (sign-in after signing out),
-   * so the page it goes to runs under its own CSP; with a phone's keyboard
-   * up, once it is down.
+   * so the page it goes to starts in a fresh document (`PASSWORD_PATHS`);
+   * with a phone's keyboard up, once it is down.
    */
   leave(url: string): void {
     afterKeyboard(() => this.navigate(url))

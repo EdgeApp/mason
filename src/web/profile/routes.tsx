@@ -43,15 +43,23 @@ import { useProfile } from './NodeProfile.js'
 
 type Params = Readonly<Partial<Record<string, string>>>
 
-/** One page of the signed-in app. */
-export interface PageRoute {
+/**
+ * What opens a page, and who holds that (for the 403's words); a page
+ * without one opens for every signed-in viewer.
+ */
+type Access =
+  | { permission: Permission; least: Role }
+  | { permission?: undefined; least?: undefined }
+
+/**
+ * One page of the signed-in app. Its access matches the server's table
+ * (src/node/webRoutes.ts `PAGE_ROUTES`), which pageAccess.test.ts checks.
+ */
+export type PageRoute = Access & {
   path: string
   title: (params: Params) => string
   description: string
   icon: IconName
-  /** What opens it, and who holds that (for the 403's words). */
-  permission: Permission
-  least: Role
   masterOnly: boolean
   /** The trail after the node's pill; the last is the page. */
   crumbs: (params: Params) => Crumb[]
@@ -238,8 +246,6 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
     title: () => 'Your account',
     description: 'Your name, emails, Appearance and password.',
     icon: 'person',
-    permission: 'builds.read',
-    least: 'tester',
     masterOnly: false,
     crumbs: () => [{ label: 'Your account' }],
   },
@@ -287,7 +293,10 @@ function RoutePage({ route }: { route: PageRoute }): JSX.Element {
     !session.permissions.includes(route.hiddenWithout)
   )
     return <NotFound />
-  if (!session.permissions.includes(route.permission))
+  if (
+    route.permission != null &&
+    !session.permissions.includes(route.permission)
+  )
     return <Forbidden title={title} least={route.least} crumbs={crumbs} />
   const Ported = route.page
   return <Ported />

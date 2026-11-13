@@ -22,35 +22,37 @@ the builds routes and the pages' reads itself (see [Builds](#14-builds) and
 - Times are milliseconds since the Unix epoch.
 - An error answers `{ "error": "<message>" }` with one of these statuses:
 
-  | Status | Meaning |
-  | --- | --- |
-  | 400 | The request is invalid: a field fails its check, or the action is refused for a reason the message gives. |
-  | 401 | No credential, or one that is unknown, revoked or expired (on the host, a key revoked while the master was away once the host has synced). |
-  | 403 | The caller's role, a key's scopes or the CSRF check refuses it. |
-  | 404 | No such route, project, run, node or other thing the path names. |
-  | 409 | The change conflicts with what exists (a name taken, a project still running). |
-  | 413 | The body is over the route's limit. |
-  | 429 | Sign-in or setup is locked for a while; the answer has `retryAt`. |
-  | 502 | A peer did not answer: a node during pairing, a backup push, a Space. |
-  | 503 | The host is not connected, or a host past its offline grace window. |
-  | 500 | The host failed to answer a builds route for a reason of its own. |
+  | Status | Meaning                                                                                                                                    |
+  | ------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+  | 400    | The request is invalid: a field fails its check, or the action is refused for a reason the message gives.                                  |
+  | 401    | No credential, or one that is unknown, revoked or expired (on the host, a key revoked while the master was away once the host has synced). |
+  | 403    | The caller's role, a key's scopes or the CSRF check refuses it.                                                                            |
+  | 404    | No such route, project, run, node or other thing the path names.                                                                           |
+  | 409    | The change conflicts with what exists (a name taken, a project still running).                                                             |
+  | 413    | The body is over the route's limit.                                                                                                        |
+  | 429    | Sign-in or setup is locked for a while; the answer has `retryAt`.                                                                          |
+  | 502    | A peer did not answer: a node during pairing, a backup push, a Space.                                                                      |
+  | 503    | The host is not connected, or a host past its offline grace window.                                                                        |
+  | 500    | The host failed to answer a builds route for a reason of its own.                                                                          |
 
   Some areas map further errors; their sections say so.
+
 - Bodies are limited per area. The first limit that applies to a path is the
   one that holds:
 
-  | Paths | Limit |
-  | --- | --- |
-  | `/api/v2/projects/:slug/secrets…` | 8 MB |
-  | `/api/v2/apple/certificates`, `…/profiles`, `…/setup` | 2 MB |
+  | Paths                                                                                                                                                                              | Limit |
+  | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----- |
+  | `/api/v2/projects/:slug/secrets…`                                                                                                                                                  | 8 MB  |
+  | `/api/v2/apple/certificates`, `…/profiles`, `…/setup`                                                                                                                              | 2 MB  |
   | the wizard's routes: `POST /api/v2/projects/check` (that path alone, so a project slugged `check` takes the next limit), `…/:slug/discover`, `…/:slug/wizard/…`, `…/:slug/webhook` | 64 KB |
-  | other `/api/v2/projects…` | 1 MB |
-  | `/api/v2/build-numbers/…` | 1 MB |
-  | `/api/v2/runs…`, `/api/v2/queue…` | 16 KB |
-  | `/api/v2/session…`, `/api/v2/people…`, `/api/v2/groups…`, `/api/v2/settings/backup…`, `/api/v2/backups`, `/api/v2/storage…`, `/api/v2/cloud…` | 64 KB |
-  | every other `/api/v2/…` route | 1 MB |
+  | other `/api/v2/projects…`                                                                                                                                                          | 1 MB  |
+  | `/api/v2/build-numbers/…`                                                                                                                                                          | 1 MB  |
+  | `/api/v2/runs…`, `/api/v2/queue…`                                                                                                                                                  | 16 KB |
+  | `/api/v2/session…`, `/api/v2/people…`, `/api/v2/groups…`, `/api/v2/settings/backup…`, `/api/v2/backups`, `/api/v2/storage…`, `/api/v2/cloud…`                                      | 64 KB |
+  | every other `/api/v2/…` route                                                                                                                                                      | 1 MB  |
 
   A host forwards at most 512 KB.
+
 - The master serves HTTPS. When its certificate is its own rather than one a
   public CA signed, the master logs a pin at start (`pin: sha256//…`) and
   `mason status` prints it. `mason api` uses it; with curl, pass
@@ -110,8 +112,9 @@ means no limit. A scoped key:
   project or run outside them;
 - is refused (403 `This key is scoped to projects and cannot do that`) on
   anything that is not about one project: settings, nodes, people, groups,
-  storage, backups, cloud and Apple routes, and listing or revoking keys. It
-  may still create keys within its own scopes.
+  storage, backups, cloud and Apple routes, listing or revoking keys, and the
+  shell's status, notifications, search and dashboard. It may still create
+  keys within its own scopes.
 
 ### Browser sessions
 
@@ -196,51 +199,52 @@ the host's cache, while the master is away.
   master accepts it only while that account is enabled and its permission
   version is unchanged. It is audited as `host:<account id>`.
 
-  | Kind | Requests | CSRF proof |
-  | --- | --- | --- |
-  | Run reads (`isRunRead`) | `GET /api/v2/runs/:id/logs` | none |
+  | Kind                        | Requests                                                                                                                     | CSRF proof                                                                       |
+  | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+  | Run reads (`isRunRead`)     | `GET /api/v2/runs/:id/logs`                                                                                                  | none                                                                             |
   | Run actions (`isRunAction`) | `POST /api/jobs`, `POST /api/jobs/:id/cancel`, `POST /api/v2/runs`, `POST /api/v2/runs/:id/cancel`, `…/restart`, `…/approve` | the host session's token in `X-Mason-CSRF` or `csrf`, from the host's own origin |
 
   Any other request from a host session answers 403.
+
 - The host's `/live` is not a forwarded request: the host relays it over its
   link (see [Live updates](#live-updates)).
 - The master's own session cookie is never accepted on a forwarded request,
   and sign-in and setup refuse forwarded requests (403 `Sign in on the
-  master itself`).
+master itself`).
 
 ### Roles and permissions
 
 Every account and key has one of four roles. Each role includes the ones
 below it:
 
-| Role | In short |
-| --- | --- |
-| `admin` | Everything, including people, sign-in methods and the backup key. |
-| `manager` | Configures Mason: projects, secrets, settings, nodes, keys, Apple, backups, groups. |
-| `developer` | Reads projects and runs, requests, cancels, restarts and approves runs, makes keys up to its own role. |
-| `tester` | Sees its groups' published builds on the host, and reads them through the builds routes (section 14). Through the rest of this API it can read its own person record, change its own password and sign out. |
+| Role        | In short                                                                                                                                                                                                    |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `admin`     | Everything, including people, sign-in methods and the backup key.                                                                                                                                           |
+| `manager`   | Configures Mason: projects, secrets, settings, nodes, keys, Apple, backups, groups.                                                                                                                         |
+| `developer` | Reads projects and runs, requests, cancels, restarts and approves runs, makes keys up to its own role.                                                                                                      |
+| `tester`    | Sees its groups' published builds on the host, and reads them through the builds routes (section 14). Through the rest of this API it can read its own person record, change its own password and sign out. |
 
 Routes check a permission with `allow(actor, '<permission>')`, which also
 applies a key's scopes, or `allowRole`, which checks only the role. The
 lowest role each permission needs (`src/master/permissions.ts`):
 
-| Permission | Role | | Permission | Role |
-| --- | --- | --- | --- | --- |
-| `builds.read` | tester | | `settings.read` | manager |
-| `devices.register` | tester | | `settings.change` | manager |
-| `apps.read` | developer | | `nodes.read` | manager |
-| `projects.read` | developer | | `nodes.change` | manager |
-| `runs.read` | developer | | `keys.read` | manager |
-| `runs.request` | developer | | `keys.revoke` | manager |
-| `runs.approve` | developer | | `apple.change` | manager |
-| `keys.create` | developer | | `backups.run` | manager |
-| `projects.change` | manager | | `groups.read` | manager |
-| `secrets.read` | manager | | `groups.change` | manager |
-| `secrets.change` | manager | | `people.read` | manager |
-| `buildNumbers.seed` | manager | | `people.change` | admin |
-| | | | `signIn.change` | admin |
-| | | | `hosts.change` | admin |
-| | | | `backups.key` | admin |
+| Permission          | Role      |     | Permission        | Role    |
+| ------------------- | --------- | --- | ----------------- | ------- |
+| `builds.read`       | tester    |     | `settings.read`   | manager |
+| `devices.register`  | tester    |     | `settings.change` | manager |
+| `apps.read`         | developer |     | `nodes.read`      | manager |
+| `projects.read`     | developer |     | `nodes.change`    | manager |
+| `runs.read`         | developer |     | `keys.read`       | manager |
+| `runs.request`      | developer |     | `keys.revoke`     | manager |
+| `runs.approve`      | developer |     | `apple.change`    | manager |
+| `keys.create`       | developer |     | `backups.run`     | manager |
+| `projects.change`   | manager   |     | `groups.read`     | manager |
+| `secrets.read`      | manager   |     | `groups.change`   | manager |
+| `secrets.change`    | manager   |     | `people.read`     | manager |
+| `buildNumbers.seed` | manager   |     | `people.change`   | admin   |
+|                     |           |     | `signIn.change`   | admin   |
+|                     |           |     | `hosts.change`    | admin   |
+|                     |           |     | `backups.key`     | admin   |
 
 `builds.read` is checked by the builds routes (section 14), on the master
 and on the host, and by the catalog; `devices.register` is checked by the
@@ -260,17 +264,17 @@ for its own sign-ins.
 tells the web app which node it runs on and what to show before anyone signs
 in:
 
-| Field | Meaning |
-| --- | --- |
-| `role` | `master` or `host`. |
-| `version` | The Mason version the node runs. |
-| `masterOrigin` | The master's public origin (the `master` setting), when one is set. The host learns it from the master. |
-| `hostOrigin` | The host's public origin (the `host` setting), when one is set. |
-| `setupNeeded` | `true` on a master with no account yet: first-run setup. Always `false` on a host. |
-| `signIn` | `password`: whether username and password sign-in is offered (`false` on a host that has never reached its master). `providers`: the enabled [sign-in methods](#sign-in-methods) offered here, as `{ id, name }` (on the master only once the `master` setting names its origin). |
-| `state` | `ok`; on a host, `waitingForMaster` before its first sync, and `maintenance` once it has not reached its master for longer than its offline grace window. |
-| `testEndpoints` | Whether the node runs with `--test-endpoints`. |
-| `release` | `{ repository, version }`: the GitHub repository and version of the release the node runs, when it comes from one. |
+| Field           | Meaning                                                                                                                                                                                                                                                                           |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `role`          | `master` or `host`.                                                                                                                                                                                                                                                               |
+| `version`       | The Mason version the node runs.                                                                                                                                                                                                                                                  |
+| `masterOrigin`  | The master's public origin (the `master` setting), when one is set. The host learns it from the master.                                                                                                                                                                           |
+| `hostOrigin`    | The host's public origin (the `host` setting), when one is set.                                                                                                                                                                                                                   |
+| `setupNeeded`   | `true` on a master with no account yet: first-run setup. Always `false` on a host.                                                                                                                                                                                                |
+| `signIn`        | `password`: whether username and password sign-in is offered (`false` on a host that has never reached its master). `providers`: the enabled [sign-in methods](#sign-in-methods) offered here, as `{ id, name }` (on the master only once the `master` setting names its origin). |
+| `state`         | `ok`; on a host, `waitingForMaster` before its first sync, and `maintenance` once it has not reached its master for longer than its offline grace window.                                                                                                                         |
+| `testEndpoints` | Whether the node runs with `--test-endpoints`.                                                                                                                                                                                                                                    |
+| `release`       | `{ repository, version }`: the GitHub repository and version of the release the node runs, when it comes from one.                                                                                                                                                                |
 
 The host answers it in every state, also while it waits for its master and
 in maintenance, when its other pages answer 503.
@@ -293,12 +297,12 @@ export const host: NodeInfo = {
 
 ### Session
 
-| Method and path | What it does | Who |
-| --- | --- | --- |
-| `POST /api/v2/session/parameters` | The Argon2id parameters to hash the password of a username or email with. | anyone |
-| `POST /api/v2/session` | Signs in and sets the session cookie. | anyone |
-| `GET /api/v2/session` | The signed-in session, from the cookie. | a session |
-| `DELETE /api/v2/session` | Signs out and clears the cookie. | a session, with CSRF |
+| Method and path                   | What it does                                                              | Who                  |
+| --------------------------------- | ------------------------------------------------------------------------- | -------------------- |
+| `POST /api/v2/session/parameters` | The Argon2id parameters to hash the password of a username or email with. | anyone               |
+| `POST /api/v2/session`            | Signs in and sets the session cookie.                                     | anyone               |
+| `GET /api/v2/session`             | The signed-in session, from the cookie.                                   | a session            |
+| `DELETE /api/v2/session`          | Signs out and clears the cookie.                                          | a session, with CSRF |
 
 **`POST /api/v2/session/parameters`** takes `{ "identifier": "ada" }`: a
 username (1–64 letters, digits, dots, dashes or underscores) or one of the
@@ -331,12 +335,12 @@ the account whichever identifier named it.
 signed in`. It reads the session cookie only: an API key is not a session
 and gets 401 too.
 
-| Field | Meaning |
-| --- | --- |
-| `accountId`, `name`, `role` | Who is signed in. |
-| `csrf` | The proof every other request from this session sends in `X-Mason-CSRF`. |
-| `permissions` | The [permissions](#roles-and-permissions) the person's role holds, in the table's order; the web app shows or hides actions by them. |
-| `emails` | The person's email addresses in order, each `{ email, confirmed }`. |
+| Field                       | Meaning                                                                                                                              |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `accountId`, `name`, `role` | Who is signed in.                                                                                                                    |
+| `csrf`                      | The proof every other request from this session sends in `X-Mason-CSRF`.                                                             |
+| `permissions`               | The [permissions](#roles-and-permissions) the person's role holds, in the table's order; the web app shows or hides actions by them. |
+| `emails`                    | The person's email addresses in order, each `{ email, confirmed }`.                                                                  |
 
 ```ts
 import type { SessionInfo } from '@mason/api'
@@ -366,9 +370,9 @@ them:
   answers whose account it is, and the host starts its own session for that
   account. `POST /api/v2/session` answers `{ "name", "role", "csrf" }`. Both
   must come from the host's own origin (`Origin`), else 403 `Untrusted
-  origin`. A wrong username, email or password is 401, a locked account or
+origin`. A wrong username, email or password is 401, a locked account or
   address 429 with `retryAt`, and without the master 503 `Password sign-in
-  needs the master; try again shortly`.
+needs the master; try again shortly`.
 - `GET /api/v2/session` answers the same fields as on the master, from the
   host's cache, so it keeps answering while the master is away.
 - `DELETE /api/v2/session` ends the host session and clears its cookie. It
@@ -377,20 +381,20 @@ them:
 
 Bodies are limited to 4 KB, and the routes to 120 requests a minute per
 address. Before the host's first sync and in maintenance they answer 503
-with the reason. The sign-in page's `/auth/password…` routes and its
-sign-out form (`POST /auth/logout`) keep working beside them.
+with the reason. The sign-in page's `/auth/password…` routes keep working
+beside them.
 
 ### People
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/people` | Every person who is not removed. | `people.read` |
-| `POST /api/v2/people` | Adds a person. 201. | `people.change` |
-| `GET /api/v2/people/:id` | One person. | `people.read`, or the person themselves |
-| `PUT /api/v2/people/:id` | Changes a person. | `people.change`; a person may change their own `name`, `emails` and `password` |
-| `DELETE /api/v2/people/:id` | Removes a person. | `people.change` |
-| `POST /api/v2/people/:id/invitation` | Makes the person's invitation link and answers it, once. 201. | `people.change` |
-| `DELETE /api/v2/people/:id/invitation` | Revokes the person's invitation link. | `people.change` |
+| Method and path                        | What it does                                                  | Permission                                                                     |
+| -------------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `GET /api/v2/people`                   | Every person who is not removed.                              | `people.read`                                                                  |
+| `POST /api/v2/people`                  | Adds a person. 201.                                           | `people.change`                                                                |
+| `GET /api/v2/people/:id`               | One person.                                                   | `people.read`, or the person themselves                                        |
+| `PUT /api/v2/people/:id`               | Changes a person.                                             | `people.change`; a person may change their own `name`, `emails` and `password` |
+| `DELETE /api/v2/people/:id`            | Removes a person.                                             | `people.change`                                                                |
+| `POST /api/v2/people/:id/invitation`   | Makes the person's invitation link and answers it, once. 201. | `people.change`                                                                |
+| `DELETE /api/v2/people/:id/invitation` | Revokes the person's invitation link.                         | `people.change`                                                                |
 
 A person:
 
@@ -421,15 +425,15 @@ unused, unexpired invitation link.
 
 The body of `POST` and `PUT` takes these fields, all optional for `PUT`:
 
-| Field | Type |
-| --- | --- |
-| `name` | text, up to 120 characters |
-| `username` | 1–64 letters, digits, dots, dashes or underscores; unique, ignoring case (a person may change only its case) |
-| `role` | `admin`, `manager`, `developer` or `tester` (default `tester`) |
-| `disabled` | boolean |
-| `emails` | a list of up to 10 email addresses, each up to 320 characters, lower-cased and without repeats; it replaces the person's list. No address may be another person's |
-| `confirmEmails` | addresses the person already has, to confirm |
-| `password` | `{ "clientHash": "<64 hex>", "clientParameters": { … } }`, with parameters of at least 32 MiB, 6 iterations and 4 lanes |
+| Field           | Type                                                                                                                                                              |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`          | text, up to 120 characters                                                                                                                                        |
+| `username`      | 1–64 letters, digits, dots, dashes or underscores; unique, ignoring case (a person may change only its case)                                                      |
+| `role`          | `admin`, `manager`, `developer` or `tester` (default `tester`)                                                                                                    |
+| `disabled`      | boolean                                                                                                                                                           |
+| `emails`        | a list of up to 10 email addresses, each up to 320 characters, lower-cased and without repeats; it replaces the person's list. No address may be another person's |
+| `confirmEmails` | addresses the person already has, to confirm                                                                                                                      |
+| `password`      | `{ "clientHash": "<64 hex>", "clientParameters": { … } }`, with parameters of at least 32 MiB, 6 iterations and 4 lanes                                           |
 
 An address already on the person keeps whether it is confirmed; one an
 administrator adds is confirmed. The old `email` and `addresses` fields are
@@ -491,17 +495,17 @@ must come from that origin's own page (`Origin`) and are limited with the
 other `/auth` pages:
 
 - `POST /auth/invite/lookup` `{ "token" }` answers `{ "name", "username"?,
-  "usernameRequired" }` (`false` when the person has a username or a
+"usernameRequired" }` (`false` when the person has a username or a
   confirmed email to sign in with)
   for a live link, or 404 `This invitation link is not valid or has
-  expired` (400 on the host).
+expired` (400 on the host).
 - `POST /auth/invite` `{ "token", "username", "clientHash",
-  "clientParameters" }` sets the password from a client hash made as for
+"clientParameters" }` sets the password from a client hash made as for
   `password` above (a raw `password` is refused) and the username, which a
   person who has one keeps (409 when it is taken) and a person with a
   confirmed email may leave empty. The link is used up, the
   permission version bumped, and the browser signed in (`{ "signedIn": true
-  }` with the session cookie). It is audited as `person.invite.accept` by
+}` with the session cookie). It is audited as `person.invite.accept` by
   the person. On the host, the master does this over the host's link and
   the host signs the person in once its cache has the change.
 
@@ -510,13 +514,13 @@ other `/auth` pages:
 A group is a named set of app IDs and the people in it; testers see the
 published builds of their groups' apps.
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/groups` | Every group, by name. | `groups.read` |
-| `GET /api/v2/groups/:id` | One group. | `groups.read` |
-| `POST /api/v2/groups` | Adds a group. 201. | `groups.change` |
-| `PUT /api/v2/groups/:id` | Renames a group or replaces its apps or members. | `groups.change` |
-| `DELETE /api/v2/groups/:id` | Removes a group. | `groups.change` |
+| Method and path             | What it does                                     | Permission      |
+| --------------------------- | ------------------------------------------------ | --------------- |
+| `GET /api/v2/groups`        | Every group, by name.                            | `groups.read`   |
+| `GET /api/v2/groups/:id`    | One group.                                       | `groups.read`   |
+| `POST /api/v2/groups`       | Adds a group. 201.                               | `groups.change` |
+| `PUT /api/v2/groups/:id`    | Renames a group or replaces its apps or members. | `groups.change` |
+| `DELETE /api/v2/groups/:id` | Removes a group.                                 | `groups.change` |
 
 The body takes `name` (up to 120 characters, unique; required for `POST`),
 `apps` (app row IDs, as `apps[].id` in a project shows them) and `members`
@@ -537,21 +541,21 @@ an unknown group; 409 for a name in use; 400 for an unknown app or person.
 
 ## 3. API keys
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/keys` | The newest 1000 keys, without tokens. | `keys.read` |
-| `POST /api/v2/keys` | Creates a key and answers its token once. 201. | `keys.create` |
-| `DELETE /api/v2/keys/:id` | Revokes a key. | `keys.revoke` |
+| Method and path           | What it does                                   | Permission    |
+| ------------------------- | ---------------------------------------------- | ------------- |
+| `GET /api/v2/keys`        | The newest 1000 keys, without tokens.          | `keys.read`   |
+| `POST /api/v2/keys`       | Creates a key and answers its token once. 201. | `keys.create` |
+| `DELETE /api/v2/keys/:id` | Revokes a key.                                 | `keys.revoke` |
 
 `POST /api/v2/keys` takes:
 
-| Field | Type |
-| --- | --- |
-| `role` | required: `admin`, `manager`, `developer` or `tester`, no higher than the caller's |
-| `name` | text, up to 120 characters (default `<role> key <id prefix>`) |
-| `projects` | project slugs, each up to 160 characters |
-| `branches` | branch patterns, each up to 200 characters |
-| `expiresAt` | a time in the future |
+| Field       | Type                                                                               |
+| ----------- | ---------------------------------------------------------------------------------- |
+| `role`      | required: `admin`, `manager`, `developer` or `tester`, no higher than the caller's |
+| `name`      | text, up to 120 characters (default `<role> key <id prefix>`)                      |
+| `projects`  | project slugs, each up to 160 characters                                           |
+| `branches`  | branch patterns, each up to 200 characters                                         |
+| `expiresAt` | a time in the future                                                               |
 
 ```json
 {
@@ -675,13 +679,13 @@ Requests a run of any workflow on a branch or commit.
   make it.
 - Body:
 
-  | Field | Type |
-  | --- | --- |
-  | `project` | a project slug, or an app ID the project owns (`app` is accepted as well) |
-  | `branch` | a branch name, up to 200 characters (default: the project's default branch); a branch rule must allow it |
-  | `workflow` | a workflow name (default `build`) |
-  | `params` | an object of the workflow's parameters |
-  | `commit` | a 40-hex commit to pin instead of the branch head |
+  | Field      | Type                                                                                                     |
+  | ---------- | -------------------------------------------------------------------------------------------------------- |
+  | `project`  | a project slug, or an app ID the project owns (`app` is accepted as well)                                |
+  | `branch`   | a branch name, up to 200 characters (default: the project's default branch); a branch rule must allow it |
+  | `workflow` | a workflow name (default `build`)                                                                        |
+  | `params`   | an object of the workflow's parameters                                                                   |
+  | `commit`   | a 40-hex commit to pin instead of the branch head                                                        |
 
   ```json
   {
@@ -766,36 +770,38 @@ master, which checks every subscription.
   one viewer, 503 on a host while the master is unreachable.
 - Messages are JSON, one per frame. A page sends:
 
-  | Message | Meaning |
-  | --- | --- |
+  | Message                                                                                                                           | Meaning                                                                                                                                                                                                                                                                                                                                                      |
+  | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
   | `{ "subscribe": "run", "run": id, "stage"?: name, "after"?: offset, "tail"?: true, "log"?: false, "follow"?: true, "key"?: key }` | the run's `run`, `stages` and `steps` events, and the stage's log from byte `after`, or from its last megabyte with `tail`, or not at all with `log: false`. Without `stage` it follows the running stage, sending the last megabyte of its log from a line's start and switching when the next stage starts; `follow` keeps following after naming a stage. |
-  | `{ "subscribe": "status", "run": id }` | the run's `run` events only |
-  | `{ "subscribe": "status" }` | the shell's `status` events: what [`GET /api/v2/status`](#status-notifications-and-search) answers, whenever it changes. The master checks it on every change of a run and every two seconds; a host answers it itself, with its link to the master, and never sends it on. Every role may subscribe. |
-  | `{ "subscribe": "queue" }` | `queue` events: the queue panel's running and queued stages, of the runs a key's scopes cover |
-  | `{ "unsubscribe": key }` | stop one subscription |
+  | `{ "subscribe": "status", "run": id }`                                                                                            | the run's `run` events only                                                                                                                                                                                                                                                                                                                                  |
+  | `{ "subscribe": "status" }`                                                                                                       | the shell's `status` events: what [`GET /api/v2/status`](#status-notifications-and-search) answers, whenever it changes. The master checks it on every change of a run and every two seconds; a host answers it itself, with its link to the master, and never sends it on. Every role may subscribe.                                                        |
+  | `{ "subscribe": "queue" }`                                                                                                        | `queue` events: the queue panel's running and queued stages, of the runs a key's scopes cover                                                                                                                                                                                                                                                                |
+  | `{ "unsubscribe": key }`                                                                                                          | stop one subscription                                                                                                                                                                                                                                                                                                                                        |
 
   `key` names the subscription in the frames that answer it; it defaults to
   `run:<id>`, `status:<id>`, `status` or `queue`. Each subscription is checked as the
   matching HTTP read (`runs.read` on the run's project and branch). A page
   holds 200 subscriptions at most and may send 50 messages at once and 20 a
   second after that.
+
 - The node sends `{ "key", "event", "data" }`:
 
-  | Event | Data |
-  | --- | --- |
-  | `run` | `{ "id", "number", "workflow", "branch", "status", "created", "started"?, "finished"?, "description"?, "reason"? }` |
-  | `stages` | `[{ "name", "kind", "status", "attempt", "node"?, "started"?, "finished"?, "reason"?, "disconnected"? }]`, without `@setup` |
-  | `steps` | `{ "stage", "steps": [{ "id", "kind", "title", "status", "ms", "parent" }] }` |
-  | `log` | `{ "stage", "offset", "first", "text", "partial"? }`: `offset` is the byte the text ends at and `first` the number of its first line. A line longer than 256 KB comes in pieces marked `partial`, the last unmarked. A running stage's unfinished last line waits for its end. |
-  | `queue` | `[{ "job", "project", "workflow", "number", "branch", "stage", "status", "elapsed"?, "progress"? }]` |
-  | `status` | the shell's status (`StatusInfo`), as `GET /api/v2/status` answers it |
-  | `end` | the run has finished and its log has been sent |
-  | `gone` | the run does not exist |
-  | `error` | `{ "error" }`, for a bad message or a refused subscription |
+  | Event    | Data                                                                                                                                                                                                                                                                           |
+  | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+  | `run`    | `{ "id", "number", "workflow", "branch", "status", "created", "started"?, "finished"?, "description"?, "reason"? }`                                                                                                                                                            |
+  | `stages` | `[{ "name", "kind", "status", "attempt", "node"?, "started"?, "finished"?, "reason"?, "disconnected"? }]`, without `@setup`                                                                                                                                                    |
+  | `steps`  | `{ "stage", "steps": [{ "id", "kind", "title", "status", "ms", "parent" }] }`                                                                                                                                                                                                  |
+  | `log`    | `{ "stage", "offset", "first", "text", "partial"? }`: `offset` is the byte the text ends at and `first` the number of its first line. A line longer than 256 KB comes in pieces marked `partial`, the last unmarked. A running stage's unfinished last line waits for its end. |
+  | `queue`  | `[{ "job", "project", "workflow", "number", "branch", "stage", "status", "elapsed"?, "progress"? }]`                                                                                                                                                                           |
+  | `status` | the shell's status (`StatusInfo`), as `GET /api/v2/status` answers it                                                                                                                                                                                                          |
+  | `end`    | the run has finished and its log has been sent                                                                                                                                                                                                                                 |
+  | `gone`   | the run does not exist                                                                                                                                                                                                                                                         |
+  | `error`  | `{ "error" }`, for a bad message or a refused subscription                                                                                                                                                                                                                     |
 
   An event is sent only when its data changed. To resume after a dropped
   socket, subscribe again with `after` set to the last `offset` received:
   every later line comes once, with none lost.
+
 - The node pings every 25 seconds and closes a client that misses two. Close
   codes: 1008 when the session or key may no longer watch (final); 1012 when
   the node restarts or a host loses its link to the master (reconnect and
@@ -862,35 +868,35 @@ settings. Errors: 404 for an unknown project, 409 for a conflict.
 
 ### Project routes
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/projects` | Every project, in position order, filtered to a key's scopes. | `projects.read` |
-| `GET /api/v2/projects/:slug` | One project. | `projects.read` |
-| `PUT /api/v2/projects/:slug` | Creates a project (201) or changes the fields given (200). | `projects.change` |
-| `DELETE /api/v2/projects/:slug` | Deletes a project and its runs. | `projects.change` |
-| `POST /api/v2/projects/:slug/apps` | Gives the project an app ID. 201. | `projects.change` |
-| `DELETE /api/v2/projects/:slug/apps/:bundleId` | Releases an app ID from the project. | `projects.change` |
-| `PUT /api/v2/projects/:slug/rules` | Replaces the branch rules. | `projects.change` |
+| Method and path                                | What it does                                                  | Permission        |
+| ---------------------------------------------- | ------------------------------------------------------------- | ----------------- |
+| `GET /api/v2/projects`                         | Every project, in position order, filtered to a key's scopes. | `projects.read`   |
+| `GET /api/v2/projects/:slug`                   | One project.                                                  | `projects.read`   |
+| `PUT /api/v2/projects/:slug`                   | Creates a project (201) or changes the fields given (200).    | `projects.change` |
+| `DELETE /api/v2/projects/:slug`                | Deletes a project and its runs.                               | `projects.change` |
+| `POST /api/v2/projects/:slug/apps`             | Gives the project an app ID. 201.                             | `projects.change` |
+| `DELETE /api/v2/projects/:slug/apps/:bundleId` | Releases an app ID from the project.                          | `projects.change` |
+| `PUT /api/v2/projects/:slug/rules`             | Replaces the branch rules.                                    | `projects.change` |
 
 **`PUT /api/v2/projects/:slug`.** The slug is letters, digits, dots, dashes
 and underscores, up to 160 characters. Every field is optional, but a new
 project needs `repository`:
 
-| Field | Type |
-| --- | --- |
-| `name` | text, up to 120 characters (default: the slug) |
-| `repository` | a GitHub repository, `https://github.com/<owner>/<repo>` or `git@github.com:<owner>/<repo>`, stored lower case with `.git` |
-| `format` | `pipeline` (default) or `script` |
-| `entrypoint` | a relative path to the Masonfile; `null` clears it (then `Masonfile.ts`) |
-| `timeoutSeconds` | 1–86400 (default 14400) |
-| `enabled` | boolean (default `true`) |
-| `position` | integer (default 0) |
-| `defaultBranch` | a branch name (default `master`) |
-| `webhookSecret` | 16–256 characters, `{ "keep": true }` to keep the stored one, or `null` to clear it |
-| `script` | for script projects: `{ "workspace", "platforms", "on" }` |
-| `repositories` | up to 20 more GitHub repositories its stages may fetch |
-| `tagPushes` | boolean: whether `ctx.git.tag` may push tags |
-| `signingLabel` | a node label signing stages require, or `null` |
+| Field            | Type                                                                                                                       |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `name`           | text, up to 120 characters (default: the slug)                                                                             |
+| `repository`     | a GitHub repository, `https://github.com/<owner>/<repo>` or `git@github.com:<owner>/<repo>`, stored lower case with `.git` |
+| `format`         | `pipeline` (default) or `script`                                                                                           |
+| `entrypoint`     | a relative path to the Masonfile; `null` clears it (then `Masonfile.ts`)                                                   |
+| `timeoutSeconds` | 1–86400 (default 14400)                                                                                                    |
+| `enabled`        | boolean (default `true`)                                                                                                   |
+| `position`       | integer (default 0)                                                                                                        |
+| `defaultBranch`  | a branch name (default `master`)                                                                                           |
+| `webhookSecret`  | 16–256 characters, `{ "keep": true }` to keep the stored one, or `null` to clear it                                        |
+| `script`         | for script projects: `{ "workspace", "platforms", "on" }`                                                                  |
+| `repositories`   | up to 20 more GitHub repositories its stages may fetch                                                                     |
+| `tagPushes`      | boolean: whether `ctx.git.tag` may push tags                                                                               |
+| `signingLabel`   | a node label signing stages require, or `null`                                                                             |
 
 ```json
 {
@@ -907,12 +913,12 @@ has queued or running runs.
 an enabled channel for each platform, and disables the app's other
 platforms. It answers the app.
 
-| Field | Type |
-| --- | --- |
-| `bundleId` | required, up to 160 characters |
-| `name` | required, up to 120 characters |
-| `platforms` | required: one or more of `ios`, `android`, `macos`, `windows`, `tvos`, each once |
-| `apple` | `{ "team": "<10 capitals and digits>", "bundleIds": [...] }`: the Apple team and every bundle ID it signs, the app ID or its extensions (default: the app ID alone) |
+| Field       | Type                                                                                                                                                                |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bundleId`  | required, up to 160 characters                                                                                                                                      |
+| `name`      | required, up to 120 characters                                                                                                                                      |
+| `platforms` | required: one or more of `ios`, `android`, `macos`, `windows`, `tvos`, each once                                                                                    |
+| `apple`     | `{ "team": "<10 capitals and digits>", "bundleIds": [...] }`: the Apple team and every bundle ID it signs, the app ID or its extensions (default: the app ID alone) |
 
 409 when the app ID belongs to another project.
 
@@ -933,15 +939,15 @@ The dashboard's add-project wizard uses these routes. Each checks its
 permission and that a key's scopes cover the project it names; `check` names
 no project yet, so a key scoped to projects cannot use it.
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `POST /api/v2/projects/check` | Checks the master can read a repository. | `projects.change` |
-| `POST /api/v2/projects/:slug/discover` | Starts a discovery run on the default branch. 202. | `projects.change` |
-| `GET /api/v2/projects/:slug/discover` | The latest discovery run and what it found. | `projects.change` |
-| `POST /api/v2/projects/:slug/wizard/apps` | Adds app IDs the Masonfile declares. | `projects.change` |
-| `POST /api/v2/projects/:slug/wizard/rules` | Sets the branch rules from lines of text. | `projects.change` |
-| `POST /api/v2/projects/:slug/webhook` | Creates the GitHub push webhook. | `projects.change` |
-| `GET /api/v2/projects/:slug/masonfile` | The project's Masonfile at a commit. | `projects.read` |
+| Method and path                            | What it does                                       | Permission        |
+| ------------------------------------------ | -------------------------------------------------- | ----------------- |
+| `POST /api/v2/projects/check`              | Checks the master can read a repository.           | `projects.change` |
+| `POST /api/v2/projects/:slug/discover`     | Starts a discovery run on the default branch. 202. | `projects.change` |
+| `GET /api/v2/projects/:slug/discover`      | The latest discovery run and what it found.        | `projects.change` |
+| `POST /api/v2/projects/:slug/wizard/apps`  | Adds app IDs the Masonfile declares.               | `projects.change` |
+| `POST /api/v2/projects/:slug/wizard/rules` | Sets the branch rules from lines of text.          | `projects.change` |
+| `POST /api/v2/projects/:slug/webhook`      | Creates the GitHub push webhook.                   | `projects.change` |
+| `GET /api/v2/projects/:slug/masonfile`     | The project's Masonfile at a commit.               | `projects.read`   |
 
 - **`check`** takes `{ "repository": "https://github.com/example/phones" }`
   and answers `{ "repository", "slug", "defaultBranch" }`, the slug derived
@@ -953,7 +959,7 @@ no project yet, so a key scoped to projects cannot use it.
   `{ "run", "status", "reason" }` and, once the Masonfile is read, `apps` (each
   `{ "bundleId", "platforms", "bundleIds" }`) and `triggers` by workflow.
 - **`wizard/apps`** takes `{ "apps": "app.example.one,app.example.two",
-  "team": "ABCDE12345" }`: a comma-separated list of app IDs the discovery
+"team": "ABCDE12345" }`: a comma-separated list of app IDs the discovery
   found, and an optional Apple team for those built for iOS, macOS or tvOS. It
   answers the project. 400 for an app ID the Masonfile does not declare.
 - **`wizard/rules`** takes `{ "rules": "master automatic\n*" }`: one rule
@@ -980,17 +986,17 @@ changing secrets needs backups configured.
 Every route checks its permission against the project, and records a refusal
 in the project's secret audit when the project exists.
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/projects/:slug/secrets` | The variants, without contents. | `projects.read` |
-| `GET /api/v2/projects/:slug/secrets/backups` | `{ "backupsConfigured" }`: secrets are kept only once backups are configured. | `projects.read` |
-| `GET /api/v2/projects/:slug/secrets/audit` | The latest audit entries. | `secrets.read` |
-| `GET /api/v2/projects/:slug/secrets/:id` | One variant's contents. | `secrets.read` |
-| `POST /api/v2/projects/:slug/secrets` | Adds a variant. 201. | `secrets.change` |
-| `PUT /api/v2/projects/:slug/secrets/:id` | A new value, or new text for a text file. | `secrets.change` |
-| `PUT /api/v2/projects/:slug/secrets/:id/file` | New bytes for a file. | `secrets.change` |
-| `PUT /api/v2/projects/:slug/secrets/:id/configs` | New build configs. | `secrets.change` |
-| `DELETE /api/v2/projects/:slug/secrets/:id` | Deletes a variant. | `secrets.change` |
+| Method and path                                  | What it does                                                                  | Permission       |
+| ------------------------------------------------ | ----------------------------------------------------------------------------- | ---------------- |
+| `GET /api/v2/projects/:slug/secrets`             | The variants, without contents.                                               | `projects.read`  |
+| `GET /api/v2/projects/:slug/secrets/backups`     | `{ "backupsConfigured" }`: secrets are kept only once backups are configured. | `projects.read`  |
+| `GET /api/v2/projects/:slug/secrets/audit`       | The latest audit entries.                                                     | `secrets.read`   |
+| `GET /api/v2/projects/:slug/secrets/:id`         | One variant's contents.                                                       | `secrets.read`   |
+| `POST /api/v2/projects/:slug/secrets`            | Adds a variant. 201.                                                          | `secrets.change` |
+| `PUT /api/v2/projects/:slug/secrets/:id`         | A new value, or new text for a text file.                                     | `secrets.change` |
+| `PUT /api/v2/projects/:slug/secrets/:id/file`    | New bytes for a file.                                                         | `secrets.change` |
+| `PUT /api/v2/projects/:slug/secrets/:id/configs` | New build configs.                                                            | `secrets.change` |
+| `DELETE /api/v2/projects/:slug/secrets/:id`      | Deletes a variant.                                                            | `secrets.change` |
 
 The body limit is 8 MB, enough for the largest file (5 MiB) in base64.
 Through the host the limit is 512 KB, a file of about 380 KiB.
@@ -1022,15 +1028,15 @@ projects may also show `pathEnv` and `destination`.
 
 ### POST /api/v2/projects/:slug/secrets
 
-| Field | Type |
-| --- | --- |
-| `kind` | required: `value` or `file` |
-| `name` | required. A value's name is an environment variable name (`[A-Z_][A-Z0-9_]*`, up to 100 characters, not `MASON_…`, `NODE_OPTIONS`, `NODE_PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, nor a name the build environment sets, such as `PATH`, `HOME`, `CI` or `GIT_…`). A file's name is a file name in pipeline projects and a relative path in script projects. |
-| `configs` | build configs, as a list or a comma-separated string: letters, digits, dashes and underscores, at most 20; empty for all configs |
-| `value` | for a value: text up to 64 KiB, no NUL |
-| `contents` | for a file: base64, without line breaks, up to 5 MiB decoded |
-| `masked` | script projects, values only: boolean (default `true`) |
-| `pathEnv` | script projects, files only: the variable that holds the file's path |
+| Field      | Type                                                                                                                                                                                                                                                                                                                                                              |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `kind`     | required: `value` or `file`                                                                                                                                                                                                                                                                                                                                       |
+| `name`     | required. A value's name is an environment variable name (`[A-Z_][A-Z0-9_]*`, up to 100 characters, not `MASON_…`, `NODE_OPTIONS`, `NODE_PATH`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, nor a name the build environment sets, such as `PATH`, `HOME`, `CI` or `GIT_…`). A file's name is a file name in pipeline projects and a relative path in script projects. |
+| `configs`  | build configs, as a list or a comma-separated string: letters, digits, dashes and underscores, at most 20; empty for all configs                                                                                                                                                                                                                                  |
+| `value`    | for a value: text up to 64 KiB, no NUL                                                                                                                                                                                                                                                                                                                            |
+| `contents` | for a file: base64, without line breaks, up to 5 MiB decoded                                                                                                                                                                                                                                                                                                      |
+| `masked`   | script projects, values only: boolean (default `true`)                                                                                                                                                                                                                                                                                                            |
+| `pathEnv`  | script projects, files only: the variable that holds the file's path                                                                                                                                                                                                                                                                                              |
 
 A name keeps one kind, one default variant, and each config in at most one
 of its variants. Script projects take no configs. It answers 201 with the
@@ -1052,7 +1058,7 @@ variant.
   binary file. The fetch is audited as viewed.
 - **`GET …/secrets/audit`** takes `?limit=` (1–1000, default 200) and
   answers entries newest first: `{ "id", "name", "configs", "action",
-  "who", "address", "at", "detail" }`. `action` is `viewed`, `added`,
+"who", "address", "at", "detail" }`. `action` is `viewed`, `added`,
   `edited`, `replaced`, `deleted`, `configs changed` or `refused`. `address`
   ends in `via host` for forwarded requests.
 - **`PUT …/secrets/:id`** takes `{ "value": "…" }` for a value or
@@ -1066,15 +1072,20 @@ The `PUT` routes answer the variant.
 
 ## 7. Build numbers
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
+| Method and path                   | What it does                                         | Permission                           |
+| --------------------------------- | ---------------------------------------------------- | ------------------------------------ |
 | `POST /api/v2/build-numbers/seed` | Sets where a project's build-number sequence stands. | `buildNumbers.seed`, for the project |
 
 For a project moving to Mason with numbers already issued elsewhere: the
 next number reserved for the key comes after `last`. Nothing is lowered.
 
 ```json
-{ "project": "phones", "key": "app.example.one", "branch": "master", "last": "2026103104" }
+{
+  "project": "phones",
+  "key": "app.example.one",
+  "branch": "master",
+  "last": "2026103104"
+}
 ```
 
 - `key` is the sequence's key; the project's setup must have declared its
@@ -1090,12 +1101,12 @@ for a key with no scheme, a missing branch, or a `last` in another format.
 
 Workers and the host paired with the master.
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/nodes` | Every paired node with its inventory and software state, its `status` (`idle`, `busy` or `offline`; a host is `idle` while connected) and, while it runs one, its `stage` (`<run id> <stage>`). | `nodes.read` |
-| `POST /api/v2/nodes` | Pairs a node by its address and pairing key. 201. | `nodes.change`; a host also `hosts.change` |
-| `PUT /api/v2/nodes/:fingerprint` | Sets a node's name, type, labels and slots. | `nodes.change` |
-| `DELETE /api/v2/nodes/:fingerprint` | Unpairs a node. | `nodes.change`; a host also `hosts.change` |
+| Method and path                     | What it does                                                                                                                                                                                    | Permission                                 |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `GET /api/v2/nodes`                 | Every paired node with its inventory and software state, its `status` (`idle`, `busy` or `offline`; a host is `idle` while connected) and, while it runs one, its `stage` (`<run id> <stage>`). | `nodes.read`                               |
+| `POST /api/v2/nodes`                | Pairs a node by its address and pairing key. 201.                                                                                                                                               | `nodes.change`; a host also `hosts.change` |
+| `PUT /api/v2/nodes/:fingerprint`    | Sets a node's name, type, labels and slots.                                                                                                                                                     | `nodes.change`                             |
+| `DELETE /api/v2/nodes/:fingerprint` | Unpairs a node.                                                                                                                                                                                 | `nodes.change`; a host also `hosts.change` |
 
 A node:
 
@@ -1145,13 +1156,13 @@ the key.
 
 **`PUT /api/v2/nodes/:fingerprint`** takes any of:
 
-| Field | Value |
-| --- | --- |
-| `name` | 1–128 characters, not all spaces, without control characters |
-| `type` | up to 64 letters, digits, dots, dashes and underscores, or `""` for none |
-| `labels` | a list of up to 20 labels like a type, repeats dropped; it replaces the node's labels, so a node that runs setup keeps `setup` in it |
-| `slots` | 1–64 stages at a time |
-| `workspaceRoots` | absolute paths for custom workspace paths |
+| Field            | Value                                                                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `name`           | 1–128 characters, not all spaces, without control characters                                                                         |
+| `type`           | up to 64 letters, digits, dots, dashes and underscores, or `""` for none                                                             |
+| `labels`         | a list of up to 20 labels like a type, repeats dropped; it replaces the node's labels, so a node that runs setup keeps `setup` in it |
+| `slots`          | 1–64 stages at a time                                                                                                                |
+| `workspaceRoots` | absolute paths for custom workspace paths                                                                                            |
 
 A field left out is kept. Every field is checked before any is written, and
 any other field, `address` and `key` included, is refused (400). A host
@@ -1172,24 +1183,24 @@ host or node; 409 for a pool name in use; 400 otherwise.
 
 ### Cloud accounts
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/cloud/accounts` | The accounts and their last check. | `settings.read` |
-| `POST /api/v2/cloud/accounts` | Adds an account. 201. | `settings.change` |
-| `PUT /api/v2/cloud/accounts/:id/key` | Replaces the account's key: `{ "key" }`. | `settings.change`; the host's account also `hosts.change` |
-| `POST /api/v2/cloud/accounts/:id/check` | Asks the provider about the key again. | `settings.read` |
-| `DELETE /api/v2/cloud/accounts/:id` | Removes an account. | `settings.change`; the host's account also `hosts.change` |
-| `GET /api/v2/cloud/accounts/:id/catalog` | The regions, sizes and images a pool may use. | `settings.read` |
-| `GET /api/v2/cloud/accounts/:id/domains` | The account's DNS domains, for a host's name: `["example.test"]`. None for NoMac or when the provider cannot list them. | `nodes.read` |
+| Method and path                          | What it does                                                                                                            | Permission                                                |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `GET /api/v2/cloud/accounts`             | The accounts and their last check.                                                                                      | `settings.read`                                           |
+| `POST /api/v2/cloud/accounts`            | Adds an account. 201.                                                                                                   | `settings.change`                                         |
+| `PUT /api/v2/cloud/accounts/:id/key`     | Replaces the account's key: `{ "key" }`.                                                                                | `settings.change`; the host's account also `hosts.change` |
+| `POST /api/v2/cloud/accounts/:id/check`  | Asks the provider about the key again.                                                                                  | `settings.read`                                           |
+| `DELETE /api/v2/cloud/accounts/:id`      | Removes an account.                                                                                                     | `settings.change`; the host's account also `hosts.change` |
+| `GET /api/v2/cloud/accounts/:id/catalog` | The regions, sizes and images a pool may use.                                                                           | `settings.read`                                           |
+| `GET /api/v2/cloud/accounts/:id/domains` | The account's DNS domains, for a host's name: `["example.test"]`. None for NoMac or when the provider cannot list them. | `nodes.read`                                              |
 
 `POST` takes:
 
-| Field | Type |
-| --- | --- |
-| `name` | required, up to 80 characters |
-| `provider` | required: `digitalocean` or `nomac` |
-| `key` | required: a DigitalOcean API token (`dop_v1_…`), or a NoMac API key (`nmk_…`) |
-| `id` | a slug of lowercase letters, digits and dashes, up to 40 (default: made from the name) |
+| Field      | Type                                                                                   |
+| ---------- | -------------------------------------------------------------------------------------- |
+| `name`     | required, up to 80 characters                                                          |
+| `provider` | required: `digitalocean` or `nomac`                                                    |
+| `key`      | required: a DigitalOcean API token (`dop_v1_…`), or a NoMac API key (`nmk_…`)          |
+| `id`       | a slug of lowercase letters, digits and dashes, up to 40 (default: made from the name) |
 
 An account answers as:
 
@@ -1203,7 +1214,11 @@ An account answers as:
   "check": {
     "state": "ok",
     "checkedAt": 1793450000000,
-    "digitalocean": { "email": "ops@example.test", "dropletLimit": 25, "status": "active" }
+    "digitalocean": {
+      "email": "ops@example.test",
+      "dropletLimit": 25,
+      "status": "active"
+    }
   }
 }
 ```
@@ -1233,25 +1248,25 @@ provider with no catalog (NoMac).
 
 Pools live in the `cloud` settings area beside the monthly budget.
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/cloud/pools` | The pools, each with its machines (`id`, `state`, `address`, `created`). | `settings.read` |
-| `GET /api/v2/cloud/budget` | `{ "monthly", "notice"? }`: the monthly budget in dollars and, once pools near or pass it, why they stop growing. | `settings.read` |
-| `POST /api/v2/cloud/pools` | Adds a pool. 201. | `settings.change` |
-| `PUT /api/v2/cloud/pools/:name` | Replaces a pool; it keeps its name. | `settings.change` |
-| `DELETE /api/v2/cloud/pools/:name` | Removes a pool; its machines retire. | `settings.change` |
+| Method and path                    | What it does                                                                                                      | Permission        |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `GET /api/v2/cloud/pools`          | The pools, each with its machines (`id`, `state`, `address`, `created`).                                          | `settings.read`   |
+| `GET /api/v2/cloud/budget`         | `{ "monthly", "notice"? }`: the monthly budget in dollars and, once pools near or pass it, why they stop growing. | `settings.read`   |
+| `POST /api/v2/cloud/pools`         | Adds a pool. 201.                                                                                                 | `settings.change` |
+| `PUT /api/v2/cloud/pools/:name`    | Replaces a pool; it keeps its name.                                                                               | `settings.change` |
+| `DELETE /api/v2/cloud/pools/:name` | Removes a pool; its machines retire.                                                                              | `settings.change` |
 
-| Field | Type |
-| --- | --- |
-| `name` | required: a slug of lowercase letters, digits and dashes, up to 40 |
-| `type` | required: the node type its machines serve, a slug |
-| `account` | required: a cloud account ID |
+| Field                     | Type                                                                  |
+| ------------------------- | --------------------------------------------------------------------- |
+| `name`                    | required: a slug of lowercase letters, digits and dashes, up to 40    |
+| `type`                    | required: the node type its machines serve, a slug                    |
+| `account`                 | required: a cloud account ID                                          |
 | `region`, `size`, `image` | required for DigitalOcean; NoMac uses `nomac`, `standard` and `macos` |
-| `labels` | labels its machines carry, slugs (default `["setup"]`) |
-| `maxNodes` | 1–50 (default 1; NoMac 1) |
-| `slots` | 1–64 (default 1) |
-| `ttlMinutes` | idle minutes before a machine goes, 1–1440 (default 60) |
-| `maxHoursPerNode` | 1–720 (default 24); NoMac 1–8 (default 8) |
+| `labels`                  | labels its machines carry, slugs (default `["setup"]`)                |
+| `maxNodes`                | 1–50 (default 1; NoMac 1)                                             |
+| `slots`                   | 1–64 (default 1)                                                      |
+| `ttlMinutes`              | idle minutes before a machine goes, 1–1440 (default 60)               |
+| `maxHoursPerNode`         | 1–720 (default 24); NoMac 1–8 (default 8)                             |
 
 Numbers may be sent as strings and `labels` as a comma-separated string, as
 the dashboard's form sends them. `POST` and `PUT` answer the pool; `DELETE`
@@ -1265,25 +1280,25 @@ removing it, and pairing or unpairing any host on the Nodes routes, need
 open and receives the client hashes of host password sign-ins, which sign
 in to the master too. A manager may still give it a Space.
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/cloud/hosts` | The cloud host, if any. | `settings.read` |
-| `POST /api/v2/cloud/hosts` | Records a host and starts making it. 201. | `hosts.change` |
-| `POST /api/v2/cloud/hosts/:name/reconcile` | Checks the host again and continues making it. | `hosts.change` |
-| `POST /api/v2/cloud/hosts/:name/space` | Gives the host a new Space for its builds. | `settings.change` |
-| `DELETE /api/v2/cloud/hosts/:name` | Destroys the host. | `hosts.change` |
+| Method and path                            | What it does                                   | Permission        |
+| ------------------------------------------ | ---------------------------------------------- | ----------------- |
+| `GET /api/v2/cloud/hosts`                  | The cloud host, if any.                        | `settings.read`   |
+| `POST /api/v2/cloud/hosts`                 | Records a host and starts making it. 201.      | `hosts.change`    |
+| `POST /api/v2/cloud/hosts/:name/reconcile` | Checks the host again and continues making it. | `hosts.change`    |
+| `POST /api/v2/cloud/hosts/:name/space`     | Gives the host a new Space for its builds.     | `settings.change` |
+| `DELETE /api/v2/cloud/hosts/:name`         | Destroys the host.                             | `hosts.change`    |
 
 `POST /api/v2/cloud/hosts` takes:
 
-| Field | Type |
-| --- | --- |
-| `name` | required: a slug, up to 40 |
-| `account` | required: a DigitalOcean cloud account |
-| `region` | required, 2–20 lowercase letters, digits and dashes |
-| `size` | required, 2–40 of the same |
-| `image` | default `ubuntu-24-04-x64` |
-| `dns` | `{ "domain": "example.test", "name": "builds" }`: a record in a domain the account's DNS holds (`@` for the domain itself); the host then gets a Let's Encrypt certificate |
-| `space` | `{ "bucket": "mason-builds", "region": "sfo3" }`: a new Space for its builds |
+| Field     | Type                                                                                                                                                                       |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`    | required: a slug, up to 40                                                                                                                                                 |
+| `account` | required: a DigitalOcean cloud account                                                                                                                                     |
+| `region`  | required, 2–20 lowercase letters, digits and dashes                                                                                                                        |
+| `size`    | required, 2–40 of the same                                                                                                                                                 |
+| `image`   | default `ubuntu-24-04-x64`                                                                                                                                                 |
+| `dns`     | `{ "domain": "example.test", "name": "builds" }`: a record in a domain the account's DNS holds (`@` for the domain itself); the host then gets a Let's Encrypt certificate |
+| `space`   | `{ "bucket": "mason-builds", "region": "sfo3" }`: a new Space for its builds                                                                                               |
 
 It is refused (400) when the master already has a host, the name is taken,
 the account is not DigitalOcean, the domain is not in the account, or the
@@ -1320,12 +1335,12 @@ install). A cloud node's firewall opens only the link port to the master.
 
 Permanent workers the master keeps on DigitalOcean, as many as needed.
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/cloud/nodes` | The cloud nodes. | `settings.read` |
-| `POST /api/v2/cloud/nodes` | Records a node and starts making it. 201. | `settings.change` |
-| `POST /api/v2/cloud/nodes/:name/reconcile` | Checks the node again. | `settings.change` |
-| `DELETE /api/v2/cloud/nodes/:name` | Destroys the node. | `settings.change` |
+| Method and path                            | What it does                              | Permission        |
+| ------------------------------------------ | ----------------------------------------- | ----------------- |
+| `GET /api/v2/cloud/nodes`                  | The cloud nodes.                          | `settings.read`   |
+| `POST /api/v2/cloud/nodes`                 | Records a node and starts making it. 201. | `settings.change` |
+| `POST /api/v2/cloud/nodes/:name/reconcile` | Checks the node again.                    | `settings.change` |
+| `DELETE /api/v2/cloud/nodes/:name`         | Destroys the node.                        | `settings.change` |
 
 `POST` takes `name`, `account`, `region`, `size` and `image` as for a host,
 plus `type` (the node type, a slug) and `labels` (up to 20 lowercase
@@ -1340,29 +1355,29 @@ Spaces. Every Space Mason has used is a storage location that keeps serving
 the builds in it; one location takes new builds. All routes check
 `settings.change`, except `GET`, which checks `settings.read`.
 
-| Method and path | What it does |
-| --- | --- |
-| `GET /api/v2/storage` | The `storage` setting and every location, with the files and bytes the host holds in each when the host answers within 5 s. |
-| `POST /api/v2/storage/space` | Adds a Space by URL and key, after checking the key can write, read and delete in it. |
-| `POST /api/v2/storage/space/new` | Makes a new Space and a key limited to it in a DigitalOcean cloud account. |
-| `POST /api/v2/storage/disk` | New builds go to the host's disk. |
-| `POST /api/v2/storage/locations/:id/use` | New builds go to this location (`disk` for the disk). |
-| `DELETE /api/v2/storage/locations/:id` | Removes a Space and its builds from Mason. |
+| Method and path                          | What it does                                                                                                                |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/v2/storage`                    | The `storage` setting and every location, with the files and bytes the host holds in each when the host answers within 5 s. |
+| `POST /api/v2/storage/space`             | Adds a Space by URL and key, after checking the key can write, read and delete in it.                                       |
+| `POST /api/v2/storage/space/new`         | Makes a new Space and a key limited to it in a DigitalOcean cloud account.                                                  |
+| `POST /api/v2/storage/disk`              | New builds go to the host's disk.                                                                                           |
+| `POST /api/v2/storage/locations/:id/use` | New builds go to this location (`disk` for the disk).                                                                       |
+| `DELETE /api/v2/storage/locations/:id`   | Removes a Space and its builds from Mason.                                                                                  |
 
 - **`space`** takes
   `{ "url": "https://mason-builds.sfo3.digitaloceanspaces.com",
-  "accessKeyId": "…", "secretAccessKey": "…", "use": true }`. The URL may
+"accessKeyId": "…", "secretAccessKey": "…", "use": true }`. The URL may
   also be the region endpoint with the bucket as its path or in `bucket`.
   `secretAccessKey` may be `{ "keep": true }` to reuse the stored one.
 - **`space/new`** takes `{ "account": "do-main", "bucket": "mason-builds",
-  "region": "sfo3", "use": true }`. The region is one with Spaces: `sfo3`,
+"region": "sfo3", "use": true }`. The region is one with Spaces: `sfo3`,
   `nyc3`, `ams3`, `fra1`, `lon1`, `sgp1`, `syd1`, `blr1`, `tor1`, `atl1`.
 - With `"use": false` both only remember the location; otherwise new builds
   go there. Both answer the `storage` setting, and save nothing (400
   `Nothing was saved: …`) when a check or a step fails.
 - A location answers as `{ "id", "kind", "active", "bucket", "region",
-  "endpoint", "origin", "bucketOwned", "account", "host", "addedAt",
-  "addedBy", "usage" }`; `kind` is `disk` or `space`.
+"endpoint", "origin", "bucketOwned", "account", "host", "addedAt",
+"addedBy", "usage" }`; `kind` is `disk` or `space`.
 - **`DELETE`** takes `{ "confirm": "<bucket>" }` and answers
   `{ "files", "bucketDeleted" }`. It deletes the bucket and key only when
   Mason made them. Refused (400) for the disk, for the location that takes
@@ -1372,21 +1387,21 @@ the builds in it; one location takes new builds. All routes check
 
 The master pushes encrypted snapshots of its database to a git repository.
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/settings/backup` | The `backup` setting and the backup status; the backup key for administrators. | `settings.read` |
-| `PUT /api/v2/settings/backup` | Configures backups. | `settings.change` |
-| `POST /api/v2/settings/backup/confirm` | Records that an administrator stored the backup key. | `backups.key` |
-| `GET /api/v2/backups` | The backup status. | `backups.run` |
-| `POST /api/v2/backups` | Takes a backup now. | `backups.run` |
+| Method and path                        | What it does                                                                   | Permission        |
+| -------------------------------------- | ------------------------------------------------------------------------------ | ----------------- |
+| `GET /api/v2/settings/backup`          | The `backup` setting and the backup status; the backup key for administrators. | `settings.read`   |
+| `PUT /api/v2/settings/backup`          | Configures backups.                                                            | `settings.change` |
+| `POST /api/v2/settings/backup/confirm` | Records that an administrator stored the backup key.                           | `backups.key`     |
+| `GET /api/v2/backups`                  | The backup status.                                                             | `backups.run`     |
+| `POST /api/v2/backups`                 | Takes a backup now.                                                            | `backups.run`     |
 
 `PUT` takes:
 
-| Field | Type |
-| --- | --- |
+| Field        | Type                                                                                             |
+| ------------ | ------------------------------------------------------------------------------------------------ |
 | `repository` | a git URL such as `git@github.com:example/mason-backup.git` (SSH or HTTPS), up to 500 characters |
-| `branch` | a branch name (default `master`) |
-| `auth` | `deployKey` (default: the master's own SSH key, made once) or `github` (its GitHub connection) |
+| `branch`     | a branch name (default `master`)                                                                 |
+| `auth`       | `deployKey` (default: the master's own SSH key, made once) or `github` (its GitHub connection)   |
 
 The setting answers with the deploy key's public half as `deployKey`, to add
 to the repository, together with the status:
@@ -1399,7 +1414,12 @@ to the repository, together with the status:
   "deployKey": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyOnly",
   "configured": true,
   "backedUp": true,
-  "lastSuccess": { "at": 1793450000000, "commit": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b", "kind": "commit", "auth": "deployKey" }
+  "lastSuccess": {
+    "at": 1793450000000,
+    "commit": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+    "kind": "commit",
+    "auth": "deployKey"
+  }
 }
 ```
 
@@ -1417,15 +1437,15 @@ Settings areas share two routes; each area checks its own values. Secret
 fields are write-only: reads show them as `{ "set": true }`, and a write may
 send `{ "keep": true }` to keep the stored value.
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `GET /api/v2/settings/:area` | An area's value. | `settings.read` |
-| `PUT /api/v2/settings/:area` | Replaces an area's value; answers it as `GET` does. | `settings.change` |
-| `PUT /api/v2/settings/signIn/methods/:id` | Adds or changes one sign-in method. | `signIn.change` |
-| `DELETE /api/v2/settings/signIn/methods/:id` | Removes one sign-in method. | `signIn.change` |
-| `PUT /api/v2/settings/nodeTypes/:type` | Adds or changes one node type. | `settings.change` |
-| `DELETE /api/v2/settings/nodeTypes/:type` | Removes one node type. | `settings.change` |
-| `PUT /api/v2/settings/cloud/budget` | Sets the cloud pools' monthly budget. | `settings.change` |
+| Method and path                              | What it does                                        | Permission        |
+| -------------------------------------------- | --------------------------------------------------- | ----------------- |
+| `GET /api/v2/settings/:area`                 | An area's value.                                    | `settings.read`   |
+| `PUT /api/v2/settings/:area`                 | Replaces an area's value; answers it as `GET` does. | `settings.change` |
+| `PUT /api/v2/settings/signIn/methods/:id`    | Adds or changes one sign-in method.                 | `signIn.change`   |
+| `DELETE /api/v2/settings/signIn/methods/:id` | Removes one sign-in method.                         | `signIn.change`   |
+| `PUT /api/v2/settings/nodeTypes/:type`       | Adds or changes one node type.                      | `settings.change` |
+| `DELETE /api/v2/settings/nodeTypes/:type`    | Removes one node type.                              | `settings.change` |
+| `PUT /api/v2/settings/cloud/budget`          | Sets the cloud pools' monthly budget.               | `settings.change` |
 
 An unknown area is 404. Changing `signIn`, `master` or `host` (all of
 it: `origin`, `workerOrigin` and `offlineGraceHours`) also needs
@@ -1436,19 +1456,19 @@ values without editors. A cloud host the master makes still sets `host`
 itself. In `cloudAccounts`, changing the key of, or removing, the account
 a cloud host was made in needs `hosts.change`. The areas:
 
-| Area | Value |
-| --- | --- |
-| `host` | `{ "origin": "https://builds.example.test", "workerOrigin"?, "offlineGraceHours": 72 }`: the host's public HTTPS origin, an origin cloud machines reach it at, and hours (1–720) it serves without the master. |
-| `master` | `{ "origin": "https://mason-admin.example.test:9300" }`: the master's own public HTTPS origin, where sign-in providers return the browser to the master's pages. `{}` (or an empty `origin`) offers only username and password on the master. It stays on the master. |
-| `github` | `{ "kind": "token", "token" }`, `{ "kind": "app", "appId", "installationId", "privateKey" }`, or `{ "kind": "ssh" }` (the master makes a key; send `"privateKey": { "keep": true }` to keep it). A token or App is checked with GitHub on save. |
-| `signIn` | `{ "methods": [ … ] }`: OIDC or OAuth 2 providers the host offers, and the master too once `master` is set (below). |
-| `storage` | `{ "driver": "disk" }`, or `{ "driver": "s3", "s3": { "endpoint", "bucket", "region", "accessKeyId", "secretAccessKey" } }`. The [Storage](#10-storage) routes are the usual way to change it. |
-| `backup` | Served by the [Backups](#11-backups) routes. |
-| `nodeTypes` | `{ "<type>": { "software", "settings", "diskThresholdGb", "androidLicensesAccepted" } }` (below). |
-| `cloud` | `{ "monthlyBudget": 200, "pools": [ … ] }`. The [Pools](#pools) routes change one pool at a time. |
-| `cloudAccounts` | `{ "accounts": [{ "id", "name", "provider", "key" }] }`. The [Cloud accounts](#cloud-accounts) routes change one at a time. |
-| `apple` | `{ "appleId", "teams": { "<team ID>": { "name", "issuerId", "keyId", "privateKey" } } }`: the Apple ID for Xcode downloads, and an App Store Connect key per team (`issuerId` a UUID, `keyId` ten characters, `privateKey` the `.p8` contents). A field left out keeps what is stored; `null` clears `appleId`. |
-| `buildNumbers` | `{ "countBase": 0 }`, 0–9999. |
+| Area            | Value                                                                                                                                                                                                                                                                                                           |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `host`          | `{ "origin": "https://builds.example.test", "workerOrigin"?, "offlineGraceHours": 72 }`: the host's public HTTPS origin, an origin cloud machines reach it at, and hours (1–720) it serves without the master.                                                                                                  |
+| `master`        | `{ "origin": "https://mason-admin.example.test:9300" }`: the master's own public HTTPS origin, where sign-in providers return the browser to the master's pages. `{}` (or an empty `origin`) offers only username and password on the master. It stays on the master.                                           |
+| `github`        | `{ "kind": "token", "token" }`, `{ "kind": "app", "appId", "installationId", "privateKey" }`, or `{ "kind": "ssh" }` (the master makes a key; send `"privateKey": { "keep": true }` to keep it). A token or App is checked with GitHub on save.                                                                 |
+| `signIn`        | `{ "methods": [ … ] }`: OIDC or OAuth 2 providers the host offers, and the master too once `master` is set (below).                                                                                                                                                                                             |
+| `storage`       | `{ "driver": "disk" }`, or `{ "driver": "s3", "s3": { "endpoint", "bucket", "region", "accessKeyId", "secretAccessKey" } }`. The [Storage](#10-storage) routes are the usual way to change it.                                                                                                                  |
+| `backup`        | Served by the [Backups](#11-backups) routes.                                                                                                                                                                                                                                                                    |
+| `nodeTypes`     | `{ "<type>": { "software", "settings", "diskThresholdGb", "androidLicensesAccepted" } }` (below).                                                                                                                                                                                                               |
+| `cloud`         | `{ "monthlyBudget": 200, "pools": [ … ] }`. The [Pools](#pools) routes change one pool at a time.                                                                                                                                                                                                               |
+| `cloudAccounts` | `{ "accounts": [{ "id", "name", "provider", "key" }] }`. The [Cloud accounts](#cloud-accounts) routes change one at a time.                                                                                                                                                                                     |
+| `apple`         | `{ "appleId", "teams": { "<team ID>": { "name", "issuerId", "keyId", "privateKey" } } }`: the Apple ID for Xcode downloads, and an App Store Connect key per team (`issuerId` a UUID, `keyId` ten characters, `privateKey` the `.p8` contents). A field left out keeps what is stored; `null` clears `appleId`. |
+| `buildNumbers`  | `{ "countBase": 0 }`, 0–9999.                                                                                                                                                                                                                                                                                   |
 
 ### Sign-in methods
 
@@ -1458,20 +1478,20 @@ dashboard does not show stay as stored when the type is unchanged. With
 `"create": true` it refuses (400) to replace a method of that ID. Unknown
 fields are refused.
 
-| Field | Type |
-| --- | --- |
-| `type` | `oidc` or `oauth2` |
-| `name` | up to 80 characters |
-| `issuer` | an HTTPS URL |
-| `clientId` | up to 256 characters |
-| `clientSecret` | up to 4096 characters, or `{ "keep": true }` |
-| `enabled` | boolean (default `true`); a disabled method is kept but not offered |
-| `authentication` | `post` (default) or `basic` |
-| `switchParameters` | up to 8 extra authorization parameters for switching accounts |
-| `signingAlgorithm` | `oidc` only: `RS256` (default), `ES256` or `EdDSA` |
-| `authorizationEndpoint`, `tokenEndpoint`, `userinfoEndpoint` | `oauth2` only: HTTPS URLs |
-| `scopes` | `oauth2` only: a list |
-| `claims` | `oauth2` only: `{ "subject", "name", "email", "emailVerified" }` claim names |
+| Field                                                        | Type                                                                         |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `type`                                                       | `oidc` or `oauth2`                                                           |
+| `name`                                                       | up to 80 characters                                                          |
+| `issuer`                                                     | an HTTPS URL                                                                 |
+| `clientId`                                                   | up to 256 characters                                                         |
+| `clientSecret`                                               | up to 4096 characters, or `{ "keep": true }`                                 |
+| `enabled`                                                    | boolean (default `true`); a disabled method is kept but not offered          |
+| `authentication`                                             | `post` (default) or `basic`                                                  |
+| `switchParameters`                                           | up to 8 extra authorization parameters for switching accounts                |
+| `signingAlgorithm`                                           | `oidc` only: `RS256` (default), `ES256` or `EdDSA`                           |
+| `authorizationEndpoint`, `tokenEndpoint`, `userinfoEndpoint` | `oauth2` only: HTTPS URLs                                                    |
+| `scopes`                                                     | `oauth2` only: a list                                                        |
+| `claims`                                                     | `oauth2` only: `{ "subject", "name", "email", "emailVerified" }` claim names |
 
 `DELETE` removes the method; 404 when there is none. Both answer the
 `signIn` area, client secrets shown as `{ "set": true }`.
@@ -1521,7 +1541,11 @@ stored Android licence acceptance and does not record a new one: that takes
     "java": "17",
     "android": ["platforms;android-35", "build-tools;35.0.0"]
   },
-  "settings": { "noSleep": true, "devToolsSecurity": true, "automationMode": false },
+  "settings": {
+    "noSleep": true,
+    "devToolsSecurity": true,
+    "automationMode": false
+  },
   "diskThresholdGb": 40
 }
 ```
@@ -1544,24 +1568,24 @@ signing certificates and provisioning profiles. All routes need
 `apple.change`. The password is write-only and the session never leaves the
 master.
 
-| Method and path | What it does |
-| --- | --- |
-| `GET /api/v2/apple/signing` | What Settings shows: the Apple ID (`signedIn`, `needsCode`, `appleId`, `notice`), its teams with each configured team's key and current distribution certificate (`setup`), why a team's last setup failed (`failures`) and the teams being set up now (`settingUp`). `settings.read`. |
-| `GET /api/v2/apple/session` | The Apple ID session's state. |
-| `POST /api/v2/apple/session` | Signs the Apple ID in; Apple usually asks for a code next. |
-| `POST /api/v2/apple/session/code` | Sends Apple's two-factor code. |
-| `GET /api/v2/apple/setup` | The teams the signed-in Apple ID belongs to. |
-| `POST /api/v2/apple/setup` | Checks a team's signing again: its App Store Connect key and distribution certificate. |
-| `GET /api/v2/apple/certificates` | The signing certificates, without private keys. |
-| `POST /api/v2/apple/certificates` | Imports or creates a certificate. 201. |
-| `DELETE /api/v2/apple/certificates/:id` | Removes a certificate. |
-| `GET /api/v2/apple/profiles` | The provisioning profiles: `{ team, bundleId, distribution, platform, name, uuid, expiresAt }` each, `platform` being `ios`, `macos` or `tvos`. |
+| Method and path                         | What it does                                                                                                                                                                                                                                                                           |
+| --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/v2/apple/signing`             | What Settings shows: the Apple ID (`signedIn`, `needsCode`, `appleId`, `notice`), its teams with each configured team's key and current distribution certificate (`setup`), why a team's last setup failed (`failures`) and the teams being set up now (`settingUp`). `settings.read`. |
+| `GET /api/v2/apple/session`             | The Apple ID session's state.                                                                                                                                                                                                                                                          |
+| `POST /api/v2/apple/session`            | Signs the Apple ID in; Apple usually asks for a code next.                                                                                                                                                                                                                             |
+| `POST /api/v2/apple/session/code`       | Sends Apple's two-factor code.                                                                                                                                                                                                                                                         |
+| `GET /api/v2/apple/setup`               | The teams the signed-in Apple ID belongs to.                                                                                                                                                                                                                                           |
+| `POST /api/v2/apple/setup`              | Checks a team's signing again: its App Store Connect key and distribution certificate.                                                                                                                                                                                                 |
+| `GET /api/v2/apple/certificates`        | The signing certificates, without private keys.                                                                                                                                                                                                                                        |
+| `POST /api/v2/apple/certificates`       | Imports or creates a certificate. 201.                                                                                                                                                                                                                                                 |
+| `DELETE /api/v2/apple/certificates/:id` | Removes a certificate.                                                                                                                                                                                                                                                                 |
+| `GET /api/v2/apple/profiles`            | The provisioning profiles: `{ team, bundleId, distribution, platform, name, uuid, expiresAt }` each, `platform` being `ios`, `macos` or `tvos`.                                                                                                                                        |
 
 - The session routes answer the state:
   `{ "appleId", "state", "since", "notice", "codeVia", "error" }`, `state`
   being `signedOut`, `needsCode`, `signedIn`, `expired` or `failed`.
   **`POST …/session`** takes `{ "appleId": "ada@example.test", "password":
-  "…" }` (`appleId` defaults to the stored one). **`…/session/code`** takes
+"…" }` (`appleId` defaults to the stored one). **`…/session/code`** takes
   `{ "code": "123456" }`, six digits; 400 when no sign-in waits for a code.
 - Once the Apple ID is signed in (directly, or after the code), the master
   sets up in the background the teams it uses: the Apple ID's only team, or
@@ -1574,7 +1598,7 @@ master.
   as `apple.setup` by the person who signed in. A failure (Apple's
   certificate limit, an Apple ID without the Admin role, a team without API
   access) becomes a notice naming the team and what to do, in `mason
-  status`, the dashboard and Settings → Apple, until a later setup of that
+status`, the dashboard and Settings → Apple, until a later setup of that
   team succeeds or the Apple ID no longer belongs to it.
 - Apple answering 401 to any of the master's App Store Connect website calls
   moves the session to `expired`, with the call in `error`: sign in again.
@@ -1585,7 +1609,7 @@ master.
   (optional with one team) and runs the same setup now: it keeps what still
   works and makes what is missing, then sets up the profiles of the team's
   app IDs that still lack them. It answers `{ "team": { "id", "name" },
-  "key", "keyId", "certificate" }`, where `key` is `created`, `kept` or
+"key", "keyId", "certificate" }`, where `key` is `created`, `kept` or
   `replaced` and `certificate` `created` or `kept`. 400 when the Apple ID is
   in no such team or Apple allows no more distribution certificates.
 - **`POST …/certificates`** takes `team` (ten capitals and digits) and one
@@ -1598,22 +1622,23 @@ master.
 
   It answers what was imported or created, then sets up profiles for the
   team's app IDs that still lack them.
+
 - A certificate: `{ "id", "team", "kind", "appleId", "serial", "name",
-  "sha1", "expiresAt", "source", "revoked" }`, `source` being `p12`,
+"sha1", "expiresAt", "source", "revoked" }`, `source` being `p12`,
   `match` or `created`. `DELETE` answers `null`; 404 for an unknown
   certificate.
 - A profile: `{ "team", "bundleId", "distribution", "name", "uuid",
-  "expiresAt" }`.
+"expiresAt" }`.
 
 ## 14. Builds
 
 The published builds a caller may see, and their files. Every route needs
 `builds.read`, which every role has, from an API key or a browser session.
 
-| Method and path | What it does |
-| --- | --- |
-| `GET /api/v2/builds` | Builds, newest first. |
-| `GET /api/v2/builds/:id` | One build. |
+| Method and path                   | What it does                           |
+| --------------------------------- | -------------------------------------- |
+| `GET /api/v2/builds`              | Builds, newest first.                  |
+| `GET /api/v2/builds/:id`          | One build.                             |
 | `GET /api/v2/builds/:id/download` | The build's file, or a redirect to it. |
 
 **Where they are answered.** The host answers these routes itself, from its
@@ -1642,7 +1667,7 @@ connected`. Both answer the same builds for the same caller.
 - A scoped key sees only builds whose app belongs to a project in its
   `projects` and whose branch matches its `branches`. A `project` query, or
   a build, outside them is 403 `This key does not cover that project or
-  branch`.
+branch`.
 
 A build of an app the caller does not see is 404 `No such build`, like an
 unknown one. Only ready, unexpired builds of enabled apps are listed.
@@ -1651,16 +1676,16 @@ unknown one. Only ready, unexpired builds of enabled apps are listed.
 
 Query, every field optional:
 
-| Field | Meaning |
-| --- | --- |
-| `project` | A project slug. |
-| `app` | An app ID (`app.example.one`). |
-| `branch` | A branch, exactly. |
-| `platform` | `ios`, `android`, `macos`, `windows` or `tvos`. |
-| `variant` | A variant name; empty (`variant=`) is the default variant, the file a stage published with none. |
-| `run` | A run's id: the builds that run published. |
-| `latest` | `1` keeps only the newest build of each app, branch, platform and variant. |
-| `limit` | 1–500, default 50, applied after the caller's apps and scopes. |
+| Field      | Meaning                                                                                          |
+| ---------- | ------------------------------------------------------------------------------------------------ |
+| `project`  | A project slug.                                                                                  |
+| `app`      | An app ID (`app.example.one`).                                                                   |
+| `branch`   | A branch, exactly.                                                                               |
+| `platform` | `ios`, `android`, `macos`, `windows` or `tvos`.                                                  |
+| `variant`  | A variant name; empty (`variant=`) is the default variant, the file a stage published with none. |
+| `run`      | A run's id: the builds that run published.                                                       |
+| `latest`   | `1` keeps only the newest build of each app, branch, platform and variant.                       |
+| `limit`    | 1–500, default 50, applied after the caller's apps and scopes.                                   |
 
 A field that is invalid, or given twice, is 400 (`Invalid platform`).
 Answers a list of builds in this shape:
@@ -1710,7 +1735,7 @@ The build, in the shape above.
 - `HEAD` answers the same headers without the file.
 - 404 `The build’s file is no longer available` when the stored file is
   missing or its size is not the build's; 502 `The build’s storage is
-  unreachable` when the disk or Space cannot be read. A refusal is JSON,
+unreachable` when the disk or Space cannot be read. A refusal is JSON,
   through the master too.
 
 The host logs each download once its file is under way (`Build 41
@@ -1729,22 +1754,22 @@ key the host verifies itself); a key scoped to projects is refused (403)
 where a read is not about one project. The host answers 503 before its
 first sync and once past its offline grace window.
 
-| Method and path | What it answers | Permission |
-| --- | --- | --- |
-| `GET /api/v2/status` | The shell: the master's workers, the host's link, the banners. | `builds.read` |
-| `GET /api/v2/notifications` | Approvals the caller may decide; the master's notices for managers. | `builds.read` |
-| `GET /api/v2/search?q=` | ⌘K results. | `builds.read` |
-| `GET /api/v2/dashboard?platform=&project=` | Projects & apps. | `projects.read` |
-| `GET /api/v2/queue` | The running and queued stages. | `runs.read` |
-| `GET /api/v2/artifacts?project=&branch=` | The latest 50 runs with their build numbers and saved artifacts. | `runs.read` |
-| `GET /api/v2/artifacts/runs/:id` | One run's stages, tests, published builds and saved artifacts. | `runs.read` |
-| `GET /api/v2/runs/:id?include=graph,steps,history,details` | The run page. | `runs.read` |
-| `GET /api/v2/projects/:slug/overview` | A project's details. | `projects.read` |
-| `GET /api/v2/projects/:slug/runs?branch=&app=&limit=` | A project's or an app ID's Runs and builds. | `projects.read` |
-| `GET /api/v2/projects/:slug/apps/:appId` | An app ID and its build-number sequence. | `projects.read` |
-| `GET /api/v2/projects/:slug/masonfile/commits` | The commits the Masonfile tab offers. | `projects.read` |
-| `GET /api/v2/projects/:slug/masonfile?commit=` | The Masonfile at a commit. | `projects.read` |
-| `GET /api/v2/account` | The caller's own record. | a session (a key gets 401) |
+| Method and path                                            | What it answers                                                     | Permission                 |
+| ---------------------------------------------------------- | ------------------------------------------------------------------- | -------------------------- |
+| `GET /api/v2/status`                                       | The shell: the master's workers, the host's link, the banners.      | `builds.read`              |
+| `GET /api/v2/notifications`                                | Approvals the caller may decide; the master's notices for managers. | `builds.read`              |
+| `GET /api/v2/search?q=`                                    | ⌘K results.                                                         | `builds.read`              |
+| `GET /api/v2/dashboard?platform=&project=`                 | Projects & apps.                                                    | `projects.read`            |
+| `GET /api/v2/queue`                                        | The running and queued stages.                                      | `runs.read`                |
+| `GET /api/v2/artifacts?project=&branch=`                   | The latest 50 runs with their build numbers and saved artifacts.    | `runs.read`                |
+| `GET /api/v2/artifacts/runs/:id`                           | One run's stages, tests, published builds and saved artifacts.      | `runs.read`                |
+| `GET /api/v2/runs/:id?include=graph,steps,history,details` | The run page.                                                       | `runs.read`                |
+| `GET /api/v2/projects/:slug/overview`                      | A project's details.                                                | `projects.read`            |
+| `GET /api/v2/projects/:slug/runs?branch=&app=&limit=`      | A project's or an app ID's Runs and builds.                         | `projects.read`            |
+| `GET /api/v2/projects/:slug/apps/:appId`                   | An app ID and its build-number sequence.                            | `projects.read`            |
+| `GET /api/v2/projects/:slug/masonfile/commits`             | The commits the Masonfile tab offers.                               | `projects.read`            |
+| `GET /api/v2/projects/:slug/masonfile?commit=`             | The Masonfile at a commit.                                          | `projects.read`            |
+| `GET /api/v2/account`                                      | The caller's own record.                                            | a session (a key gets 401) |
 
 ### Status, notifications and search
 
@@ -1775,7 +1800,7 @@ export const host: StatusInfo = {
 
 **`GET /api/v2/notifications`** lists the approvals waiting for the caller
 (those whose roles include theirs, `admin` and `manager` when the approval
-names none, within a key's scopes), and on the master, for managers and
+names none), and on the master, for managers and
 administrators, its notices (the Apple two-factor code, the cloud budget,
 node checklists, Apple setup, the backup reminder):
 
@@ -1886,19 +1911,21 @@ node it ran on, by name) and saved artifacts (each with the `url` it
 downloads from: the host's origin), and the parts `include` names,
 comma-separated:
 
-| Part | Adds |
-| --- | --- |
-| `graph` | `graph`, the workflow's recorded stages, post stages, approvals (who decides each, its message and parameters), parameters, and `workflows`, every workflow of the recorded Masonfile with its parameters (each parameter as the Masonfile declares it: `type`, `choices`, `default`, `min`, `max`, `pattern`, `description`); and `layout`, its bubbles and rails in columns and rows with each stage's state. A run whose graph is no longer kept has neither. |
-| `steps` | `steps`, every stage's steps with `logStart` and `logEnd`, the byte range of their lines in the stage's log. |
-| `history` | `history`, the last 10 runs of the same branch and workflow, each with its stages' states. |
-| `details` | `details`: `trigger`, `requestedBy`, the `buildNumber` the run reserved, its `params`, the project's `repository` and the `nodes` it ran on. |
+| Part      | Adds                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `graph`   | `graph`, the workflow's recorded stages, post stages, approvals (who decides each, its message and parameters), parameters, and `workflows`, every workflow of the recorded Masonfile with its parameters (each parameter as the Masonfile declares it: `type`, `choices`, `default`, `min`, `max`, `pattern`, `description`); and `layout`, its bubbles and rails in columns and rows with each stage's state. A run whose graph is no longer kept has neither. |
+| `steps`   | `steps`, every stage's steps with `logStart` and `logEnd`, the byte range of their lines in the stage's log.                                                                                                                                                                                                                                                                                                                                                     |
+| `history` | `history`, the last 10 runs of the same branch and workflow, each with its stages' states.                                                                                                                                                                                                                                                                                                                                                                       |
+| `details` | `details`: `trigger`, `requestedBy`, the `buildNumber` the run reserved, its `params`, the project's `repository` and the `nodes` it ran on.                                                                                                                                                                                                                                                                                                                     |
 
 Another part is 400. The first page of the log comes from the windowed
 [`GET /api/v2/runs/:id/logs?from=|last=`](#get-apiv2runsidlogs). Without
 `include` the route answers the run as before.
 
 ```ts fragment
-const page: RunPage = await get(runPath(id, ['graph', 'steps', 'history', 'details']))
+const page: RunPage = await get(
+  runPath(id, ['graph', 'steps', 'history', 'details']),
+)
 ```
 
 ### Project pages
@@ -1964,6 +1991,11 @@ answers from its copies only. 404 says why there is none: the project
 builds from a script, no run has a commit yet, the host is still copying
 it or has none, or the file is not in that commit.
 
+On both nodes a disabled project answers 404 on each of these routes. A
+key scoped to branches reads only the runs, branches, artifacts and
+Masonfile commits of the branches it covers, with or without `?branch=`; a
+Masonfile `?commit=` no covered run has is 404.
+
 ### Your account
 
 **`GET /api/v2/account`** answers the caller's own record: id, name, role,
@@ -1997,17 +2029,17 @@ The selected device is the node's `__Host-mason-device` cookie, which
 `select` sets and removing the selected device clears. `?platform=` chooses
 the platform; without it, the remembered choice, else the browser's.
 
-| Method and path | What it does |
-| --- | --- |
-| `GET /api/v2/catalog/apps` | `{ apps, platforms }`: the apps the person may install. |
-| `GET /api/v2/catalog/apps/:id?platform=` | The app, its platforms, its branches (master first) and each platform's latest build. |
-| `GET /api/v2/catalog/apps/:id/branches/:key?platform=` | A branch's builds for a platform, each with whether the selected device may install it and, for an eligible iOS app, its grant and its `installUrl` (the `itms-services://` link, on the node's public origin). `ios` says how iOS apps install from here: `{ "via": "here" }`, `{ "via": "host", "host": "<origin>" }` (a master without a public origin of its own) or `{ "via": "none" }`. |
-| `POST /api/v2/catalog/builds/:id/install` | `InstallAnswer`, below. |
-| `POST /api/v2/catalog/builds/:id/prepare` | Asks for a build of that branch and commit for the selected device: `{ prepared }`, `false` with none of the person's selected. |
-| `GET /api/v2/devices` | The person's devices, the selected one, whether registration is configured, and every registered device for an administrator; `via` is the host's origin when registration goes through its own pages. |
-| `POST /api/v2/devices/registrations` | `{ url, expiresAt }`: a registration profile to download once, with a plain `GET`, within five minutes (`/devices/profiles/<token>`, `application/x-apple-aspen-config`; 404 after). |
-| `POST /api/v2/devices/:id/select`, `…/rename` (`{ "name" }`), `…/retry`, `…/remove` | The action, then the devices as `GET /api/v2/devices` answers them. 404 for a device not the person's or another action. |
-| `GET /api/v2/devices/complete/:token` | Where a registration link ended: `registering`, `registered` (selecting the device) or `unavailable`. |
+| Method and path                                                                     | What it does                                                                                                                                                                                                                                                                                                                                                                                  |
+| ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/v2/catalog/apps`                                                          | `{ apps, platforms }`: the apps the person may install.                                                                                                                                                                                                                                                                                                                                       |
+| `GET /api/v2/catalog/apps/:id?platform=`                                            | The app, its platforms, its branches (master first) and each platform's latest build.                                                                                                                                                                                                                                                                                                         |
+| `GET /api/v2/catalog/apps/:id/branches/:key?platform=`                              | A branch's builds for a platform, each with whether the selected device may install it and, for an eligible iOS app, its grant and its `installUrl` (the `itms-services://` link, on the node's public origin). `ios` says how iOS apps install from here: `{ "via": "here" }`, `{ "via": "host", "host": "<origin>" }` (a master without a public origin of its own) or `{ "via": "none" }`. |
+| `POST /api/v2/catalog/builds/:id/install`                                           | `InstallAnswer`, below.                                                                                                                                                                                                                                                                                                                                                                       |
+| `POST /api/v2/catalog/builds/:id/prepare`                                           | Asks for a build of that branch and commit for the selected device: `{ prepared }`, `false` with none of the person's selected.                                                                                                                                                                                                                                                               |
+| `GET /api/v2/devices`                                                               | The person's devices, the selected one, whether registration is configured, and every registered device for an administrator; `via` is the host's origin when registration goes through its own pages.                                                                                                                                                                                        |
+| `POST /api/v2/devices/registrations`                                                | `{ url, expiresAt }`: a registration profile to download once, with a plain `GET`, within five minutes (`/devices/profiles/<token>`, `application/x-apple-aspen-config`; 404 after).                                                                                                                                                                                                          |
+| `POST /api/v2/devices/:id/select`, `…/rename` (`{ "name" }`), `…/retry`, `…/remove` | The action, then the devices as `GET /api/v2/devices` answers them. 404 for a device not the person's or another action.                                                                                                                                                                                                                                                                      |
+| `GET /api/v2/devices/complete/:token`                                               | Where a registration link ended: `registering`, `registered` (selecting the device) or `unavailable`.                                                                                                                                                                                                                                                                                         |
 
 An app or build the person may not see is 404; Install apps for someone
 without tester access is 403. **Install** answers what the button does:
@@ -2048,17 +2080,17 @@ existing clients keep working. The host forwards `/api/jobs` and
 `/api/queue`, not `/api/apps`. Bodies are limited to 16 KB, and unknown
 fields are refused.
 
-| Method and path | What it does | Permission |
-| --- | --- | --- |
-| `POST /api/jobs` | Requests a `build` run. 202. | `runs.request` |
-| `GET /api/jobs/:id` | One job. | `runs.read` |
-| `GET /api/jobs/:id/log` | The job's log, `text/plain`. | `runs.read` |
-| `GET /api/jobs/:id/logs` | The job's log as a download (`X-Mason-Log-Capture: full`). | `runs.read` |
-| `POST /api/jobs/:id/cancel` | Cancels a job: `{ "cancelled": true }`, or 409 when it is not active. | `runs.request` |
-| `GET /api/queue` | Queued and running jobs. | `runs.read` |
-| `GET /api/apps` | Projects with their build settings. | `apps.read` |
-| `GET /api/apps/:slug/build-settings` | A project's default branch and automatic branches. | `apps.read` |
-| `PUT /api/apps/:slug/build-settings` | Sets them. | `projects.change` |
+| Method and path                      | What it does                                                          | Permission        |
+| ------------------------------------ | --------------------------------------------------------------------- | ----------------- |
+| `POST /api/jobs`                     | Requests a `build` run. 202.                                          | `runs.request`    |
+| `GET /api/jobs/:id`                  | One job.                                                              | `runs.read`       |
+| `GET /api/jobs/:id/log`              | The job's log, `text/plain`.                                          | `runs.read`       |
+| `GET /api/jobs/:id/logs`             | The job's log as a download (`X-Mason-Log-Capture: full`).            | `runs.read`       |
+| `POST /api/jobs/:id/cancel`          | Cancels a job: `{ "cancelled": true }`, or 409 when it is not active. | `runs.request`    |
+| `GET /api/queue`                     | Queued and running jobs.                                              | `runs.read`       |
+| `GET /api/apps`                      | Projects with their build settings.                                   | `apps.read`       |
+| `GET /api/apps/:slug/build-settings` | A project's default branch and automatic branches.                    | `apps.read`       |
+| `PUT /api/apps/:slug/build-settings` | Sets them.                                                            | `projects.change` |
 
 `POST /api/jobs` takes `{ "app": "app.example.one", "branch": "master",
 "platforms": ["ios"], "idempotencyKey": "ci-8812", "envVars":
@@ -2085,11 +2117,11 @@ Until the first account exists, the master's pages create it with these
 routes, gated by the six-digit setup code the master prints. They refuse
 forwarded requests.
 
-| Method and path | What it does |
-| --- | --- |
-| `GET /api/setup` | `{ "configured" }`, and `waitUntil` before the next code guess is checked. |
-| `POST /api/setup` | Takes `{ "code", "username", "clientHash", "clientParameters" }`, creates the first administrator and signs them in. 201. |
-| `POST /api/setup/restore` | Takes `{ "code", "repository", "key", "branch", "date" }` and restores the master from a backup. 202. |
+| Method and path           | What it does                                                                                                              |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/setup`          | `{ "configured" }`, and `waitUntil` before the next code guess is checked.                                                |
+| `POST /api/setup`         | Takes `{ "code", "username", "clientHash", "clientParameters" }`, creates the first administrator and signs them in. 201. |
+| `POST /api/setup/restore` | Takes `{ "code", "repository", "key", "branch", "date" }` and restores the master from a backup. 202.                     |
 
 A wrong code delays the next guess (5 s, then 10, 20, …); it and any guess
 during the wait answer 429 with `retryAt`, and a guess during the wait is not
@@ -2102,14 +2134,14 @@ The tester pages are the web app's on both nodes, signed in with that
 node's session: each address answers the app's shell, which reads the JSON
 routes above, with the status of what it will show.
 
-| Method and path | What it does |
-| --- | --- |
-| `GET /apps`, and `GET /` for a tester (the master) or everyone (the host) | Install apps: the shell (403 while the person waits for tester access). The app sends a tester at `/` to `/apps`, and a developer on the host to `/projects`. |
-| `GET /apps/:appId`, `GET /apps/:appId/branches/:branchKey` | An app's branches; a branch's builds for a platform. The shell, 404 for an app the person may not see or a malformed id or branch key. |
-| `GET /install/:token/manifest.plist`, `GET /install/:token/artifact` | A grant's iOS manifest and package, with no cookie: `HEAD`, a single `Range` (206 with `Content-Range`, 416 when unsatisfiable) and `If-Range`. |
-| `GET /devices` | Devices: the shell. |
-| `GET /devices/qr` | The QR code (SVG) that opens Devices on a phone. |
-| `GET /devices/complete/:token` | Where a registered device lands: selects it (the `__Host-mason-device` cookie) once registered, then the shell; 410 for a link that is no longer the person's. |
+| Method and path                                                           | What it does                                                                                                                                                   |
+| ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /apps`, and `GET /` for a tester (the master) or everyone (the host) | Install apps: the shell (403 while the person waits for tester access). The app sends a tester at `/` to `/apps`, and a developer on the host to `/projects`.  |
+| `GET /apps/:appId`, `GET /apps/:appId/branches/:branchKey`                | An app's branches; a branch's builds for a platform. The shell, 404 for an app the person may not see or a malformed id or branch key.                         |
+| `GET /install/:token/manifest.plist`, `GET /install/:token/artifact`      | A grant's iOS manifest and package, with no cookie: `HEAD`, a single `Range` (206 with `Content-Range`, 416 when unsatisfiable) and `If-Range`.                |
+| `GET /devices`                                                            | Devices: the shell.                                                                                                                                            |
+| `GET /devices/qr`                                                         | The QR code (SVG) that opens Devices on a phone.                                                                                                               |
+| `GET /devices/complete/:token`                                            | Where a registered device lands: selects it (the `__Host-mason-device` cookie) once registered, then the shell; 410 for a link that is no longer the person's. |
 
 Installs, preparing a build, registration profiles and device actions are
 the JSON routes' (`POST /api/v2/catalog/builds/:id/install`, `…/prepare`,
@@ -2137,8 +2169,7 @@ Devices pages, and a tester's `/`, answer 200 and say no host is linked yet
 
 Projects & apps is `/projects` on both nodes, with its filters
 (`?platform=`, `?project=`) there. To a tester `/projects` and every page
-under it answer the shell with 404, on both nodes, and the app draws its
-404.
+under it answer the shell with 404, on both nodes, and the app draws its 404.
 
 The master's public origin is its `master` setting. A manifest from the
 master names its package there, and a registration started on the master
@@ -2156,20 +2187,20 @@ app's shell to developers and up, signed in with that node's session, and
 the app reads the project through the routes in
 [Project pages](#project-pages); the host answers them from the copy the
 master sends it, read only. A project (or an app ID of it) the node does not
-hold, or the viewer may not see, answers the shell with 404. To a tester
-they answer 404. `/projects/new`, the add-project wizard, is the master's,
-for holders of `projects.change` (others read its 403 inside the app).
+hold, that is disabled, or that the viewer may not see, answers the shell
+with 404. To a tester they answer 404. `/projects/new`, the add-project
+wizard, is the master's, for holders of `projects.change` (others read its 403 inside the app).
 
-| Method and path | What it shows |
-| --- | --- |
-| `GET /projects` | Projects & apps, with `?platform=` and `?project=`. |
-| `GET /projects/:slug` | The project's Overview: app IDs, branch rules, build numbers. |
-| `GET /projects/:slug/runs` | Runs and builds: its branches and the latest runs, `?branch=` for one. |
-| `GET /projects/:slug/masonfile` | The Masonfile at a run's commit, `?commit=`. |
-| `GET /projects/:slug/secrets` | Secrets (the master only). |
-| `GET /projects/new` | Add a project: the repository, its app IDs, its branches and triggers (the master only). |
-| `GET /projects/:slug/apps/:appId` | An app ID's Runs and builds, `?branch=` for one branch. |
-| `GET /projects/:slug/apps/:appId/build-numbers` | An app ID's Build numbers. |
+| Method and path                                 | What it shows                                                                            |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `GET /projects`                                 | Projects & apps, with `?platform=` and `?project=`.                                      |
+| `GET /projects/:slug`                           | The project's Overview: app IDs, branch rules, build numbers.                            |
+| `GET /projects/:slug/runs`                      | Runs and builds: its branches and the latest runs, `?branch=` for one.                   |
+| `GET /projects/:slug/masonfile`                 | The Masonfile at a run's commit, `?commit=`.                                             |
+| `GET /projects/:slug/secrets`                   | Secrets (the master only).                                                               |
+| `GET /projects/new`                             | Add a project: the repository, its app IDs, its branches and triggers (the master only). |
+| `GET /projects/:slug/apps/:appId`               | An app ID's Runs and builds, `?branch=` for one branch.                                  |
+| `GET /projects/:slug/apps/:appId/build-numbers` | An app ID's Build numbers.                                                               |
 
 An app ID's Runs and builds lists the runs whose own workflow has a stage,
 in `stages` or `post`, whose `publishes` holds the app ID, read from the
@@ -2177,7 +2208,7 @@ graph the run recorded; its branch list holds only the branches with such
 a run, those the push trigger builds first. Its Build numbers shows the
 sequence the app ID takes its numbers from — one whose `apps` lists it,
 else its own key, else the default scheme (`N`, across branches) — and on
-the master, to a holder of `buildNumbers.seed`, *Set where it stands*, a
+the master, to a holder of `buildNumbers.seed`, _Set where it stands_, a
 sheet preset to that sequence that posts `POST /api/v2/build-numbers/seed`
 (on the Overview the sheet starts with a sequence to choose). An app ID that is not
 the project's, or that is disabled, answers 404 under the project.
@@ -2190,21 +2221,21 @@ master's session, and the app reads and changes it through the routes
 above. A role without the permission reads the 403 inside the app; signed
 out, each address sends to sign in.
 
-| Method and path | What it shows | Permission |
-| --- | --- | --- |
-| `GET /nodes` | Nodes: paired nodes, the host, cloud hosts and nodes, pools, storage. | `nodes.read` |
-| `GET /cloud` | Cloud accounts and their checks. | `settings.read` |
-| `GET /settings` | Settings: API keys, GitHub, Apple, sign-in methods, the host, node types, the budget. | `settings.read` |
-| `GET /people` | People. | `people.read` |
-| `GET /groups` | Groups. | `groups.read` |
-| `GET /groups/:id` | A group's apps and members; an unknown or malformed id answers the shell with 404. | `groups.read` |
-| `GET /backups` | Backups: the repository, the deploy key, the last run and the backup key. | `settings.read` |
-| `GET /account` | Your account, on both nodes. | anyone signed in |
+| Method and path   | What it shows                                                                         | Permission       |
+| ----------------- | ------------------------------------------------------------------------------------- | ---------------- |
+| `GET /nodes`      | Nodes: paired nodes, the host, cloud hosts and nodes, pools, storage.                 | `nodes.read`     |
+| `GET /cloud`      | Cloud accounts and their checks.                                                      | `settings.read`  |
+| `GET /settings`   | Settings: API keys, GitHub, Apple, sign-in methods, the host, node types, the budget. | `settings.read`  |
+| `GET /people`     | People.                                                                               | `people.read`    |
+| `GET /groups`     | Groups.                                                                               | `groups.read`    |
+| `GET /groups/:id` | A group's apps and members; an unknown or malformed id answers the shell with 404.    | `groups.read`    |
+| `GET /backups`    | Backups: the repository, the deploy key, the last run and the backup key.             | `settings.read`  |
+| `GET /account`    | Your account, on both nodes.                                                          | anyone signed in |
 
 The host answers only `/account` among them, from its cache; signed out it
 sends to `/auth/login` and back. An administrator who has not confirmed the
 backup key is sent to Backups by the web app, once per browser session
-(`keyConfirmed` in `GET /api/v2/settings/backup`); *Skip for now* goes on
+(`keyConfirmed` in `GET /api/v2/settings/backup`); _Skip for now_ goes on
 to Projects & apps for the rest of that session.
 
 ### The host's GitHub webhook

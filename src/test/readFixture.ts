@@ -72,7 +72,8 @@ export interface ReadFixture {
   /** The finished run, and the run waiting for an approval. */
   runs: { built: string; waiting: string }
   build: number
-  keys: { developer: string; manager: string; scoped: string }
+  /** API keys: `scoped` to another project, `release` to this one's release branch. */
+  keys: { developer: string; manager: string; scoped: string; release: string }
   /**
    * Publishes another build of alpha on master (an iOS build provisioned
    * for the devices named by UDID), and waits until the host has it.
@@ -152,6 +153,12 @@ export async function readFixture(root: string): Promise<ReadFixture> {
       role: 'developer',
       name: 'reads scoped',
       projects: ['elsewhere'],
+    }).token,
+    release: master.keys.create(localOperator, {
+      role: 'developer',
+      name: 'reads release',
+      projects: ['reads'],
+      branches: ['release'],
     }).token,
   }
   // A real run on the co-worker: its graph, steps, history and kept Masonfile.

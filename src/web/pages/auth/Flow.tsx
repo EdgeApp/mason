@@ -34,7 +34,7 @@ const TITLES: Record<SignInFlow['state'], string> = {
   chooseAccount: 'Choose an account',
 }
 
-/** A link to a page the node serves (a full load, under that page's own CSP). */
+/** A link to a page the node serves, or a password page: a full load. */
 function Go({
   href,
   primary = false,

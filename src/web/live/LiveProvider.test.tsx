@@ -13,6 +13,7 @@ import {
   useLiveState,
   useLiveStatus,
 } from './LiveProvider.js'
+import { useRunStatuses } from './useRunStatuses.js'
 
 afterEach(cleanup)
 
@@ -124,5 +125,53 @@ describe('Live updates in the app', () => {
         <Bare />
       </LiveProvider>,
     )
+  })
+})
+
+describe('Run statuses on a list page', () => {
+  it('subscribes only the runs a change adds and ends only those it drops', async () => {
+    const win = new FakeLiveWindow()
+    const live = new LiveClient('wss://mason.test/live', win)
+    function Chips({ ids }: { ids: string[] }): JSX.Element {
+      const statuses = useRunStatuses(
+        ids.map((id) => ({ id, status: 'running' })),
+      )
+      return <p>{ids.map((id) => `${id}:${statuses[id] ?? '-'}`).join(' ')}</p>
+    }
+    const page = render(
+      <LiveProvider client={live}>
+        <Chips ids={['a', 'b']} />
+      </LiveProvider>,
+    )
+    await act(async () => win.socket.accept())
+    const sent = (): unknown[] => win.socket.sent.slice()
+    assert.deepEqual(sent(), [
+      { subscribe: 'status', run: 'a', key: 'run-status:a' },
+      { subscribe: 'status', run: 'b', key: 'run-status:b' },
+    ])
+    // The queue moves on: c is added, a leaves, b stays subscribed.
+    page.rerender(
+      <LiveProvider client={live}>
+        <Chips ids={['b', 'c']} />
+      </LiveProvider>,
+    )
+    assert.deepEqual(sent().slice(2), [
+      { unsubscribe: 'run-status:a' },
+      { subscribe: 'status', run: 'c', key: 'run-status:c' },
+    ])
+    await act(async () =>
+      win.socket.frame({
+        key: 'run-status:b',
+        event: 'run',
+        data: { status: 'succeeded' },
+      }),
+    )
+    screen.getByText('b:succeeded c:-')
+    // Leaving the page ends what is left.
+    page.unmount()
+    assert.deepEqual(sent().slice(4), [
+      { unsubscribe: 'run-status:b' },
+      { unsubscribe: 'run-status:c' },
+    ])
   })
 })

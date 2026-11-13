@@ -3,6 +3,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
 import { FLOW_META, type SignInFlow } from '../shared/api/index.js'
+import type { Permission, Role } from '../shared/permissions.js'
+import { roleCan } from '../master/permissions.js'
 import {
   masterContentSecurityPolicy,
   shellContentSecurityPolicy,
@@ -68,9 +70,12 @@ export function sendShell(
     return
   }
   const meta = `<meta name="${FLOW_META}" content="${attribute(JSON.stringify(options.flow))}">`
+  // A function, so `$'`, `$&` and the like in the flow are not patterns.
   res
     .type('html')
-    .send(readFileSync(file, 'utf8').replace('</head>', `${meta}\n</head>`))
+    .send(
+      readFileSync(file, 'utf8').replace('</head>', () => `${meta}\n</head>`),
+    )
 }
 
 /**
@@ -107,4 +112,204 @@ export function webAppRoutes(options: { dir?: string } = {}): express.Router {
     sendShell(res, { dir })
   })
   return router
+}
+
+/** What a page names, which the node checks before it answers 200. */
+export type PageSubject =
+  /** `/`: first-run setup, Projects & apps, or Install apps. */
+  | 'home'
+  /** Sign-in and invitations, open to everyone. */
+  | 'signIn'
+  | 'invite'
+  /** A project, an app ID in it, a run, a group. */
+  | 'project'
+  | 'app'
+  | 'run'
+  | 'group'
+  /** Install apps' pages and Devices. */
+  | 'catalog'
+  | 'devices'
+
+/** One page address of the web app, and who may open it. */
+export interface PageRoute {
+  path: string | string[]
+  /** What a signed-in viewer needs: without it the page answers 403. */
+  permission?: Permission
+  /** To a viewer without this permission the page does not exist: 404, not 403. */
+  hiddenWithout?: Permission
+  /** What the page names, which the node checks. */
+  subject?: PageSubject
+  /** Served by the master only; on a host the address is unknown. */
+  masterOnly?: boolean
+  /**
+   * Served by a host only; on the master the address is unknown, so a
+   * signed-out viewer goes to the master's own sign-in.
+   */
+  hostOnly?: boolean
+}
+
+/**
+ * Every page of the web app on both nodes; the app's own table
+ * (src/web/profile/routes.tsx) declares the same access for each, which
+ * src/web/profile/pageAccess.test.ts checks. Each answers the app's shell
+ * (`index.html`), with the status of what the app will show there: 403 for
+ * a role without the page's permission, 404 for a page hidden from it or a
+ * thing that does not exist, the node's own status for what it names.
+ * Signed out, a page sends to sign in. Any other address answers the shell
+ * with 404 (src/node/webRoutes.ts `pageFallback`).
+ */
+export const PAGE_ROUTES: readonly PageRoute[] = [
+  { path: '/', subject: 'home' },
+  { path: '/sign-in', subject: 'signIn', masterOnly: true },
+  { path: '/auth/login', subject: 'signIn', hostOnly: true },
+  { path: '/auth/invite', subject: 'invite' },
+  {
+    path: '/projects',
+    permission: 'projects.read',
+    hiddenWithout: 'projects.read',
+  },
+  {
+    path: '/projects/new',
+    permission: 'projects.change',
+    hiddenWithout: 'projects.read',
+    masterOnly: true,
+  },
+  {
+    path: [
+      '/projects/:slug',
+      '/projects/:slug/runs',
+      '/projects/:slug/masonfile',
+    ],
+    permission: 'projects.read',
+    hiddenWithout: 'projects.read',
+    subject: 'project',
+  },
+  {
+    path: '/projects/:slug/secrets',
+    permission: 'projects.read',
+    hiddenWithout: 'projects.read',
+    subject: 'project',
+    masterOnly: true,
+  },
+  {
+    path: [
+      '/projects/:slug/apps/:appId',
+      '/projects/:slug/apps/:appId/build-numbers',
+    ],
+    permission: 'projects.read',
+    hiddenWithout: 'projects.read',
+    subject: 'app',
+  },
+  { path: '/artifacts', permission: 'runs.read' },
+  { path: '/runs/:id', permission: 'runs.read', subject: 'run' },
+  // Search reads what GET /api/v2/search allows; Your account is every
+  // signed-in viewer's own.
+  { path: '/search', permission: 'builds.read' },
+  { path: '/account' },
+  { path: '/nodes', permission: 'nodes.read', masterOnly: true },
+  {
+    path: ['/cloud', '/settings', '/backups'],
+    permission: 'settings.read',
+    masterOnly: true,
+  },
+  { path: '/people', permission: 'people.read', masterOnly: true },
+  { path: '/groups', permission: 'groups.read', masterOnly: true },
+  {
+    path: '/groups/:id',
+    permission: 'groups.read',
+    subject: 'group',
+    masterOnly: true,
+  },
+  {
+    path: ['/apps', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
+    permission: 'builds.read',
+    subject: 'catalog',
+  },
+  { path: '/devices', permission: 'devices.register', subject: 'devices' },
+]
+
+/** What a page answers: the shell with a status, or a redirect. */
+export type PageAnswer = number | { redirect: string }
+
+/** What the page routes need of a node. */
+export interface PageNode {
+  node: 'master' | 'host'
+  /** The signed-in viewer's role; undefined when signed out. */
+  role(req: express.Request): Role | undefined
+  /** Where a signed-out request is sent to sign in. */
+  signIn(req: express.Request): string
+  /**
+   * What a page about `subject` answers. `home`, `signIn` and `invite` are
+   * asked signed out too (`role` undefined); the others only once the
+   * viewer holds the page's permission.
+   */
+  check(
+    subject: PageSubject,
+    req: express.Request,
+    role: Role | undefined,
+  ): PageAnswer | Promise<PageAnswer>
+}
+
+/** Subjects a signed-out viewer reaches: the node decides where they go. */
+const open: ReadonlySet<PageSubject> = new Set(['home', 'signIn', 'invite'])
+
+/** Answers a page: a redirect, or the shell with its status. */
+function send(res: express.Response, answer: PageAnswer): void {
+  if (typeof answer === 'number') sendShell(res, { status: answer })
+  // A bare redirect: no body, so no page.
+  else res.status(303).location(answer.redirect).end()
+}
+
+/**
+ * The node's page addresses from {@link PAGE_ROUTES}, each answering the
+ * web app's shell with the status of what it will show, or sending a
+ * signed-out viewer to sign in.
+ */
+export function pageRoutes(node: PageNode): express.Router {
+  const router = express.Router()
+  for (const route of PAGE_ROUTES) {
+    if (route.masterOnly === true && node.node !== 'master') continue
+    if (route.hostOnly === true && node.node !== 'host') continue
+    router.get(route.path, (req, res, next) => {
+      const role = node.role(req)
+      const answer = async (): Promise<PageAnswer> => {
+        const subject = route.subject
+        if (subject != null && open.has(subject))
+          return await node.check(subject, req, role)
+        if (role == null) return { redirect: node.signIn(req) }
+        if (route.hiddenWithout != null && !roleCan(role, route.hiddenWithout))
+          return 404
+        if (route.permission != null && !roleCan(role, route.permission))
+          return 403
+        return subject == null ? 200 : await node.check(subject, req, role)
+      }
+      answer().then(
+        (result) => {
+          send(res, result)
+        },
+        (error: unknown) => {
+          next(error)
+        },
+      )
+    })
+  }
+  return router
+}
+
+/**
+ * Every other GET address a browser opens answers the shell with 404 (or
+ * sends a signed-out viewer to sign in); the API, assets and other
+ * addresses (`/api/`, `/assets/`, any other method) answer a plain 404.
+ */
+export function pageFallback(node: PageNode): express.RequestHandler {
+  return (req, res) => {
+    if (
+      (req.method !== 'GET' && req.method !== 'HEAD') ||
+      /^\/(api|assets)(\/|$)/.test(req.path)
+    ) {
+      res.status(404).send('Not found')
+      return
+    }
+    send(res, node.role(req) == null ? { redirect: node.signIn(req) } : 404)
+  }
 }

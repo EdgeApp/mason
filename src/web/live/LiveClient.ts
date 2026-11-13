@@ -1,10 +1,12 @@
 // The app's one socket to /live on the node that served it, shared by
-// every live part of the page (built from src/browser/live.ts, which stays
-// for the server's run page until M11). It reconnects after 1, 2, 4… up to
+// every live part of the page. It reconnects after 1, 2, 4… up to
 // 30 seconds and resubscribes, each subscription naming where it left off,
 // and tells its listeners its state for the sidebar's footer.
 import {
+  LIVE_MESSAGE_BURST,
+  LIVE_MESSAGES_PER_SECOND,
   LIVE_PATH,
+  LIVE_TOO_MANY,
   LIVE_UNAVAILABLE,
   type LiveFrame,
   type LiveMessage,
@@ -44,6 +46,16 @@ export type LiveState =
 export function liveUrl(location: { protocol: string; host: string }): string {
   return `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}${LIVE_PATH}`
 }
+
+/**
+ * The client's own pace, below the node's budget: messages sent in time
+ * still reach the node together when it falls behind (a busy event loop, a
+ * lossy link, a host relaying to its master), and the headroom covers that.
+ */
+export const CLIENT_BURST = Math.floor((LIVE_MESSAGE_BURST * 4) / 5)
+export const CLIENT_MESSAGES_PER_SECOND = Math.floor(
+  (LIVE_MESSAGES_PER_SECOND * 3) / 4,
+)
 
 /** The wait before the next reconnect: 1, 2, 4… seconds, 30 at most. */
 export const backoff = (attempt: number): number =>
@@ -89,6 +101,14 @@ export class LiveClient {
   private timer: unknown
   private stopped = false
   private current: LiveState = 'connecting'
+  /**
+   * What the client's pace still allows on this socket, as of `budgetAt`;
+   * what it does not waits in `outbox` for the refill.
+   */
+  private budget = CLIENT_BURST
+  private budgetAt = 0
+  private readonly outbox: string[] = []
+  private pacing: unknown
 
   constructor(
     private readonly url: string,
@@ -134,6 +154,7 @@ export class LiveClient {
     const socket = this.socket
     this.socket = undefined
     this.open = false
+    this.unpace()
     socket?.close()
     if (this.current !== 'unavailable') this.set('closed')
   }
@@ -152,7 +173,62 @@ export class LiveClient {
   }
 
   private write(message: LiveMessage): void {
-    if (this.open) this.socket?.send(JSON.stringify(message))
+    if (!this.open) return
+    this.outbox.push(JSON.stringify(message))
+    this.flush()
+  }
+
+  /**
+   * Sends what the client's pace allows and waits for its refill to send
+   * the rest, so a burst (every subscription on a reconnect) stays within
+   * the node's budget.
+   */
+  private flush(): void {
+    const now = Date.now()
+    const earned = Math.floor(
+      ((now - this.budgetAt) * CLIENT_MESSAGES_PER_SECOND) / 1000,
+    )
+    if (earned > 0) {
+      this.budget = Math.min(CLIENT_BURST, this.budget + earned)
+      this.budgetAt = now
+    }
+    while (this.outbox.length > 0 && this.budget > 0) {
+      this.budget -= 1
+      this.socket?.send(this.outbox.shift()!)
+    }
+    if (this.outbox.length > 0 && this.pacing == null)
+      this.pacing = this.win.setTimeout(() => {
+        this.pacing = undefined
+        // At least one message's worth of time has passed.
+        this.budget = Math.min(CLIENT_BURST, this.budget + 1)
+        this.budgetAt = Date.now()
+        this.flush()
+      }, 1000 / CLIENT_MESSAGES_PER_SECOND)
+  }
+
+  /**
+   * The node refused a message over its budget: the client's pace starts
+   * again from empty, and the subscription the refusal names is sent again
+   * after the refill, or its end if the page has left it meanwhile.
+   */
+  private refused(key: string | undefined): void {
+    this.budget = 0
+    this.budgetAt = Date.now()
+    this.win.clearTimeout(this.pacing)
+    this.pacing = undefined
+    if (key == null) this.flush()
+    else {
+      const subscription = this.subscriptions.get(key)
+      if (subscription != null) this.send(key, subscription)
+      else this.write({ unsubscribe: key })
+    }
+  }
+
+  /** Forgets what waited to be sent: a new socket sends every subscription again. */
+  private unpace(): void {
+    this.outbox.length = 0
+    this.win.clearTimeout(this.pacing)
+    this.pacing = undefined
   }
 
   private send(key: string, subscription: Subscription): void {
@@ -167,6 +243,9 @@ export class LiveClient {
     socket.onopen = (): void => {
       if (this.socket !== socket) return
       this.open = true
+      this.unpace()
+      this.budget = CLIENT_BURST
+      this.budgetAt = Date.now()
       this.set('open')
       for (const [key, subscription] of this.subscriptions)
         this.send(key, subscription)
@@ -181,6 +260,13 @@ export class LiveClient {
       } catch {
         return
       }
+      if (
+        frame.event === 'error' &&
+        (frame.data as { error?: unknown } | undefined)?.error === LIVE_TOO_MANY
+      ) {
+        this.refused(frame.key)
+        return
+      }
       const subscription =
         frame.key == null ? undefined : this.subscriptions.get(frame.key)
       if (subscription == null) return
@@ -193,6 +279,7 @@ export class LiveClient {
       if (this.socket !== socket) return
       this.socket = undefined
       this.open = false
+      this.unpace()
       if (this.stopped || event.code === 1008) {
         this.stopped = true
         this.set('closed')

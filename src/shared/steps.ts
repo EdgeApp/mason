@@ -1,5 +1,5 @@
 // A stage's steps as the run page lists them, each under the section it ran
-// in: the server's old page and the web app share the order.
+// in.
 
 /** What the list needs of a step. */
 export interface TreeStep {

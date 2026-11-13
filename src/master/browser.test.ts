@@ -101,13 +101,19 @@ describe('Master sign-in in a real browser', () => {
         await visible('Every hour the master encrypts a snapshot')
         await screenshot('master-backup-prompt.png')
         assert.equal(node.master!.configured(), true)
-        // The account icon opens Your account, which holds Sign out.
-        await device.command('tapOn', { css: 'a[aria-label="Your account"]' })
-        await visible('^Your account$')
+        // The account menu holds Sign out, which loads sign-in afresh.
         await device.command('tapOn', {
-          css: 'form[data-mason="sign-out"] button',
+          css: 'button[aria-label="Your account"]',
+        })
+        await device.command('evalBrowserScript', {
+          script:
+            "const item = [...document.querySelectorAll('[role=menu] [role=menuitem], [role=menu] button')].find((e) => e.textContent.replace(/[\\uE000-\\uF8FF]/g, '').trim() === 'Sign out'); if (item == null) throw new Error('No Sign out in the account menu'); item.click()",
         })
         await visible('^Sign in$')
+        await device.command('evalBrowserScript', {
+          script:
+            "if (location.pathname !== '/sign-in') throw new Error('Signed out to ' + location.pathname)",
+        })
         await type('#sign-in-username', 'owner')
         await type('#sign-in-password', 'Owner-Horse-9-long')
         await device.command('tapOn', {
@@ -118,7 +124,7 @@ describe('Master sign-in in a real browser', () => {
         await visible('their latest builds and runs')
         await device.command('evalBrowserScript', {
           script:
-            "if (location.pathname !== '/' || document.querySelector('nav.rail a[aria-current=page]').getAttribute('href') !== '/projects') throw new Error('Not the lone master home')",
+            "if (location.pathname !== '/' || document.querySelector('.m-sidebar nav[aria-label=\"Destinations\"] a[aria-current=page]')?.getAttribute('href') !== '/projects') throw new Error('Not the lone master home')",
         })
         await screenshot('master-signed-in.png')
       } finally {

@@ -5,10 +5,11 @@
 // from lib/. Each screen is saved as `<screen>-<width>-<MASON_SCREENS>.png`
 // in MASON_ARTIFACTS (MASON_SCREENS is `after` unless set); `light` sets
 // Appearance to Light in local storage before each capture. Every request a
-// page made must be to its own origin. MASON_SCREENS_PREFIX (`/_web`) opens
-// each screen under the React app's mount, and MASON_SCREENS_ONLY (names,
-// comma-separated) captures only those screens: a milestone captures the
-// screens it ships while the server still answers the real routes.
+// page made must be to its own origin, and no page may scroll sideways.
+// MASON_SCREENS_PREFIX (`/_web`) opens each screen under the React app's
+// mount, and MASON_SCREENS_ONLY (names, comma-separated) captures only those
+// screens: a milestone captures the screens it ships while the server still
+// answers the real routes.
 import assert from 'node:assert/strict'
 import {
   existsSync,
@@ -853,6 +854,12 @@ describe('Every Mason screen at three widths', function () {
       href: location.href,
       heading: document.querySelector('h1')?.textContent ?? document.title ?? '',
       requests: performance.getEntriesByType('resource').map((entry) => entry.name),
+      scrollWidth: document.documentElement.scrollWidth,
+      innerWidth,
+      tabLabels: [...document.querySelectorAll('.m-tabbar__item')].map((item) => {
+        const style = getComputedStyle(item)
+        return style.fontSize + ' ' + style.fontWeight
+      }),
     })`
 
   /** Opens a screen, settles it and saves its capture; returns what went wrong, if anything. */
@@ -873,6 +880,9 @@ describe('Every Mason screen at three widths', function () {
       href: string
       heading: string
       requests: string[]
+      scrollWidth: number
+      innerWidth: number
+      tabLabels: string[]
     }
     // Let layout and animations finish before the capture.
     await new Promise((resolve) => setTimeout(resolve, 400))
@@ -890,6 +900,16 @@ describe('Every Mason screen at three widths', function () {
     if (foreign.length > 0)
       problems.push(
         `${file}: requests to another origin: ${foreign.join(', ')}`,
+      )
+    // Nothing wider than the window: no page scrolls sideways.
+    if (page.scrollWidth > page.innerWidth)
+      problems.push(
+        `${file}: scrolls sideways at ${width} px (scrollWidth ${page.scrollWidth} > innerWidth ${page.innerWidth})`,
+      )
+    // Every tab bar label is drawn alike, the More button's too.
+    if (new Set(page.tabLabels).size > 1)
+      problems.push(
+        `${file}: tab bar labels differ (${page.tabLabels.join(', ')})`,
       )
     const signInPaths = ['/sign-in', '/auth/login']
     if (

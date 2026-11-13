@@ -1,7 +1,6 @@
 // The Material Symbols Outlined glyphs Mason's subset font ships
-// (assets/fonts/material-symbols-outlined-subset.woff2), by name. A copy of
-// src/view/icons.ts's table, which stays for the server pages until they go;
-// a new glyph is added to the subset font and to both tables, never drawn ad hoc.
+// (assets/fonts/material-symbols-outlined-subset.woff2), by name. A new
+// glyph is added to the subset font and to this table, never drawn ad hoc.
 export const icons = {
   search: 0xe8b6,
   notifications: 0xe7f4,

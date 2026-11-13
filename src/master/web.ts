@@ -1,10 +1,5 @@
-import { readFileSync } from 'node:fs'
 import type express from 'express'
-import {
-  masterContentSecurityPolicy,
-  nodeWebApp,
-  type WebAppContext,
-} from '../node/webApp.js'
+import { nodeWebApp, type WebAppContext } from '../node/webApp.js'
 import { accountsApi } from './accountsApi.js'
 import { masterApi } from './api.js'
 import { backupApi } from './backupApi.js'
@@ -27,7 +22,7 @@ import { secretsApi } from './secretsApi.js'
 import { adminApi } from './adminApi.js'
 import { masterReader, nodeViews } from './reads.js'
 import { readApi } from '../node/readApi.js'
-import { masterCatalogApi } from './catalogPages.js'
+import { masterCatalogApi, masterCatalogShell } from './catalogPages.js'
 import { cookie } from '../auth/routes.js'
 import { MASTER_SESSION_COOKIE } from './auth.js'
 
@@ -68,12 +63,6 @@ export function masterNodeInfo(context: MasterWebContext): NodeInfo {
   }
 }
 
-const bundle = (name: string): string =>
-  readFileSync(
-    new URL(`../browser/bundles/${name}.js`, import.meta.url),
-    'utf8',
-  )
-
 /** The master's web listener: its UI and API. */
 export function masterApp(context: MasterWebContext): express.Express {
   const app = nodeWebApp(context)
@@ -88,27 +77,6 @@ export function masterApp(context: MasterWebContext): express.Express {
       master.auth.session(cookie(req, MASTER_SESSION_COOKIE)),
     ),
   )
-  for (const name of [
-    'groups',
-    'master',
-    'password-worker',
-    'people',
-    'run',
-    'secrets',
-  ])
-    app.get(`/assets/${name}.js`, (_req, res) => {
-      if (name === 'password-worker')
-        res.set('Content-Security-Policy', masterContentSecurityPolicy)
-      res.type('js').send(bundle(name))
-    })
-  // The catalog's platform switch, local times and iPad check.
-  app.get('/assets/catalog.js', (_req, res) => {
-    res
-      .type('js')
-      .send(
-        readFileSync(new URL('../browser/client.js', import.meta.url), 'utf8'),
-      )
-  })
   app.use(
     accountsApi(master, {
       setupCode: context.setupCode ?? ((): undefined => undefined),
@@ -149,9 +117,13 @@ export function masterApp(context: MasterWebContext): express.Express {
   // After the provider routes, whose limiter covers every /auth request.
   app.use(providerSignInRoutes(master))
   app.use(invitationRoutes(master))
+  // Install apps' and Devices' own addresses: the QR code, the completion
+  // link and the grants' files; their pages are the web app's.
+  app.use(
+    masterCatalogShell(master, (req) =>
+      master.auth.session(cookie(req, MASTER_SESSION_COOKIE)),
+    ),
+  )
   masterPages(app, master)
-  app.use((_req, res) => {
-    res.status(404).send('Not found')
-  })
   return app
 }

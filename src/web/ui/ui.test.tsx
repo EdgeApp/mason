@@ -30,6 +30,14 @@ import { Toggletip, Tooltip } from './Tooltip.js'
 
 afterEach(cleanup)
 
+describe('The icon table', () => {
+  it('names each glyph of the subset font once, in the private use area', () => {
+    const codes = Object.values(icons)
+    assert.equal(new Set(codes).size, codes.length)
+    assert(codes.every((code) => code >= 0xe000 && code <= 0xf8ff))
+  })
+})
+
 describe('The status table', () => {
   it('gives every state a tone, a glyph from the subset and a word', () => {
     const tones: Tone[] = [

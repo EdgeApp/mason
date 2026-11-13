@@ -1,8 +1,7 @@
 // The Argon2id password worker: bundle-web.mjs builds it into
 // password-worker-[hash].js, which the node serves with the one policy that
 // lets it compile WebAssembly. The page never hashes a password itself
-// (src/web/workers/hasher.ts talks to it). Moved from
-// src/browser/passwordWorker.ts, which the server pages keep until they go.
+// (src/web/workers/hasher.ts talks to it).
 import { calibratePasswordCosts } from '../../auth/passwordCalibration.js'
 import { clientPasswordHash } from '../../auth/passwordKdf.js'
 import {

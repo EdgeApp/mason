@@ -1,4 +1,4 @@
-// Install apps and Devices rules the server pages and the web app share:
+// Install apps and Devices rules the web app draws by:
 // which platform a visit is for, how a run's variants group into one build,
 // what a device's state and model read as, and when Devices refreshes.
 import { platformNames, type PlatformName } from './api/dashboard.js'

@@ -371,20 +371,11 @@ describe('Host web API: node and session', function () {
     }
     // Still signed in after all that.
     assert.equal((await b.send('GET', '/api/v2/session')).status, 200)
-    // The old pages' sign-out form takes the same proof in its field.
-    const form = await fetch(c.hosts.get('host')!.web!.url + '/auth/logout', {
-      method: 'POST',
-      redirect: 'manual',
-      // @ts-expect-error undici's dispatcher option
-      dispatcher: insecure,
-      headers: {
-        cookie: `${SESSION}=${b.cookie!}`,
-        origin: ORIGIN,
-        'content-type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({ csrf }),
+    // Signing out takes the same proof.
+    const out = await b.send('DELETE', '/api/v2/session', {
+      headers: { ...fromHost, 'x-mason-csrf': csrf },
     })
-    assert.equal(form.status, 303)
+    assert.equal(out.status, 200, out.text)
     assert.equal((await b.send('GET', '/api/v2/session')).status, 401)
   })
 
@@ -425,6 +416,31 @@ describe('Host web API: node and session', function () {
     }
     assert.equal(last!.status, 429, last!.text)
     assert.equal(typeof last!.json.retryAt, 'number')
+  })
+
+  it('refuses a sign-in to a role it does not know, keeping no session', async () => {
+    const db = runtime().cache.db
+    const role = db.prepare('UPDATE accounts SET role=? WHERE id=?')
+    // A role from a newer master.
+    role.run('owner', hugo)
+    try {
+      const b = browser()
+      const refused = await signIn(b)
+      assert.equal(refused.status, 401, refused.text)
+      assert.deepEqual(refused.json, {
+        error: 'This host does not know this account’s role; update the host',
+      })
+      // The cookie set for the session is cleared, and the session is gone.
+      const [set, cleared] = refused.headers.getSetCookie()
+      const token = /^__Host-mason-session=([^;]+)/.exec(set!)![1]
+      assert.equal(runtime().accounts.session(token), undefined)
+      assert.match(cleared!, /^__Host-mason-session=;/)
+      assert.equal(b.cookie, undefined)
+      assert.equal((await b.send('GET', '/api/v2/session')).status, 401)
+    } finally {
+      role.run('developer', hugo)
+    }
+    assert.equal((await signIn(browser())).status, 200)
   })
 })
 
@@ -623,6 +639,12 @@ describe('Host web API: the pages’ reads, from its cache', function () {
       (await get('/api/v2/dashboard', { key: f.keys.scoped })).status,
       403,
     )
+    // The shell's reads are about the whole node, so a scoped key is refused.
+    for (const route of ['/api/v2/status', '/api/v2/notifications']) {
+      assert.equal((await get(route, { key: f.keys.developer })).status, 200)
+      for (const key of [f.keys.scoped, f.keys.release])
+        assert.equal((await get(route, { key })).status, 403, route)
+    }
     assert.equal(
       (await get('/api/v2/account', { key: f.keys.developer })).status,
       401,
@@ -796,5 +818,181 @@ describe('Host web API: the pages’ reads, from its cache', function () {
     assert.equal(shape(asStatusInfo, status.data).link?.online, true)
     // The queue is still the master's, relayed.
     assert.equal(frames.find((frame) => frame.key === 'queue')?.event, 'queue')
+  })
+
+  it('answers a project with no app the same on its pages and its reads, as the master does', async () => {
+    f.c.master.master!.saveProject(localOperator, 'appless', {
+      name: 'Appless',
+      repository: 'https://github.com/example/appless',
+    })
+    await f.c.until(
+      () =>
+        host
+          .host!.cache.db.prepare(
+            "SELECT 1 FROM projects WHERE slug='appless' AND details IS NOT NULL",
+          )
+          .get() != null,
+      10_000,
+      'the project on the host',
+    )
+    // A project's pages ask for the project and its reads for the role and
+    // scope only, on either node: no app to see hides neither.
+    for (const node of [f.c.master, host]) {
+      const who = f.on(node === host ? 'host' : 'master', 'developer')
+      for (const route of [
+        '/projects/appless',
+        '/projects/appless/runs',
+        '/projects/appless/masonfile',
+        '/api/v2/projects/appless/overview',
+        '/api/v2/projects/appless/runs',
+        '/api/v2/projects/appless/masonfile/commits',
+      ]) {
+        const reply = await f.request(node, 'GET', route, who)
+        assert.equal(
+          reply.status,
+          200,
+          `${node === host ? 'host' : 'master'} ${route}: ${reply.text}`,
+        )
+      }
+    }
+  })
+
+  it('lists a branch-scoped key only its branches’ runs, artifacts and commits, on either node', async () => {
+    const key = { key: f.keys.release }
+    const cache = host.host!.cache.db
+    // The host lists the commits it holds a Masonfile copy of.
+    await f.c.until(
+      () =>
+        cache
+          .prepare(
+            "SELECT 1 FROM jobs j JOIN masonfiles m ON m.key=j.project_id || ':' || j.commit_sha WHERE j.id=? AND m.text IS NOT NULL",
+          )
+          .get(f.runs.waiting) != null,
+      20_000,
+      'the release run’s Masonfile on the host',
+    )
+    const release = String(
+      cache
+        .prepare('SELECT commit_sha FROM jobs WHERE id=?')
+        .get(f.runs.waiting)!.commit_sha,
+    )
+    const master = String(
+      cache.prepare('SELECT commit_sha FROM jobs WHERE id=?').get(f.runs.built)!
+        .commit_sha,
+    )
+    for (const node of [f.c.master, host]) {
+      const where = node === host ? 'host' : 'master'
+      const read = async (route: string): Promise<Reply2> =>
+        await f.request(node, 'GET', route, key)
+      const onRelease = (runs: Array<{ id: string; branch: string }>): void => {
+        assert(runs.length > 0, `${where}: no runs`)
+        assert(
+          runs.every((run) => run.branch === 'release'),
+          `${where}: ${JSON.stringify(runs)}`,
+        )
+        assert(!runs.some((run) => run.id === f.runs.built), where)
+      }
+      // Without ?branch=, a project's runs and its branch list.
+      const runs = shape(
+        asProjectRuns,
+        (await read('/api/v2/projects/reads/runs')).json,
+      )
+      onRelease(runs.runs)
+      assert.deepEqual(
+        runs.branches.map((entry) => entry.branch),
+        ['release'],
+        where,
+      )
+      assert.equal(runs.more, false, where)
+      // Only build publishes alpha, and it ran on master.
+      const app = (await read(`/api/v2/projects/reads/runs?app=${ALPHA}`)).json
+      assert.deepEqual([app.branches, app.runs], [[], []], where)
+      assert.equal(
+        (await read('/api/v2/projects/reads/runs?branch=master')).status,
+        403,
+        where,
+      )
+      // Artifacts narrowed to the project, and the branches it offers.
+      const artifacts = (await read('/api/v2/artifacts?project=reads')).json
+      onRelease(artifacts.runs)
+      assert.deepEqual(artifacts.branches, ['release'], where)
+      // The Masonfile tab's commits, the one it shows, and another branch's.
+      assert.deepEqual(
+        (await read('/api/v2/projects/reads/masonfile/commits')).json,
+        [{ sha: release, branch: 'release' }],
+        where,
+      )
+      assert.equal(
+        (await read('/api/v2/projects/reads/masonfile')).json.commit,
+        release,
+        where,
+      )
+      const other = await read(
+        `/api/v2/projects/reads/masonfile?commit=${master}`,
+      )
+      assert.deepEqual(
+        [other.status, other.json],
+        [404, { error: 'No run this key covers has that commit.' }],
+        where,
+      )
+      assert.equal(
+        (await read('/api/v2/projects/reads/overview')).status,
+        200,
+        where,
+      )
+    }
+  })
+
+  it('answers a disabled project 404 on its pages and its reads, on either node', async () => {
+    const m = f.c.master.master!
+    const cache = host.host!.cache.db
+    const onHost = async (enabled: number): Promise<void> => {
+      await f.c.until(
+        () =>
+          cache
+            .prepare(
+              "SELECT 1 FROM projects WHERE slug='dormant' AND enabled=? AND details IS NOT NULL",
+            )
+            .get(enabled) != null,
+        10_000,
+        `the project on the host, enabled=${enabled}`,
+      )
+    }
+    const routes = [
+      '/projects/dormant',
+      '/projects/dormant/runs',
+      '/projects/dormant/masonfile',
+      '/api/v2/projects/dormant/overview',
+      '/api/v2/projects/dormant/runs',
+      '/api/v2/projects/dormant/masonfile/commits',
+    ]
+    const answers = async (status: number): Promise<void> => {
+      for (const node of [f.c.master, host]) {
+        const who = f.on(node === host ? 'host' : 'master', 'admin')
+        for (const route of routes) {
+          const reply = await f.request(node, 'GET', route, who)
+          assert.equal(
+            reply.status,
+            status,
+            `${node === host ? 'host' : 'master'} ${route}: ${reply.text}`,
+          )
+        }
+      }
+    }
+    m.saveProject(localOperator, 'dormant', {
+      name: 'Dormant',
+      repository: 'https://github.com/example/dormant',
+      enabled: false,
+    })
+    try {
+      await onHost(0)
+      // One rule on both nodes: a disabled project is 404, even to an admin.
+      await answers(404)
+      m.saveProject(localOperator, 'dormant', { enabled: true })
+      await onHost(1)
+      await answers(200)
+    } finally {
+      m.projects.remove(localOperator, 'dormant')
+    }
   })
 })

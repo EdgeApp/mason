@@ -1,10 +1,9 @@
-import { asPin } from '../node/pinnedFetch.js'
 import { DatabaseSync } from 'node:sqlite'
 import { isIP } from 'node:net'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { asObject, asString, asOptional } from 'cleaners'
+import { asObject, asString } from 'cleaners'
 import { noSymlinks, privateDirectory } from '../config.js'
 import { integer, oneOf, text } from '../validation.js'
 import {
@@ -639,10 +638,3 @@ export function exclusiveLock(file: string): DatabaseSync {
     throw error
   }
 }
-export const asClientConfig = asObject({
-  url: text(2048),
-  keyFile: text(4096),
-  pollMs: asOptional(integer(50, 10000), 1000),
-  /** Public-key pin of a master serving its own self-signed certificate. */
-  pin: asOptional(asPin),
-})

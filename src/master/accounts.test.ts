@@ -259,8 +259,17 @@ describe('Master sign-in, setup, people and permissions', function () {
       home.headers.get('content-security-policy')!,
       /wasm-unsafe-eval/,
     )
-    assertShell(await request(c.master, 'GET', '/sign-in'))
-    const bundle = await request(c.master, 'GET', '/assets/password-worker.js')
+    const signInPage = await request(c.master, 'GET', '/sign-in')
+    assertShell(signInPage)
+    // The old pages' worker is gone; the shell names the hashed one.
+    assert.equal(
+      (await request(c.master, 'GET', '/assets/password-worker.js')).status,
+      404,
+    )
+    const worker = /name="mason-password-worker" content="([^"]+)"/.exec(
+      signInPage.text,
+    )![1]!
+    const bundle = await request(c.master, 'GET', worker)
     assert.equal(bundle.status, 200)
     assert.match(bundle.headers.get('content-type')!, /javascript/)
     assert.match(
@@ -403,7 +412,7 @@ describe('Master sign-in, setup, people and permissions', function () {
         (await request(node, 'GET', '/api/v2/node')).json.setupNeeded,
         true,
       )
-      // Before the first account: sign-in and backups lead to setup; other pages are 404.
+      // Before the first account: every page leads to setup.
       assert.equal(
         (await request(node, 'GET', '/sign-in')).headers.get('location'),
         '/',
@@ -412,7 +421,10 @@ describe('Master sign-in, setup, people and permissions', function () {
         (await request(node, 'GET', '/backups')).headers.get('location'),
         '/',
       )
-      assert.equal((await request(node, 'GET', '/elsewhere')).status, 404)
+      assert.equal(
+        (await request(node, 'GET', '/elsewhere')).headers.get('location'),
+        '/',
+      )
       const code = (await import('node:fs'))
         .readFileSync(path.join(data, 'setup-code'), 'utf8')
         .trim()

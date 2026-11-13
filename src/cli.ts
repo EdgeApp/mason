@@ -1,10 +1,7 @@
 import { backfillDevices } from './devices/backfill.js'
-import { builderCommand } from './builder/cli.js'
-import { keyCommand } from './upload/keyCli.js'
 import { realpathSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { loadConfig } from './config.js'
-import { serve } from './server.js'
 import { Accounts } from './auth/accounts.js'
 import { rewriteTeamStationSubjects } from './auth/rewriteTeamStationSubjects.js'
 import { asId } from './validation.js'
@@ -12,33 +9,45 @@ import { Store } from './store.js'
 import { nodeMain } from './node/main.js'
 
 /**
- * The legacy commands keep their exact syntax: every `builder` and
- * `devices-*` command, `keys import`, and any command given `--config <file>`.
+ * The message for a command the cluster retired with the standalone server
+ * and builder, or undefined for any other command.
+ */
+export function retiredCommand(argv: string[]): string | undefined {
+  const [command, action] = argv
+  const name =
+    command === 'builder'
+      ? 'mason builder'
+      : command === 'serve' && argv.includes('--config')
+        ? 'mason serve --config'
+        : command === 'keys' && action === 'import'
+          ? 'mason keys import'
+          : command === 'keys' && argv.includes('--config')
+            ? 'mason keys --config'
+            : undefined
+  return name == null
+    ? undefined
+    : `\`${name}\` is retired: the cluster replaced the standalone server, the builder and their keys. See "Migrating from the standalone server and builder" in the README.`
+}
+
+/**
+ * The legacy maintenance commands keep their exact syntax: every
+ * `devices-*` command, and any command given `--config <file>`. They work
+ * on the pre-cluster distribution database.
  */
 export function isLegacyCommand(argv: string[]): boolean {
-  return (
-    argv.includes('--config') ||
-    argv[0] === 'builder' ||
-    (argv[0] === 'keys' && argv[1] === 'import') ||
-    (argv[0]?.startsWith('devices-') ?? false)
-  )
+  return argv.includes('--config') || (argv[0]?.startsWith('devices-') ?? false)
 }
 
 export function run(
   argv: string[],
   output: (value: string) => void = console.log,
 ): void {
-  if (argv[0] === 'keys') {
-    keyCommand(argv.slice(1), output)
-    return
-  }
   const [command, flag, file] = argv
   if (
     ![
       'migrate',
       'prune',
       'status',
-      'serve',
       'accounts',
       'admin-grant',
       'admin-revoke',
@@ -60,26 +69,9 @@ export function run(
           : argv.length !== 3)
   )
     throw new Error(
-      'Usage: mason migrate|prune|status|serve --config <file>; mason rewrite-teamstation-subjects --config <file> --provider <id> [--apply]; mason admin-grant --config <file> --provider <id> --subject <subject (usr_ for TeamStation)> --email <email>',
+      'Usage: mason migrate|prune|status|accounts --config <file>; mason rewrite-teamstation-subjects --config <file> --provider <id> [--apply]; mason admin-grant --config <file> --provider <id> --subject <subject (usr_ for TeamStation)> --email <email>',
     )
   const store = new Store(loadConfig(file))
-  if (command === 'serve') {
-    const server = serve(store)
-    server.once('error', () => {
-      console.error('Mason could not start its listener')
-      process.exitCode = 1
-    })
-    const stop = (): void => {
-      server.close()
-    }
-    process.once('SIGTERM', stop)
-    process.once('SIGINT', stop)
-    server.once('close', () => {
-      process.off('SIGTERM', stop)
-      process.off('SIGINT', stop)
-    })
-    return
-  }
   try {
     const accounts = new Accounts(store)
     if (command === 'rewrite-teamstation-subjects') {
@@ -127,20 +119,17 @@ if (
   import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
 ) {
   try {
-    if (
+    const retired = retiredCommand(process.argv.slice(2))
+    if (retired != null) {
+      console.error(retired)
+      process.exitCode = 1
+    } else if (
       process.argv[2] === 'devices-inspect' &&
       process.argv[3] === '--config' &&
       process.argv.length === 5
     ) {
       void backfillDevices(process.argv[4]!).catch(() => {
         console.error('Mason device metadata inspection failed')
-        process.exitCode = 1
-      })
-    } else if (process.argv[2] === 'builder') {
-      void builderCommand(process.argv.slice(3)).catch(() => {
-        console.error(
-          'Builder command failed. Check private configuration and job status.',
-        )
         process.exitCode = 1
       })
     } else if (isLegacyCommand(process.argv.slice(2)))

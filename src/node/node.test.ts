@@ -15,8 +15,7 @@ import type { AddressInfo } from 'node:net'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'mocha'
 import { Agent, fetch } from 'undici'
-import { builderCommand } from '../builder/cli.js'
-import { isLegacyCommand, run } from '../cli.js'
+import { isLegacyCommand, retiredCommand, run } from '../cli.js'
 import { parseArgs, parseRoleCommand, port, single } from './args.js'
 import { createCertificate, publicKeyPin } from './certificate.js'
 import { controlRequest } from './control.js'
@@ -257,10 +256,13 @@ describe('Configuration-free nodes', function () {
       (await get(url + '/api/v2/node', node.identity.pin)).body,
       /"setupNeeded":true/,
     )
-    assert.equal((await get(url + '/missing', node.identity.pin)).status, 404)
+    // Before setup every address opens first-run setup, the web app's.
+    const setup = await get(url + '/missing', node.identity.pin)
+    assert.equal(setup.status, 200)
+    assert.match(setup.body, /<div id="root"><\/div>/)
     assert.equal(
       (await get(url + '/assets/style.css', node.identity.pin)).status,
-      200,
+      404,
     )
     const status = (await controlRequest(node.dir, 'status')) as Record<
       string,
@@ -385,9 +387,21 @@ describe('Configuration-free nodes', function () {
       host.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') + '/',
       host.identity.pin,
     )
+    // The web app's shell, which reads the host's state from /api/v2/node.
     assert.equal(page.status, 503)
-    assert.match(page.body, /Test endpoints are enabled/)
-    assert.match(page.body, /waiting for its master/)
+    assert.match(page.body, /<div id="root"><\/div>/)
+    const info = JSON.parse(
+      (
+        await get(
+          host.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') + '/api/v2/node',
+          host.identity.pin,
+        )
+      ).body,
+    ) as { state: string; testEndpoints: boolean }
+    assert.deepEqual(
+      [info.state, info.testEndpoints],
+      ['waitingForMaster', true],
+    )
     hostIO.stop()
     assert.equal(await hostDone, 0)
   })
@@ -1240,73 +1254,14 @@ describe('Configuration-free nodes', function () {
     }
   })
 
-  it('lets the builder client reach a master by pin', async () => {
-    const certificate = createCertificate(['127.0.0.1'])
-    let polls = 0
-    const server = createHttpsServer(
-      { cert: certificate.cert, key: certificate.key },
-      (req, res) => {
-        res.setHeader('Content-Type', 'application/json')
-        if (req.method === 'POST')
-          res.end(JSON.stringify({ id: 'job-1', status: 'queued' }))
-        else
-          res.end(
-            JSON.stringify({
-              id: 'job-1',
-              status: ++polls < 2 ? 'running' : 'succeeded',
-            }),
-          )
-      },
-    ).listen(0, '127.0.0.1')
-    await once(server, 'listening')
-    try {
-      const key = path.join(root, 'key')
-      writeFileSync(key, 'a'.repeat(64), { mode: 0o600 })
-      const config = path.join(root, 'client.json')
-      const write = (pin: string): void =>
-        writeFileSync(
-          config,
-          JSON.stringify({
-            url: `https://127.0.0.1:${(server.address() as AddressInfo).port}`,
-            keyFile: 'key',
-            pollMs: 50,
-            pin,
-          }),
-          { mode: 0o600 },
-        )
-      write(publicKeyPin(certificate.cert))
-      const output: string[] = []
-      await builderCommand(
-        [
-          'build',
-          '--client-config',
-          config,
-          '--app',
-          'app.example',
-          '--branch',
-          'master',
-        ],
-        (line) => output.push(line),
-      )
-      assert.equal(JSON.parse(output.at(-1)!).status, 'succeeded')
-      write(publicKeyPin(createCertificate([]).cert))
-      await assert.rejects(
-        builderCommand(
-          ['build', '--client-config', config, '--app', 'app.example'],
-          () => undefined,
-        ),
-      )
-      assert.equal(polls, 2)
-    } finally {
-      server.close()
-    }
-  })
-
   it('keeps the legacy commands on their old paths', async () => {
     assert(isLegacyCommand(['status', '--config', 'x']))
-    assert(isLegacyCommand(['builder', 'serve']))
+    // The standalone builder and distribution server are retired.
+    assert(!isLegacyCommand(['builder', 'serve']))
+    assert.throws(() => run(['serve', '--config', 'x']), /Usage/)
     assert(isLegacyCommand(['devices-inspect']))
-    assert(isLegacyCommand(['keys', 'import', '--file', 'f']))
+    // So are the upload keys their upload API took.
+    assert(!isLegacyCommand(['keys', 'import', '--file', 'f']))
     assert(!isLegacyCommand(['keys', 'create', '--role', 'developer']))
     assert(!isLegacyCommand(['status']))
     assert(!isLegacyCommand([]))
@@ -1332,13 +1287,23 @@ describe('Configuration-free nodes', function () {
       assert.match(result.err, /failed/)
     }
     assert.match(
-      (await runCli(['builder', 'apps', '--config', missing])).err,
-      /Builder command failed/,
-    )
-    assert.match(
       (await runCli(['status', '--config', missing])).err,
       /Mason command failed/,
     )
+    for (const [args, name] of [
+      [['serve', '--config', missing], 'mason serve --config'],
+      [['builder'], 'mason builder'],
+      [['keys', 'list', '--config', missing], 'mason keys --config'],
+      [['keys', 'import', '--file', missing], 'mason keys import'],
+    ] as const) {
+      const result = await runCli([...args])
+      assert.equal(result.code, 1)
+      assert(result.err.includes(`\`${name}\` is retired`), result.err)
+      assert.match(result.err, /Migrating from the standalone server/)
+    }
+    // The node's own keys command keeps its name.
+    assert.equal(retiredCommand(['keys', 'list', '--data', root]), undefined)
+    assert.equal(retiredCommand(['serve']), undefined)
     const help = await runCli(['help'])
     assert.equal(help.code, 0)
     assert.match(help.out, /mason worker/)

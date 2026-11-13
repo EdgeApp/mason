@@ -36,6 +36,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { LinkError, type Link } from '../link/link.js'
 import { Outbox } from './outbox.js'
 import { HostCache } from './cache.js'
+import { hostMasonfileCommits } from './reads.js'
 import { proofLog } from '../test/proofLog.js'
 import { assertShell } from '../test/webShell.js'
 import type { NodeInfo } from '../shared/api/index.js'
@@ -1076,9 +1077,12 @@ describe('Host cache, sign-in and offline serving', function () {
       await c.until(() => !runtime().online(), 2000, 'offline')
       assert.equal((await b.get('/')).status, 200)
       runtime().advanceClock(73 * 3_600_000)
+      // The web app's shell, which reads why from /api/v2/node.
       const maintenance = await b.get('/')
       assert.equal(maintenance.status, 503)
-      assert.match(await maintenance.text(), /Maintenance/)
+      assert.match(await maintenance.text(), /<div id="root"><\/div>/)
+      const node = (await (await b.get('/api/v2/node')).json()) as Json
+      assert.equal(node.state, 'maintenance')
       // Install apps' JSON has nothing to serve either.
       const apps = await b.get('/api/v2/catalog/apps')
       assert.equal(apps.status, 503)
@@ -1266,7 +1270,8 @@ describe('Host cache, sign-in and offline serving', function () {
       'Hugo on the host',
     )
     const hugoBrowser = browser()
-    // The web app's sign-in; the old pages' worker stays for Your account.
+    // The web app's sign-in, which names its own hashed password worker;
+    // the old pages' worker is gone.
     const login = await hugoBrowser.get('/auth/login?return=/apps')
     assertShell({
       status: login.status,
@@ -1275,7 +1280,7 @@ describe('Host cache, sign-in and offline serving', function () {
     })
     assert.equal(
       (await hugoBrowser.get('/assets/password-worker.js')).status,
-      200,
+      404,
     )
     const json = async (route: string, value: unknown): Promise<Response> =>
       await hugoBrowser.get(route, {
@@ -1585,11 +1590,15 @@ describe('Host cache, sign-in and offline serving', function () {
       'the host synced',
     )
     await master.settings.set(admin, 'host', before)
-    assert.equal((await b.get('/install.sh')).status, 404)
-    assert.equal(
-      (await b.get('/releases/current/mason-0.2.0-linux-x64.tar.gz')).status,
-      404,
-    )
+    // Their addresses are no files: signed out, they send to sign in.
+    for (const route of [
+      '/install.sh',
+      '/releases/current/mason-0.2.0-linux-x64.tar.gz',
+    ]) {
+      const reply = await b.get(route)
+      assert.equal(reply.status, 303, route)
+      assert.match(reply.headers.get('location')!, /^\/auth\/login\?return=/)
+    }
     assert(!existsSync(path.join(host.dir, 'storage', 'releases')))
   })
 
@@ -1749,8 +1758,7 @@ describe('Host cache, sign-in and offline serving', function () {
     // Offline, plain answers pass through without the banner.
     await c.drop('host', 1000, async () => {
       await c.until(() => !runtime().online(), 2000, 'offline')
-      const missing = await tess.get('/nothing-here')
-      assert.equal(await missing.text(), 'Not found')
+      assertShell(await shellOf(tess, '/nothing-here'), 404)
     })
     await c.until(() => runtime().online(), 10000, 'online')
     // A host started before it has a runtime only says it is waiting.
@@ -1763,8 +1771,16 @@ describe('Host cache, sign-in and offline serving', function () {
     const waiting = await fetch(
       `http://127.0.0.1:${(server.address() as { port: number }).port}/anything`,
     )
+    // A page is the web app's shell, which reads why from /api/v2/node;
+    // anything else says so plainly.
     assert.equal(waiting.status, 503)
-    assert.match(await waiting.text(), /waiting for its master/)
+    assert.match(await waiting.text(), /<div id="root"><\/div>/)
+    const posted = await fetch(
+      `http://127.0.0.1:${(server.address() as { port: number }).port}/anything`,
+      { method: 'POST' },
+    )
+    assert.equal(posted.status, 503)
+    assert.match(await posted.text(), /waiting for its master/)
     server.close()
   })
 
@@ -2079,5 +2095,43 @@ describe('Plain emails on the host', () => {
       [],
     )
     db.close()
+  })
+})
+
+describe('Masonfile commits on the host', () => {
+  it('offers each commit once, with its newest run’s branch, newest first and 30 at most, as the master does', () => {
+    const dir = mkdtempSync(
+      path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'host-commits-'),
+    )
+    const cache = new HostCache(dir)
+    try {
+      const job = cache.db.prepare(
+        "INSERT INTO jobs(id,project_id,workflow,number,branch,commit_sha,trigger,status,created,params,actor) VALUES(?,7,'build',?,?,?,'request','succeeded',?,'{}','test')",
+      )
+      const masonfile = cache.db.prepare(
+        "INSERT INTO masonfiles(key,project_id,commit_sha,file,text) VALUES(?,7,?,'Masonfile.ts','')",
+      )
+      const commits = (): string[][] =>
+        hostMasonfileCommits({ cache } as unknown as HostRuntime, 7).map(
+          (commit) => [commit.sha, commit.branch],
+        )
+      // One commit run on two branches, the newer run copied first; and a
+      // commit the host has no Masonfile copy for.
+      job.run('b-newer', 2, 'feature', 'shared', 2000)
+      job.run('a-older', 1, 'master', 'shared', 1000)
+      masonfile.run('7:shared', 'shared')
+      job.run('c-bare', 3, 'master', 'bare', 3000)
+      assert.deepEqual(commits(), [['shared', 'feature']])
+      for (let i = 0; i < 31; i++) {
+        job.run(`d-${i}`, 10 + i, 'develop', `c${i}`, 10_000 + i)
+        masonfile.run(`7:c${i}`, `c${i}`)
+      }
+      assert.deepEqual(
+        commits(),
+        Array.from({ length: 30 }, (_, i) => [`c${30 - i}`, 'develop']),
+      )
+    } finally {
+      cache.close()
+    }
   })
 })

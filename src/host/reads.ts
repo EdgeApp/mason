@@ -11,14 +11,15 @@ import type {
   StatusInfo,
 } from '../shared/api/index.js'
 import { isRole } from '../shared/permissions.js'
-import { approvalRolesFromGraph } from '../view/notifications.js'
-import { graphFromJson, type RunGraph } from '../view/run.js'
-import type { ViewerRole } from '../view/shell.js'
+import { approvalRolesFromGraph } from '../master/pageData/notifications.js'
+import { newestCommits } from '../master/pageData/artifacts.js'
+import { graphFromJson, type RunGraph } from '../master/pageData/run.js'
+import type { ViewerRole } from '../master/pageData/viewer.js'
 import { refusal } from './builds.js'
 import type { HostRuntime } from './runtime.js'
 
 /** What the shell says while the master is unreachable. */
-export const OFFLINE_TEXT =
+const OFFLINE_TEXT =
   'The Mason master is unreachable. You are seeing the last synced builds.'
 
 /** The host's link to its master, and the banners its pages show. */
@@ -90,16 +91,31 @@ export function hostAccount(host: HostRuntime, accountId: number): AccountInfo {
   }
 }
 
-/** The commits the host has a Masonfile copy for, newest run first. */
+/**
+ * The commits the host has a Masonfile copy for, as the master's
+ * `masonfileCommits`: each commit's newest run first, 30 at most; with
+ * `keep`, each commit's newest run on a branch it passes.
+ */
 export function hostMasonfileCommits(
   host: HostRuntime,
   projectId: number,
+  keep?: (branch: string) => boolean,
 ): MasonfileCommit[] {
-  return host.cache.db
-    .prepare(
-      "SELECT j.commit_sha AS sha, j.branch FROM jobs j JOIN masonfiles m ON m.key=j.project_id || ':' || j.commit_sha WHERE j.project_id=? GROUP BY j.commit_sha ORDER BY MAX(j.created) DESC LIMIT 50",
-    )
-    .all(projectId) as unknown as MasonfileCommit[]
+  const db = host.cache.db
+  if (keep == null)
+    return db
+      .prepare(
+        "SELECT commit_sha AS sha,branch FROM (SELECT j.commit_sha,j.branch,ROW_NUMBER() OVER (PARTITION BY j.commit_sha ORDER BY j.created DESC) AS place,j.created FROM jobs j JOIN masonfiles m ON m.key=j.project_id || ':' || j.commit_sha WHERE j.project_id=?) WHERE place=1 ORDER BY created DESC LIMIT 30",
+      )
+      .all(projectId) as unknown as MasonfileCommit[]
+  return newestCommits(
+    db
+      .prepare(
+        "SELECT j.commit_sha AS sha,j.branch FROM jobs j JOIN masonfiles m ON m.key=j.project_id || ':' || j.commit_sha WHERE j.project_id=? ORDER BY j.created DESC",
+      )
+      .iterate(projectId) as Iterable<MasonfileCommit>,
+    keep,
+  )
 }
 
 /**
@@ -153,7 +169,13 @@ export function hostReader(
       details: string | null
     }>
   const project = (slug: string): ProjectRecord | undefined => {
-    const row = projects().find((entry) => entry.slug === slug)
+    const row = db
+      .prepare(
+        'SELECT id,slug,name,details FROM projects WHERE slug=? AND enabled=1',
+      )
+      .get(slug) as
+      | { id: number; slug: string; name: string; details: string | null }
+      | undefined
     const details = storedDetails(row?.details)
     if (row == null || details == null) return undefined
     const names = new Map(
@@ -237,7 +259,8 @@ export function hostReader(
       return row == null ? undefined : graphFromJson(row.graph, row.workflow)
     },
     runOptions: () => ({}),
-    masonfileCommits: (projectId) => hostMasonfileCommits(host, projectId),
+    masonfileCommits: (projectId, keep) =>
+      hostMasonfileCommits(host, projectId, keep),
     // The host answers from its copies only: it cannot read a repository.
     masonfile: async (found, commit): Promise<MasonfileText> => {
       const kept = db

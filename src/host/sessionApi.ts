@@ -151,7 +151,17 @@ export function hostSessionApi(
     if (!fromHere(req, res)) return
     try {
       const { session } = await passwordSignIn(req, res, store, password)
-      const info = describe(session.account_id, session.csrf)!
+      const info = describe(session.account_id, session.csrf)
+      if (info == null) {
+        // A role this host does not know (its master is newer): end the
+        // session it cannot describe, and refuse as for any sign-in.
+        store.db.prepare('DELETE FROM sessions WHERE hash=?').run(session.hash)
+        res.clearCookie(SESSION_COOKIE, cookieOptions)
+        refuse(res, 401, {
+          error: 'This host does not know this account’s role; update the host',
+        })
+        return
+      }
       const reply: SignInReply = {
         name: info.name,
         role: info.role,

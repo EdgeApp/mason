@@ -131,7 +131,15 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
   rmSync(work, { recursive: true, force: true })
   mkdirSync(work, { recursive: true })
   mkdirSync(options.out, { recursive: true })
-  if (!existsSync(path.join(options.repo, 'lib', 'cli.js')))
+  // The node and its web app: tsc's output and the React app's bundle,
+  // built from the development install, with its packages' licences.
+  const bundles = path.join(options.repo, 'lib', 'web', 'bundles')
+  const bundled = path.join(bundles, 'THIRD_PARTY_LICENCES.md')
+  if (
+    !existsSync(path.join(options.repo, 'lib', 'cli.js')) ||
+    !existsSync(path.join(bundles, 'index.html')) ||
+    !existsSync(bundled)
+  )
     throw new Error('Build lib/ first (npm run build)')
 
   let modules = options.modules
@@ -152,7 +160,9 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
     )
     modules = path.join(deps, 'node_modules')
   }
-  const notice = licences(modules)
+  // React and the web app's other packages are development dependencies,
+  // so the production modules leave them out; the bundle lists theirs.
+  const notice = `${licences(modules)}\n# Bundled into the web app (lib/web/bundles)\n\n${readFileSync(bundled, 'utf8')}`
   const sums = await fetchText(`${nodeSource}/v${nodeVersion}/SHASUMS256.txt`)
   const files: string[] = []
   const context: InstallContext = {
@@ -203,17 +213,23 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
       rmSync(path.join(node, extra), { recursive: true, force: true })
     for (const name of readdirSync(path.join(node, 'bin')))
       if (name !== 'node') rmSync(path.join(node, 'bin', name), { force: true })
-    // Mason itself, without its tests.
+    // Mason itself, with the web app's bundle (lib/web/bundles), without its tests.
     cpSync(path.join(options.repo, 'lib'), path.join(root, 'lib'), {
       recursive: true,
-      // Tests and their helpers stay out of a release.
-      filter: (source) =>
-        !source.endsWith('.test.js') &&
-        path
+      // Tests and their helpers stay out of a release, and so does tsc's
+      // copy of the web app: the nodes serve only its bundle.
+      filter: (source) => {
+        const parts = path
           .relative(path.join(options.repo, 'lib'), source)
-          .split(path.sep)[0] !== 'test',
+          .split(path.sep)
+        return (
+          !/\.test\.js(\.map)?$/.test(source) &&
+          !parts.includes('test') &&
+          (parts[0] !== 'web' || parts.length === 1 || parts[1] === 'bundles')
+        )
+      },
     })
-    // The fonts, icons and logo the pages are drawn with, and their licences.
+    // The fonts, icons and logo the web app is drawn with, and their licences.
     cpSync(path.join(options.repo, 'assets'), path.join(root, 'assets'), {
       recursive: true,
     })

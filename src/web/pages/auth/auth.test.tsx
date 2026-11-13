@@ -4,6 +4,7 @@ import { userEvent } from '@testing-library/user-event'
 import { afterEach, describe, it } from 'mocha'
 import { clientParameters } from '../../../auth/passwordProtocol.js'
 import { tryAgainAt } from '../../../shared/format.js'
+import { safeReturn } from '../../../shared/routes.js'
 import { FLOW_META, type SignInFlow } from '../../../shared/api/index.js'
 import { ApiClient, ApiError } from '../../api/client.js'
 import { App } from '../../main.js'
@@ -228,21 +229,43 @@ describe('Sign in', () => {
   })
 
   it('never returns to another origin, and says the browser signed out', async () => {
-    const app = renderApp({
-      path: '/auth/login?return=%2F%2Fevil.example&signed_out=1',
-      node: nodeInfo('host'),
-      replies: {
-        'POST /api/v2/session/parameters': PARAMETERS,
-        'POST /api/v2/session': { name: 'Tess', role: 'tester', csrf: 'p' },
-      },
-    })
-    await heading('Sign in')
-    screen.getByText('You are signed out.')
-    await fill('Username or email', 'tess')
-    await fill('Password', 'Tess-Horse-9-long')
-    await press('Sign in')
-    await until(() => app.left.length > 0, 'the sign-in')
-    assert.deepEqual(app.left, ['/'])
+    // A tab or newline is dropped by the URL parser: `/\t/evil.example` is `//evil.example`.
+    for (const hostile of [
+      '%2F%2Fevil.example',
+      '%2F%09%2Fevil.example',
+      '%2F%0A%2Fevil.example',
+    ]) {
+      const app = renderApp({
+        path: `/auth/login?return=${hostile}&signed_out=1`,
+        node: nodeInfo('host'),
+        replies: {
+          'POST /api/v2/session/parameters': PARAMETERS,
+          'POST /api/v2/session': { name: 'Tess', role: 'tester', csrf: 'p' },
+        },
+      })
+      await heading('Sign in')
+      screen.getByText('You are signed out.')
+      await fill('Username or email', 'tess')
+      await fill('Password', 'Tess-Horse-9-long')
+      await press('Sign in')
+      await until(() => app.left.length > 0, 'the sign-in')
+      assert.deepEqual(app.left, ['/'], hostile)
+      cleanup()
+    }
+    for (const value of [
+      '//evil.example',
+      '/\\evil.example',
+      '/\t/evil.example',
+      '/\n/evil.example',
+      '/\u007f/evil.example',
+      '/x#fragment',
+      '/auth/start/gh',
+      'https://evil.example',
+      '/' + 'x'.repeat(1024),
+      null,
+    ])
+      assert.equal(safeReturn(value), '/', String(value))
+    assert.equal(safeReturn('/apps/3?platform=ios'), '/apps/3?platform=ios')
   })
 
   it('says when password sign-in needs the master, and when the host has no copy of the account yet', async () => {

@@ -4,9 +4,16 @@
 //   password-worker-[hash].js  the Argon2id worker (src/web/workers/password.ts)
 //   theme-boot.js            unhashed; index.html loads it first, synchronously
 //   index.html               the shell, naming the hashed files
+//   THIRD_PARTY_LICENCES.md  the licences of the packages bundled in
 // The fonts stay where assetRoutes serves them (/assets/fonts/…). The server
 // serves the files under /assets/web/ (src/node/webRoutes.ts).
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { build } from 'esbuild'
@@ -56,7 +63,7 @@ const styles = await build({
   entryNames: '[name]-[hash]',
   external: ['/assets/fonts/*'],
 })
-await build({
+const boot = await build({
   ...common,
   stdin: {
     contents: "import { bootTheme } from './theme-boot.js'\nbootTheme()\n",
@@ -92,4 +99,30 @@ writeFileSync(
 </body>
 </html>
 `,
+)
+
+// The licences of the packages bundled in: React and the rest of the web
+// app's are development dependencies, which a release does not install, so
+// its notice takes them from here (src/release/build.ts).
+const bundled = new Set()
+for (const result of [scripts, styles, boot])
+  for (const input of Object.keys(result.metafile.inputs)) {
+    const found = /^(.*node_modules\/(?:@[^/]+\/)?[^/]+)\//.exec(input)
+    if (found != null) bundled.add(found[1])
+  }
+const licences = [...bundled].map((dir) => {
+  const name = dir.replace(/^node_modules\//, '')
+  const file = readdirSync(path.join(root, dir)).find((entry) =>
+    /^licen[cs]e(\.|$)/i.test(entry),
+  )
+  if (file != null)
+    return `## ${name}\n\n${readFileSync(path.join(root, dir, file), 'utf8').trim()}\n`
+  const { license } = JSON.parse(
+    readFileSync(path.join(root, dir, 'package.json'), 'utf8'),
+  )
+  return `## ${name}\n\n${license} (its package.json; it ships no licence file)\n`
+})
+writeFileSync(
+  path.join(outdir, 'THIRD_PARTY_LICENCES.md'),
+  licences.sort().join('\n'),
 )

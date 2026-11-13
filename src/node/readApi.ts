@@ -7,7 +7,7 @@ import {
   type Response,
 } from 'express'
 import { apiErrors, json, NotFound } from '../master/api.js'
-import { allow, allowRole, can, covers } from '../master/permissions.js'
+import { allow, allowRole, can, covers, scoped } from '../master/permissions.js'
 import type { Actor } from '../master/roles.js'
 import { SCRIPT_PROJECT } from '../master/projectDetails.js'
 import {
@@ -39,25 +39,27 @@ import {
   type StatusInfo,
   type WorkflowSpec,
 } from '../shared/api/index.js'
-import { appBuildNumbers } from '../view/admin.js'
+import { appBuildNumbers } from '../master/pageData/buildNumbers.js'
 import {
   artifactRunData,
   artifactsListData,
+  firstKept,
   projectRunsData,
-} from '../view/artifacts.js'
+  type ArtifactsSource,
+} from '../master/pageData/artifacts.js'
 import {
   dashboardData,
-  queueEntries,
   type DashboardSource,
-} from '../view/dashboard.js'
-import { layoutGraph, type StageState } from '../view/graph.js'
+} from '../master/pageData/dashboard.js'
+import { layoutGraph, type StageState } from '../master/pageData/graph.js'
 import {
   approvalNotifications,
   notificationsFor,
-} from '../view/notifications.js'
-import { runData, type RunData, type RunGraph } from '../view/run.js'
-import { search } from '../view/search.js'
-import type { Viewer, ViewerRole } from '../view/shell.js'
+} from '../master/pageData/notifications.js'
+import { runData, type RunData, type RunGraph } from '../master/pageData/run.js'
+import { search } from '../master/pageData/search.js'
+import type { Viewer, ViewerRole } from '../master/pageData/viewer.js'
+import { queueEntries } from '../master/queue.js'
 
 /** A project as its pages read it, on either node. */
 export interface ProjectRecord {
@@ -99,8 +101,11 @@ export interface NodeReader {
   reserved(run: string): string | undefined
   graphOf(run: string): RunGraph | undefined
   runOptions(): NonNullable<Parameters<typeof runData>[3]>
-  /** The commits the Masonfile tab offers, newest run first. */
-  masonfileCommits(projectId: number): MasonfileCommit[]
+  /** The commits the Masonfile tab offers, newest run first; with `keep`, only the branches it passes. */
+  masonfileCommits(
+    projectId: number,
+    keep?: (branch: string) => boolean,
+  ): MasonfileCommit[]
   /** A commit's Masonfile; a NotFound that says why there is none. */
   masonfile(project: ProjectRecord, commit: string): Promise<MasonfileText>
   account(actor: Actor): AccountInfo
@@ -110,7 +115,7 @@ export interface NodeReader {
 
 /** The view functions' viewer for an API caller. */
 export function viewerFor(reader: NodeReader, actor: Actor): Viewer {
-  return { name: '', role: actor.role, node: reader.node, signOut: '' }
+  return { role: actor.role, node: reader.node }
 }
 
 const text = (req: Request, name: string): string | undefined => {
@@ -138,23 +143,12 @@ export function notificationsOf(
   actor: Actor,
 ): NotificationItem[] {
   const viewer = viewerFor(reader, actor)
-  const target = (href: string | undefined): boolean => {
-    const id = /^\/runs\/([^/?]+)$/.exec(href ?? '')?.[1]
-    if (id == null) return true
-    try {
-      return covers(actor, runTarget(reader.db, decodeURIComponent(id)))
-    } catch {
-      return false
-    }
-  }
-  const approvals = approvalNotifications(reader.db, viewer, (job, stage) =>
-    reader.approvalRoles(job, stage),
-  ).filter((entry) => can(actor, 'runs.approve') && target(entry.href))
-  return notificationsFor(viewer, approvals, reader.notices()).map((entry) => ({
-    kind: entry.icon === 'pan_tool' ? 'approval' : 'notice',
-    text: entry.text,
-    ...(entry.href == null ? {} : { href: entry.href }),
-  }))
+  const approvals = can(actor, 'runs.approve')
+    ? approvalNotifications(reader.db, viewer, (job, stage) =>
+        reader.approvalRoles(job, stage),
+      )
+    : []
+  return notificationsFor(viewer, approvals, reader.notices())
 }
 
 /** Everything the run page draws, with the parts asked for. */
@@ -235,16 +229,26 @@ export function runPageData(
 /**
  * The workflows of the Masonfile a project's latest run recorded, the
  * default branch's first, for Request run; none when no kept graph has them.
+ * With `keep` (a scoped key's branches), only runs on a branch it passes.
  */
 export function latestWorkflows(
   reader: NodeReader,
   project: ProjectRecord,
+  keep?: (branch: string) => boolean,
 ): WorkflowSpec[] | undefined {
-  const jobs = reader.db
-    .prepare(
-      "SELECT id FROM jobs WHERE project_id=? AND workflow NOT LIKE '@%' ORDER BY branch=? DESC, created DESC LIMIT 5",
-    )
-    .all(project.id, project.details.defaultBranch) as Array<{ id: string }>
+  const jobs = firstKept(
+    reader.db
+      .prepare(
+        "SELECT id,branch FROM jobs WHERE project_id=? AND workflow NOT LIKE '@%' ORDER BY branch=? DESC, created DESC LIMIT ?",
+      )
+      .iterate(
+        project.id,
+        project.details.defaultBranch,
+        keep == null ? 5 : -1,
+      ) as Iterable<{ id: string; branch: string }>,
+    5,
+    keep == null ? undefined : (job): boolean => keep(job.branch),
+  )
   for (const job of jobs) {
     const workflows = reader.graphOf(job.id)?.workflows
     if (workflows != null && workflows.length > 0) return workflows
@@ -255,12 +259,14 @@ export function latestWorkflows(
 /**
  * The commit a Masonfile tab shows and its text, or why there is none:
  * the newest commit by default; for a script project, a commit with no run,
- * or one the node has no copy of, the reason.
+ * or one the node has no copy of, the reason. With `keep` (a scoped key's
+ * branches), only the commits of runs on a branch it passes.
  */
 export async function masonfileData(
   reader: NodeReader,
   project: ProjectRecord,
   commit: string | undefined,
+  keep?: (branch: string) => boolean,
 ): Promise<{
   commits: MasonfileCommit[]
   commit?: string
@@ -268,7 +274,19 @@ export async function masonfileData(
   text?: string
   error?: string
 }> {
-  const commits = reader.masonfileCommits(project.id)
+  const commits = reader.masonfileCommits(project.id, keep)
+  if (
+    commit != null &&
+    keep != null &&
+    !(
+      reader.db
+        .prepare(
+          'SELECT DISTINCT branch FROM jobs WHERE project_id=? AND commit_sha=?',
+        )
+        .all(project.id, commit) as Array<{ branch: string }>
+    ).some((row) => keep(row.branch))
+  )
+    return { commits, commit, error: 'No run this key covers has that commit.' }
   const chosen = commit ?? commits[0]?.sha
   if (project.details.format === 'script')
     return {
@@ -335,13 +353,28 @@ export function readApi(reader: NodeReader): Router {
   }
   const source = (
     actor: Actor,
-  ): DashboardSource & { artifactBase: string } => ({
+  ): DashboardSource & Pick<ArtifactsSource, 'artifactBase' | 'covers'> => ({
     db: reader.db,
     viewer: viewerFor(reader, actor),
     now: reader.now(),
     appVisible: reader.appVisible(actor),
     artifactBase: reader.artifactBase(),
+    // A scoped key lists only the runs and branches its scopes cover.
+    ...(scoped(actor)
+      ? {
+          covers: (target: { project: string; branch: string }) =>
+            covers(actor, target),
+        }
+      : {}),
   })
+  /** For a scoped key, whether its scopes cover a branch of the project. */
+  const branchesOf = (
+    actor: Actor,
+    found: ProjectRecord,
+  ): ((branch: string) => boolean) | undefined =>
+    scoped(actor)
+      ? (branch): boolean => covers(actor, { project: found.slug, branch })
+      : undefined
   /** A project the caller may read; 404 for one that does not exist or is disabled. */
   const project = (req: Request, actor: Actor): ProjectRecord => {
     const slug = String(req.params.slug)
@@ -376,12 +409,13 @@ export function readApi(reader: NodeReader): Router {
     }
   }
 
+  // The shell's reads are about the whole node, so a scoped key is refused.
   get(STATUS_PATH, (_req, _res, actor): StatusInfo => {
-    allowRole(actor, 'builds.read')
+    allow(actor, 'builds.read')
     return reader.status(actor)
   })
   get(NOTIFICATIONS_PATH, (_req, _res, actor): NotificationItem[] => {
-    allowRole(actor, 'builds.read')
+    allow(actor, 'builds.read')
     return notificationsOf(reader, actor)
   })
   get(SEARCH_PATH, (req, _res, actor): SearchResult[] => {
@@ -428,14 +462,12 @@ export function readApi(reader: NodeReader): Router {
       ...(filter == null ? {} : { project: filter }),
       ...(branch == null ? {} : { branch }),
     })
-    // A scoped key's filters offer only what it may read.
+    // A scoped key's filters offer only what it may read; its runs and
+    // branches are already only those its scopes cover.
     return {
       ...list,
       projects: list.projects.filter((project) =>
         covers(actor, { project: project.slug }),
-      ),
-      branches: list.branches.filter((name) =>
-        covers(actor, { project: filter!, branch: name }),
       ),
     }
   })
@@ -474,7 +506,7 @@ export function readApi(reader: NodeReader): Router {
     '/api/v2/projects/:slug/overview',
     (req, _res, actor): ProjectOverview => {
       const found = project(req, actor)
-      const workflows = latestWorkflows(reader, found)
+      const workflows = latestWorkflows(reader, found, branchesOf(actor, found))
       return {
         ...found.details,
         slug: found.slug,
@@ -534,14 +566,21 @@ export function readApi(reader: NodeReader): Router {
   })
   get(
     '/api/v2/projects/:slug/masonfile/commits',
-    (req, _res, actor): MasonfileCommit[] =>
-      reader.masonfileCommits(project(req, actor).id),
+    (req, _res, actor): MasonfileCommit[] => {
+      const found = project(req, actor)
+      return reader.masonfileCommits(found.id, branchesOf(actor, found))
+    },
   )
   get(
     '/api/v2/projects/:slug/masonfile',
     async (req, _res, actor): Promise<MasonfileText> => {
       const found = project(req, actor)
-      const data = await masonfileData(reader, found, text(req, 'commit'))
+      const data = await masonfileData(
+        reader,
+        found,
+        text(req, 'commit'),
+        branchesOf(actor, found),
+      )
       if (data.text == null) throw new NotFound(data.error!)
       return { commit: data.commit!, file: data.file!, text: data.text }
     },

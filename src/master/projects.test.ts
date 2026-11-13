@@ -34,7 +34,7 @@ import { Projects } from './projects.js'
 import { localOperator, type Actor } from './roles.js'
 import { asRules, globExpression, matches, ruleFor } from './rules.js'
 import { seedLegacySecrets, seedSecret } from '../test/secrets.js'
-import type { QueueEntry } from '../view/dashboard.js'
+import type { QueueEntry } from './queue.js'
 
 let root: string
 // API responses are read field by field in assertions.

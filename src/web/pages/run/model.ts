@@ -71,7 +71,7 @@ export const stageLabel = (name: string): string =>
 
 /**
  * A run whose graph is no longer kept: its stages one after another, from
- * Start to End, as the old page drew it.
+ * Start to End.
  */
 export function chainLayout(stages: readonly RunPageStage[]): Layout {
   const bubbles: Bubble[] = [

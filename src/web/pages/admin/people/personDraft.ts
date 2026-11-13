@@ -1,7 +1,7 @@
 // What People and Your account edit before Save: a person's name, username,
 // role and email lines, the change lines the confirm lists, and the body
 // `PUT /api/v2/people/:id` is sent. Nothing is stored until the confirm is
-// accepted (src/browser/personEditor.ts's rules and words).
+// accepted.
 import type { PersonChange } from '../../../../shared/api/people.js'
 import type { SessionEmail } from '../../../../shared/api/session.js'
 import { roles, type Role } from '../../../../shared/permissions.js'

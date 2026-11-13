@@ -15,10 +15,15 @@ import {
 import { nodeWebApp } from './webApp.js'
 import { assertShell } from '../test/webShell.js'
 import {
+  pageFallback,
+  pageRoutes,
+  PAGE_ROUTES,
   sendShell,
   WEB_ASSETS,
   webAppRoutes,
   webBundlesDir,
+  type PageAnswer,
+  type PageNode,
 } from './webRoutes.js'
 
 /** Serves an app on a free port and returns its origin and a closer. */
@@ -160,6 +165,11 @@ describe('The React app on a node', () => {
         flow: { state: 'failed', message: 'No "x" <b>&</b> here' },
       }),
     )
+    app.get('/patterns', (_req, res) =>
+      sendShell(res, {
+        flow: { state: 'failed', message: "$' $` $& $$ here" },
+      }),
+    )
     const { origin, server } = await serve(app)
     servers.push(server)
     const read = async (
@@ -179,6 +189,13 @@ describe('The React app on a node', () => {
       message: 'No "x" <b>&</b> here',
     })
     assert.doesNotMatch(flow.text, /<b>/)
+    // Replacement patterns in the flow are its text, not the page's.
+    const patterns = await read('/patterns')
+    assert.deepEqual(assertShell(patterns), {
+      state: 'failed',
+      message: "$' $` $& $$ here",
+    })
+    assert.equal(patterns.text.match(/<div id="root">/g)?.length, 1)
   })
 
   it('says so when the app is not built', async () => {
@@ -205,5 +222,106 @@ describe('The React app on a node', () => {
     } finally {
       rmSync(empty, { recursive: true, force: true })
     }
+  })
+
+  it('M11 answers every page from one table: sign-in when signed out, 403 or 404 by permission, the node’s check, and 404 elsewhere', async () => {
+    let role: 'admin' | 'developer' | 'tester' | undefined
+    const asked: string[] = []
+    const node = (kind: 'master' | 'host'): PageNode => ({
+      node: kind,
+      role: () => role,
+      signIn: (req) => `/sign-in?return=${encodeURIComponent(req.originalUrl)}`,
+      check: (subject, req): PageAnswer | Promise<PageAnswer> => {
+        asked.push(subject)
+        if (req.query.fail != null) throw new Error('The check failed')
+        if (subject === 'home' && role == null) return { redirect: '/sign-in' }
+        return subject === 'run' ? Promise.resolve(404) : 200
+      },
+    })
+    const mount = async (kind: 'master' | 'host'): Promise<string> => {
+      const app = express()
+      app.use(pageRoutes(node(kind)))
+      app.use(pageFallback(node(kind)))
+      app.use(
+        (
+          _error: unknown,
+          _req: express.Request,
+          res: express.Response,
+          _next: express.NextFunction,
+        ) => {
+          res.status(500).send('Server error')
+        },
+      )
+      const { origin, server } = await serve(app)
+      servers.push(server)
+      return origin
+    }
+    const onMaster = await mount('master')
+    const onHost = await mount('host')
+    const get = async (
+      origin: string,
+      route: string,
+      method = 'GET',
+    ): Promise<{ status: number; location: string | null; text: string }> => {
+      const reply = await fetch(origin + route, { method, redirect: 'manual' })
+      return {
+        status: reply.status,
+        location: reply.headers.get('location'),
+        text: await reply.text(),
+      }
+    }
+    // Signed out: sign-in for a page, the node's own answer for the open ones.
+    role = undefined
+    assert.equal(
+      (await get(onMaster, '/nodes')).location,
+      '/sign-in?return=%2Fnodes',
+    )
+    assert.equal((await get(onMaster, '/')).location, '/sign-in')
+    assert.equal((await get(onMaster, '/sign-in')).status, 200)
+    assert.equal(
+      (await get(onHost, '/elsewhere')).location,
+      '/sign-in?return=%2Felsewhere',
+    )
+    // A role without a page's permission: 403, or 404 where the page is hidden from it.
+    role = 'tester'
+    assert.equal((await get(onMaster, '/artifacts')).status, 403)
+    assert.equal((await get(onMaster, '/projects/x/runs')).status, 404)
+    assert.equal((await get(onMaster, '/account')).status, 200)
+    // What the page names is the node's to check, after the permission.
+    role = 'developer'
+    asked.length = 0
+    assert.equal((await get(onMaster, '/runs/1')).status, 404)
+    assert.equal((await get(onMaster, '/projects/x')).status, 200)
+    assert.deepEqual(asked, ['run', 'project'])
+    assert.equal((await get(onMaster, '/runs/1?fail=1')).status, 500)
+    // A master-only page does not exist on a host; neither does any other address.
+    role = 'admin'
+    assert.equal((await get(onMaster, '/groups/2')).status, 200)
+    assert.equal((await get(onHost, '/groups/2')).status, 404)
+    assert.equal((await get(onHost, '/no/such/page')).status, 404)
+    assert.match((await get(onHost, '/no/such/page')).text, /<div id="root">/)
+    // The host's sign-in does not exist on the master: signed out, its own.
+    assert.equal((await get(onMaster, '/auth/login')).status, 404)
+    assert.equal((await get(onHost, '/auth/login')).status, 200)
+    role = undefined
+    assert.equal(
+      (await get(onMaster, '/auth/login?return=%2Fnodes')).location,
+      '/sign-in?return=%2Fauth%2Flogin%3Freturn%3D%252Fnodes',
+    )
+    role = 'admin'
+    // The API, assets and other methods answer a plain 404.
+    for (const [route, method] of [
+      ['/api/v2/none', 'GET'],
+      ['/assets/none.js', 'GET'],
+      ['/projects', 'POST'],
+    ] as const) {
+      const reply = await get(onHost, route, method)
+      assert.deepEqual([reply.status, reply.text], [404, 'Not found'], route)
+    }
+    // Every page the master serves is in the table once.
+    const paths = PAGE_ROUTES.flatMap((route) =>
+      Array.isArray(route.path) ? route.path : [route.path],
+    )
+    assert.equal(new Set(paths).size, paths.length)
   })
 })

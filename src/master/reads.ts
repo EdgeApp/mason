@@ -20,8 +20,9 @@ import type {
   StatusInfo,
   WorkerNode,
 } from '../shared/api/index.js'
-import { graphFromJson, type RunGraph } from '../view/run.js'
-import type { ViewerRole } from '../view/shell.js'
+import { newestCommits } from './pageData/artifacts.js'
+import { graphFromJson, type RunGraph } from './pageData/run.js'
+import type { ViewerRole } from './pageData/viewer.js'
 
 /** Worker capacity and health for the top bar, and the workers for the dashboard. */
 export function cluster(master: Master): {
@@ -156,16 +157,31 @@ export function appVisibleTo(
   return (appId) => allowed.has(appId)
 }
 
-/** The commits a project's Masonfile tab offers: each commit's newest run first, 30 at most. */
+/**
+ * The commits a project's Masonfile tab offers: each commit's newest run
+ * first, 30 at most; with `keep`, each commit's newest run on a branch it
+ * passes.
+ */
 export function masonfileCommits(
   master: Master,
   projectId: number,
+  keep?: (branch: string) => boolean,
 ): MasonfileCommit[] {
-  return master.database.db
-    .prepare(
-      'SELECT commit_sha AS sha,branch FROM (SELECT commit_sha,branch,ROW_NUMBER() OVER (PARTITION BY commit_sha ORDER BY created DESC) AS place,created FROM jobs WHERE project_id=? AND commit_sha IS NOT NULL) WHERE place=1 ORDER BY created DESC LIMIT 30',
-    )
-    .all(projectId) as unknown as MasonfileCommit[]
+  const db = master.database.db
+  if (keep == null)
+    return db
+      .prepare(
+        'SELECT commit_sha AS sha,branch FROM (SELECT commit_sha,branch,ROW_NUMBER() OVER (PARTITION BY commit_sha ORDER BY created DESC) AS place,created FROM jobs WHERE project_id=? AND commit_sha IS NOT NULL) WHERE place=1 ORDER BY created DESC LIMIT 30',
+      )
+      .all(projectId) as unknown as MasonfileCommit[]
+  return newestCommits(
+    db
+      .prepare(
+        'SELECT commit_sha AS sha,branch FROM jobs WHERE project_id=? AND commit_sha IS NOT NULL ORDER BY created DESC',
+      )
+      .iterate(projectId) as Iterable<MasonfileCommit>,
+    keep,
+  )
 }
 
 /** Settings → Apple: the Apple ID, its teams and their certificates, failures and teams being set up. */
@@ -228,6 +244,7 @@ export function masterReader(
   context: { testEndpoints: boolean },
 ): NodeReader {
   const db = master.database.db
+  // A disabled project is hidden, as on the host and in every list.
   const record = (slug: string): ProjectRecord | undefined => {
     let project
     try {
@@ -236,6 +253,7 @@ export function masterReader(
       if (error instanceof ProjectNotFound) return undefined
       throw error
     }
+    if (!project.enabled) return undefined
     return {
       id: project.id,
       slug: project.slug,
@@ -302,7 +320,8 @@ export function masterReader(
       requester: (label) => requesterName(db, label),
       buildNumber: (job) => reservedBuildNumber(db, job),
     }),
-    masonfileCommits: (projectId) => masonfileCommits(master, projectId),
+    masonfileCommits: (projectId, keep) =>
+      masonfileCommits(master, projectId, keep),
     // The copy kept when a run pinned the commit, else the mirror; a
     // Masonfile too large to copy is read from the mirror.
     masonfile: async (project, commit): Promise<MasonfileText> => {

@@ -640,7 +640,7 @@ describe('App ID pages on the master and the host', function () {
         .get(ALPHA)!.id,
     )
     for (const [name, node, who] of nodes()) {
-      const found = await request(node, '/search?q=alpha', who())
+      const found = await request(node, '/api/v2/search?q=alpha', who())
       assert.equal(found.status, 200, name)
       const app = (found.json as Json[]).find(
         (result) => result.kind === 'app' && result.label === ALPHA,
@@ -653,7 +653,7 @@ describe('App ID pages on the master and the host', function () {
       [c.master, onMaster('tess')],
       [host, onHost('tess')],
     ] as const) {
-      const found = await request(node, '/search?q=alpha', who)
+      const found = await request(node, '/api/v2/search?q=alpha', who)
       assert.deepEqual(
         (found.json as Json[]).map((result) => [result.kind, result.href]),
         [['app', `/apps/${alpha}`]],

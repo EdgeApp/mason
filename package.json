@@ -12,20 +12,18 @@
     "node": ">=24.14.0 <25"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/bundle-browser.mjs && node scripts/bundle-web.mjs",
+    "build": "tsc -p tsconfig.json && node scripts/bundle-web.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "typecheck:masonfiles": "tsc -p tsconfig.examples.json",
     "check:doc-examples": "node scripts/check-doc-examples.ts",
     "lint": "eslint src",
-    "test": "tsc && node scripts/bundle-browser.mjs && node scripts/bundle-web.mjs && mocha --require=./lib/test/fixtureRoots.test.js --import=tsx --timeout 10000 --ignore 'src/web/**' 'src/**/*.test.ts' && mocha --require=./lib/test/fixtureRoots.test.js --require=./src/web/test/setup.ts --import=tsx --timeout 10000 'src/web/**/*.test.ts' 'src/web/**/*.test.tsx'",
-    "coverage": "tsc && node scripts/bundle-browser.mjs && node scripts/bundle-web.mjs && NODE_DISABLE_COMPILE_CACHE=1 c8 --all --include 'src/**/*.ts' --include 'src/**/*.tsx' --include 'lib/**/*.js' --exclude 'src/**/*.test.ts' --exclude 'src/**/*.test.tsx' --exclude 'lib/**/*.test.js' --exclude 'lib/browser/bundles/**' --exclude 'lib/web/bundles/**' --exclude-after-remap --reporter text --reporter json --reporter lcov --check-coverage --per-file --lines 90 sh -c \"mocha --require=./lib/test/fixtureRoots.test.js --timeout 10000 --ignore 'lib/web/**' 'lib/**/*.test.js' && mocha --require=./lib/test/fixtureRoots.test.js --require=./lib/web/test/setup.js --timeout 10000 'lib/web/**/*.test.js'\"",
+    "test": "tsc && node scripts/bundle-web.mjs && mocha --require=./lib/test/fixtureRoots.test.js --import=tsx --timeout 10000 --ignore 'src/web/**' 'src/**/*.test.ts' && mocha --require=./lib/test/fixtureRoots.test.js --require=./src/web/test/setup.ts --import=tsx --timeout 10000 'src/web/**/*.test.ts' 'src/web/**/*.test.tsx'",
+    "coverage": "tsc && node scripts/bundle-web.mjs && NODE_DISABLE_COMPILE_CACHE=1 c8 --all --include 'src/**/*.ts' --include 'src/**/*.tsx' --include 'lib/**/*.js' --exclude 'src/**/*.test.ts' --exclude 'src/**/*.test.tsx' --exclude 'lib/**/*.test.js' --exclude 'lib/web/bundles/**' --exclude-after-remap --reporter text --reporter json --reporter lcov --check-coverage --per-file --lines 90 sh -c \"mocha --require=./lib/test/fixtureRoots.test.js --timeout 10000 --ignore 'lib/web/**' 'lib/**/*.test.js' && mocha --require=./lib/test/fixtureRoots.test.js --require=./lib/web/test/setup.js --timeout 10000 'lib/web/**/*.test.js'\"",
     "start": "node lib/cli.js serve",
     "mason": "node lib/cli.js",
     "tokens": "node scripts/tokens.mjs"
   },
   "dependencies": {
-    "@ios27_design_system/react": "1.0.0",
-    "@ios27_design_system/tokens": "1.0.2",
     "acorn": "8.19.0",
     "argon2": "0.45.1",
     "bplist-parser": "0.5.0",
@@ -36,15 +34,14 @@
     "hash-wasm": "4.12.0",
     "openid-client": "6.8.8",
     "qrcode": "1.5.4",
-    "react": "19.3.1",
-    "react-dom": "19.3.1",
-    "react-router": "7.18.5",
     "ssh2": "1.17.0",
     "undici": "7.29.1",
     "ws": "8.22.0",
     "yauzl": "3.4.0"
   },
   "devDependencies": {
+    "@ios27_design_system/react": "1.0.0",
+    "@ios27_design_system/tokens": "1.0.2",
     "@tanstack/virtual-core": "3.19.11",
     "@testing-library/dom": "10.4.2",
     "@testing-library/react": "16.3.3",
@@ -68,6 +65,9 @@
     "mocha": "12.0.3",
     "oidc-provider": "9.12.2",
     "prettier": "3.6.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "react-router": "7.18.5",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
     "typescript-eslint": "8.48.1"

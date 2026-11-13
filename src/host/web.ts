@@ -1,293 +1,146 @@
-import express, { type ErrorRequestHandler, type RequestHandler } from 'express'
-import { existsSync, readFileSync } from 'node:fs'
+import express, { type ErrorRequestHandler } from 'express'
+import { existsSync } from 'node:fs'
 import {
   authRoutes,
   cookieOptions,
   csrf,
+  returnPath,
   SESSION_COOKIE,
   sessionContext,
   type AuthOptions,
-  type Frame,
   type PasswordRelay,
 } from '../auth/routes.js'
 import { LinkError, type Link } from '../link/link.js'
 import type { Session } from '../auth/accounts.js'
 import { forwardRoutes } from './forward.js'
 import { deviceCallbackRoutes } from '../devices/routes.js'
-import {
-  masterContentSecurityPolicy,
-  nodeWebApp,
-  sendPage,
-  testBanner,
-  type WebAppContext,
-} from '../node/webApp.js'
+import { nodeWebApp, type WebAppContext } from '../node/webApp.js'
 import { storedDetails } from '../master/projectDetails.js'
-import {
-  approvalNotifications,
-  approvalRolesFromGraph,
-  notificationsFor,
-} from '../view/notifications.js'
-import { search } from '../view/search.js'
-import { page, shell, type FramedPage, type Viewer } from '../view/shell.js'
-import { escape } from '../view/html.js'
-import { stylesheet } from '../view/stylesheet.js'
+import { isRole, type Role } from '../shared/permissions.js'
 import type { Projected } from '../master/changes.js'
 import type { HostRuntime } from './runtime.js'
 import { hostLogin } from './sessions.js'
 import { hostNodeInfo, hostSessionApi } from './sessionApi.js'
 import { nodeInfoRoutes } from '../node/nodeInfo.js'
 import { catalogApi, type CatalogApiCaller } from '../catalog/api.js'
-import { catalogShellRoutes } from '../catalog/shell.js'
+import {
+  catalogShellRoutes,
+  catalogStatus,
+  type CatalogShellOptions,
+} from '../catalog/shell.js'
 import { StoreCatalogSource } from '../catalog/source.js'
 import { Devices } from '../devices/store.js'
 import { Refused } from './builds.js'
 import { readApi } from '../node/readApi.js'
-import { sendShell } from '../node/webRoutes.js'
-import { hostReader, OFFLINE_TEXT } from './reads.js'
+import {
+  pageFallback,
+  pageRoutes,
+  sendShell,
+  type PageAnswer,
+  type PageNode,
+  type PageSubject,
+} from '../node/webRoutes.js'
+import { hostReader } from './reads.js'
 
-const OFFLINE_BANNER = `<p class="notice" role="status">${OFFLINE_TEXT}</p>`
-
-/** Every HTML page carries the banner while the master is unreachable. */
-function offlineBanner(host: HostRuntime): RequestHandler {
-  return (_req, res, next) => {
-    if (host.online()) {
-      next()
-      return
-    }
-    const send = res.send.bind(res)
-    res.send = ((body: unknown) => {
-      if (typeof body === 'string' && body.startsWith('<!doctype html>'))
-        return send(body.replace('<main>', `<main>${OFFLINE_BANNER}`))
-      return send(body)
-    }) as typeof res.send
-    next()
-  }
-}
-
-/** The signed-in person as the views see them, from the host's cache. */
-function hostViewer(
-  host: HostRuntime,
-  req: express.Request,
-): { viewer: Viewer; accountId: number } | undefined {
+/** The signed-in person's role on the host, from its cache. */
+function hostRole(host: HostRuntime, req: express.Request): Role | undefined {
   const context = sessionContext(req, host.accounts)
   if (context == null) return undefined
   const row = host.cache.db
-    .prepare('SELECT name,role FROM accounts WHERE id=?')
-    .get(context.account.id) as { name: string; role: string } | undefined
-  const role = (['admin', 'manager', 'developer', 'tester'] as const).find(
-    (entry) => entry === row?.role,
-  )
-  if (row == null || role == null) return undefined
-  return {
-    accountId: context.account.id,
-    viewer: {
-      name: row.name,
-      role,
-      node: 'host',
-      signOut: `<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="${escape(context.session.csrf)}"><button class="secondary">Sign out</button></form>`,
-    },
-  }
+    .prepare('SELECT role FROM accounts WHERE id=?')
+    .get(context.account.id) as { role: string } | undefined
+  return isRole(row?.role) ? row.role : undefined
 }
 
 /**
- * A page in the host's shell: the side menu, search, the approvals that
- * wait for the viewer, and the test banner.
+ * The host's pages, from the web app's route table, read from the copy the
+ * master sends: a project, app ID or run the host does not hold (or the
+ * viewer may not see) answers its unknown state with 404; `/` is Install
+ * apps for everyone here.
  */
-function hostShell(
+function hostPageNode(
   host: HostRuntime,
-  context: WebAppContext,
-  viewer: Viewer | undefined,
-  framed: FramedPage,
-): string {
-  return shell({
-    title: framed.title,
-    body: framed.body,
-    ...(viewer == null ? {} : { viewer }),
-    ...(framed.active == null ? {} : { active: framed.active }),
-    ...(framed.scripts == null ? {} : { scripts: framed.scripts }),
-    ...(framed.head == null ? {} : { head: framed.head }),
-    banners: testBanner(context),
-    notifications:
-      viewer == null
-        ? []
-        : notificationsFor(
-            viewer,
-            approvalNotifications(host.cache.db, viewer, (job, stage) => {
-              const row = host.cache.db
-                .prepare('SELECT workflow,graph FROM jobs WHERE id=?')
-                .get(job) as
-                | { workflow: string; graph: string | null }
-                | undefined
-              return row == null
-                ? undefined
-                : approvalRolesFromGraph(row.graph, row.workflow, stage)
-            }),
-          ),
-  })
-}
-
-/** The host's shell for the person a request is from: the catalog, device and sign-in pages. */
-function hostFrame(host: HostRuntime, context: WebAppContext): Frame {
-  return (req, framed) =>
-    hostShell(host, context, hostViewer(host, req)?.viewer, framed)
-}
-
-/**
- * Projects & apps, the project pages, Artifacts, runs and search for
- * developers and up, and Your account for everyone; `/` and the rest of
- * Install apps are the catalog's.
- */
-function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
-  const router = express.Router()
-  const visible =
-    (accountId: number) =>
-    (appId: number): boolean =>
-      host.cache.store.visible(accountId, appId)
-  /** Sends someone not signed in to sign in, and back. */
-  const signIn = (req: express.Request, res: express.Response): void => {
-    res.redirect(
-      303,
-      '/auth/login?return=' + encodeURIComponent(req.originalUrl),
-    )
-  }
-  // Projects are for developers and up: to a tester they do not exist, and
-  // the web app says so inside its shell.
-  router.use('/projects', (req, res, next) => {
-    const found = hostViewer(host, req)
-    if (req.method !== 'GET' || found?.viewer.role !== 'tester') {
-      next()
-      return
-    }
-    sendShell(res, { status: 404 })
-  })
-  /**
-   * A project's pages on the host are the web app's, read from the copy the
-   * master sends, for developers and up and only for a project with an app
-   * they may see: a project or app ID the host does not hold (or the viewer
-   * may not see) answers its unknown state with that status.
-   */
-  const projectShell = (
-    req: express.Request,
-    res: express.Response,
-    app?: string,
-  ): void => {
-    const found = hostViewer(host, req)
-    if (found == null) {
-      signIn(req, res)
-      return
-    }
-    // A tester never gets here: the 404 above answers them.
+  catalog: CatalogShellOptions,
+): PageNode {
+  /** Whether the enabled project at `:slug` is here, and the viewer sees its app ID `app`. */
+  const projectKnown = (req: express.Request, app?: string): boolean => {
+    const context = sessionContext(req, host.accounts)
+    if (context == null) return false
     const db = host.cache.db
     const row = db
       .prepare('SELECT id,details FROM projects WHERE slug=? AND enabled=1')
       .get(String(req.params.slug)) as
       | { id: number; details: string | null }
       | undefined
-    const apps =
-      row == null
-        ? []
-        : (
-            db
-              .prepare(
-                'SELECT a.id,a.slug,a.enabled FROM apps a JOIN project_apps pa ON pa.app_id=a.id WHERE pa.project_id=?',
-              )
-              .all(row.id) as Array<{
-              id: number
-              slug: string
-              enabled: number
-            }>
-          ).filter((entry) => visible(found.accountId)(entry.id))
-    // An app ID page needs that app ID, enabled.
-    const known =
-      row != null &&
-      storedDetails(row.details) != null &&
-      apps.length > 0 &&
-      (app == null ||
-        apps.some((entry) => entry.slug === app && entry.enabled === 1))
-    sendShell(res, known ? {} : { status: 404 })
-  }
-  router.get(
-    ['/projects/:slug', '/projects/:slug/runs', '/projects/:slug/masonfile'],
-    (req, res) => {
-      projectShell(req, res)
-    },
-  )
-  router.get(
-    [
-      '/projects/:slug/apps/:appId',
-      '/projects/:slug/apps/:appId/build-numbers',
-    ],
-    (req, res) => {
-      projectShell(req, res, String(req.params.appId))
-    },
-  )
-  // Your account is the web app's, read from the cache; changes go to the
-  // master over the link, so the page is read-only while it is down.
-  router.get('/account', (req, res) => {
-    if (hostViewer(host, req) == null) {
-      signIn(req, res)
-      return
-    }
-    sendShell(res)
-  })
-  // Projects & apps and Artifacts are the web app's, read from this host's
-  // copy; a tester reads the 403 inside it on Artifacts (and the 404 above
-  // on Projects).
-  router.get(['/projects', '/artifacts'], (req, res) => {
-    const found = hostViewer(host, req)
-    if (found == null) {
-      signIn(req, res)
-      return
-    }
-    sendShell(res, found.viewer.role === 'tester' ? { status: 403 } : {})
-  })
-  // E2E only: a browser that cannot be handed a cookie (Safari in a
-  // Simulator) opens the session a test.session control request started.
-  if (context.testEndpoints)
-    router.get('/test/session/:token', (req, res) => {
-      const token = String(req.params.token)
-      if (host.accounts.session(token) == null) {
-        res.status(404).send('Not found')
-        return
-      }
-      res.cookie(SESSION_COOKIE, token, cookieOptions)
-      res.redirect(303, '/')
-    })
-  // The run page is the web app's, read from this host's copy: a tester
-  // reads its 403 inside it, and a run the host does not hold its
-  // unknown-run state, each with that status.
-  router.get('/runs/:id', (req, res) => {
-    const found = hostViewer(host, req)
-    if (found == null) {
-      signIn(req, res)
-      return
-    }
-    if (found.viewer.role === 'tester') {
-      sendShell(res, { status: 403 })
-      return
-    }
-    const known =
-      host.cache.db
-        .prepare('SELECT 1 FROM jobs WHERE id=?')
-        .get(String(req.params.id)) != null
-    sendShell(res, known ? {} : { status: 404 })
-  })
-  router.get('/search', (req, res) => {
-    const found = hostViewer(host, req)
-    if (found == null) {
-      res.status(401).json([])
-      return
-    }
-    res.json(
-      search(
-        {
-          db: host.cache.db,
-          viewer: found.viewer,
-          appVisible: visible(found.accountId),
-        },
-        typeof req.query.q === 'string' ? req.query.q : '',
-      ),
+    // As on the master, a project's pages need only the project (and its
+    // reads only the role and scope); an app ID page needs that app ID,
+    // enabled and visible.
+    if (row == null || storedDetails(row.details) == null) return false
+    if (app == null) return true
+    const found = db
+      .prepare(
+        'SELECT a.id FROM apps a JOIN project_apps pa ON pa.app_id=a.id WHERE pa.project_id=? AND a.slug=? AND a.enabled=1',
+      )
+      .get(row.id, app) as { id: number } | undefined
+    return (
+      found != null && host.cache.store.visible(context.account.id, found.id)
     )
+  }
+  const signIn = (req: express.Request): string =>
+    '/auth/login?return=' + encodeURIComponent(req.originalUrl)
+  const check = (
+    subject: PageSubject,
+    req: express.Request,
+    role: Role | undefined,
+  ): PageAnswer | Promise<PageAnswer> => {
+    switch (subject) {
+      case 'home':
+        return role == null
+          ? { redirect: signIn(req) }
+          : check('catalog', req, role)
+      case 'signIn':
+        // Where it goes back to must be a path on this node.
+        returnPath(req.query.return)
+        return 200
+      case 'invite':
+        // The web app reads the token from the fragment, then drops it.
+        return 200
+      case 'project':
+        return projectKnown(req) ? 200 : 404
+      case 'app':
+        return projectKnown(req, String(req.params.appId)) ? 200 : 404
+      case 'run':
+        return host.cache.db
+          .prepare('SELECT 1 FROM jobs WHERE id=?')
+          .get(String(req.params.id)) == null
+          ? 404
+          : 200
+      case 'catalog':
+      case 'devices':
+        return catalogStatus(catalog, subject, req)
+      case 'group':
+        return 404
+    }
+  }
+  return {
+    node: 'host',
+    role: (req) => hostRole(host, req),
+    signIn,
+    check,
+  }
+}
+
+/** E2E only: a browser that cannot be handed a cookie (Safari in a Simulator) opens the session a test.session control request started. */
+function testSessionRoutes(host: HostRuntime): express.Router {
+  const router = express.Router()
+  router.get('/test/session/:token', (req, res) => {
+    const token = String(req.params.token)
+    if (host.accounts.session(token) == null) {
+      res.status(404).send('Not found')
+      return
+    }
+    res.cookie(SESSION_COOKIE, token, cookieOptions)
+    res.redirect(303, '/')
   })
   return router
 }
@@ -456,53 +309,52 @@ function hostCatalogApi(host: HostRuntime): express.Router {
 }
 
 /**
- * Install apps (`/` for everyone here) and Devices are the web app's, read
- * from the cache; the QR code and the grants' files are the host's own.
+ * Install apps and Devices on the host, read from its cache; the QR code
+ * and the grants' files are the host's own.
  */
-function hostCatalogShell(host: HostRuntime): express.Router {
-  return catalogShellRoutes({
-    paths: ['/', '/apps', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
+function hostCatalogOptions(host: HostRuntime): CatalogShellOptions {
+  return {
     caller: (req) => hostCatalogCaller(host, req),
     signIn: (req) =>
       '/auth/login?return=' + encodeURIComponent(req.originalUrl),
-    shell: (res, status) => {
-      sendShell(res, { status })
-    },
     files: () => new StoreCatalogSource(host.cache.store),
     qr: () => host.cache.store.config.origin + '/devices',
-  })
+  }
 }
+
+/**
+ * While the host waits for its master or is in maintenance: a page answers
+ * the web app's shell with 503 (the app reads which from `/api/v2/node`),
+ * anything else a plain 503.
+ */
+function unavailable(
+  req: express.Request,
+  res: express.Response,
+  text: string,
+): void {
+  if (req.method === 'GET' && !/^\/(api|assets)(\/|$)/.test(req.path)) {
+    sendShell(res, { status: 503 })
+    return
+  }
+  res.status(503).type('text/plain').send(text)
+}
+
+const WAITING = 'This Mason host is waiting for its master.'
 
 /** The host's public web listener: catalog, installs and sign-in from its cache. */
 export function hostApp(
   context: WebAppContext & { host?: HostRuntime },
 ): express.Express {
-  const app = nodeWebApp({ ...context, styles: stylesheet })
+  const app = nodeWebApp(context)
   const host = context.host
   // Before every gate: the web app reads it while the host waits or is in maintenance.
   app.use(nodeInfoRoutes(() => hostNodeInfo(host, context)))
   if (host == null) {
-    app.use((_req, res) => {
-      sendPage(
-        res,
-        context,
-        'Mason',
-        '<section class="card"><p>This Mason host is waiting for its master.</p></section>',
-        503,
-      )
+    app.use((req, res) => {
+      unavailable(req, res, WAITING)
     })
     return app
   }
-  app.get('/assets/run.js', (_req, res) => {
-    res
-      .type('js')
-      .send(
-        readFileSync(
-          new URL('../browser/bundles/run.js', import.meta.url),
-          'utf8',
-        ),
-      )
-  })
   // Webhooks are relayed or kept for the master even past the grace window, and
   // stages upload and fetch artifacts by their tokens and grants.
   app.use(host.webhooks.routes())
@@ -516,46 +368,23 @@ export function hostApp(
   app.use(readApi(hostReader(host, context)))
   app.use(hostCatalogApi(host))
   app.use(forwardRoutes(host))
-  app.use((_req, res, next) => {
+  app.use((req, res, next) => {
     if (host.cache.host() == null) {
-      sendPage(
-        res,
-        context,
-        'Mason',
-        '<section class="card"><p>This Mason host is waiting for its master.</p></section>',
-        503,
-      )
+      unavailable(req, res, WAITING)
       return
     }
     if (host.maintenance()) {
-      sendPage(
+      unavailable(
+        req,
         res,
-        context,
-        'Maintenance',
-        '<section class="card"><p>This Mason host has not reached its master for too long to serve builds safely. It comes back as soon as the master is reachable.</p></section>',
-        503,
+        'This Mason host has not reached its master for too long to serve builds safely. It comes back as soon as the master is reachable.',
       )
       return
     }
     next()
   })
-  app.use(offlineBanner(host))
   app.use(xcodeRoutes(host))
-  // The sign-in page's script and the worker that hashes a password.
-  for (const name of ['master', 'password-worker', 'people'])
-    app.get(`/assets/${name}.js`, (_req, res) => {
-      if (name === 'password-worker')
-        res.set('Content-Security-Policy', masterContentSecurityPolicy)
-      res
-        .type('js')
-        .send(
-          readFileSync(
-            new URL(`../browser/bundles/${name}.js`, import.meta.url),
-            'utf8',
-          ),
-        )
-    })
-  const frame = hostFrame(host, context)
+  if (context.testEndpoints) app.use(testSessionRoutes(host))
   // The Profile Service posts a signed body, read raw before any form parser.
   app.use(deviceCallbackRoutes(host.cache.store, host.devices))
   app.use(express.urlencoded({ extended: false, limit: '16kb' }))
@@ -571,39 +400,24 @@ export function hostApp(
           name: identity.name,
         })) as { account: Projected }
       }),
-      people: false,
-      account: false,
-      frame,
-      shell: (res, options) => {
-        sendShell(res, options)
-      },
       password: hostPassword(host),
       invitation: hostInvitation(host),
     }),
   )
-  app.use(viewRoutes(host, context))
-  app.use(hostCatalogShell(host))
-  app.use((_req, res) => {
-    res.status(404).send('Not found')
-  })
-  const errors: ErrorRequestHandler = (error, req, res, _next) => {
+  const catalog = hostCatalogOptions(host)
+  // Install apps' and Devices' own addresses: the QR code, the completion
+  // link and the grants' files; their pages are the web app's.
+  app.use(catalogShellRoutes(catalog))
+  const pages = hostPageNode(host, catalog)
+  app.use(pageRoutes(pages))
+  app.use(pageFallback(pages))
+  // A failed request's reason is the web app's to show, with a way back to sign in.
+  const errors: ErrorRequestHandler = (error, _req, res, _next) => {
     const message =
       error instanceof Error && error.name === 'SignInRefused'
         ? error.message
         : 'The request is invalid or has expired. Return to sign in and try again.'
-    // The sign-in protocol's own failures are the web app's to show.
-    if (req.path.startsWith('/auth/')) {
-      sendShell(res, { status: 400, flow: { state: 'invalid', message } })
-      return
-    }
-    res
-      .status(400)
-      .send(
-        page(
-          'Request could not be completed',
-          `<p>${escape(message)}</p><a href="/auth/login">Sign in</a>`,
-        ),
-      )
+    sendShell(res, { status: 400, flow: { state: 'invalid', message } })
   }
   app.use(errors)
   return app

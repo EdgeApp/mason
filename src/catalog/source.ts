@@ -19,7 +19,7 @@ import type {
   CatalogBuild,
   CompleteData,
   DevicesData,
-} from './views.js'
+} from '../shared/api/catalog.js'
 
 /** A refusal the pages answer with its status: 403 for tester access, 404 for an app or device the person may not see. */
 export class CatalogRefused extends Error {

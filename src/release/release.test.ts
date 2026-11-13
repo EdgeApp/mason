@@ -342,11 +342,35 @@ describe('Releases, install.sh and updates', function () {
       'mason-0.1.1/mason',
       'mason-0.1.1/node/bin/node',
       'mason-0.1.1/lib/cli.js',
+      // The web app: its shell, theme boot script and fonts.
+      'mason-0.1.1/lib/web/bundles/index.html',
+      'mason-0.1.1/lib/web/bundles/theme-boot.js',
+      'mason-0.1.1/assets/fonts/geist-variable.woff2',
       'mason-0.1.1/package.json',
       'mason-0.1.1/THIRD_PARTY_LICENCES.md',
       'mason-0.1.1/src/devices/apple-roots.pem',
     ])
       assert(list.includes(entry + '\n'), entry)
+    // Of the web app only its bundle, which is all the nodes serve; no
+    // tests or their helpers anywhere in lib/.
+    const shipped = list
+      .split('\n')
+      .filter((entry) => entry.startsWith('mason-0.1.1/lib/'))
+    assert.deepEqual(
+      shipped.filter(
+        (entry) =>
+          entry.startsWith('mason-0.1.1/lib/web/') &&
+          entry !== 'mason-0.1.1/lib/web/' &&
+          !entry.startsWith('mason-0.1.1/lib/web/bundles/'),
+      ),
+      [],
+    )
+    assert.deepEqual(
+      shipped.filter(
+        (entry) => entry.includes('.test.js') || /\/test\//.test(entry),
+      ),
+      [],
+    )
     assert(
       list.includes('mason-0.1.1/node_modules/argon2/prebuilds/linux-x64/'),
     )
@@ -372,6 +396,7 @@ describe('Releases, install.sh and updates', function () {
       '-C',
       unpacked,
       'mason-0.1.1/package.json',
+      'mason-0.1.1/THIRD_PARTY_LICENCES.md',
     ])
     assert.equal(
       (
@@ -384,6 +409,18 @@ describe('Releases, install.sh and updates', function () {
       ).masonReleases,
       'EdgeApp/mason',
     )
+    // The notice names the web app's bundled packages, which are not installed.
+    const notice = readFileSync(
+      path.join(unpacked, 'mason-0.1.1', 'THIRD_PARTY_LICENCES.md'),
+      'utf8',
+    )
+    const bundled = notice.split(
+      '\n# Bundled into the web app (lib/web/bundles)\n',
+    )[1]
+    assert(bundled != null, 'the web app’s licences')
+    for (const name of ['react', 'react-dom', 'react-router', 'scheduler'])
+      assert.match(bundled, new RegExp(`^## ${name}\n\n`, 'm'), name)
+    assert.match(notice, /^## express\n\n/m)
     assert(!list.includes('node/include/'))
     assert(!/mason-0\.1\.1\/lib\/[^\n]*\.test\.js\n/.test(list))
     assert(!list.includes('mason-0.1.1/lib/test/'))
@@ -1752,10 +1789,32 @@ describe('Releases, install.sh and updates', function () {
         { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
       )
       assert(list.includes('mason-0.1.8/node_modules/express/'))
-      assert(
-        !list.includes('mason-0.1.8/node_modules/mocha/'),
-        'no development modules',
+      // The web app's packages are bundled into it, never installed (npm
+      // leaves an empty @ios27_design_system scope directory).
+      for (const name of [
+        'mocha',
+        'react',
+        'react-dom',
+        'react-router',
+        '@ios27_design_system/react',
+        '@ios27_design_system/tokens',
+      ])
+        assert(
+          !list.includes(`mason-0.1.8/node_modules/${name}/`),
+          `no development module ${name}`,
+        )
+      // Their licences still ship, from the bundle's list.
+      const notice = execFileSync(
+        'tar',
+        [
+          '-xzOf',
+          path.join(out, tarballName('0.1.8', here as never)),
+          'mason-0.1.8/THIRD_PARTY_LICENCES.md',
+        ],
+        { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
       )
+      assert.match(notice, /^## express\n/m)
+      assert.match(notice, /^## react-dom\n/m)
       const error = console.error
       console.error = (): void => undefined
       try {

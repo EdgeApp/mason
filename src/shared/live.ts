@@ -1,5 +1,5 @@
 // The `/live` WebSocket's messages, which the server (src/master/live.ts,
-// src/host/live.ts) and the pages (src/browser/live.ts, the web app) share.
+// src/host/live.ts) and the web app share.
 import type { StatusInfo } from './api/shell.js'
 
 /** Where the master and the host accept the live pages' socket. */
@@ -7,6 +7,19 @@ export const LIVE_PATH = '/live'
 
 /** The close code that means the node cannot serve live updates (its master is older): final. */
 export const LIVE_UNAVAILABLE = 4000
+
+/**
+ * Messages a page may send at once, and how many more each second: the
+ * node refuses the rest, so the page paces itself below the same budget.
+ */
+export const LIVE_MESSAGE_BURST = 50
+export const LIVE_MESSAGES_PER_SECOND = 20
+
+/** Subscriptions one socket may hold at once on a node. */
+export const LIVE_MAX_SUBSCRIPTIONS = 200
+
+/** Why a node refuses a message over its socket's budget. */
+export const LIVE_TOO_MANY = 'Too many messages: send fewer'
 
 /**
  * What a page subscribes to: a run's log, a run's status, or the queue;
@@ -106,4 +119,45 @@ export interface LiveStep {
   status: string
   ms: number | null
   parent: number | null
+}
+
+/**
+ * One socket's message budget on a node: LIVE_MESSAGE_BURST at once,
+ * refilled by LIVE_MESSAGES_PER_SECOND.
+ */
+export class LiveBudget {
+  private allowance = LIVE_MESSAGE_BURST
+
+  constructor(private counted: number) {}
+
+  /** Spends one message at `now`; false when none is left. */
+  take(now: number): boolean {
+    this.allowance = Math.min(
+      LIVE_MESSAGE_BURST,
+      this.allowance + ((now - this.counted) / 1000) * LIVE_MESSAGES_PER_SECOND,
+    )
+    this.counted = now
+    if (this.allowance < 1) return false
+    this.allowance--
+    return true
+  }
+}
+
+/**
+ * The refusal of a message over the budget, naming the subscription it
+ * leaves unsent (an unsubscribe's key is the one it ends), so the page
+ * can send it again.
+ */
+export function liveRefusal(message: LiveMessage | undefined): LiveFrame {
+  const key =
+    message == null
+      ? undefined
+      : 'unsubscribe' in message
+        ? message.unsubscribe
+        : message.key
+  return {
+    ...(key == null ? {} : { key }),
+    event: 'error',
+    data: { error: LIVE_TOO_MANY },
+  }
 }

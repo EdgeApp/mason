@@ -103,7 +103,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
 export interface ButtonLinkProps extends Look {
   to: string
   children?: ReactNode
-  /** A full document load, for pages served by the node or under their own CSP. */
+  /** A full document load: a page the node serves, or a password page (`PASSWORD_PATHS`). */
   reloadDocument?: boolean
   className?: string
 }

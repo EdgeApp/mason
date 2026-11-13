@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'mocha'
+import {
+  LIVE_MESSAGE_BURST,
+  LIVE_MESSAGES_PER_SECOND,
+  LIVE_TOO_MANY,
+} from '../../shared/live.js'
 import { FakeLiveWindow } from '../test/fakeLiveSocket.js'
 import {
   backoff,
   browserLiveWindow,
+  CLIENT_BURST,
+  CLIENT_MESSAGES_PER_SECOND,
   LIVE_UNAVAILABLE,
   LiveClient,
   liveUrl,
@@ -36,6 +43,91 @@ describe('The app’s live client', () => {
       [0, 1, 2, 3, 4, 5, 9].map(backoff),
       [1000, 2000, 4000, 8000, 16000, 30000, 30000],
     )
+  })
+
+  it('keeps below the node’s message budget: a burst at once, the rest one per refill, again after a reconnect', () => {
+    // Headroom for messages that reach the node together although sent apart.
+    assert.equal(CLIENT_BURST, 40)
+    assert.equal(CLIENT_MESSAGES_PER_SECOND, 15)
+    assert(CLIENT_BURST < LIVE_MESSAGE_BURST)
+    assert(CLIENT_MESSAGES_PER_SECOND < LIVE_MESSAGES_PER_SECOND)
+    const { win, live } = client()
+    const runs = LIVE_MESSAGE_BURST + 10
+    for (let n = 0; n < runs; n++)
+      live.subscribe(
+        `run-status:${n}`,
+        () => ({ subscribe: 'status', run: String(n) }),
+        () => undefined,
+      )
+    win.socket.accept()
+    assert.equal(win.socket.sent.length, CLIENT_BURST)
+    // The rest wait for the refill, one message's worth of time each.
+    assert.deepEqual(win.tick(), [1000 / CLIENT_MESSAGES_PER_SECOND])
+    assert.equal(win.socket.sent.length, CLIENT_BURST + 1)
+    while (win.timers.size > 0) win.tick()
+    assert.equal(win.socket.sent.length, runs)
+    assert.deepEqual(
+      win.socket.sent.map((message) => (message as { key: string }).key),
+      Array.from({ length: runs }, (_, n) => `run-status:${n}`),
+    )
+    // A new socket has a new budget, and sends every subscription again.
+    win.socket.drop(1006)
+    win.tick()
+    win.socket.accept()
+    assert.equal(win.socket.sent.length, CLIENT_BURST)
+    while (win.timers.size > 0) win.tick()
+    assert.equal(win.socket.sent.length, runs)
+    // What waited on a socket that closed is not sent on the next one.
+    live.close()
+    assert.equal(win.timers.size, 0)
+  })
+
+  it('sends a subscription the node refused as over its budget again after a refill, or its end if the page left it', () => {
+    const { win, live } = client()
+    const frames: string[] = []
+    const stop = live.subscribe(
+      'run:1',
+      () => ({ subscribe: 'run', run: '1', after: 7 }),
+      (frame) => frames.push(frame.event),
+    )
+    const leaving = live.subscribe(
+      'run:2',
+      () => ({ subscribe: 'run', run: '2' }),
+      () => undefined,
+    )
+    win.socket.accept()
+    assert.equal(win.socket.sent.length, 2)
+    const refusal = (key?: string): void =>
+      win.socket.frame({
+        ...(key == null ? {} : { key }),
+        event: 'error',
+        data: { error: LIVE_TOO_MANY },
+      })
+    refusal('run:1')
+    // Not at once: the node's budget is empty, so the client waits a refill.
+    assert.equal(win.socket.sent.length, 2)
+    assert.deepEqual(win.tick(), [1000 / CLIENT_MESSAGES_PER_SECOND])
+    assert.deepEqual(win.socket.sent.at(-1), {
+      subscribe: 'run',
+      run: '1',
+      after: 7,
+      key: 'run:1',
+    })
+    // A refusal is the client's to handle, not the subscription's.
+    assert.deepEqual(frames, [])
+    // One the page has left meanwhile is not resubscribed; its end goes again.
+    leaving()
+    while (win.timers.size > 0) win.tick()
+    const before = win.socket.sent.length
+    refusal('run:2')
+    while (win.timers.size > 0) win.tick()
+    assert.deepEqual(win.socket.sent.slice(before), [{ unsubscribe: 'run:2' }])
+    // A refusal naming nothing only slows the client down.
+    refusal()
+    assert.equal(win.timers.size, 0)
+    assert.equal(win.socket.sent.length, before + 1)
+    stop()
+    assert.equal(win.socket.closed, true)
   })
 
   it('opens on the first subscription, sends each once open, and routes frames by key', () => {

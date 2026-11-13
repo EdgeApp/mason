@@ -111,6 +111,9 @@ describe('Master web API: the pages’ reads', function () {
       (await get('/api/v2/status', { key: f.keys.developer })).status,
       200,
     )
+    // The cluster's workers and banners are not about one project.
+    for (const key of [f.keys.scoped, f.keys.release])
+      assert.equal((await get('/api/v2/status', { key })).status, 403)
   })
 
   it('GET /api/v2/notifications: the approvals a person may decide, and the master’s notices for managers', async () => {
@@ -136,11 +139,14 @@ describe('Master web API: the pages’ reads', function () {
         [],
         role,
       )
-    // A key scoped to another project sees no approval of this one.
-    assert.deepEqual(
-      (await get('/api/v2/notifications', { key: f.keys.scoped })).json,
-      [],
+    // The master's notices are about the whole cluster, so a scoped key is
+    // refused, even one scoped to the waiting run's project.
+    assert.equal(
+      (await get('/api/v2/notifications', { key: f.keys.manager })).status,
+      200,
     )
+    for (const key of [f.keys.scoped, f.keys.release])
+      assert.equal((await get('/api/v2/notifications', { key })).status, 403)
   })
 
   it('GET /api/v2/search: projects, app IDs, runs and branches within what the person may see', async () => {

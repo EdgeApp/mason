@@ -29,7 +29,7 @@ import {
 import { AppRoutes } from './profile/routes.js'
 import { ToastProvider } from './ui/Toast.js'
 
-/** Where the master and the host mount the app beside the server pages. */
+/** A second mount of the app on both nodes, under its own prefix. */
 export const WEB_BASENAME = '/_web'
 
 /** The router's basename: `/_web` inside that mount, none outside it. */

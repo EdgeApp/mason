@@ -17,7 +17,11 @@ import express from 'express'
 import { after, before, describe, it } from 'mocha'
 import { SESSION_COOKIE } from '../auth/routes.js'
 import { branchKey } from '../catalog/platform.js'
-import { catalogShellRoutes } from '../catalog/shell.js'
+import {
+  catalogShellRoutes,
+  catalogStatus,
+  type CatalogShellOptions,
+} from '../catalog/shell.js'
 import { CatalogRefused, type CatalogSource } from '../catalog/source.js'
 import { DEVICE_COOKIE } from '../devices/store.js'
 import { HOST_UNREACHABLE_ERROR } from '../shared/api/index.js'
@@ -1077,8 +1081,11 @@ describe('Install apps and Devices on the master, through the host', function ()
   it('gives a tester on the master app results that open Install apps, and no projects', async () => {
     const tess = onMaster('tess')
     const results = JSON.parse(
-      (await request(c.master, '/search?q=alpha', { cookie: tess.cookie }))
-        .text,
+      (
+        await request(c.master, '/api/v2/search?q=alpha', {
+          cookie: tess.cookie,
+        })
+      ).text,
     ) as Json[]
     assert.deepEqual(
       results.map((result) => [result.kind, result.href]),
@@ -1086,8 +1093,11 @@ describe('Install apps and Devices on the master, through the host', function ()
     )
     assert.deepEqual(
       JSON.parse(
-        (await request(c.master, '/search?q=relay', { cookie: tess.cookie }))
-          .text,
+        (
+          await request(c.master, '/api/v2/search?q=relay', {
+            cookie: tess.cookie,
+          })
+        ).text,
       ),
       [],
     )
@@ -1231,27 +1241,32 @@ describe('Install apps and Devices addresses on any node', function () {
   let mayRegister = true
   let failure: Error | undefined
   let known: number | undefined
-  const shellRoutes = (): express.Router =>
-    catalogShellRoutes({
-      paths: ['/', '/apps', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
-      caller: (req) =>
-        req.get('cookie') == null
-          ? undefined
-          : {
-              accountId: 1,
-              source: source as CatalogSource,
-              checkCsrf: () => undefined,
-              mayRegister,
-              registration: true,
-            },
-      signIn: (req) => `/sign-in?return=${encodeURIComponent(req.originalUrl)}`,
-      shell: (res, status) => {
-        res.status(status).type('text/plain').send('shell')
-      },
-      files: () => source as CatalogSource,
-      qr: () => 'https://node.example.test/devices',
-      failure: () => known,
-    })
+  const options: CatalogShellOptions = {
+    caller: (req) =>
+      req.get('cookie') == null
+        ? undefined
+        : {
+            accountId: 1,
+            source: source as CatalogSource,
+            checkCsrf: () => undefined,
+            mayRegister,
+            registration: true,
+          },
+    signIn: (req) => `/sign-in?return=${encodeURIComponent(req.originalUrl)}`,
+    files: () => source as CatalogSource,
+    qr: () => 'https://node.example.test/devices',
+    failure: () => known,
+  }
+  /** The pages' statuses, as a node's page routes answer them. */
+  const pages =
+    (subject: 'catalog' | 'devices'): express.RequestHandler =>
+    (req, res, next) => {
+      catalogStatus(options, subject, req).then((answer) => {
+        if (typeof answer === 'number')
+          res.status(answer).type('text/plain').send('shell')
+        else res.redirect(303, answer.redirect)
+      }, next)
+    }
   const fail = async (): Promise<never> => {
     throw failure ?? new Error('Nothing here')
   }
@@ -1286,7 +1301,12 @@ describe('Install apps and Devices addresses on any node', function () {
 
   before(async () => {
     const app = express()
-    app.use(shellRoutes())
+    app.use(catalogShellRoutes(options))
+    app.get(
+      ['/apps', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
+      pages('catalog'),
+    )
+    app.get('/devices', pages('devices'))
     // The server's own error, without its stack on the console.
     app.use(
       (
@@ -1317,12 +1337,24 @@ describe('Install apps and Devices addresses on any node', function () {
   it('answers 403 at Devices, its completion link and its QR code to someone who may not register', async () => {
     mayRegister = false
     try {
-      for (const route of ['/devices', `/devices/complete/${'A'.repeat(43)}`])
-        assert.deepEqual(await get(route), {
-          status: 403,
-          text: 'shell',
-          location: null,
-        })
+      assert.deepEqual(await get('/devices'), {
+        status: 403,
+        text: 'shell',
+        location: null,
+      })
+      // The completion link answers the app's shell itself.
+      const complete = await fetch(
+        `${base}/devices/complete/${'A'.repeat(43)}`,
+        { redirect: 'manual', headers: { cookie: 'session=1' } },
+      )
+      assertShell(
+        {
+          status: complete.status,
+          text: await complete.text(),
+          headers: complete.headers,
+        },
+        403,
+      )
       const qr = await get('/devices/qr')
       assert.deepEqual([qr.status, qr.text], [403, 'Tester access required'])
     } finally {

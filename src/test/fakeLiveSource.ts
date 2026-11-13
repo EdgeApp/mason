@@ -7,7 +7,7 @@ import type {
   LiveStep,
 } from '../master/live.js'
 import type { FeedEvent } from '../master/runFeed.js'
-import type { QueueEntry } from '../view/dashboard.js'
+import type { QueueEntry } from '../master/queue.js'
 
 /** A run's rows and stage logs a test changes, with the feed it announces them on. */
 export class FakeLiveSource implements LiveSource {

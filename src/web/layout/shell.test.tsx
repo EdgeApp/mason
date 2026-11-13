@@ -231,6 +231,8 @@ describe('The live footer', () => {
         .querySelector('.m-sidebar__foot .m-status')!
         .textContent!.replace(glyph('sync'), '')
     assert.equal(foot(), 'Connecting…')
+    // The shell opens its socket once it has subscribed.
+    await until(() => app.live.sockets.length > 0, 'the live socket')
     await act(async () => app.live.socket.accept())
     assert.equal(foot(), 'Live')
     assert(sidebar().querySelector('.m-sidebar__foot .m-dot--live') != null)
@@ -283,6 +285,8 @@ describe('The live footer', () => {
       }),
     })
     await page('Projects & apps')
+    // The shell opens its socket once it has subscribed.
+    await until(() => app.live.sockets.length > 0, 'the live socket')
     await act(async () => app.live.socket.accept())
     await act(async () =>
       app.live.socket.frame({
@@ -539,6 +543,8 @@ describe('Banners from the node’s status', () => {
           .getAttribute('href'),
         '/nodes',
       )
+      // The shell opens its socket once it has subscribed.
+      await until(() => app.live.sockets.length > 0, 'the live socket')
       await act(async () => app.live.socket.drop(4000))
       screen.getByText('Live updates are unavailable')
       within(document.querySelector('.m-banners')!).getByRole('button', {
@@ -580,6 +586,8 @@ describe('Banners from the node’s status', () => {
       replies: shellReplies('developer', 'host'),
     })
     await page('Projects & apps')
+    // The shell opens its socket once it has subscribed.
+    await until(() => app.live.sockets.length > 0, 'the live socket')
     await act(async () => app.live.socket.accept())
     await act(async () =>
       app.live.socket.frame({
@@ -651,6 +659,8 @@ describe('Notifications', () => {
     app.node.set('/api/v2/notifications', [
       { kind: 'approval', text: 'Run 9 waits', href: '/runs/9' },
     ])
+    // The shell opens its socket once it has subscribed.
+    await until(() => app.live.sockets.length > 0, 'the live socket')
     await act(async () => app.live.socket.accept())
     await act(async () =>
       app.live.socket.frame({
@@ -871,9 +881,10 @@ describe('The ⌘K palette', () => {
     key: Partial<KeyboardEventInit> = { metaKey: true },
   ): Promise<HTMLInputElement> => {
     await act(async () => fireEvent.keyDown(document, { key: 'k', ...key }))
-    return screen.getByRole('combobox', {
+    // The palette may draw a tick after the key press.
+    return (await screen.findByRole('combobox', {
       name: 'Search projects, app IDs, runs, commits and branches',
-    }) as HTMLInputElement
+    })) as HTMLInputElement
   }
   const type = async (input: HTMLInputElement, text: string): Promise<void> => {
     await act(async () => fireEvent.change(input, { target: { value: text } }))

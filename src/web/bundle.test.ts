@@ -20,6 +20,7 @@ describe('scripts/bundle-web.mjs', () => {
       // Sorted after the hashes go, so the order never depends on them.
       names.map((name) => name.replace(/-[A-Z0-9]{8}\./, '-[hash].')).sort(),
       [
+        'THIRD_PARTY_LICENCES.md',
         'app-[hash].css',
         'app-[hash].js',
         'index.html',
@@ -34,7 +35,10 @@ describe('scripts/bundle-web.mjs', () => {
       `<script src="${WEB_ASSETS}/theme-boot.js"></script>`,
     )
     assert(boot > 0)
-    for (const name of names.filter((name) => name !== 'index.html'))
+    // The licences go into the release notice, not the page.
+    for (const name of names.filter(
+      (name) => name !== 'index.html' && !name.endsWith('.md'),
+    ))
       assert(html.includes(`${WEB_ASSETS}/${name}"`), name)
     const css = names.find((name) => name.endsWith('.css'))!
     const app = names.find((name) => /^app-.*\.js$/.test(name))!

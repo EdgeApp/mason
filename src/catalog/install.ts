@@ -19,7 +19,7 @@ import {
   type Build,
   type Format,
 } from '../validation.js'
-import { escape } from '../view/html.js'
+import { escape } from '../shared/format.js'
 
 const asGrant = asObject({
   hash: asString,
@@ -120,9 +120,6 @@ export class Installations {
     origin = this.store.config.origin,
   ): string {
     return installUrl(origin, token, resource)
-  }
-  iosUrl(token: string): string {
-    return iosInstallUrl(this.store.config.origin, token)
   }
 }
 /** Where a grant's manifest or package is served on an origin. */

@@ -12,7 +12,7 @@ export interface NodeProfile {
   /** The sidebar's node pill: "Master" or "Host". */
   short: string
   version: string
-  /** Where a 401 sends the browser (a full load, under its own CSP), given where it was. */
+  /** Where a 401 sends the browser (a full load: `PASSWORD_PATHS`), given where it was. */
   signIn: (from: string) => string
   /** Where signing out leaves for: sign-in, saying so. */
   signedOut: string

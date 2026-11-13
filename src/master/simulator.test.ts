@@ -13,7 +13,7 @@ import {
   simulatorZip,
   zip,
 } from '../upload/fixtures.test.js'
-import { artifactRunData } from '../view/artifacts.js'
+import { artifactRunData } from './pageData/artifacts.js'
 import { olderVersion } from './artifacts.js'
 import { localOperator } from './roles.js'
 
@@ -261,7 +261,7 @@ describe('iPhone Simulator and tvOS builds', function () {
     const detail = artifactRunData(
       {
         db: host.host!.cache.db,
-        viewer: { name: 'Sam', role: 'admin', node: 'host', signOut: '' },
+        viewer: { role: 'admin', node: 'host' },
         now: Date.now(),
         appVisible: () => true,
         artifactBase: '',

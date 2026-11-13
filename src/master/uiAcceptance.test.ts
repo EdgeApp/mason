@@ -6,7 +6,7 @@
 // writes the screenshots and logs that prove it into MASON_ARTIFACTS.
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, X509Certificate } from 'node:crypto'
 import {
   appendFileSync,
   existsSync,
@@ -22,12 +22,14 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { after, before, describe, it } from 'mocha'
 import { clientPasswordHash } from '../auth/passwordKdf.js'
+import { fixture } from '../auth/providers.test.js'
 import {
   clientParameters,
   DEFAULT_PASSWORD_COSTS,
 } from '../auth/passwordProtocol.js'
 import { pinnedFetch } from '../node/pinnedFetch.js'
 import type { RunningNode } from '../node/serve.js'
+import { branchKey } from '../shared/catalog.js'
 import { cluster, type Cluster } from '../test/cluster.js'
 import { localOperator } from './roles.js'
 
@@ -46,6 +48,16 @@ const sha = (data: Buffer): string =>
   createHash('sha256').update(data).digest('hex')
 const quote = (value: string): string =>
   "'" + value.replaceAll("'", "'\\''") + "'"
+/** A certificate's public key pin, as Chrome's SPKI list takes it. */
+const spki = (cert: Buffer): string =>
+  createHash('sha256')
+    .update(
+      new X509Certificate(cert).publicKey.export({
+        type: 'spki',
+        format: 'der',
+      }),
+    )
+    .digest('base64')
 
 export const ALPHA = 'com.example.alpha'
 export const BETA = 'com.example.beta-with-a-longer-id'
@@ -137,6 +149,8 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
   let daemon: Daemon
   let wrapper: string
   let root: string
+  /** The test OIDC and OAuth 2 providers (E12), at identity.example.test. */
+  let identity: Awaited<ReturnType<typeof fixture>>
   const runs: Record<string, Json> = {}
   const people: Record<string, number> = {}
   const origin = (node: RunningNode): string =>
@@ -146,8 +160,18 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     if (!enabled) return this.skip()
     assert(parent && artifacts && browserBin && daemonName && clientRoot)
     root = mkdtempSync(path.join(realpathSync(parent), 'ui-'))
-    c = await cluster(path.join(root, 'cluster'), { coWorker: true })
-    host = await c.startHost('host')
+    // Both nodes reach the providers through the fixture's transport, made
+    // once their addresses are known: the providers call back to each.
+    const providerFetch: typeof fetch = async (input, init) =>
+      await identity.transport(input, init)
+    c = await cluster(path.join(root, 'cluster'), {
+      coWorker: true,
+      masterOptions: { providerFetch },
+    })
+    host = await c.startHost('host', {
+      hostOptions: { transport: providerFetch },
+    })
+    identity = await fixture(origin(c.master), [origin(host)])
     const master = c.master.master!
     await master.settings.set(localOperator, 'host', {
       origin: origin(host),
@@ -263,12 +287,15 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       'the builds, people and group on the host',
     )
     wrapper = path.join(root, 'browser')
-    const pins = [c.master, host]
-      .map((node) => node.web!.certificate!.pin.replace(/^sha256\/\//, ''))
-      .join(',')
+    const pins = [
+      ...[c.master, host].map((node) =>
+        node.web!.certificate!.pin.replace(/^sha256\/\//, ''),
+      ),
+      spki(identity.certificate),
+    ].join(',')
     writeFileSync(
       wrapper,
-      `#!/bin/sh\nexec ${quote(browserBin)} --ignore-certificate-errors-spki-list=${quote(pins)} "$@"\n`,
+      `#!/bin/sh\nexec ${quote(browserBin)} --host-resolver-rules=${quote('MAP identity.example.test 127.0.0.1')} --ignore-certificate-errors-spki-list=${quote(pins)} "$@"\n`,
       { mode: 0o700 },
     )
     const require = createRequire(import.meta.url)
@@ -285,6 +312,7 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
   })
   after(async () => {
     await c?.close()
+    await identity?.close()
   })
 
   /** A fresh Chrome (its own profile) at a window size, on a node's origin. */
@@ -652,7 +680,27 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         "document.querySelector('[role=menu]') != null",
         'the account menu',
       )
+      // The menu is sized to the screen, not to the 32 px button it hangs from.
+      await holds(
+        m,
+        "(() => { const r = document.querySelector('[role=menu]').getBoundingClientRect(); return r.width >= 224 && r.right <= innerWidth && document.documentElement.scrollWidth <= innerWidth })()",
+        'the account menu at its own width, on the screen',
+      )
       await m.shot('account-menu-after.png')
+      // So is the notifications panel, which hangs the same way.
+      await m.tap('button[aria-haspopup="dialog"].m-iconbadge')
+      await holds(
+        m,
+        "(() => { const p = document.querySelector('.m-anchor > .m-popover'); if (p == null) return false; const r = p.getBoundingClientRect(); return r.width >= 320 && r.right <= innerWidth && document.documentElement.scrollWidth <= innerWidth })()",
+        'the notifications panel at its own width, on the screen',
+      )
+      await m.shot('notifications-panel.png')
+      await m.tap('button[aria-label="Your account"]')
+      await holds(
+        m,
+        "document.querySelector('[role=menu]') != null",
+        'the account menu again',
+      )
       await press(m, 'Your account', '[role=menu]')
       await holds(
         m,
@@ -1029,21 +1077,34 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
   it('E2 the run page’s breadcrumbs are pills from Mason Master down to the run, and each one opens its level', async () => {
     const latest = runs['build-beta@develop']
     const b = await browser('mason-e2-paul', c.master, '1280x860')
+    /** Runs a check until it passes, or fails with its last error after 15 s: the page may still be leaving. */
+    const settled = async (check: string): Promise<void> => {
+      const deadline = Date.now() + 15_000
+      for (;;) {
+        try {
+          await b.script(check)
+          return
+        } catch (error) {
+          if (Date.now() > deadline) throw error
+          await new Promise((resolve) => setTimeout(resolve, 250))
+        }
+      }
+    }
     /** Fails unless the page is at this path and query. */
     const at = async (where: string): Promise<void> => {
-      await b.script(
+      await settled(
         `if (location.pathname + location.search !== ${JSON.stringify(where)}) throw new Error('The page is ' + location.pathname + location.search)`,
       )
     }
-    /** Fails unless the breadcrumbs are these pills, each a link, the last one current. */
+    /** Fails unless the trail is these levels after the node's pill, the last one current and not a link, the others links. */
     const trail = async (expected: string[]): Promise<void> => {
-      await b.script(
-        `const pills = [...document.querySelectorAll('nav.breadcrumbs[aria-label="Breadcrumb"] a.crumb')]; const got = pills.map((a) => a.textContent + (a.getAttribute('aria-current') === 'page' ? '*' : '')).join(' › '); if (got !== ${JSON.stringify(expected.join(' › '))}) throw new Error('The breadcrumbs are ' + got); if (pills.some((a) => !a.getAttribute('href'))) throw new Error('A pill is not a link')`,
+      await settled(
+        `const items = [...document.querySelectorAll('.m-crumbs li')]; const got = items.map((li) => li.textContent.replace(/[\\uE000-\\uF8FF]/g, '') + (li.querySelector('[aria-current="page"]') ? '*' : '')).join(' › '); if (got !== ${JSON.stringify(expected.join(' › '))}) throw new Error('The breadcrumbs are ' + got); if (items.slice(0, -1).some((li) => li.querySelector('a[href]') == null)) throw new Error('A level is not a link'); if (items.at(-1).querySelector('a') != null) throw new Error('The page itself is a link')`,
       )
     }
-    /** Taps the breadcrumb pill that links here. */
-    const pill = async (href: string): Promise<void> => {
-      await b.tap(`nav.breadcrumbs a.crumb[href="${href}"]`)
+    /** Taps the trail's link to this address. */
+    const crumb = async (href: string): Promise<void> => {
+      await b.tap(`.m-crumbs a[href="${href}"]`)
     }
     try {
       await masterSignIn(b, 'paul', PASSWORDS.paul!)
@@ -1052,36 +1113,22 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       await b.open('/projects/fixture/runs')
       await b.visible('The latest runs on every branch.')
       await b.tap(
-        'nav.branch-list a[href="/projects/fixture/runs?branch=develop"]',
+        'nav[aria-label="Branches"] a[href="/projects/fixture/runs?branch=develop"]',
       )
       await b.visible('The latest runs on develop.')
+      await at('/projects/fixture/runs?branch=develop')
       await trail([
         'Mason Master',
-        'Projects',
+        'Projects & apps',
         'Fixture',
         'Runs and builds',
         'develop*',
       ])
-      // The run page is the web app's: its trail is the app's, from the
-      // node's pill through the project's Runs and builds and the branch.
-      const appTrail = async (expected: string[]): Promise<void> => {
-        await b.script(
-          `const got = [...document.querySelectorAll('.m-crumbs li')].map((li) => li.textContent.replace(/[\\uE000-\\uF8FF]/g, '') + (li.querySelector('[aria-current="page"]') ? '*' : '')).join(' › '); if (got !== ${JSON.stringify(expected.join(' › '))}) throw new Error('The breadcrumbs are ' + got)`,
-        )
-      }
-      await b.tap('table.runs tbody tr:first-child a')
+      await b.tap('table.m-runs tbody tr:first-child a')
       await b.visible('History of develop')
       await at(`/runs/${latest.id}`)
       const run = `Run ${latest.number}`
-      const levels = [
-        'Mason Master',
-        'Projects',
-        'Fixture',
-        'Runs and builds',
-        'develop',
-        run,
-      ]
-      await appTrail([
+      await trail([
         'Mason Master',
         'Projects & apps',
         'Fixture',
@@ -1090,35 +1137,41 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         `${run}*`,
       ])
       await b.shot('breadcrumb-run-after.png')
-      // From the right back to the first: each crumb opens its level, the
-      // server's pages with a full load until their milestones.
-      await b.tap('.m-crumbs a[href="/projects/fixture/runs?branch=develop"]')
+      // From the right back to the first: each level opens its page.
+      await crumb('/projects/fixture/runs?branch=develop')
       await b.visible('The latest runs on develop.')
       await at('/projects/fixture/runs?branch=develop')
-      await trail([...levels.slice(0, 4), 'develop*'])
-      // Back on the run, its Runs and builds crumb, then the server's pills.
+      await trail([
+        'Mason Master',
+        'Projects & apps',
+        'Fixture',
+        'Runs and builds',
+        'develop*',
+      ])
       await b.open(`/runs/${latest.id}`)
       await b.visible('History of develop')
-      await b.tap('.m-crumbs a[href="/projects/fixture/runs"]')
+      await crumb('/projects/fixture/runs')
       await b.visible('The latest runs on every branch.')
       await at('/projects/fixture/runs')
-      await trail([...levels.slice(0, 3), 'Runs and builds*'])
-      await pill('/projects/fixture')
+      await trail([
+        'Mason Master',
+        'Projects & apps',
+        'Fixture',
+        'Runs and builds*',
+      ])
+      await crumb('/projects/fixture')
       await b.visible('App IDs')
       await at('/projects/fixture')
-      await trail([...levels.slice(0, 2), 'Fixture*'])
-      await pill('/projects')
+      await trail(['Mason Master', 'Projects & apps', 'Fixture*'])
+      await crumb('/projects')
       await b.visible('their latest builds and runs')
       await at('/projects')
-      // Projects & apps is the web app's, with its own trail; its node pill
-      // opens the master's home, Projects & apps again.
-      await appTrail(['Mason Master', 'Projects & apps*'])
+      await trail(['Mason Master', 'Projects & apps*'])
+      // The node's pill opens the master's home, Projects & apps again.
       await b.tap('.m-crumbs a.m-node-pill[href="/"]')
       await b.visible('their latest builds and runs')
-      await b.script(
-        "if (location.pathname !== '/') throw new Error('The page is ' + location.pathname)",
-      )
-      await appTrail(['Mason Master', 'Projects & apps*'])
+      await at('/')
+      await trail(['Mason Master', 'Projects & apps*'])
     } finally {
       await b.close()
     }
@@ -2321,6 +2374,14 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         'no banner while the link is up',
       )
       await c.drop('host', 1000, async () => {
+        // The page already open learns it without a reload: the host stops
+        // /live, so the shell reads its status again.
+        await holds(
+          h,
+          "document.querySelector('.m-sidebar__foot')?.textContent.includes('Master unreachable') && document.body.textContent.includes('The master is unreachable')",
+          'the open page’s banner and footer',
+        )
+        await h.shot('host-offline-open-page.png')
         // Projects & apps from the host's copy, under the read-only banner.
         await h.open('/projects')
         await h.visible('The master is unreachable')
@@ -2371,6 +2432,314 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       )
     } finally {
       await h.close()
+    }
+  })
+
+  it('E12 a person signs in through a provider on the master (OpenID Connect) and on the host (OAuth 2), and the shell is theirs on both', async () => {
+    const master = c.master.master!
+    const settings = master.settings
+    const earlier = {
+      master: settings.value('master') ?? {},
+      signIn: settings.value('signIn') ?? { methods: [] },
+    }
+    // Two methods from the test provider: the master calls back to its own
+    // address, the host to its own.
+    await settings.set(localOperator, 'master', { origin: origin(c.master) })
+    await settings.set(localOperator, 'signIn', {
+      methods: identity.configs
+        .filter((config) => config.id === 'first' || config.id === 'plain')
+        .map((config) => ({ ...config, enabled: true })),
+    })
+    // The provider asserts Alex's and Jordan's verified addresses.
+    identity.setClaims({})
+    await master.people.create(localOperator, {
+      name: 'Alex Lee',
+      role: 'developer',
+      emails: ['alex@example.test'],
+    })
+    await master.people.create(localOperator, {
+      name: 'Jordan Lee',
+      role: 'tester',
+      emails: ['jordan@example.test'],
+    })
+    await c.until(
+      () =>
+        host.host!.cache.signInMethods().length === 2 &&
+        host
+          .host!.cache.db.prepare(
+            "SELECT 1 FROM accounts WHERE name='Jordan Lee'",
+          )
+          .get() != null,
+      20_000,
+      'the methods and Jordan on the host',
+    )
+    /** Fails unless the account menu names this person. */
+    const theirs = async (b: Browser, name: string): Promise<void> => {
+      await b.tap('button[aria-label="Your account"]')
+      await holds(
+        b,
+        `document.querySelector('[role=menu]')?.textContent.includes(${JSON.stringify(name)})`,
+        `the account menu naming ${name}`,
+      )
+      await b.command('pressKey', { key: 'Escape' })
+    }
+    /** Fails unless the sign-in page offers a button per method, each starting where given. */
+    const offers = async (
+      b: Browser,
+      starts: Record<string, string>,
+    ): Promise<void> => {
+      const buttons =
+        "JSON.stringify([...document.querySelectorAll('section[aria-label=\"Sign in\"] a')].map((a) => [a.textContent.replace(/[\\uE000-\\uF8FF]/g, '').trim(), a.getAttribute('href')]))"
+      const expected = JSON.stringify(
+        Object.entries(starts).map(([name, href]) => [
+          `Sign in with ${name}`,
+          href,
+        ]),
+      )
+      await holds(
+        b,
+        `${buttons} === ${JSON.stringify(expected)}`,
+        `the sign-in buttons ${expected}`,
+      ).catch(async (error: unknown) => {
+        throw new Error(
+          `${String(error)}; the page has ${await value(b, buttons)}`,
+        )
+      })
+    }
+    try {
+      const m = await browser('mason-e12-alex', c.master, '1280x860')
+      try {
+        await m.open('/sign-in')
+        await offers(m, {
+          first: `${origin(c.master)}/auth/start/first?return=%2F`,
+          'Plain OAuth': `${origin(c.master)}/auth/start/plain?return=%2F`,
+        })
+        // The button starts at the master's address, goes to the provider and
+        // comes back signed in, opening the master's home.
+        await m.tap(`a[href="${origin(c.master)}/auth/start/first?return=%2F"]`)
+        await m.visible('their latest builds and runs')
+        await holds(m, "location.pathname === '/'", 'the master’s home')
+        await theirs(m, 'Alex Lee')
+        const session = await value(
+          m,
+          "await fetch('/api/v2/session').then((r) => r.json()).then((s) => s.name + ' ' + s.role)",
+        )
+        assert.equal(session, 'Alex Lee developer')
+      } finally {
+        await m.close()
+      }
+      assert.deepEqual(
+        master.database.db
+          .prepare(
+            "SELECT target FROM audit WHERE action='session.provider' ORDER BY id",
+          )
+          .all()
+          .map((row) => row.target),
+        ['first'],
+      )
+      const h = await browser('mason-e12-jordan', host, '1280x860')
+      try {
+        await h.open('/auth/login?return=%2Fapps')
+        await offers(h, {
+          first: '/auth/start/first?return=%2Fapps',
+          'Plain OAuth': '/auth/start/plain?return=%2Fapps',
+        })
+        await h.tap('a[href="/auth/start/plain?return=%2Fapps"]')
+        // Back on the host, at the page asked for.
+        await holds(
+          h,
+          "location.pathname === '/apps' && document.querySelector('button[aria-label=\"Your account\"]') != null",
+          'Install apps on the host, signed in',
+        )
+        await h.visible('^Install apps$')
+        await theirs(h, 'Jordan Lee')
+        const session = await value(
+          h,
+          "await fetch('/api/v2/session').then((r) => r.json()).then((s) => s.name + ' ' + s.role)",
+        )
+        assert.equal(session, 'Jordan Lee tester')
+      } finally {
+        await h.close()
+      }
+    } finally {
+      await settings.set(localOperator, 'signIn', earlier.signIn)
+      await settings.set(localOperator, 'master', earlier.master)
+    }
+  })
+
+  /** The platform switch's links, the current one starred: `ios,android*`. */
+  const switchState =
+    "[...document.querySelectorAll('nav[aria-label=\"Build platform\"] a')].map((a) => new URL(a.href).searchParams.get('platform') + (a.getAttribute('aria-current') === 'true' ? '*' : '')).join()"
+
+  it('E13 the platform switch on Install apps changes the address and the builds in place, marks the platform current and keeps the document', async () => {
+    const alpha = Number(
+      c.master
+        .master!.database.db.prepare('SELECT id FROM apps WHERE slug=?')
+        .get(ALPHA)!.id,
+    )
+    const app = `/apps/${alpha}`
+    const branch = `${app}/branches/${branchKey('master')}`
+    const h = await browser('mason-e13-tess', host, '1280x860')
+    /** Fails unless the page is here, shows this, and is still the same document. */
+    const shows = async (
+      where: string,
+      text: string,
+      platforms: string,
+    ): Promise<void> => {
+      await holds(
+        h,
+        `location.pathname + location.search === ${JSON.stringify(where)} && document.querySelector('main')?.textContent.includes(${JSON.stringify(text)}) && ${switchState} === ${JSON.stringify(platforms)}`,
+        `${where} showing ${text}, the switch ${platforms}`,
+      )
+      await holds(
+        h,
+        "window.masonDocument === 'e13'",
+        `the same document at ${where}`,
+      )
+    }
+    try {
+      await hostSignIn(h, 'tess', PASSWORDS.tess!, '/')
+      await h.visible('Choose an app to browse recent builds')
+      await h.open(`${app}?platform=android`)
+      await h.visible('^Branches with builds for Android\\.$')
+      // A marker on the window: a full load would lose it.
+      await h.script("window.masonDocument = 'e13'")
+      await shows(
+        `${app}?platform=android`,
+        'Branches with builds for Android.',
+        'ios,android*',
+      )
+      // The app: iOS has no builds, and names the platforms that do.
+      await h.tap('nav[aria-label="Build platform"] a[href$="platform=ios"]')
+      await shows(
+        `${app}?platform=ios`,
+        'There are currently no builds for iOS.',
+        'ios*,android',
+      )
+      await h.tap(`main a.m-list__row[href$="${app}?platform=android"]`)
+      await shows(
+        `${app}?platform=android`,
+        'Branches with builds for Android.',
+        'ios,android*',
+      )
+      // The branch: Android's builds, then iOS's empty state, then back.
+      await h.tap(`a.m-list__row[href^="${branch}?"]`)
+      await shows(
+        `${branch}?platform=android`,
+        'Android builds · newest first',
+        'ios,android*',
+      )
+      await holds(
+        h,
+        "document.querySelector('main .m-catalog-build button.m-btn') != null",
+        'Alpha’s Android build with its Install',
+      )
+      await h.tap('nav[aria-label="Build platform"] a[href$="platform=ios"]')
+      await shows(`${branch}?platform=ios`, 'No iOS builds', 'ios*,android')
+      await holds(
+        h,
+        "document.querySelector('main .m-catalog-build') == null",
+        'no builds listed for iOS',
+      )
+      await h.tap(
+        'nav[aria-label="Build platform"] a[href$="platform=android"]',
+      )
+      await shows(
+        `${branch}?platform=android`,
+        'Android builds · newest first',
+        'ios,android*',
+      )
+      await holds(
+        h,
+        "document.querySelector('main .m-catalog-build button.m-btn') != null && document.cookie.split('; ').includes('mason-platform=android')",
+        'the Android build again, the platform remembered',
+      )
+    } finally {
+      await h.close()
+    }
+  })
+
+  it('E14 Back and Forward walk Install apps, an app, its branch and a platform switch, each restoring its address and content', async () => {
+    const alpha = Number(
+      c.master
+        .master!.database.db.prepare('SELECT id FROM apps WHERE slug=?')
+        .get(ALPHA)!.id,
+    )
+    const app = `/apps/${alpha}`
+    const branch = `${app}/branches/${branchKey('master')}`
+    const b = await browser('mason-e14-tess', c.master, '1280x860')
+    /** Fails unless the page is here, shows this, and is still the same document. */
+    const shows = async (
+      where: string,
+      text: string,
+      platforms: string,
+    ): Promise<void> => {
+      await holds(
+        b,
+        `location.pathname + location.search === ${JSON.stringify(where)} && document.querySelector('main')?.textContent.includes(${JSON.stringify(text)}) && ${switchState} === ${JSON.stringify(platforms)}`,
+        `${where} showing ${text}, the switch ${platforms}`,
+      )
+      await holds(
+        b,
+        "window.masonDocument === 'e14'",
+        `the same document at ${where}`,
+      )
+    }
+    // Install apps, Alpha, master, then iOS: each step and its content.
+    const steps: Array<[string, string, string]> = [
+      [
+        '/apps?platform=android',
+        'Choose an app to browse recent builds.',
+        'ios,android*,macos',
+      ],
+      [
+        `${app}?platform=android`,
+        'Branches with builds for Android.',
+        'ios,android*',
+      ],
+      [
+        `${branch}?platform=android`,
+        'Android builds · newest first',
+        'ios,android*',
+      ],
+      [`${branch}?platform=ios`, 'No iOS builds', 'ios*,android'],
+    ]
+    try {
+      await masterSignIn(b, 'tess', PASSWORDS.tess!)
+      await b.visible('Choose an app to browse recent builds')
+      await b.open('/apps?platform=android')
+      await b.visible('Choose an app to browse recent builds')
+      await b.script("window.masonDocument = 'e14'")
+      await shows(...steps[0]!)
+      await b.tap(`a.m-list__row[href="${app}?platform=android"]`)
+      await shows(...steps[1]!)
+      await b.tap(`a.m-list__row[href^="${branch}?"]`)
+      await shows(...steps[2]!)
+      await b.tap('nav[aria-label="Build platform"] a[href$="platform=ios"]')
+      await shows(...steps[3]!)
+      // Back to Install apps a step at a time, then Forward to iOS again.
+      for (const step of [steps[2]!, steps[1]!, steps[0]!]) {
+        await b.script('history.back()')
+        await shows(...step)
+      }
+      for (const step of [steps[1]!, steps[2]!, steps[3]!]) {
+        await b.script('history.forward()')
+        await shows(...step)
+      }
+      await holds(
+        b,
+        "document.querySelector('main .m-catalog-build') == null",
+        'no builds listed for iOS',
+      )
+      await b.script('history.back()')
+      await shows(...steps[2]!)
+      await holds(
+        b,
+        "document.querySelector('main .m-catalog-build button.m-btn') != null",
+        'Alpha’s Android build again',
+      )
+    } finally {
+      await b.close()
     }
   })
 })

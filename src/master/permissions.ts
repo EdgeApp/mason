@@ -66,9 +66,14 @@ export function permissionsOf(role: Role): Permission[] {
   return permissions.filter((name) => atLeast(role, policy[name]))
 }
 
+/** Whether a role allows an action. */
+export function roleCan(role: Role, action: Action): boolean {
+  return atLeast(role, policy[action])
+}
+
 /** Whether an actor's role allows an action. */
 export function can(actor: Actor, action: Action): boolean {
-  return atLeast(actor.role, policy[action])
+  return roleCan(actor.role, action)
 }
 
 /**

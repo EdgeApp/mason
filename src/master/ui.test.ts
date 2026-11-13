@@ -1429,9 +1429,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       (await request(c.master, 'GET', '/projects/wizard/runs')).status,
       303,
     )
-    const bundle = await request(c.master, 'GET', '/assets/secrets.js')
-    assert.equal(bundle.status, 200)
-    assert.match(bundle.text, /data-secrets/)
+    // The old Secrets page's script is gone with the server pages.
+    assert.equal(
+      (await request(c.master, 'GET', '/assets/secrets.js')).status,
+      404,
+    )
     shell(await request(c.master, 'GET', '/projects/none', manager2), 404)
     // A developer may not cancel others' runs from a page without the controls of a manager either way; testers see no runs.
     // A tester's home is Install apps, the web app's (catalogRelay.test.ts follows it).
@@ -1487,10 +1489,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
           person.emails[0].email === 'tester.person@example.test',
       ),
     )
-    // The old page script is still served until the server pages retire.
-    const script = await request(c.master, 'GET', '/assets/groups.js')
-    assert.equal(script.status, 200)
-    assert.match(script.type, /javascript/)
+    // The old Groups page's script is gone with the server pages.
+    assert.equal(
+      (await request(c.master, 'GET', '/assets/groups.js')).status,
+      404,
+    )
     for (const route of [
       '/groups/999999',
       '/groups/0',

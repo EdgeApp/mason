@@ -61,7 +61,7 @@ export function AccountMenu(): JSX.Element {
       ),
     },
     { kind: 'separator' },
-    // A password page: entered by a full load, under its own CSP.
+    // A password page: entered by a full load (`PASSWORD_PATHS`).
     {
       kind: 'item',
       label: 'Your account',

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import express, { Router } from 'express'
-import { lineAt, plainLog } from '../view/log.js'
+import { lineAt, plainLog } from './logText.js'
 import { AUTOMATIC_POLL_MS } from '../builder/automatic.js'
 import { branchName } from '../builder/config.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'

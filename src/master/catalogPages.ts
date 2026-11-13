@@ -1,10 +1,14 @@
 import type express from 'express'
 import type { Request } from 'express'
 import { catalogApi, type CatalogApiCaller } from '../catalog/api.js'
-import { catalogShellRoutes } from '../catalog/shell.js'
+import {
+  catalogShellRoutes,
+  catalogStatus,
+  type CatalogShellOptions,
+} from '../catalog/shell.js'
 import { LinkCatalogSource, type CatalogLink } from '../catalog/source.js'
 import { LinkError } from '../link/link.js'
-import { sendShell } from '../node/webRoutes.js'
+import type { PageAnswer } from '../node/webRoutes.js'
 import { HOST_UNREACHABLE_ERROR, NO_HOST_ERROR } from '../shared/api/index.js'
 import { checkCsrf, type MasterSession } from './auth.js'
 import { noHost, relayDownload } from './buildsApi.js'
@@ -104,36 +108,53 @@ export function masterCatalogApi(
   })
 }
 
+/** Install apps and Devices on the master: what the host answers over the link. */
+function catalogOptions(
+  master: Master,
+  session: (req: Request) => MasterSession | undefined,
+): CatalogShellOptions {
+  const link = catalogLink(master)
+  return {
+    caller: (req) => masterCaller(master, link, session, req),
+    signIn: () => '/sign-in',
+    files: () =>
+      new LinkCatalogSource(link, undefined, catalogOrigins(master).master),
+    qr: (): string => {
+      const { master: own, host } = catalogOrigins(master)
+      return `${own ?? host ?? ''}/devices`
+    },
+    failure: (error, page): number | undefined => {
+      // A cluster without a host yet: its pages say so; a file cannot come.
+      if (noHost(master) != null) return page ? 200 : 503
+      return unreachable(error) ? 503 : undefined
+    },
+  }
+}
+
 /**
- * Install apps and Devices on the master: their addresses answer the web
- * app's shell, which reads them as JSON relayed from the host over the
- * link. Install grants live on the host; their manifests and packages are
- * relayed from it. The master's public origin (its `master` setting) is
- * what manifests and registration callbacks name; without one iOS installs
- * and registration go to the host's own pages.
+ * The status an Install apps page or Devices answers with on the master,
+ * read from the host over the link.
+ */
+export async function masterCatalogStatus(
+  master: Master,
+  session: (req: Request) => MasterSession | undefined,
+  subject: 'catalog' | 'devices',
+  req: Request,
+): Promise<PageAnswer> {
+  return await catalogStatus(catalogOptions(master, session), subject, req)
+}
+
+/**
+ * Install apps' and Devices' own addresses on the master: the registration's
+ * completion link, the QR code, and the grants' manifests and packages,
+ * relayed from the host, where install grants live. The master's public
+ * origin (its `master` setting) is what manifests and registration
+ * callbacks name; without one iOS installs and registration go to the
+ * host's own pages.
  */
 export function masterCatalogShell(
   master: Master,
   session: (req: Request) => MasterSession | undefined,
 ): express.Router {
-  const link = catalogLink(master)
-  return catalogShellRoutes({
-    paths: ['/', '/apps', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
-    caller: (req) => masterCaller(master, link, session, req),
-    signIn: () => '/sign-in',
-    shell: (res, status) => {
-      sendShell(res, { status })
-    },
-    files: () =>
-      new LinkCatalogSource(link, undefined, catalogOrigins(master).master),
-    qr: () => {
-      const { master: own, host } = catalogOrigins(master)
-      return `${own ?? host ?? ''}/devices`
-    },
-    failure: (error, page) => {
-      // A cluster without a host yet: its pages say so; a file cannot come.
-      if (noHost(master) != null) return page ? 200 : 503
-      return unreachable(error) ? 503 : undefined
-    },
-  })
+  return catalogShellRoutes(catalogOptions(master, session))
 }

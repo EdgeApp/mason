@@ -5,7 +5,7 @@ import type { Request } from 'express'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { cookie } from '../auth/routes.js'
 import type { Stream } from '../link/link.js'
-import { queueEntries, type QueueEntry } from '../view/dashboard.js'
+import { queueEntries, type QueueEntry } from './queue.js'
 import { hostSessionActor } from './api.js'
 import { MASTER_SESSION_COOKIE, sessionActor } from './auth.js'
 import { allow, allowRole, covers } from './permissions.js'
@@ -15,7 +15,10 @@ import type { Master } from './runtime.js'
 import { masterStatus } from './reads.js'
 import type { StatusInfo } from '../shared/api/shell.js'
 import {
+  LIVE_MAX_SUBSCRIPTIONS as MAX_SUBSCRIPTIONS,
   LIVE_PATH,
+  LiveBudget,
+  liveRefusal,
   type LiveEvent,
   type LiveFrame,
   type LiveMessage,
@@ -41,10 +44,6 @@ const HIGH_WATER = 1024 * 1024
 const FOLLOW_TAIL = 1024 * 1024
 /** What a page that stops reading may hold unsent before it is dropped. */
 const MAX_BUFFERED = 16 * 1024 * 1024
-const MAX_SUBSCRIPTIONS = 200
-/** Messages a page may send at once, and how many more it may send each second. */
-const MESSAGE_BURST = 50
-const MESSAGES_PER_SECOND = 20
 /** Sockets one viewer may hold open at once on a node. */
 export const MAX_SOCKETS_PER_VIEWER = 16
 /** How often a shell status subscription is checked for a change. */
@@ -464,8 +463,7 @@ export class LiveSession {
   private readonly stop: () => void
   private ended = false
   /** Messages it may still send now, refilled each second. */
-  private allowance = MESSAGE_BURST
-  private counted: number
+  private readonly budget: LiveBudget
   /** Checks the shell's status while a subscription to it is open. */
   private ticker: ReturnType<typeof setInterval> | undefined
 
@@ -475,32 +473,26 @@ export class LiveSession {
     private readonly out: LiveOutput,
     private readonly now: () => number = Date.now,
   ) {
-    this.counted = now()
+    this.budget = new LiveBudget(now())
     // Registered before any snapshot is read: nothing written after it is missed.
     this.stop = source.subscribe((events) => this.hear(events))
   }
 
   receive(text: string): void {
     if (this.ended) return
-    const now = this.now()
-    this.allowance = Math.min(
-      MESSAGE_BURST,
-      this.allowance + ((now - this.counted) / 1000) * MESSAGES_PER_SECOND,
-    )
-    this.counted = now
-    if (this.allowance < 1) {
-      this.send({
-        event: 'error',
-        data: { error: 'Too many messages: send fewer' },
-      })
-      return
-    }
-    this.allowance--
-    let message: LiveMessage
+    // Parsed first, so a refusal names the subscription it leaves unsent.
+    let message: LiveMessage | Error
     try {
       message = parseMessage(text)
     } catch (error) {
-      this.send({ event: 'error', data: { error: (error as Error).message } })
+      message = error as Error
+    }
+    if (!this.budget.take(this.now())) {
+      this.send(liveRefusal(message instanceof Error ? undefined : message))
+      return
+    }
+    if (message instanceof Error) {
+      this.send({ event: 'error', data: { error: message.message } })
       return
     }
     if ('unsubscribe' in message) {
@@ -518,7 +510,8 @@ export class LiveSession {
       if (!this.watches.has(key) && this.watches.size >= MAX_SUBSCRIPTIONS)
         throw new Error('Too many subscriptions')
       if (message.subscribe === 'status' && message.run == null) {
-        allowRole(actor, 'builds.read')
+        // The cluster's state, as GET /api/v2/status: no project-scoped key's.
+        allow(actor, 'builds.read')
         if (this.source.status == null)
           throw new Error('This node has no status to follow')
         const watch = this.watch('shell', '')

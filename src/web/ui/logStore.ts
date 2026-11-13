@@ -1,8 +1,7 @@
 // A run log's lines, held a window at a time for the log viewer: lines are
 // asked for by number, a chunk of 500 at once, as they come into view, those
 // far from view are let go once 20,000 are held, and live lines extend the
-// log at its end. Ported from src/browser/logViewer.ts (the old page's,
-// until M11), without the DOM: the LogViewer component draws it.
+// log at its end. The LogViewer component draws it.
 import type { RunLogPage } from '../../shared/api/index.js'
 import { ansiLines, type AnsiPiece } from '../../shared/ansi.js'
 
