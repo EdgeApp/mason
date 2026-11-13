@@ -149,7 +149,7 @@ export function masterApp(context: MasterWebContext): express.Express {
   // After the provider routes, whose limiter covers every /auth request.
   app.use(providerSignInRoutes(master))
   app.use(invitationRoutes(master))
-  masterPages(app, context, master)
+  masterPages(app, master)
   app.use((_req, res) => {
     res.status(404).send('Not found')
   })

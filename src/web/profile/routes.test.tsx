@@ -12,20 +12,10 @@ import { PAGE_ROUTES } from './routes.js'
 
 afterEach(() => cleanup())
 
-/** A record of the full loads the app asked for. */
-const server = (
-  here: string,
-): { here: string; go: (url: string) => void; went: string[] } => {
-  const went: string[] = []
-  return { here, go: (url) => went.push(url), went }
-}
-
-describe('The routes the app has ported and the node’s own pages', () => {
-  it('has ported Projects & apps, Artifacts, Search, the run page, the project pages and administration', () => {
+describe('The app’s routes', () => {
+  it('draws every page itself: Projects & apps, Artifacts, Search, the run page, the project pages, administration, Install apps and Devices', () => {
     assert.deepEqual(
-      PAGE_ROUTES.filter((route) => route.page != null).map(
-        (route) => route.path,
-      ),
+      PAGE_ROUTES.map((route) => route.path),
       [
         '/projects',
         '/artifacts',
@@ -46,45 +36,31 @@ describe('The routes the app has ported and the node’s own pages', () => {
         '/groups/:id',
         '/backups',
         '/account',
+        '/apps',
+        '/apps/:appId',
+        '/apps/:appId/branches/:branchKey',
+        '/devices',
+        '/devices/complete/:token',
       ],
     )
   })
 
-  it('leaves for the node’s own page at an address it has not ported, outside the mount', async () => {
-    const pages = server('/projects')
-    renderApp({ path: '/devices?tab=mine', server: pages })
-    await screen.findByRole('status', { name: 'Opening the page' })
-    await until(() => pages.went.length === 1, 'the full load')
-    assert.deepEqual(pages.went, ['/devices?tab=mine'])
-  })
-
-  it('draws the placeholder, never a full load, where the node answered the app itself', async () => {
-    const pages = server('/devices')
-    renderApp({ path: '/devices', server: pages })
-    await screen.findByRole('heading', { name: 'Coming in M10' })
-    assert.deepEqual(pages.went, [])
-  })
-
-  it('sends `/` to the node’s own home outside the mount when it is not Projects & apps', async () => {
-    const pages = server('/projects')
-    renderApp({
-      node: nodeInfo('host'),
-      path: '/',
-      replies: shellReplies('developer', 'host'),
-      server: pages,
-    })
-    await until(() => pages.went.length === 1, 'the full load')
-    assert.deepEqual(pages.went, ['/'])
-    cleanup()
-    // Where the node answered the app at `/`, the first destination opens.
-    renderApp({
-      node: nodeInfo('host'),
-      path: '/',
-      replies: shellReplies('tester', 'host'),
-      server: server('/'),
-    })
-    // …which is the node's own page too.
-    await until(() => where.path === '/apps', 'Install apps')
+  it('opens Install apps from `/` for a tester on either node, naming the platform in the address', async () => {
+    const apps = { apps: [], platforms: [] }
+    for (const node of ['host', 'master'] as const) {
+      renderApp({
+        node: nodeInfo(node),
+        path: '/',
+        replies: shellReplies('tester', node, { '/api/v2/catalog/apps': apps }),
+      })
+      await screen.findByRole('heading', { level: 1, name: 'Install apps' })
+      await screen.findByText('No apps have been configured yet.')
+      await until(
+        () => /^\/apps\?platform=\w+$/.test(where.path),
+        'the platform',
+      )
+      cleanup()
+    }
   })
 
   it('opens the ⌘K palette at /search, and again from its button', async () => {

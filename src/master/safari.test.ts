@@ -8,14 +8,21 @@
 // days, serverAuth, as Safari requires) from a test CA the simulator
 // trusts. Sign-in is reached by a direct load and again after signing out,
 // so the Argon2id worker runs under the shell's policy both ways: only the
-// worker's own response allows WebAssembly. Saves safari-signed-in.png.
+// worker's own response allows WebAssembly. Each sign-in leaves with the
+// keyboard up and must land with the trail below the top bar (Safari carries
+// a keyboard into the next load). Saves safari-signed-in.png.
+// Then a tester opens the host's Install apps on the phone, an app and a
+// branch's builds, with the tab bar and its Install rows: safari-catalog.png.
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { after, before, describe, it } from 'mocha'
+import { branchKey } from '../catalog/platform.js'
 import type { RunningNode } from '../node/serve.js'
+import { insertBuild } from '../store.js'
 import { cluster, type Cluster } from '../test/cluster.js'
 import { localOperator } from './roles.js'
 
@@ -118,6 +125,9 @@ describe('Mason in iOS Safari (S1)', function () {
   } = process.env
   let c: Cluster
   let host: RunningNode
+  let root: string
+  let alpha: number
+  let tess: number
   let daemon: Daemon
   let device: Device
   const base = (node: RunningNode): string =>
@@ -126,7 +136,7 @@ describe('Mason in iOS Safari (S1)', function () {
   before(async function () {
     if (!enabled) return this.skip()
     assert(udid && parent && artifacts && daemonName && clientRoot)
-    const root = mkdtempSync(path.join(realpathSync(parent), 'safari-'))
+    root = mkdtempSync(path.join(realpathSync(parent), 'safari-'))
     const certificates = testCertificates(root)
     execFileSync('xcrun', [
       'simctl',
@@ -139,11 +149,85 @@ describe('Mason in iOS Safari (S1)', function () {
     c = await cluster(path.join(root, 'cluster'), {
       master: { webCert: web.cert, webKey: web.key },
     })
-    host = await c.startHost('host', { web })
+    host = await c.startHost('host', { web, testEndpoints: true })
     await c.master.master!.settings.set(localOperator, 'host', {
       origin: base(host),
       workerOrigin: base(host),
     })
+    // Alpha for Tess's group, with an Android build on master the host holds.
+    const master = c.master.master!
+    const repo = c.repo('fixtures/safari')
+    repo.commit({ 'Masonfile.ts': 'export function setup() {}' })
+    master.saveProject(localOperator, 'safari', {
+      repository: repo.url,
+      rules: [{ pattern: '*', mode: 'request' }],
+      apps: [
+        {
+          bundleId: 'com.example.alpha',
+          name: 'Alpha',
+          platforms: ['ios', 'android'],
+        },
+      ],
+    })
+    const db = master.database.db
+    alpha = Number(
+      (
+        db
+          .prepare('SELECT id FROM apps WHERE slug=?')
+          .get('com.example.alpha') as { id: number }
+      ).id,
+    )
+    tess = (
+      await master.people.create(localOperator, {
+        name: 'Tess Tester',
+        emails: ['tess@example.test'],
+        role: 'tester',
+      })
+    ).id
+    master.people.createGroup(localOperator, {
+      name: 'Testers',
+      apps: [alpha],
+      members: [tess],
+    })
+    const bytes = Buffer.from('safari apk')
+    const digest = createHash('sha256').update(bytes).digest('hex')
+    const key = digest.slice(0, 32) + '.apk'
+    const channel = db
+      .prepare("SELECT id FROM channels WHERE app_id=? AND platform='android'")
+      .get(alpha) as { id: number }
+    const build = insertBuild(
+      db,
+      {
+        channelId: Number(channel.id),
+        branch: 'master',
+        commit: 'c'.repeat(40),
+        version: '4.18.3',
+        buildNumber: '26111301',
+        bundleId: 'com.example.alpha',
+        format: 'apk',
+        size: bytes.length,
+        digest,
+        changelog: '',
+        source: 'test',
+        customFields: '{}',
+      },
+      key,
+      { now: Date.now(), retentionDays: 14 },
+    )
+    writeFileSync(path.join(root, 'alpha.apk'), bytes)
+    await host.host!.objects.put(key, path.join(root, 'alpha.apk'), digest)
+    master.database.change('build', build.id)
+    const cache = host.host!.cache.db
+    await c.until(
+      () =>
+        cache.prepare('SELECT 1 FROM builds WHERE id=?').get(build.id) !=
+          null &&
+        cache.prepare('SELECT 1 FROM accounts WHERE id=?').get(tess) != null &&
+        cache.prepare("SELECT 1 FROM groups WHERE name='Testers'").get() !=
+          null,
+      30_000,
+      'the build, Tess and her group on the host',
+    )
     const require = createRequire(import.meta.url)
     const client = [
       path.join(clientRoot, 'dist/cjs/index.js'),
@@ -162,6 +246,25 @@ describe('Mason in iOS Safari (S1)', function () {
       commandTimeout: 120_000,
       outputDir: path.join(realpathSync(parent), 'maestro-output'),
     })
+    // Safari's first launch on a new simulator can drop the link and stay
+    // on its start page: open the master until its page shows.
+    const open = async (): Promise<void> => {
+      await device.command('openLink', `${base(c.master)}/sign-in`)
+      await dismiss()
+    }
+    for (let attempt = 1; attempt < 3; attempt++) {
+      await open()
+      const shown = await device
+        .command('assertVisible', { text: 'Sign in', timeout: 20_000 })
+        .then(
+          () => true,
+          () => false,
+        )
+      if (shown) return
+      console.log(`S1: Safari did not show sign-in (try ${attempt})`)
+    }
+    await open()
+    await visible('Sign in')
   })
   after(async () => {
     if (device != null) await daemon.detach(udid!).catch(() => undefined)
@@ -184,6 +287,24 @@ describe('Mason in iOS Safari (S1)', function () {
     await device
       .command('tapOn', { text, optional: true, timeout: 3000 })
       .catch(() => undefined)
+  }
+  const find = (node: Node, text: string): Node | undefined =>
+    node.text === text
+      ? node
+      : (node.children ?? [])
+          .map((child) => find(child, text))
+          .find((found) => found != null)
+  /** The page's breadcrumb trail lies wholly below the sticky top bar. */
+  const trailBelowBar = async (): Promise<void> => {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    const tree = await device.hierarchy()
+    const bar = find(tree, 'banner')?.bounds
+    const trail = find(tree, 'Breadcrumb, navigation')?.bounds
+    assert(bar && trail, 'the top bar and the trail')
+    assert(
+      trail.y >= bar.y + bar.height,
+      `the trail (top ${trail.y}) under the top bar (bottom ${bar.y + bar.height})`,
+    )
   }
   /**
    * Taps the control of this type and name at its centre: a field and its
@@ -234,6 +355,7 @@ describe('Mason in iOS Safari (S1)', function () {
     // Signed in: the master's home.
     await visible('Projects & apps')
     await dismiss('Never for This Website')
+    await trailBelowBar()
     assert.equal(sessions(), before + 1)
     // Sign out from the web app's account menu: a full load to sign-in.
     await device.command('openLink', `${base(c.master)}/_web/projects`)
@@ -247,9 +369,43 @@ describe('Mason in iOS Safari (S1)', function () {
     await signIn()
     await visible('Projects & apps')
     await dismiss('Not Now')
+    await trailBelowBar()
     assert.equal(sessions(), before + 1)
     writeFileSync(
       path.join(artifacts!, 'safari-signed-in.png'),
+      await device.screenshot(),
+    )
+  })
+
+  it('shows a tester the host’s Install apps on the phone: an app, a branch’s builds with Install, and the tab bar', async () => {
+    // Safari cannot be handed a cookie: the host opens her session itself.
+    const { token } = host.host!.accounts.startSession(tess)
+    await device.command('openLink', `${base(host)}/test/session/${token}`)
+    await dismiss()
+    await device.command('openLink', `${base(host)}/apps`)
+    await dismiss()
+    await visible('Choose an app to browse recent builds')
+    // The tab bar holds her two destinations.
+    await visible('Install')
+    await visible('Devices')
+    await device.command('tapOn', { text: 'Alpha' })
+    // iOS is the phone's own platform; Alpha has no iOS builds yet.
+    await visible('There are currently no builds for iOS.*')
+    await visible('Android')
+    await device.command(
+      'openLink',
+      `${base(host)}/apps/${alpha}/branches/${branchKey('master')}?platform=android`,
+    )
+    await dismiss()
+    await visible('Android builds · newest first')
+    await visible('.*26111301.*')
+    const tree = await device.hierarchy()
+    assert(
+      find(tree, 'Install 4.18.3 build 26111301') != null,
+      'the build’s Install row',
+    )
+    writeFileSync(
+      path.join(artifacts!, 'safari-catalog.png'),
       await device.screenshot(),
     )
   })

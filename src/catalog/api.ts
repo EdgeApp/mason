@@ -18,6 +18,7 @@ import {
   type DeviceActionName,
   type DevicesData,
   type InstallAnswer,
+  type IosDelivery,
   type PrepareAnswer,
   type RegistrationAnswer,
 } from '../shared/api/index.js'
@@ -47,6 +48,19 @@ export interface CatalogApiCaller {
   registration: boolean
   /** The public origin an iOS installer's manifest is served on; none when the node has none. */
   installOrigin?: string
+  /**
+   * The host's origin, when iOS installs and device registration go through
+   * its own pages (a master without a public address of its own).
+   */
+  hostPages?: string
+}
+
+/** How iOS apps install for a caller: here, through the host's pages, or not at all. */
+export function iosDelivery(caller: CatalogApiCaller): IosDelivery {
+  if (caller.hostPages != null) return { via: 'host', host: caller.hostPages }
+  return caller.installOrigin == null || caller.installOrigin === ''
+    ? { via: 'none' }
+    : { via: 'here' }
 }
 
 export interface CatalogApiOptions {
@@ -122,8 +136,10 @@ export function catalogApi(options: CatalogApiOptions): Router {
   const devices = async (
     caller: CatalogApiCaller,
     selected: number | undefined,
-  ): Promise<DevicesData> =>
-    await caller.source.devices(caller.accountId, selected)
+  ): Promise<DevicesData> => {
+    const data = await caller.source.devices(caller.accountId, selected)
+    return caller.hostPages == null ? data : { ...data, via: caller.hostPages }
+  }
 
   router.get(
     CATALOG_APPS_PATH,
@@ -147,13 +163,27 @@ export function catalogApi(options: CatalogApiOptions): Router {
     `${CATALOG_APPS_PATH}/:id/branches/:key`,
     route(async (req): Promise<BranchData> => {
       const caller = signedIn(req)
-      return await caller.source.branch(
+      const data = await caller.source.branch(
         caller.accountId,
         id(req.params.id),
         String(req.params.key),
         chosenPlatform(req),
         selectedDevice(req),
       )
+      const ios = iosDelivery(caller)
+      return {
+        ...data,
+        ios,
+        // A grant links straight to the installer on the node's address.
+        builds: data.builds.map((build) =>
+          build.token == null || ios.via !== 'here'
+            ? build
+            : {
+                ...build,
+                installUrl: iosInstallUrl(caller.installOrigin!, build.token),
+              },
+        ),
+      }
     }),
   )
   router.post(
@@ -179,7 +209,7 @@ export function catalogApi(options: CatalogApiOptions): Router {
         }
       return {
         kind: 'itms',
-        ...(caller.installOrigin == null
+        ...(caller.installOrigin == null || caller.installOrigin === ''
           ? {}
           : { url: iosInstallUrl(caller.installOrigin, result.token) }),
         ...expiry,

@@ -82,7 +82,22 @@ export interface CatalogBuild {
   eligible: boolean
   /** The grant for an eligible iOS app, so the tap opens the installer. */
   token?: string
+  /**
+   * The grant's `itms-services` link, on the node's public address: the
+   * row links straight to it, so Safari keeps the tap's gesture.
+   */
+  installUrl?: string
 }
+
+/**
+ * How iOS apps install from this node: here, through the host's own pages
+ * (a master without a public address of its own), or not at all (neither
+ * has one).
+ */
+export type IosDelivery =
+  | { via: 'here' }
+  | { via: 'host'; host: string }
+  | { via: 'none' }
 
 /** A branch's builds for one platform, newest first. */
 export interface BranchData {
@@ -92,6 +107,8 @@ export interface BranchData {
   builds: CatalogBuild[]
   /** Whether the viewer has a device selected. */
   device: boolean
+  /** How iOS installs happen from here; the JSON route always answers it. */
+  ios?: IosDelivery
 }
 
 /** A registered (or registering) device. */
@@ -114,6 +131,11 @@ export interface DevicesData {
   /** Whether device registration is configured here. */
   registration: boolean
   all: Array<{ name: string; model: string; status: string }>
+  /**
+   * The host's origin, when devices register through its own pages (a
+   * master without a public address of its own).
+   */
+  via?: string
 }
 
 /** Where a registration link ended. */
@@ -146,7 +168,22 @@ export interface RegistrationAnswer {
   expiresAt: number
 }
 
+/** What the master answers while it has no host: installs come from one. */
+export const NO_HOST_ERROR =
+  'No host is linked yet — installs come from a host.'
+/** What the master answers while its host is away. */
+export const HOST_UNREACHABLE_ERROR =
+  'The master cannot reach the Mason host right now; try again in a moment.'
+/** A person who is signed in but may not install yet. */
+export const TESTER_ACCESS_ERROR = 'Tester access required'
+
 const asPlatformName: Cleaner<PlatformName> = asValue(...platformNames)
+
+const asIosDelivery: Cleaner<IosDelivery> = (raw) => {
+  const { via } = asObject({ via: asValue('here', 'host', 'none') })(raw)
+  if (via !== 'host') return { via }
+  return asObject({ via: asValue('host'), host: asString })(raw)
+}
 
 export const asCatalogApp = asObject<CatalogApp>({
   id: asNumber,
@@ -186,6 +223,7 @@ export const asCatalogBuild = asObject<CatalogBuild>({
   download: asOptional(asString),
   eligible: asBoolean,
   token: asOptional(asString),
+  installUrl: asOptional(asString),
 })
 
 export const asBranchData = asObject<BranchData>({
@@ -194,6 +232,7 @@ export const asBranchData = asObject<BranchData>({
   branch: asString,
   builds: asArray(asCatalogBuild),
   device: asBoolean,
+  ios: asOptional(asIosDelivery),
 })
 
 export const asDeviceInfo = asObject<DeviceInfo & { name: string }>({
@@ -214,6 +253,7 @@ export const asDevicesData = asObject<DevicesData>({
   selected: asOptional(asNumber),
   registration: asBoolean,
   all: asArray(asObject({ name: asString, model: asString, status: asString })),
+  via: asOptional(asString),
 })
 
 export const asCompleteData: Cleaner<CompleteData> = (raw) => {

@@ -1434,11 +1434,8 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     assert.match(bundle.text, /data-secrets/)
     shell(await request(c.master, 'GET', '/projects/none', manager2), 404)
     // A developer may not cancel others' runs from a page without the controls of a manager either way; testers see no runs.
-    // A tester's home is Install apps (catalogRelay.test.ts follows it).
-    assert.equal(
-      (await request(c.master, 'GET', '/', signIn('tester'))).status,
-      200,
-    )
+    // A tester's home is Install apps, the web app's (catalogRelay.test.ts follows it).
+    shell(await request(c.master, 'GET', '/', signIn('tester')))
   })
 
   it('U20.11 Groups lists the groups and opens a page for each, its picker over every app and person', async () => {

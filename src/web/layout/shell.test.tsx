@@ -128,7 +128,10 @@ describe('The app shell’s navigation per node and role', () => {
       path: '/',
     })
     await page('Install apps')
-    assert.equal(where.path, '/apps')
+    await until(
+      () => /^\/apps\?platform=\w+$/.test(where.path),
+      'Install apps naming the platform',
+    )
     assert.deepEqual(texts(sidebar().querySelectorAll('.m-sidebar__label')), [
       'Distribute',
     ])
@@ -1076,15 +1079,25 @@ describe('Pages in the shell', () => {
     assert.equal(document.activeElement, screen.getByRole('main'))
   })
 
-  it('draws a page a later milestone ports: breadcrumbs from the node’s pill, its header and what is coming', async () => {
-    renderApp({ path: '/apps/7' })
-    await page('App')
+  it('draws a catalog page with breadcrumbs from the node’s pill, the platform kept in each', async () => {
+    renderApp({
+      path: '/apps/7?platform=android',
+      replies: shellReplies('admin', 'master', {
+        '/api/v2/catalog/apps/7?platform=android': {
+          app: { id: 7, name: 'Alpha', slug: 'com.example.alpha' },
+          platforms: ['android'],
+          branches: [],
+          latest: {},
+        },
+      }),
+    })
+    await page('Alpha')
     const crumbs = screen.getByRole('navigation', { name: 'Breadcrumb' })
     assert.deepEqual(
       within(crumbs)
         .getAllByRole('listitem')
         .map((item) => item.textContent!.replace(glyph('lan'), '')),
-      ['Mason Master', 'Install apps', 'App'],
+      ['Mason Master', 'Install apps', 'Alpha'],
     )
     assert.equal(
       within(crumbs)
@@ -1093,15 +1106,14 @@ describe('Pages in the shell', () => {
       '/',
     )
     assert.equal(
-      within(crumbs).getByText('App').getAttribute('aria-current'),
-      'page',
-    )
-    screen.getByRole('heading', { name: 'Coming in M10' })
-    assert.equal(
-      screen
-        .getByRole('link', { name: /Open the current page/ })
+      within(crumbs)
+        .getByRole('link', { name: 'Install apps' })
         .getAttribute('href'),
-      '/apps/7',
+      '/apps?platform=android',
+    )
+    assert.equal(
+      within(crumbs).getByText('Alpha').getAttribute('aria-current'),
+      'page',
     )
   })
 

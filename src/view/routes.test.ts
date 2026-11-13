@@ -146,7 +146,7 @@ describe('Pages on the master and the host', function () {
       // No page compiles the password hash: the sign-in pages are the web
       // app's shell, which only starts the worker that does. Projects & apps
       // (the master's home), Artifacts, Your account and People (which set
-      // passwords) are the shell too.
+      // passwords) are the shell too, as are Install apps (the host's home).
       assert.doesNotMatch(reply.csp, /wasm-unsafe-eval/, route)
       assert.equal(
         reply.csp === shellContentSecurityPolicy,
@@ -156,8 +156,8 @@ describe('Pages on the master and the host', function () {
           '/artifacts',
           '/account',
           '/people',
-        ].includes(route) ||
-          (node === c.master && route === '/'),
+          '/apps',
+        ].includes(route) || route === '/',
         route,
       )
     }
@@ -212,26 +212,32 @@ describe('Pages on the master and the host', function () {
         [403, 404].includes((await get(host, route, onHost('admin'))).status),
         route,
       )
-    // The master's server pages (Install apps here) draw the side menu by role.
-    const admin = (await get(c.master, '/apps', onMaster('admin'))).text
-    assert.match(admin, /href="\/backups"/)
-    assert.match(admin, /href="\/groups"/)
-    const developer = await get(c.master, '/apps', onMaster('developer'))
-    assert.doesNotMatch(developer.text, /href="\/(backups|groups)"/)
-    assert.match(
-      developer.text,
-      /aria-label="Your account" title="Developer Person · developer · master"/,
-    )
+    // Install apps and Devices are the web app's on the master too, whose
+    // side menu follows the role from the session.
+    for (const role of ['admin', 'developer', 'tester'])
+      for (const route of ['/apps', '/devices']) {
+        const reply = await get(c.master, route, onMaster(role))
+        assert.equal(reply.status, 200, `${role} ${route}`)
+        assert.match(reply.text, /<div id="root"><\/div>/)
+        assert.equal(reply.csp, shellContentSecurityPolicy)
+      }
     // Testers' home is Install apps on both nodes, which lists nothing
     // shared with them yet.
     const catalog = await get(host, '/', onHost('tester'))
-    assert.doesNotMatch(catalog.text, /Projects &amp; apps/)
+    assert.match(catalog.text, /<div id="root"><\/div>/)
     assert.equal((await get(host, '/artifacts', onHost('tester'))).status, 403)
     const tester = onMaster('tester')
-    for (const route of ['/', '/apps'])
-      assert.match(
-        (await get(c.master, route, tester)).text,
-        /No apps have been configured yet/,
+    assert.match(
+      (await get(c.master, '/', tester)).text,
+      /<div id="root"><\/div>/,
+    )
+    for (const [node, cookie] of [
+      [c.master, tester],
+      [host, onHost('tester')],
+    ] as const)
+      assert.deepEqual(
+        JSON.parse((await get(node, '/api/v2/catalog/apps', cookie)).text).apps,
+        [],
       )
     assert.equal(
       (await get(c.master, '/artifacts', onMaster('tester'))).status,

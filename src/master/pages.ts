@@ -1,13 +1,7 @@
 import type express from 'express'
 import { cookie } from '../auth/routes.js'
-import { testBanner, type WebAppContext } from '../node/webApp.js'
-import { escape } from '../view/html.js'
-import {
-  approvalNotifications,
-  notificationsFor,
-} from '../view/notifications.js'
 import { search } from '../view/search.js'
-import { shell, type Viewer } from '../view/shell.js'
+import type { Viewer } from '../view/shell.js'
 import {
   MASTER_SESSION_COOKIE,
   sessionActor,
@@ -16,8 +10,8 @@ import {
 import { can, type Action } from './permissions.js'
 import type { Master } from './runtime.js'
 import { ProjectNotFound, type Project } from './projects.js'
-import { masterCatalogPages } from './catalogPages.js'
-import { appVisibleTo, backupNotice, cluster } from './reads.js'
+import { masterCatalogShell } from './catalogPages.js'
+import { appVisibleTo } from './reads.js'
 import { sendShell } from '../node/webRoutes.js'
 
 /** The signed-in person as the views see them. */
@@ -31,48 +25,6 @@ function viewerOf(session: MasterSession): Viewer {
   }
 }
 
-/** A master page: the shell, the forms script, and the banners that apply. */
-function masterPage(
-  context: WebAppContext,
-  master: Master,
-  title: string,
-  content: string,
-  session?: MasterSession,
-  active?: string,
-  scripts: string[] = [],
-): string {
-  const notice =
-    session == null ? undefined : backupNotice(master, sessionActor(session))
-  const banner =
-    notice == null
-      ? ''
-      : `<p class="notice" role="alert">${escape(notice)}. <a href="/backups">Backups</a></p>`
-  const viewer = session == null ? undefined : viewerOf(session)
-  return shell({
-    title,
-    body: content.startsWith('<div class="page-head')
-      ? content
-      : `<h1>${escape(title)}</h1>${content}`,
-    ...(viewer == null
-      ? {}
-      : {
-          viewer,
-          status: cluster(master).status,
-          notifications: notificationsFor(
-            viewer,
-            approvalNotifications(master.database.db, viewer, (job, stage) =>
-              master.scheduler.approvalRoles(job, stage),
-            ),
-            master.notices(),
-          ),
-          head: `<meta name="mason-csrf" content="${escape(session!.csrf)}">`,
-        }),
-    ...(active == null ? {} : { active }),
-    banners: testBanner(context) + banner,
-    scripts: ['/assets/master.js', '/assets/run.js', ...scripts],
-  })
-}
-
 /** Whether the viewer may see an app ID: developers and up see every one, testers their groups'. */
 function appVisible(
   master: Master,
@@ -81,29 +33,10 @@ function appVisible(
   return appVisibleTo(master, sessionActor(session))
 }
 
-/** The master's pages: the web app's shell behind each page's guard, search, and Install apps from the host. */
-export function masterPages(
-  app: express.Express,
-  context: WebAppContext,
-  master: Master,
-): void {
+/** The master's pages: the web app's shell behind each page's guard, and search. */
+export function masterPages(app: express.Express, master: Master): void {
   const session = (req: express.Request): MasterSession | undefined =>
     master.auth.session(cookie(req, MASTER_SESSION_COOKIE))
-  const send = (
-    res: express.Response,
-    title: string,
-    content: string,
-    current?: MasterSession,
-    code = 200,
-    active?: string,
-    scripts: string[] = [],
-  ): void => {
-    res
-      .status(code)
-      .send(
-        masterPage(context, master, title, content, current, active, scripts),
-      )
-  }
   app.get('/', (req, res, next) => {
     // First-run setup and restore are the web app's.
     if (!master.configured()) {
@@ -125,21 +58,15 @@ export function masterPages(
     }
     next()
   })
-  // Projects are for developers and up: to a tester they do not exist.
+  // Projects are for developers and up: to a tester they do not exist, and
+  // the web app says so inside its shell.
   app.use('/projects', (req, res, next) => {
     const current = session(req)
-    if (current?.role !== 'tester') {
+    if (req.method !== 'GET' || current?.role !== 'tester') {
       next()
       return
     }
-    send(
-      res,
-      'Not found',
-      '<p class="empty-state">There is no such page.</p>',
-      current,
-      404,
-      'catalog',
-    )
+    sendShell(res, { status: 404 })
   })
   // Projects & apps and Artifacts are the web app's; a tester reads the
   // 403 inside it on Artifacts (and the 404 above on Projects).
@@ -282,8 +209,9 @@ export function masterPages(
       ),
     )
   })
-  // Install apps and Devices, from the host over the link.
-  masterCatalogPages(app, master, session, send)
+  // Install apps and Devices are the web app's, read from the host over
+  // the link; the QR code and the grants' files stay the master's.
+  app.use(masterCatalogShell(master, session))
   app.get('/sign-in', (req, res) => {
     if (!master.configured()) {
       res.redirect(303, '/')

@@ -25,6 +25,7 @@ import { localOperator, roles, type Role } from './roles.js'
 import { masterApp } from './web.js'
 import { seedSecret } from '../test/secrets.js'
 import { assertShell } from '../test/webShell.js'
+import { NO_HOST_ERROR } from '../shared/api/index.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -476,43 +477,68 @@ describe('Master sign-in, setup, people and permissions', function () {
         (await request(node, 'GET', '/api/v2/notifications', { cookie })).text,
         /This master is not backed up/,
       )
-      // Testers, and everyone's Install apps and Devices, hear installs come from a host.
-      const someone = async (role: Role): Promise<string> => {
+      // Testers, and everyone's Install apps and Devices, hear installs come
+      // from a host: the pages answer the web app's shell, their JSON 503.
+      const someone = async (
+        role: Role,
+      ): Promise<{ cookie: string; csrf: string }> => {
         const person = await node.master!.people.create(localOperator, {
           name: `A ${role}`,
           emails: [`${role}@lone.example.test`],
           role,
         })
-        return `__Host-mason-master=${node.master!.auth.start(person.id, '127.0.0.1').token}`
+        const started = node.master!.auth.start(person.id, '127.0.0.1')
+        return {
+          cookie: `__Host-mason-master=${started.token}`,
+          csrf: started.session.csrf,
+        }
       }
       const tester = await someone('tester')
       const developer = await someone('developer')
-      const NOTICE = /No host is linked yet — installs come from a host/
-      for (const [who, route, active] of [
-        [tester, '/', 'apps'],
-        [tester, '/apps', 'apps'],
-        [tester, '/devices', 'devices'],
-        [developer, '/apps', 'apps'],
-        [developer, `/apps/1`, 'apps'],
-        [developer, '/devices', 'devices'],
-      ] as const) {
-        const reply = await request(node, 'GET', route, { cookie: who })
-        assert.equal(reply.status, 200, route)
-        assert.match(reply.text, NOTICE, route)
-        assert.match(
-          reply.text,
-          new RegExp(`<a href="/${active}" aria-current="page"`),
-          route,
-        )
+      for (const [who, route] of [
+        [tester, '/'],
+        [tester, '/apps'],
+        [tester, '/devices'],
+        [developer, '/apps'],
+        [developer, `/apps/1`],
+        [developer, '/apps/1/branches/bWFzdGVy'],
+        [developer, '/devices'],
+        [developer, `/devices/complete/${'A'.repeat(43)}`],
+      ] as const)
+        assertShell(await request(node, 'GET', route, { cookie: who.cookie }))
+      for (const route of [
+        '/api/v2/catalog/apps',
+        '/api/v2/catalog/apps/1',
+        '/api/v2/devices',
+      ]) {
+        const reply = await request(node, 'GET', route, {
+          cookie: tester.cookie,
+        })
+        assert.equal(reply.status, 503, route)
+        assert.deepEqual(reply.json, { error: NO_HOST_ERROR }, route)
       }
-      assertShell(await request(node, 'GET', '/', { cookie: developer }))
-      assert.equal(
-        (await request(node, 'GET', '/projects', { cookie: tester })).status,
+      assertShell(await request(node, 'GET', '/', { cookie: developer.cookie }))
+      assertShell(
+        await request(node, 'GET', '/projects', { cookie: tester.cookie }),
         404,
       )
-      // Nothing can be installed without a host.
+      // Nothing can be installed without a host, nor a grant's file fetched.
+      const install = await request(
+        node,
+        'POST',
+        '/api/v2/catalog/builds/1/install',
+        {
+          cookie: tester.cookie,
+          csrf: tester.csrf,
+          origin: node.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:'),
+        },
+      )
+      assert.deepEqual(
+        [install.status, install.json],
+        [503, { error: NO_HOST_ERROR }],
+      )
       assert.equal(
-        (await request(node, 'POST', '/builds/1/install', { cookie: tester }))
+        (await request(node, 'GET', `/install/${'A'.repeat(43)}/artifact`))
           .status,
         503,
       )

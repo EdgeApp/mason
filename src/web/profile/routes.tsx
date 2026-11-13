@@ -1,17 +1,8 @@
 // Every page's route, declared once for both profiles: master-only routes
-// are not registered on the host (their addresses answer 404 there). Until a
-// page's milestone ports it, its route is the node's own page: outside the
-// /_web mount the app leaves for it with a full load, and inside the mount
-// it renders the page's header and what is coming. The access check and
-// the 403 are real already.
-import {
-  createContext,
-  useContext,
-  useEffect,
-  type ComponentType,
-  type JSX,
-} from 'react'
-import { Navigate, Route, Routes, useLocation, useParams } from 'react-router'
+// are not registered on the host (their addresses answer 404 there). A
+// page the viewer's session may not open reads its 403.
+import type { ComponentType, JSX } from 'react'
+import { Navigate, Route, Routes, useParams } from 'react-router'
 import type { NodeInfo } from '../../shared/api/index.js'
 import type { Permission, Role } from '../../shared/permissions.js'
 import { AppShell } from '../layout/AppShell.js'
@@ -33,7 +24,6 @@ import { PeoplePage } from '../pages/admin/people/People.js'
 import { SettingsPage } from '../pages/admin/settings/Settings.js'
 import { ArtifactsPage } from '../pages/artifacts/Artifacts.js'
 import { DashboardPage } from '../pages/dashboard/Dashboard.js'
-import { PlaceholderPage } from '../pages/Placeholder.js'
 import { AppBuildNumbersPage } from '../pages/projects/BuildNumbers.js'
 import { MasonfilePage } from '../pages/projects/Masonfile.js'
 import { ProjectOverviewPage } from '../pages/projects/Overview.js'
@@ -42,7 +32,11 @@ import { SecretsPage } from '../pages/projects/Secrets.js'
 import { WizardPage } from '../pages/projects/Wizard.js'
 import { RunPage } from '../pages/run/RunPage.js'
 import { SearchPage } from '../pages/search/Search.js'
-import { SkeletonText } from '../ui/Skeleton.js'
+import { AppPage } from '../pages/catalog/App.js'
+import { AppsPage } from '../pages/catalog/Apps.js'
+import { BranchPage } from '../pages/catalog/Branch.js'
+import { CompletePage } from '../pages/devices/Complete.js'
+import { DevicesPage } from '../pages/devices/Devices.js'
 import type { IconName } from '../ui/icons.js'
 import { homeFor, navItem } from './navigation.js'
 import { useProfile } from './NodeProfile.js'
@@ -54,8 +48,6 @@ export interface PageRoute {
   path: string
   title: (params: Params) => string
   description: string
-  /** The milestone that ports it. */
-  milestone: string
   icon: IconName
   /** What opens it, and who holds that (for the 403's words). */
   permission: Permission
@@ -63,22 +55,23 @@ export interface PageRoute {
   masterOnly: boolean
   /** The trail after the node's pill; the last is the page. */
   crumbs: (params: Params) => Crumb[]
-  /** The page, once its milestone has ported it; until then the node draws it. */
-  page?: ComponentType
+  page: ComponentType
+  /** To a viewer without this permission the page does not exist: 404, not 403. */
+  hiddenWithout?: Permission
 }
 
 /** A route that is one of the navigation's destinations. */
 function destination(
   key: string,
   description: string,
-  milestone: string,
+  page: ComponentType,
 ): PageRoute {
   const entry = navItem(key)!
   return {
+    page,
     path: entry.href,
     title: () => entry.label,
     description,
-    milestone,
     icon: entry.icon,
     permission: entry.permission,
     least: entry.least,
@@ -111,12 +104,12 @@ function projectPage(
     path,
     title: () => title,
     description,
-    milestone: 'M8',
     icon: 'folder',
     permission: 'projects.read',
     least: 'developer',
     masterOnly,
     crumbs,
+    hiddenWithout: 'projects.read',
   }
 }
 
@@ -126,24 +119,20 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
     ...destination(
       'dashboard',
       'Every project’s app IDs, their latest builds and runs.',
-      'M6',
+      DashboardPage,
     ),
-    page: DashboardPage,
+    hiddenWithout: 'projects.read',
   },
-  {
-    ...destination(
-      'artifacts',
-      'Each run’s saved artifacts, test results and published builds.',
-      'M6',
-    ),
-    page: ArtifactsPage,
-  },
+  destination(
+    'artifacts',
+    'Each run’s saved artifacts, test results and published builds.',
+    ArtifactsPage,
+  ),
   {
     page: SearchPage,
     path: '/search',
     title: () => 'Search',
     description: 'Projects, app IDs, runs, commits and branches.',
-    milestone: 'M6',
     icon: 'search',
     permission: 'builds.read',
     least: 'tester',
@@ -155,7 +144,6 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
     path: '/runs/:id',
     title: () => 'Run',
     description: 'A run’s stages, steps, log and history.',
-    milestone: 'M7',
     icon: 'history',
     permission: 'runs.read',
     least: 'developer',
@@ -220,70 +208,50 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
     'An app ID’s build-number sequence.',
     (p) => [PROJECTS, project(p), app(p), { label: 'Build numbers' }],
   ),
+  destination(
+    'nodes',
+    'The workers and the host, their checks and pools.',
+    NodesPage,
+  ),
+  destination('cloud', 'Cloud accounts and their checks.', CloudPage),
+  destination(
+    'settings',
+    'Apple, signing, keys, GitHub, the host, storage, sign-in and node types.',
+    SettingsPage,
+  ),
+  destination('people', 'Who signs in, their roles and emails.', PeoplePage),
+  destination('groups', 'Which testers install which apps.', GroupsPage),
   {
-    ...destination(
-      'nodes',
-      'The workers and the host, their checks and pools.',
-      'M9',
-    ),
-    page: NodesPage,
-  },
-  {
-    ...destination('cloud', 'Cloud accounts and their checks.', 'M9'),
-    page: CloudPage,
-  },
-  {
-    ...destination(
-      'settings',
-      'Apple, signing, keys, GitHub, the host, storage, sign-in and node types.',
-      'M9',
-    ),
-    page: SettingsPage,
-  },
-  {
-    ...destination('people', 'Who signs in, their roles and emails.', 'M9'),
-    page: PeoplePage,
-  },
-  {
-    ...destination('groups', 'Which testers install which apps.', 'M9'),
-    page: GroupsPage,
-  },
-  {
-    ...destination('groups', 'A group’s apps and members.', 'M9'),
-    page: GroupPage,
+    ...destination('groups', 'A group’s apps and members.', GroupPage),
     path: '/groups/:id',
     title: () => 'Group',
     crumbs: () => [{ label: 'Groups', to: '/groups' }, { label: 'Group' }],
   },
-  {
-    ...destination(
-      'backups',
-      'Encrypted copies of this master, kept in a git repository.',
-      'M9',
-    ),
-    page: BackupsPage,
-  },
+  destination(
+    'backups',
+    'Encrypted copies of this master, kept in a git repository.',
+    BackupsPage,
+  ),
   {
     page: AccountPage,
     path: '/account',
     title: () => 'Your account',
     description: 'Your name, emails, Appearance and password.',
-    milestone: 'M9',
     icon: 'person',
     permission: 'builds.read',
     least: 'tester',
     masterOnly: false,
     crumbs: () => [{ label: 'Your account' }],
   },
-  destination('catalog', 'The apps you may install, by platform.', 'M10'),
+  destination('catalog', 'The apps you may install, by platform.', AppsPage),
   {
-    ...destination('catalog', 'An app’s branches and builds.', 'M10'),
+    ...destination('catalog', 'An app’s branches and builds.', AppPage),
     path: '/apps/:appId',
     title: () => 'App',
     crumbs: () => [{ label: 'Install apps', to: '/apps' }, { label: 'App' }],
   },
   {
-    ...destination('catalog', 'A branch’s builds, to install.', 'M10'),
+    ...destination('catalog', 'A branch’s builds, to install.', BranchPage),
     path: '/apps/:appId/branches/:branchKey',
     title: () => 'Branch',
     crumbs: (p) => [
@@ -292,9 +260,9 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
       { label: 'Branch' },
     ],
   },
-  destination('devices', 'Register an iPhone or iPad for builds.', 'M10'),
+  destination('devices', 'Register an iPhone or iPad for builds.', DevicesPage),
   {
-    ...destination('devices', 'Your device’s registration.', 'M10'),
+    ...destination('devices', 'Your device’s registration.', CompletePage),
     path: '/devices/complete/:token',
     title: () => 'Device registered',
     crumbs: () => [
@@ -308,77 +276,31 @@ export const PAGE_ROUTES: readonly PageRoute[] = [
 export const routesFor = (node: 'master' | 'host'): PageRoute[] =>
   PAGE_ROUTES.filter((route) => node === 'master' || !route.masterOnly)
 
-/**
- * Where the app leaves for the node's own pages, outside the /_web mount:
- * `here` is the address the document was loaded at (the node answered the
- * app there, so the app never leaves it), `go` loads another with a full
- * document load. Inside the mount there is none, and unported pages draw
- * their placeholder.
- */
-export interface ServerPages {
-  here: string
-  go: (url: string) => void
-}
-
-export const ServerPagesContext = createContext<ServerPages | undefined>(
-  undefined,
-)
-
-/** The node's own page at an address: a full load of it, or the placeholder. */
-function ServerPage({
-  placeholder,
-}: {
-  placeholder: () => JSX.Element
-}): JSX.Element {
-  const server = useContext(ServerPagesContext)
-  const { pathname, search } = useLocation()
-  const target = `${pathname}${search}`
-  const leaving = server != null && server.here !== target
-  useEffect(() => {
-    if (leaving) server.go(target)
-  }, [leaving, server, target])
-  if (!leaving) return placeholder()
-  return (
-    <div className="m-page">
-      <SkeletonText lines={4} label="Opening the page" />
-    </div>
-  )
-}
-
 /** One page: the 403 when the viewer's session lacks its permission. */
 function RoutePage({ route }: { route: PageRoute }): JSX.Element {
   const params = useParams()
   const { session } = useShell()
   const title = route.title(params)
   const crumbs = route.crumbs(params)
+  if (
+    route.hiddenWithout != null &&
+    !session.permissions.includes(route.hiddenWithout)
+  )
+    return <NotFound />
   if (!session.permissions.includes(route.permission))
     return <Forbidden title={title} least={route.least} crumbs={crumbs} />
   const Ported = route.page
-  if (Ported != null) return <Ported />
-  return (
-    <ServerPage
-      placeholder={() => (
-        <PlaceholderPage
-          crumbs={crumbs}
-          title={title}
-          description={route.description}
-          milestone={route.milestone}
-          icon={route.icon}
-        />
-      )}
-    />
-  )
+  return <Ported />
 }
 
 /**
  * `/`: on the master, Projects & apps for those who may read projects;
- * otherwise the viewer's first destination (Install apps for a tester),
- * which outside the mount is the node's own page at `/`.
+ * otherwise the viewer's first destination: Install apps for a tester (on
+ * either node), Projects & apps for a developer on the host.
  */
 function Home(): JSX.Element {
   const { nav, session } = useShell()
   const profile = useProfile()
-  const server = useContext(ServerPagesContext)
   if (
     profile.role === 'master' &&
     session.permissions.includes('projects.read')
@@ -388,8 +310,6 @@ function Home(): JSX.Element {
         <DashboardPage />
       </BackupsFirst>
     )
-  if (server != null && server.here !== '/')
-    return <ServerPage placeholder={() => <></>} />
   return <Navigate to={homeFor(nav)} replace />
 }
 

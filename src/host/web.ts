@@ -15,11 +15,6 @@ import type { Session } from '../auth/accounts.js'
 import { forwardRoutes } from './forward.js'
 import { deviceCallbackRoutes } from '../devices/routes.js'
 import {
-  catalogRoutes,
-  deviceRoutes,
-  installationRoutes,
-} from '../catalog/routes.js'
-import {
   masterContentSecurityPolicy,
   nodeWebApp,
   sendPage,
@@ -41,7 +36,8 @@ import type { HostRuntime } from './runtime.js'
 import { hostLogin } from './sessions.js'
 import { hostNodeInfo, hostSessionApi } from './sessionApi.js'
 import { nodeInfoRoutes } from '../node/nodeInfo.js'
-import { catalogApi } from '../catalog/api.js'
+import { catalogApi, type CatalogApiCaller } from '../catalog/api.js'
+import { catalogShellRoutes } from '../catalog/shell.js'
 import { StoreCatalogSource } from '../catalog/source.js'
 import { Devices } from '../devices/store.js'
 import { Refused } from './builds.js'
@@ -147,22 +143,6 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
     (accountId: number) =>
     (appId: number): boolean =>
       host.cache.store.visible(accountId, appId)
-  const render = (
-    res: express.Response,
-    viewer: Viewer,
-    title: string,
-    body: string,
-    active: string,
-  ): void => {
-    res.send(
-      hostShell(host, context, viewer, {
-        title,
-        body,
-        active,
-        scripts: ['/assets/run.js'],
-      }),
-    )
-  }
   /** Sends someone not signed in to sign in, and back. */
   const signIn = (req: express.Request, res: express.Response): void => {
     res.redirect(
@@ -170,20 +150,15 @@ function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
       '/auth/login?return=' + encodeURIComponent(req.originalUrl),
     )
   }
-  // Projects are for developers and up: to a tester they do not exist.
+  // Projects are for developers and up: to a tester they do not exist, and
+  // the web app says so inside its shell.
   router.use('/projects', (req, res, next) => {
     const found = hostViewer(host, req)
-    if (found?.viewer.role !== 'tester') {
+    if (req.method !== 'GET' || found?.viewer.role !== 'tester') {
       next()
       return
     }
-    render(
-      res.status(404),
-      found.viewer,
-      'Not found',
-      '<h1>Not found</h1><p class="empty-state">There is no such page.</p>',
-      'catalog',
-    )
+    sendShell(res, { status: 404 })
   })
   /**
    * A project's pages on the host are the web app's, read from the copy the
@@ -441,34 +416,60 @@ function hostInvitation(
   }
 }
 
+/** The person signed in on the host, as Install apps and Devices answer for them. */
+function hostCatalogCaller(
+  host: HostRuntime,
+  req: express.Request,
+): CatalogApiCaller | undefined {
+  const store = host.cache.store
+  const context = sessionContext(req, host.accounts)
+  if (context == null) return undefined
+  return {
+    accountId: context.account.id,
+    source: new StoreCatalogSource(store, {
+      session: context.session,
+      relay: host.devices,
+    }),
+    checkCsrf: (request): void => {
+      csrf(request, store, context.session)
+    },
+    mayRegister: new Devices(store, host.devices).allowed(context.account),
+    registration: store.config.devices != null,
+    installOrigin: store.config.origin,
+  }
+}
+
 /** Install apps and Devices as JSON, from the host's cache, for its own signed-in people. */
 function hostCatalogApi(host: HostRuntime): express.Router {
-  const store = host.cache.store
   return catalogApi({
     caller(req) {
       // Before the first sync and in maintenance there is nothing to serve.
       host.builds.ready()
-      const context = sessionContext(req, host.accounts)
-      if (context == null) return undefined
-      return {
-        accountId: context.account.id,
-        source: new StoreCatalogSource(store, {
-          session: context.session,
-          relay: host.devices,
-        }),
-        checkCsrf: (request): void => {
-          csrf(request, store, context.session)
-        },
-        mayRegister: new Devices(store, host.devices).allowed(context.account),
-        registration: store.config.devices != null,
-        installOrigin: store.config.origin,
-      }
+      return hostCatalogCaller(host, req)
     },
     failure: (error) =>
       error instanceof Refused
         ? { status: error.status, error: error.message }
         : undefined,
     now: () => host.now(),
+  })
+}
+
+/**
+ * Install apps (`/` for everyone here) and Devices are the web app's, read
+ * from the cache; the QR code and the grants' files are the host's own.
+ */
+function hostCatalogShell(host: HostRuntime): express.Router {
+  return catalogShellRoutes({
+    paths: ['/', '/apps', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
+    caller: (req) => hostCatalogCaller(host, req),
+    signIn: (req) =>
+      '/auth/login?return=' + encodeURIComponent(req.originalUrl),
+    shell: (res, status) => {
+      sendShell(res, { status })
+    },
+    files: () => new StoreCatalogSource(host.cache.store),
+    qr: () => host.cache.store.config.origin + '/devices',
   })
 }
 
@@ -500,13 +501,6 @@ export function hostApp(
           new URL('../browser/bundles/run.js', import.meta.url),
           'utf8',
         ),
-      )
-  })
-  app.get('/assets/catalog.js', (_req, res) => {
-    res
-      .type('js')
-      .send(
-        readFileSync(new URL('../browser/client.js', import.meta.url), 'utf8'),
       )
   })
   // Webhooks are relayed or kept for the master even past the grace window, and
@@ -587,23 +581,8 @@ export function hostApp(
       invitation: hostInvitation(host),
     }),
   )
-  app.use(
-    deviceRoutes(host.cache.store, host.accounts, {
-      relay: host.devices,
-      frame,
-      node: 'host',
-    }),
-  )
-  app.use(
-    installationRoutes(host.cache.store, host.accounts, {
-      frame,
-      node: 'host',
-    }),
-  )
   app.use(viewRoutes(host, context))
-  app.use(
-    catalogRoutes(host.cache.store, host.accounts, { frame, node: 'host' }),
-  )
+  app.use(hostCatalogShell(host))
   app.use((_req, res) => {
     res.status(404).send('Not found')
   })

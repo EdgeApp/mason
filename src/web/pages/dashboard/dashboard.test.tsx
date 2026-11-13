@@ -647,11 +647,19 @@ describe('Projects & apps', () => {
     )
   })
 
-  it('answers a tester the 403 inside the shell', async () => {
-    renderApp({ path: '/projects', replies: shellReplies('tester') })
-    await screen.findByText(
-      'Projects & apps is for developers, managers and administrators',
-    )
+  it('answers a tester the 404 inside the shell: to her, projects do not exist', async () => {
+    for (const path of ['/projects', '/projects/fixture', '/projects/new']) {
+      renderApp({ path, replies: shellReplies('tester') })
+      await screen.findByRole('heading', {
+        level: 1,
+        name: 'Not found',
+      })
+      screen.getByText('There is no such page')
+      cleanup()
+    }
+    // A developer who may not add projects reads the 403 on the wizard.
+    renderApp({ path: '/projects/new', replies: shellReplies('developer') })
+    await screen.findByText(/^Add a project is for /)
   })
 
   it('puts a queued run first among its project’s chips, in place of its branch’s', () => {

@@ -3,6 +3,12 @@ import { breadcrumbs, escape, type Crumb } from '../view/html.js'
 import type { ViewerNode } from '../view/shell.js'
 import { iosInstallUrl } from './install.js'
 import { branchKey, labels } from './platform.js'
+import {
+  deviceStateLabel,
+  devicesPending,
+  groupBuilds,
+  humanModel,
+} from '../shared/catalog.js'
 import type {
   AppData,
   AppsData,
@@ -254,24 +260,8 @@ export function branchView(
       return `<a id="build-${build.id}" class="list-row build-row" data-install aria-label="${escape(label)}" href="${escape(iosInstallUrl(viewer.origin, build.token))}">${content}</a>`
     return `<form id="build-${build.id}" method="post" action="/builds/${build.id}/install">${hidden(viewer)}<button class="list-row build-row" aria-label="${escape(label)}">${content}</button></form>`
   }
-  // A run's variants are one build: grouped, newest run first. The default
-  // leads, else the first variant by name in byte order (plain `<`, not
-  // `localeCompare`), as the dashboard's `leadsItsBuild` and the run
-  // pages order them, so every view names the same lead build.
-  const groups = new Map<string, CatalogBuild[]>()
-  for (const build of data.builds) {
-    const key = build.run == null ? `build:${build.id}` : `run:${build.run}`
-    const group = groups.get(key)
-    if (group == null) groups.set(key, [build])
-    else group.push(build)
-  }
-  const rows = [...groups.values()]
-    .map((group) => {
-      const sorted = [...group].sort(
-        (a, b) =>
-          Number(a.variant !== '') - Number(b.variant !== '') ||
-          (a.variant < b.variant ? -1 : a.variant > b.variant ? 1 : 0),
-      )
+  const rows = groupBuilds(data.builds)
+    .map((sorted) => {
       const head = sorted[0]!
       if (sorted.length === 1 && head.variant === '') return install(head)
       return `<section class="build-group" id="run-${escape(head.run ?? String(head.id))}"><div class="build-group-head">${heading(head)}</div>${sorted
@@ -337,13 +327,6 @@ export function registerHref(viewer: CatalogViewer): string {
   return viewer.hostPages == null ? '/devices' : `${viewer.hostPages}/devices`
 }
 
-const deviceLabels: Record<string, string> = {
-  pending: 'Waiting to register with Apple',
-  processing: 'Apple registration is processing',
-  registered: 'Registered with Apple',
-  error: 'Preparation needs attention',
-}
-
 /** Devices: how to register, the person's devices, and every device for an administrator. */
 export function devicesView(
   data: DevicesData,
@@ -352,7 +335,7 @@ export function devicesView(
   const rows = data.devices
     .map(
       (d) =>
-        `<section class="card"><h2>${escape(d.name)}</h2><p>${escape(d.model)} · iOS ${escape(d.os_version)}</p><p class="device-state">${escape(deviceLabels[d.status] ?? d.status)}</p>${d.message ? `<p>${escape(d.message)}</p>` : ''}<small class="device-id">Device identifier: ${escape(d.udid)}</small><form method="post" action="/devices/${d.id}/select">${hidden(viewer)}<button class="secondary">${data.selected === d.id ? 'Selected device' : 'Use this device'}</button></form><form method="post" action="/devices/${d.id}/rename">${hidden(viewer)}<label for="name-${d.id}">Friendly name</label><input id="name-${d.id}" name="name" maxlength="120" value="${escape(d.name)}" required><button class="secondary">Save name</button></form>${d.status === 'error' ? `<form method="post" action="/devices/${d.id}/retry">${hidden(viewer)}<button>Retry preparation</button></form>` : ''}<form method="post" action="/devices/${d.id}/remove">${hidden(viewer)}<button class="secondary">Remove from my account</button></form></section>`,
+        `<section class="card"><h2>${escape(d.name)}</h2><p>${escape(d.model)} · iOS ${escape(d.os_version)}</p><p class="device-state">${escape(deviceStateLabel(d.status))}</p>${d.message ? `<p>${escape(d.message)}</p>` : ''}<small class="device-id">Device identifier: ${escape(d.udid)}</small><form method="post" action="/devices/${d.id}/select">${hidden(viewer)}<button class="secondary">${data.selected === d.id ? 'Selected device' : 'Use this device'}</button></form><form method="post" action="/devices/${d.id}/rename">${hidden(viewer)}<label for="name-${d.id}">Friendly name</label><input id="name-${d.id}" name="name" maxlength="120" value="${escape(d.name)}" required><button class="secondary">Save name</button></form>${d.status === 'error' ? `<form method="post" action="/devices/${d.id}/retry">${hidden(viewer)}<button>Retry preparation</button></form>` : ''}<form method="post" action="/devices/${d.id}/remove">${hidden(viewer)}<button class="secondary">Remove from my account</button></form></section>`,
     )
     .join('')
   const content = !data.registration
@@ -363,7 +346,7 @@ export function devicesView(
   const all = data.all
     .map(
       (r) =>
-        `<p>${escape(r.name)} · ${escape(r.model)} · ${escape(deviceLabels[r.status] ?? r.status)}</p>`,
+        `<p>${escape(r.name)} · ${escape(r.model)} · ${escape(deviceStateLabel(r.status))}</p>`,
     )
     .join('')
   return {
@@ -378,14 +361,7 @@ export function devicesView(
           '</section>'
         : '') +
       '<a href="/">Browse apps</a>',
-    ...(data.devices.some(
-      (d) =>
-        d.status === 'pending' ||
-        d.status === 'processing' ||
-        (d.status === 'registered' && d.message === ''),
-    )
-      ? { refresh: 15 }
-      : {}),
+    ...(devicesPending(data.devices) ? { refresh: 15 } : {}),
   }
 }
 
@@ -399,11 +375,7 @@ export function completeView(
       body: '<section class="card"><p>Mason has your device and is registering it with Apple. This page updates by itself.</p></section>',
       refresh: 5,
     }
-  const model = data.device.model.replace(
-    /^(iPhone|iPad|iPod)(.+)$/,
-    (_match, family: string, variant: string) =>
-      family + ' ' + variant.replace(/(\d|[a-z])([A-Z])/g, '$1 $2'),
-  )
+  const model = humanModel(data.device.model)
   return {
     title: 'Device registered',
     body: `<section class="card"><p>You've registered the following device: <strong>${escape(model)}</strong>.</p><p>A new build of the applications is required before you can install them on your device. Mason will prepare these builds automatically.</p><p>Builds take approximately <strong>30 to 60 minutes</strong> to become available. Please check back in that time.</p><div class="actions"><a class="button" href="/">Browse apps</a><a href="/devices">View your devices</a></div></section>`,

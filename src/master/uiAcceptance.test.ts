@@ -360,6 +360,19 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     }
   }
   type Browser = Awaited<ReturnType<typeof browser>>
+  /** Runs a check in the page until it stops throwing, for up to 20 seconds. */
+  const settled = async (b: Browser, check: string): Promise<void> => {
+    const deadline = Date.now() + 20_000
+    for (;;) {
+      try {
+        await b.script(check)
+        return
+      } catch (error) {
+        if (Date.now() > deadline) throw error
+        await new Promise((resolve) => setTimeout(resolve, 250))
+      }
+    }
+  }
   /** The master's sign-in form, by username or email. */
   const masterSignIn = async (
     b: Browser,
@@ -836,15 +849,25 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     }
   })
 
-  it('E3 a tester keeps the side menu, with only Install apps and Devices, on every page of both nodes, at phone width and on a desktop; a developer lands on Projects & apps on the master', async () => {
+  it('E3 a tester keeps the navigation, with only Install apps and Devices, on every page of both nodes, at phone width and on a desktop; a developer lands on Projects & apps on the master', async () => {
     const db = c.master.master!.database.db
     const alpha = Number(
       db.prepare('SELECT id FROM apps WHERE slug=?').get(ALPHA)!.id,
     )
-    /** Fails unless the side menu holds exactly these links, the current one starred. */
-    const menu = async (b: Browser, expected: string[]): Promise<void> => {
+    /**
+     * Fails unless the navigation holds exactly these links, the current one
+     * starred: the tab bar on a phone, the sidebar on a desktop.
+     */
+    const menu = async (
+      b: Browser,
+      phone: boolean,
+      expected: string[],
+    ): Promise<void> => {
+      const links = phone
+        ? '.m-tabbar__platter a'
+        : '.m-sidebar nav[aria-label="Destinations"] a'
       await b.script(
-        `const rail = [...document.querySelectorAll('nav.rail a')].map((a) => a.getAttribute('href') + (a.getAttribute('aria-current') === 'page' ? '*' : '')).join(); if (rail !== ${JSON.stringify(expected.join())}) throw new Error('The side menu is ' + rail + ' on ' + location.pathname)`,
+        `const nav = [...document.querySelectorAll(${JSON.stringify(links)})].map((a) => a.getAttribute('href') + (a.getAttribute('aria-current') === 'page' ? '*' : '')).join(); if (nav !== ${JSON.stringify(expected.join())}) throw new Error('The navigation is ' + nav + ' on ' + location.pathname)`,
       )
     }
     /** Fails unless the page's heading is this. */
@@ -859,45 +882,113 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
       node: 'host' | 'master',
       phone: boolean,
     ): Promise<void> => {
+      // `/` opens Install apps, naming the platform in the address.
       await b.visible('Choose an app to browse recent builds')
-      await heading(b, 'Apps')
-      await menu(b, ['/apps*', '/devices'])
+      await heading(b, 'Install apps')
+      await b.script(
+        "if (location.pathname !== '/apps' || !/^\\?platform=\\w+$/.test(location.search)) throw new Error('Home is ' + location.pathname + location.search)",
+      )
+      await menu(b, phone, ['/apps*', '/devices'])
       if (node === 'master' && !phone)
         await b.shot('master-home-tester-after.png')
       await b.open('/apps')
       await b.visible('Choose an app to browse recent builds')
-      await menu(b, ['/apps*', '/devices'])
+      await menu(b, phone, ['/apps*', '/devices'])
       if (node === 'host' && phone)
         await b.shot('host-tester-install-after.png')
-      await b.tap(`a.app-card[href^="/apps/${alpha}?"]`)
-      await b.visible('^Branches · ')
-      await b.tap('a[data-platform="android"]')
-      await b.visible('^Branches · Android$')
-      await menu(b, ['/apps*', '/devices'])
-      await b.tap('a.list-row[href*="/branches/"]')
+      await b.tap(`a.m-list__row[href^="/apps/${alpha}?"]`)
+      await b.visible('^Branches with builds for ')
+      // The sticky platform switch: Android, remembered for later visits.
+      await b.tap(
+        'nav[aria-label="Build platform"] a[href*="platform=android"]',
+      )
+      await b.visible('^Branches with builds for Android.$')
+      await b.script(
+        "if (!document.cookie.split('; ').includes('mason-platform=android')) throw new Error('The platform was not remembered: ' + document.cookie)",
+      )
+      await menu(b, phone, ['/apps*', '/devices'])
+      await b.tap('a.m-list__row[href*="/branches/"]')
       await b.visible('^Android builds · newest first$')
-      await b.visible('^Install')
-      await menu(b, ['/apps*', '/devices'])
-      await b.tap('nav.rail a[href="/devices"]')
+      await settled(
+        b,
+        "if (![...document.querySelectorAll('main .m-catalog-build .m-btn')].some((b) => b.textContent.endsWith('Install'))) throw new Error('No Install on ' + location.pathname)",
+      )
+      await menu(b, phone, ['/apps*', '/devices'])
+      if (phone) await b.shot(`${node}-tester-branch-after.png`)
+      if (node === 'host' && phone) {
+        // The keyboard on the phone layout: from the top, Tab walks the skip
+        // link, the top bar, the trail, the platform switch, the builds'
+        // controls and the tab bar, each stop with a visible focus ring.
+        const stops: string[] = []
+        // A fresh load, so Tab starts at the top rather than at the last tap.
+        await b.open(await value(b, 'location.pathname + location.search'))
+        await settled(
+          b,
+          "if (document.querySelector('main .m-catalog-build .m-btn') == null) throw new Error('No builds yet')",
+        )
+        await b.script('document.activeElement?.blur(); window.scrollTo(0, 0)')
+        // Until focus leaves the page for the browser's own controls.
+        for (let n = 0; n < 20; n++) {
+          await b.command('pressKey', { key: 'Tab' })
+          const stop = await value(
+            b,
+            "(() => { const e = document.activeElement; const s = getComputedStyle(e); const ring = (s.outlineStyle !== 'none' && parseFloat(s.outlineWidth) >= 2) || s.boxShadow !== 'none'; return (ring ? 'ring ' : 'NO RING ') + e.tagName.toLowerCase() + ' ' + (e.getAttribute('aria-label') || e.textContent || '').replace(/[\\uE000-\\uF8FF]/g, '').replace(/\\s+/g, ' ').trim().slice(0, 60) })()",
+          )
+          if (/^NO RING body /.test(stop)) break
+          stops.push(stop)
+        }
+        const calm = await value(
+          b,
+          "[...document.styleSheets].flatMap((sheet) => [...sheet.cssRules]).filter((rule) => rule.media?.mediaText.includes('prefers-reduced-motion')).map((rule) => rule.cssText).filter((text) => text.includes('m-spinner')).length",
+        )
+        writeFileSync(
+          path.join(artifacts!, 'catalog-tab-order.log'),
+          `$ Tab ×${stops.length} on ${origin(host)}/apps/${alpha}/branches/<master>?platform=android at 390x844\n${stops.map((stop, n) => `${n + 1}. ${stop}`).join('\n')}\n$ reduced-motion rules covering the spinners: ${calm}\n`,
+        )
+        assert.match(stops[0]!, /^ring a Skip to content$/)
+        assert.deepEqual(
+          stops.filter((stop) => stop.startsWith('NO RING')),
+          [],
+        )
+        assert(
+          stops.some((stop) => /^ring a Android$/.test(stop)),
+          'the switch',
+        )
+        assert(
+          stops.some((stop) =>
+            /^ring button Install 1\.0\.\d+ build/.test(stop),
+          ),
+          'an Install row',
+        )
+        assert(Number(calm) > 0, 'reduced motion')
+      }
+      await b.tap(
+        phone
+          ? '.m-tabbar__platter a[href="/devices"]'
+          : '.m-sidebar a[href="/devices"]',
+      )
       await b.visible(
         'Android and desktop apps can be downloaded without iOS device registration|Device registration is being configured',
       )
       await heading(b, 'Devices')
-      await menu(b, ['/apps', '/devices*'])
+      await menu(b, phone, ['/apps', '/devices*'])
       if (node === 'host' && phone)
         await b.shot('host-tester-devices-after.png')
-      // The account icon opens Your account on both nodes.
-      await b.tap('a[aria-label="Your account"]')
-      await b.visible('^Your account$')
+      // Install apps opens on the remembered platform.
+      await b.open('/apps')
+      await b.visible('Choose an app to browse recent builds')
       await b.script(
-        "if (location.pathname !== '/account') throw new Error('The account icon opened ' + location.pathname)",
+        "if (location.search !== '?platform=android') throw new Error('Install apps opened ' + location.search)",
       )
-      await menu(b, ['/apps', '/devices'])
+      // Your account on both nodes.
+      await b.open('/account')
+      await b.visible('^Your account$')
+      await menu(b, phone, ['/apps', '/devices'])
       // To her, projects do not exist.
       await b.open('/projects')
       await b.visible('There is no such page')
       await heading(b, 'Not found')
-      await menu(b, ['/apps*', '/devices'])
+      await menu(b, phone, ['/apps', '/devices'])
     }
     for (const size of ['390x844', '1280x860']) {
       const phone = size === '390x844'
@@ -926,11 +1017,10 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
         `const items = [...document.querySelectorAll('.m-sidebar nav[aria-label="Destinations"] a')].map((a) => a.getAttribute('href') + (a.getAttribute('aria-current') === 'page' ? '*' : '')).join(); if (items !== ${JSON.stringify(['/projects*', '/artifacts', '/apps', '/devices'].join())}) throw new Error('The sidebar is ' + items + ' on ' + location.pathname); if (location.pathname !== '/') throw new Error('Home is ' + location.pathname)`,
       )
       await d.shot('master-home-developer-after.png')
-      // Install apps is still the master's own page: a full load.
       await d.tap('.m-sidebar a[href="/apps"]')
       await d.visible('Choose an app to browse recent builds')
-      await heading(d, 'Apps')
-      await menu(d, ['/apps*', '/projects', '/artifacts', '/devices'])
+      await heading(d, 'Install apps')
+      await menu(d, false, ['/projects', '/artifacts', '/apps*', '/devices'])
     } finally {
       await d.close()
     }
@@ -1067,21 +1157,27 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     const b = await browser('mason-e7-tess', c.master, '1280x860')
     try {
       await masterSignIn(b, 'tess', PASSWORDS.tess!)
-      // A tester's home on the master is Install apps.
+      // A tester's home on the master is Install apps, read from the host.
       await b.visible('Choose an app to browse recent builds')
-      await b.tap(`a.app-card[href^="/apps/${alpha}?"]`)
-      await b.visible('^Branches · ')
-      await b.tap('a[data-platform="android"]')
-      await b.visible('^Branches · Android$')
+      await b.tap(`a.m-list__row[href^="/apps/${alpha}?"]`)
+      await b.visible('^Branches with builds for ')
+      await b.tap(
+        'nav[aria-label="Build platform"] a[href*="platform=android"]',
+      )
+      await b.visible('^Branches with builds for Android.$')
       await b.visible('^master$')
       await b.shot('master-install-apps.png')
-      await b.tap('a.list-row[href*="/branches/"]')
+      await b.tap('a.m-list__row[href*="/branches/"]')
       await b.visible('^Android builds · newest first$')
-      // An Android build installs by downloading its package.
-      await b.visible('^Install')
+      // An Android build installs by downloading its package: Install asks
+      // the host for a grant and the browser downloads it from the master.
+      await b.tap('main .m-catalog-build button.m-btn')
+      await b.visible('^Downloading ')
       await b.open('/devices')
       await b.visible('^Your devices$')
       await b.visible('^iPhone of Tess$')
+      await b.visible('Registered with Apple')
+      await b.shot('master-devices-tester.png')
     } finally {
       await b.close()
     }
@@ -1157,21 +1253,23 @@ describe('Mason in a real browser: people, accounts, navigation', function () {
     const header = (reply: Reply, name: string): string =>
       `${name}: ${reply.headers.get(name) ?? '(none)'}`
     const install = await curl(
-      "-sS -i -b '__Host-mason-master=<tess>' -X POST -d 'csrf=<csrf>'",
-      `/builds/${build.id}/install`,
+      "-sS -b '__Host-mason-master=<tess>' -H 'X-Mason-CSRF: <csrf>' -X POST",
+      `/api/v2/catalog/builds/${build.id}/install`,
       {
         method: 'POST',
-        headers: {
-          origin: base,
-          'content-type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({ csrf }).toString(),
+        headers: { origin: base, 'x-mason-csrf': csrf },
       },
-      (reply) =>
-        `HTTP ${reply.status}\n${header(reply, 'location').replace(/\/install\/[^/]+\//, '/install/<token>/')}`,
+      (reply, body) =>
+        `HTTP ${reply.status}\n${body.toString().replace(/\/install\/[^/]+\//, '/install/<token>/')}`,
     )
-    assert.equal(install.reply.status, 303)
-    const artifact = install.reply.headers.get('location')!
+    assert.equal(install.reply.status, 200)
+    const answer = JSON.parse(install.body.toString()) as {
+      kind: string
+      url: string
+    }
+    assert.equal(answer.kind, 'download')
+    const artifact = answer.url
+    assert.match(artifact, /^\/install\/[^/]+\/artifact$/)
     const full = await curl(
       '-sS -o alpha.apk -w "%{http_code}"',
       artifact,

@@ -2001,10 +2001,10 @@ the platform; without it, the remembered choice, else the browser's.
 | --- | --- |
 | `GET /api/v2/catalog/apps` | `{ apps, platforms }`: the apps the person may install. |
 | `GET /api/v2/catalog/apps/:id?platform=` | The app, its platforms, its branches (master first) and each platform's latest build. |
-| `GET /api/v2/catalog/apps/:id/branches/:key?platform=` | A branch's builds for a platform, each with whether the selected device may install it and, for an eligible iOS app, its grant. |
+| `GET /api/v2/catalog/apps/:id/branches/:key?platform=` | A branch's builds for a platform, each with whether the selected device may install it and, for an eligible iOS app, its grant and its `installUrl` (the `itms-services://` link, on the node's public origin). `ios` says how iOS apps install from here: `{ "via": "here" }`, `{ "via": "host", "host": "<origin>" }` (a master without a public origin of its own) or `{ "via": "none" }`. |
 | `POST /api/v2/catalog/builds/:id/install` | `InstallAnswer`, below. |
 | `POST /api/v2/catalog/builds/:id/prepare` | Asks for a build of that branch and commit for the selected device: `{ prepared }`, `false` with none of the person's selected. |
-| `GET /api/v2/devices` | The person's devices, the selected one, whether registration is configured, and every registered device for an administrator. |
+| `GET /api/v2/devices` | The person's devices, the selected one, whether registration is configured, and every registered device for an administrator; `via` is the host's origin when registration goes through its own pages. |
 | `POST /api/v2/devices/registrations` | `{ url, expiresAt }`: a registration profile to download once, with a plain `GET`, within five minutes (`/devices/profiles/<token>`, `application/x-apple-aspen-config`; 404 after). |
 | `POST /api/v2/devices/:id/select`, `…/rename` (`{ "name" }`), `…/retry`, `…/remove` | The action, then the devices as `GET /api/v2/devices` answers them. 404 for a device not the person's or another action. |
 | `GET /api/v2/devices/complete/:token` | Where a registration link ended: `registering`, `registered` (selecting the device) or `unavailable`. |
@@ -2034,8 +2034,10 @@ export const prepare: InstallAnswer = { kind: 'prepare', buildId: 88 }
 
 On the master `itms` has no `url` until the master or the host has a
 public origin. The `.mobileconfig` and grant files, `GET /devices/qr` and
-`GET /install/:token/*` stay plain `GET`s, and the pages' form posts keep
-working beside these routes.
+`GET /install/:token/*` stay plain `GET`s. On the master without a host
+these routes answer 503 with "No host is linked yet — installs come from a
+host."; with its host away, 503 with "The master cannot reach the Mason
+host right now; try again in a moment."
 
 ## 16. Routes outside `/api/v2/`
 
@@ -2096,22 +2098,27 @@ are 404.
 
 ### Install apps and Devices
 
-The tester pages are served on both nodes, signed in with that node's
-session:
+The tester pages are the web app's on both nodes, signed in with that
+node's session: each address answers the app's shell, which reads the JSON
+routes above, with the status of what it will show.
 
 | Method and path | What it does |
 | --- | --- |
-| `GET /`, `GET /apps` | Install apps: the apps the person may install, with a platform switch. `/` is everyone's home on both nodes. |
-| `GET /apps/:appId`, `GET /apps/:appId/branches/:branchKey` | An app's branches; a branch's builds for a platform, each with its install control. |
-| `POST /builds/:id/install` | A grant for the build: 303 to its package, or the iOS installer page; 409 when the selected device must be registered or the build prepared for it. |
-| `POST /builds/:id/prepare` | Requests a build of that branch and commit for the selected device. |
+| `GET /apps`, and `GET /` for a tester (the master) or everyone (the host) | Install apps: the shell (403 while the person waits for tester access). The app sends a tester at `/` to `/apps`, and a developer on the host to `/projects`. |
+| `GET /apps/:appId`, `GET /apps/:appId/branches/:branchKey` | An app's branches; a branch's builds for a platform. The shell, 404 for an app the person may not see or a malformed id or branch key. |
 | `GET /install/:token/manifest.plist`, `GET /install/:token/artifact` | A grant's iOS manifest and package, with no cookie: `HEAD`, a single `Range` (206 with `Content-Range`, 416 when unsatisfiable) and `If-Range`. |
-| `GET /devices`, `POST /devices/profile`, `POST /devices/:id/:action` | The person's devices; a registration profile; `select`, `rename`, `retry` or `remove`. |
-| `GET /devices/complete/:token` | Where a registered device lands. |
+| `GET /devices` | Devices: the shell. |
+| `GET /devices/qr` | The QR code (SVG) that opens Devices on a phone. |
+| `GET /devices/complete/:token` | Where a registered device lands: selects it (the `__Host-mason-device` cookie) once registered, then the shell; 410 for a link that is no longer the person's. |
 
-The forms post `csrf`, the session's proof, from the node's own origin. The
+Installs, preparing a build, registration profiles and device actions are
+the JSON routes' (`POST /api/v2/catalog/builds/:id/install`, `…/prepare`,
+`POST /api/v2/devices/registrations`, `POST /api/v2/devices/:id/:action`),
+with the session's proof in `X-Mason-CSRF` from the node's own origin. The
 selected device is that node's `__Host-mason-device` cookie; a device that
-is not the person's counts as none, and selecting one is 404.
+is not the person's counts as none, and selecting one is 404. The platform
+a visit is for is `?platform=`, else the `mason-platform` cookie the app
+sets when the person switches, else the browser's own.
 
 **On the master** these pages draw their data from the host over the link,
 for the account the master session authenticated; the host decides what
@@ -2123,14 +2130,15 @@ out (`catalog.endSession`) or its account's permission version changes, and
 never signs a browser in on the host. Install tokens live on the host; the
 master relays a grant's manifest and package with the request's method,
 `Range` and `If-Range`. With a paired host disconnected the pages answer
-503 "The host is unreachable". A master whose cluster has no host yet opens
-Projects & apps at `/` for developers and up; its Install apps and Devices
-pages, and a tester's `/`, say "No host is linked yet — installs come from
-a host" (200; a form post answers 503).
+503 and say the host is unreachable. A master whose cluster has no host yet
+opens Projects & apps at `/` for developers and up; its Install apps and
+Devices pages, and a tester's `/`, answer 200 and say no host is linked yet
+(their JSON routes and grant files answer 503).
 
 Projects & apps is `/projects` on both nodes, with its filters
 (`?platform=`, `?project=`) there. To a tester `/projects` and every page
-under it answer 404, on both nodes.
+under it answer the shell with 404, on both nodes, and the app draws its
+404.
 
 The master's public origin is its `master` setting. A manifest from the
 master names its package there, and a registration started on the master

@@ -72,6 +72,35 @@ export function chosenPlatform(req: Request): Platform {
   )
 }
 
+/**
+ * A grant's manifest or package, from `/install/:token/:part`: false (and
+ * nothing sent) for a part that is neither. Grants carry no session.
+ */
+export async function sendInstallFile(
+  files: CatalogSource,
+  req: Request,
+  res: Response,
+): Promise<boolean> {
+  const part = String(req.params.part)
+  if (part !== 'manifest.plist' && part !== 'artifact') return false
+  const request: FileRequest = {
+    method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+    ...(req.get('range') == null ? {} : { range: req.get('range')! }),
+    ...(req.get('if-range') == null ? {} : { ifRange: req.get('if-range')! }),
+  }
+  await files.installFile(String(req.params.token), part, request, res)
+  return true
+}
+
+/** The device-registration QR code: an SVG of the address it opens. */
+export async function qrSvg(url: string): Promise<string> {
+  return await QRCode.toString(url, {
+    type: 'svg',
+    margin: 2,
+    color: { dark: '#10151e', light: '#ffffff' },
+  })
+}
+
 /** The signed-in person the catalog pages are for, on one node. */
 export interface CatalogCaller {
   accountId: number
@@ -242,21 +271,8 @@ export function catalogPages(options: CatalogPagesOptions): {
   installs.get(
     '/install/:token/:part',
     guarded(async (req, res) => {
-      const part = String(req.params.part)
-      if (part !== 'manifest.plist' && part !== 'artifact') {
+      if (!(await sendInstallFile(options.files(), req, res)))
         options.refuse(res, 404, 'Not found')
-        return
-      }
-      const request: FileRequest = {
-        method: req.method === 'HEAD' ? 'HEAD' : 'GET',
-        ...(req.get('range') == null ? {} : { range: req.get('range')! }),
-        ...(req.get('if-range') == null
-          ? {}
-          : { ifRange: req.get('if-range')! }),
-      }
-      await options
-        .files()
-        .installFile(String(req.params.token), part, request, res)
     }),
   )
 
@@ -273,13 +289,7 @@ export function catalogPages(options: CatalogPagesOptions): {
         return
       }
       if (req.path === '/devices/qr') {
-        res.type('image/svg+xml').send(
-          await QRCode.toString(options.qr(caller), {
-            type: 'svg',
-            margin: 2,
-            color: { dark: '#10151e', light: '#ffffff' },
-          }),
-        )
+        res.type('image/svg+xml').send(await qrSvg(options.qr(caller)))
         return
       }
       if (req.params.token != null) {

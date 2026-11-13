@@ -368,9 +368,10 @@ describe('Invitation links', function () {
     })
     assert.equal(accepted.status, 200, accepted.text)
     assert(b.cookies.has('__Host-mason-session'))
-    const home = await b.send('GET', '/')
-    assert.equal(home.status, 200)
-    assert.match(home.text, /aria-label="Your account"/)
+    // Signed in on the host: its home (Install apps) is the web app's, and
+    // her apps answer for her.
+    assertShell(await b.send('GET', '/'))
+    assert.equal((await b.send('GET', '/api/v2/catalog/apps')).status, 200)
     assert.equal(master().people.get(admin, made.json.id).username, 'hilda')
     const reused = await onHost().send('POST', '/auth/invite', {
       token,
