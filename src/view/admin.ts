@@ -30,6 +30,7 @@ import {
   type GroupApp,
   type GroupPerson,
 } from './groups.js'
+import { NOMAC_MAX_MACS } from '../master/cloud/nomacLimits.js'
 import { spacesRegions } from '../master/cloud/regions.js'
 import type { BuildNumberSequence } from '../master/projectDetails.js'
 import { SETUP_LABEL } from '../pipeline/graph.js'
@@ -146,7 +147,7 @@ export interface PoolRow {
 export interface PoolAccount {
   id: string
   name: string
-  /** NoMac pools run one Mac with Xcode; DigitalOcean ones pick region, size and image. */
+  /** NoMac pools run Macs with Xcode, two at most; DigitalOcean ones pick region, size and image. */
   provider?: 'digitalocean' | 'nomac'
   catalog?: {
     regions: Array<{ slug: string; name: string }>
@@ -189,7 +190,7 @@ function poolFields(
     return `<select id="${prefix}-${name}" name="${name}">${all.map((option) => `<option value="${escape(option.value)}"${option.value === value ? ' selected' : ''}>${escape(option.label)}</option>`).join('')}</select>`
   }
   const catalog = account?.catalog
-  // NoMac picks the Mac itself, one at a time for up to eight hours.
+  // NoMac picks the Mac itself, for up to eight hours, and runs two at once.
   const mac = account?.provider === 'nomac'
   const number = (
     name: string,
@@ -227,7 +228,7 @@ function poolFields(
       'Type of node as specified in the Masonfile.',
     ),
     mac
-      ? '<p><small>NoMac runs one Apple silicon Mac with Xcode at a time, for up to eight hours.</small></p>'
+      ? '<p><small>NoMac runs an Apple silicon Mac with Xcode for up to eight hours, and two at once when the account has bought credit and NoMac has a Mac to spare.</small></p>'
       : '',
     mac
       ? ''
@@ -290,8 +291,10 @@ function poolFields(
     row(
       'maxNodes',
       'Max machines',
-      number('maxNodes', pool.maxNodes ?? 1, 1, mac ? 1 : 50),
-      'Spin up no more than max machines concurrently.',
+      number('maxNodes', pool.maxNodes ?? 1, 1, mac ? NOMAC_MAX_MACS : 50),
+      mac
+        ? `Spin up no more than max machines concurrently. NoMac runs an account's second Mac beside its first when the account has bought credit and NoMac has one to spare; ${NOMAC_MAX_MACS} at most.`
+        : 'Spin up no more than max machines concurrently.',
     ),
     row(
       'slots',

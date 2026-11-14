@@ -15,6 +15,11 @@ import {
  * Mac is ready its first-boot script runs as a NoMac job; and the link
  * reaches its worker through NoMac's SSH gateway. A NoMac Mac is never
  * snapshotted: retiring it stops the session.
+ *
+ * An account runs one Mac at a time unless a start asks for a second beside
+ * it (`parallel`), which NoMac gives an account that has bought credit while
+ * it has a Mac to spare. With none to spare the start is a capacity failure,
+ * and the pool tries again later.
  */
 
 interface Session {
@@ -44,6 +49,19 @@ export interface NoMacOptions {
 
 export const NOMAC_LINK_PORT = 9310
 
+/**
+ * The drive a second Mac beside a running one keeps its caches on: the
+ * account's default drive is usually on the first, and a start that names
+ * no drive would get a new, empty one every time.
+ */
+export const NOMAC_PARALLEL_DRIVE = 'mason-parallel'
+
+/** Tries of one start whose answer was lost (a timeout, an outage) before it fails. */
+const START_ATTEMPTS = 3
+
+/** NoMac's answers that it has no Mac for the account now. */
+const capacityCodes = new Set(['session_limit_reached', 'capacity_unavailable'])
+
 export class NoMac implements CloudProvider {
   /** NoMac Macs keep no snapshots. */
   readonly supportsSnapshots = false
@@ -58,6 +76,15 @@ export class NoMac implements CloudProvider {
     private readonly key: string,
     private readonly options: NoMacOptions,
   ) {}
+
+  /** Waits, as a test may shorten. */
+  private async pause(ms: number): Promise<void> {
+    await (
+      this.options.wait ??
+      ((time: number): Promise<void> =>
+        new Promise((resolve) => setTimeout(resolve, time)))
+    )(ms)
+  }
 
   private get api(): string {
     return this.options.api ?? 'https://nomac.app/api/v1'
@@ -101,6 +128,10 @@ export class NoMac implements CloudProvider {
     const error = (parsed.error ?? {}) as { code?: string; message?: string }
     const message =
       `NoMac ${method} ${route.split('?')[0]}: ${response.status} ${error.message ?? error.code ?? ''}`.trim()
+    if (error.code != null && capacityCodes.has(error.code))
+      throw new ProviderError(message, 'capacity', error.code)
+    if (error.code === 'drive_in_use')
+      throw new ProviderError(message, 'other', error.code)
     if (response.status === 402)
       throw new ProviderError(
         `${message}: add credit to the NoMac account`,
@@ -131,26 +162,80 @@ export class NoMac implements CloudProvider {
     }
   }
 
+  /**
+   * Starts a Mac: alone when the account runs none, or as a second beside
+   * the running one on Mason's own drive (any free drive when that one is on
+   * a Mac too). With no Mac to spare it is a capacity failure. Each kind of
+   * start has its own idempotency key, since NoMac answers a key only for
+   * the same body.
+   */
   async create(spec: MachineSpec): Promise<ProviderMachine> {
     const limits = spec.limits ?? {}
-    const { session } = await this.call<{ session: Session }>(
-      'POST',
-      '/mac/sessions',
-      {
-        public_key: this.options.sshKey().publicKey,
-        profile: 'standard',
-        limits: {
-          ...(limits.maxSeconds == null
-            ? {}
-            : { max_duration_seconds: limits.maxSeconds }),
-          ...(limits.idleSeconds == null
-            ? {}
-            : { idle_timeout_seconds: limits.idleSeconds }),
-        },
-        access: { prompts: 'auto' },
-      },
-      spec.name,
-    )
+    const post = async (
+      key: string,
+      extra: Record<string, unknown>,
+      drive?: string,
+    ): Promise<Session> =>
+      (
+        await this.call<{ session: Session }>(
+          'POST',
+          '/mac/sessions',
+          {
+            public_key: this.options.sshKey().publicKey,
+            profile: 'standard',
+            limits: {
+              ...(limits.maxSeconds == null
+                ? {}
+                : { max_duration_seconds: limits.maxSeconds }),
+              ...(limits.idleSeconds == null
+                ? {}
+                : { idle_timeout_seconds: limits.idleSeconds }),
+            },
+            access: { prompts: 'auto', ...(drive == null ? {} : { drive }) },
+            ...extra,
+          },
+          key,
+        )
+      ).session
+    // A start whose answer was lost may have made a Mac: ask again with the
+    // same key and body, which NoMac answers with that Mac, before giving up.
+    const start = async (
+      key: string,
+      extra: Record<string, unknown> = {},
+      drive?: string,
+    ): Promise<Session> => {
+      for (let attempt = 1; ; attempt++)
+        try {
+          return await post(key, extra, drive)
+        } catch (error) {
+          if (
+            !(error instanceof ProviderError && error.kind === 'unavailable') ||
+            attempt >= START_ATTEMPTS
+          )
+            throw error
+          await this.pause(attempt * 5000)
+        }
+    }
+    const refused = (error: unknown, code: string): boolean =>
+      error instanceof ProviderError && error.code === code
+    let session: Session
+    try {
+      session = await start(spec.name)
+    } catch (error) {
+      if (!refused(error, 'session_limit_reached')) throw error
+      try {
+        session = await start(
+          `${spec.name}-parallel`,
+          { parallel: true },
+          NOMAC_PARALLEL_DRIVE,
+        )
+      } catch (second) {
+        if (!refused(second, 'drive_in_use')) throw second
+        session = await start(`${spec.name}-parallel-drive`, {
+          parallel: true,
+        })
+      }
+    }
     this.setups.set(session.id, { script: spec.userData })
     return this.machine(session, false)
   }
@@ -173,9 +258,10 @@ export class NoMac implements CloudProvider {
     if (session.state === 'failed')
       throw new ProviderError(
         `NoMac session ${id} failed${session.failure_code == null ? '' : `: ${session.failure_code}`}`,
-        session.failure_code === 'capacity_unavailable'
-          ? 'unavailable'
+        session.failure_code != null && capacityCodes.has(session.failure_code)
+          ? 'capacity'
           : 'other',
+        session.failure_code,
       )
     const setup = this.setups.get(id)
     if (session.state !== 'ready' || setup == null || setup.done === true)
@@ -225,10 +311,6 @@ export class NoMac implements CloudProvider {
       throw error
     }
     this.setups.delete(id)
-    const wait =
-      this.options.wait ??
-      ((ms: number): Promise<void> =>
-        new Promise((resolve) => setTimeout(resolve, ms)))
     for (let i = 0; i < 60; i++) {
       const { session } = await this.call<{ session: Session }>(
         'GET',
@@ -236,7 +318,7 @@ export class NoMac implements CloudProvider {
       )
       if (session.cleanup_confirmed === true || session.state === 'failed')
         return
-      await wait(5000)
+      await this.pause(5000)
     }
     throw new ProviderError(
       `NoMac session ${id} did not confirm its cleanup`,

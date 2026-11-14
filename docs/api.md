@@ -1136,7 +1136,7 @@ Pools live in the `cloud` settings area beside the monthly budget.
 | `account` | required: a cloud account ID |
 | `region`, `size`, `image` | required for DigitalOcean; NoMac uses `nomac`, `standard` and `macos` |
 | `labels` | labels its machines carry, slugs (default `["setup"]`) |
-| `maxNodes` | 1–50 (default 1; NoMac 1) |
+| `maxNodes` | 1–50 (default 1); NoMac 1–2 |
 | `slots` | 1–64 (default 1) |
 | `ttlMinutes` | idle minutes before a machine goes, 1–1440 (default 60) |
 | `maxHoursPerNode` | 1–720 (default 24); NoMac 1–8 (default 8) |
