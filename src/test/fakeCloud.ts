@@ -38,6 +38,8 @@ export class FakeCloud implements CloudProvider {
   readonly deleted: string[] = []
   /** Make the next calls fail like the provider would. */
   failCreate: ProviderError['kind'] | undefined
+  /** Fail every machine after accepting it: `get` throws this kind (a NoMac session gone failed). */
+  failMachines: ProviderError['kind'] | undefined
   failSnapshot = false
   /** How long a machine stays `new` after its worker starts, as a slow boot. */
   bootDelayMs = 0
@@ -126,6 +128,12 @@ export class FakeCloud implements CloudProvider {
   }
 
   async get(id: string): Promise<ProviderMachine | undefined> {
+    if (this.failMachines != null && this.machines.has(id))
+      throw new ProviderError(
+        `Fake machine ${id} failed`,
+        this.failMachines,
+        'capacity_unavailable',
+      )
     const machine = this.machines.get(id)
     if (machine == null) return undefined
     return {

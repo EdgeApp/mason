@@ -6,6 +6,7 @@ import type { SettingsArea, SettingValue } from '../settings.js'
 import type { Duplex } from 'node:stream'
 import type { CloudAccount } from './accounts.js'
 import { NoMac, type NoMacOptions } from './nomac.js'
+import { NOMAC_MAX_MACS } from './nomacLimits.js'
 import {
   DigitalOcean,
   ProviderError,
@@ -84,7 +85,8 @@ function asPool(value: unknown, accounts: CloudAccount[]): PoolSetting {
         ? `pool.account: no cloud account named ${input.account}`
         : 'pool.account names a cloud account',
     )
-  // NoMac runs one Mac at a time for up to eight hours, in its one profile.
+  // NoMac runs a Mac for up to eight hours, in its one profile, and an
+  // account two at once: the second starts beside the first (`parallel`).
   const nomac = account.provider === 'nomac'
   // A pool's machines run setup unless its labels leave the label out.
   const labels = input.labels ?? [SETUP_LABEL]
@@ -102,7 +104,7 @@ function asPool(value: unknown, accounts: CloudAccount[]): PoolSetting {
     size: nomac ? 'standard' : text('size', /^[a-z0-9-]{2,40}$/),
     image: nomac ? 'macos' : text('image'),
     labels: labels as string[],
-    maxNodes: count('maxNodes', 1, 1, nomac ? 1 : 50),
+    maxNodes: count('maxNodes', 1, 1, nomac ? NOMAC_MAX_MACS : 50),
     slots: count('slots', 1, 1, 64),
     ttlMinutes: count('ttlMinutes', 60, 1, 24 * 60),
     maxHoursPerNode: count(
@@ -112,6 +114,17 @@ function asPool(value: unknown, accounts: CloudAccount[]): PoolSetting {
       nomac ? 8 : 24 * 30,
     ),
   }
+}
+
+/**
+ * How long a pool waits after the provider refused or failed a new machine:
+ * a minute, or five when it has no machine to spare (NoMac's second Mac),
+ * which a minute later would rarely have changed.
+ */
+export function refusalBackoff(error: unknown): number {
+  return error instanceof ProviderError && error.kind === 'capacity'
+    ? 5 * 60_000
+    : 60_000
 }
 
 /**
@@ -794,7 +807,10 @@ nomac-service start mason-worker -- ~/.local/bin/mason worker --pairing-file ~/m
         error instanceof ProviderError
           ? `The cloud provider refused a new ${pool.name} machine (${error.kind}): ${error.message}`
           : `Could not create a ${pool.name} machine: ${(error as Error).message}`
-      this.backoff.set(pool.name, { until: this.now() + 60_000, reason })
+      this.backoff.set(pool.name, {
+        until: this.now() + refusalBackoff(error),
+        reason,
+      })
       this.log(reason)
     }
   }
@@ -834,8 +850,18 @@ nomac-service start mason-worker -- ~/.local/bin/mason worker --pairing-file ~/m
     try {
       machine = await provider.get(row.provider_id)
     } catch (error) {
-      if (!(error instanceof ProviderError && error.kind === 'setup'))
-        throw error
+      if (!(error instanceof ProviderError)) throw error
+      if (error.kind === 'capacity' || error.kind === 'other') {
+        // The provider gave up on the machine after accepting it (a NoMac
+        // session that failed): drop it, and wait as for a refused start.
+        await this.discard(row, provider, error.message)
+        this.backoff.set(row.pool, {
+          until: this.now() + refusalBackoff(error),
+          reason: `The last ${row.pool} machine failed to start: ${error.message}`,
+        })
+        return
+      }
+      if (error.kind !== 'setup') throw error
       // The same setup would fail again on a new machine: wait before the next.
       await this.discard(row, provider, error.message)
       this.backoff.set(row.pool, {
@@ -1093,7 +1119,15 @@ nomac-service start mason-worker -- ~/.local/bin/mason worker --pairing-file ~/m
           machines++
         } else if (
           row.provider_id != null &&
-          (await provider.get(row.provider_id)) == null
+          (await provider.get(row.provider_id).catch((error: unknown) => {
+            // A machine the provider failed (a NoMac session) is as gone.
+            if (
+              error instanceof ProviderError &&
+              (error.kind === 'capacity' || error.kind === 'other')
+            )
+              return undefined
+            throw error
+          })) == null
         ) {
           this.db
             .prepare(

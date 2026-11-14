@@ -11,7 +11,7 @@ import { createCertificate, certificateHash } from '../../node/certificate.js'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeNoMac } from '../../test/fakeNoMac.js'
 import { ProviderError } from './digitalocean.js'
-import { NoMac } from './nomac.js'
+import { NoMac, NOMAC_PARALLEL_DRIVE } from './nomac.js'
 import { nomacLimits } from './pools.js'
 
 const { utils } = ssh2
@@ -201,6 +201,116 @@ describe('NoMac Macs', function () {
     assert.equal(nomac.supportsSnapshots, false)
   })
 
+  it('U7.9 a second Mac starts beside the running one on Mason’s drive, any free one when that is taken; a third is a capacity failure', async () => {
+    fake.limits = { spare: true }
+    const spec = (name: string): Json => ({
+      name,
+      region: 'nomac',
+      size: 'standard',
+      image: 'macos',
+      tags: [],
+      userData: '',
+    })
+    const starts = (from: number): Json[] =>
+      fake.requests
+        .slice(from)
+        .filter(
+          (request) =>
+            request.method === 'POST' &&
+            request.path === '/api/v1/mac/sessions',
+        )
+        .map((request) => ({
+          key: request.key,
+          parallel: (request.body as Json).parallel,
+          drive: (request.body as Json).access.drive,
+        }))
+    const session = (id: string): Json => fake.sessions.get(id)
+    try {
+      // Alone: no parallel, the account's default drive.
+      let from = fake.requests.length
+      const first = await nomac.create(spec('mac-1'))
+      assert.deepEqual(starts(from), [
+        { key: 'mac-1', parallel: undefined, drive: undefined },
+      ])
+      assert.equal(session(first.id).drive, 'default')
+      // Beside it: refused alone, then started with parallel on Mason’s drive.
+      from = fake.requests.length
+      const second = await nomac.create(spec('mac-2'))
+      assert.deepEqual(starts(from), [
+        { key: 'mac-2', parallel: undefined, drive: undefined },
+        { key: 'mac-2-parallel', parallel: true, drive: 'mason-parallel' },
+      ])
+      assert.deepEqual(
+        [session(second.id).parallel, session(second.id).drive],
+        [true, NOMAC_PARALLEL_DRIVE],
+      )
+      // A third while two run: NoMac has none to spare.
+      await assert.rejects(
+        nomac.create(spec('mac-3')),
+        (error: unknown) =>
+          error instanceof ProviderError &&
+          error.kind === 'capacity' &&
+          error.code === 'capacity_unavailable',
+      )
+      // The first stops; a new second finds Mason’s drive on the running Mac
+      // and takes any free one (here the default, now free).
+      await nomac.destroy(first.id)
+      from = fake.requests.length
+      const third = await nomac.create(spec('mac-4'))
+      assert.deepEqual(starts(from), [
+        { key: 'mac-4', parallel: undefined, drive: undefined },
+        { key: 'mac-4-parallel', parallel: true, drive: 'mason-parallel' },
+        { key: 'mac-4-parallel-drive', parallel: true, drive: undefined },
+      ])
+      assert.equal(session(third.id).drive, 'default')
+      // With no Mac to spare, the second is a capacity failure, not a retry loop.
+      fake.limits = { spare: false }
+      await nomac.destroy(third.id)
+      await assert.rejects(
+        nomac.create(spec('mac-5')),
+        (error: unknown) =>
+          error instanceof ProviderError && error.kind === 'capacity',
+      )
+      await nomac.destroy(second.id)
+    } finally {
+      fake.limits = undefined
+    }
+  })
+
+  it('U7.9 a start whose answer was lost is asked again with the same key, and makes one Mac; a session NoMac failed is a capacity failure', async () => {
+    const spec: Json = {
+      name: 'lost-1',
+      region: 'nomac',
+      size: 'standard',
+      image: 'macos',
+      tags: [],
+      userData: '',
+    }
+    const before = fake.sessions.size
+    const from = fake.requests.length
+    fake.loseNextStart = true
+    const made = await nomac.create(spec)
+    assert.equal(fake.sessions.size, before + 1)
+    assert.deepEqual(
+      fake.requests
+        .slice(from)
+        .filter((request) => request.method === 'POST')
+        .map((request) => request.key),
+      ['lost-1', 'lost-1'],
+    )
+    const session = fake.sessions.get(made.id)!
+    session.state = 'failed'
+    session.failure_code = 'capacity_unavailable'
+    await assert.rejects(
+      nomac.get(made.id),
+      (error: unknown) =>
+        error instanceof ProviderError &&
+        error.kind === 'capacity' &&
+        error.code === 'capacity_unavailable',
+    )
+    session.state = 'stopped'
+  })
+
   it('U7.5 the gateway client accepts only the host key /access reported', async () => {
     const session = await nomac.create({
       name: 'mason-0123456789-mac-3',
@@ -372,7 +482,7 @@ export async function build(ctx: Stage) {
     await fake?.close()
   })
 
-  it('U7.4 a NoMac pool runs one Mac at a time for at most eight hours, in NoMac’s profile', async () => {
+  it('U7.4 a NoMac pool runs up to two Macs at once for at most eight hours each, in NoMac’s profile', async () => {
     const settings = c.master.master!.settings
     const pool = (extra: Json = {}): Json => ({
       name: 'mac',
@@ -383,10 +493,14 @@ export async function build(ctx: Stage) {
     })
     await assert.rejects(
       settings.set({ role: 'admin', label: 'paul' }, 'cloud', {
-        pools: [pool({ maxNodes: 2 })],
+        pools: [pool({ maxNodes: 3 })],
       }),
-      /pool.maxNodes is a whole number from 1 to 1/,
+      /pool.maxNodes is a whole number from 1 to 2/,
     )
+    const two = await settings.set({ role: 'admin', label: 'paul' }, 'cloud', {
+      pools: [pool({ maxNodes: 2 })],
+    })
+    assert.equal((two.pools as Json[])[0].maxNodes, 2)
     await assert.rejects(
       settings.set({ role: 'admin', label: 'paul' }, 'cloud', {
         pools: [pool({ maxHoursPerNode: 9 })],

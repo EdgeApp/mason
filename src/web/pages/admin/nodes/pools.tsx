@@ -7,6 +7,7 @@ import { useId, useMemo, useState, type FormEvent, type JSX } from 'react'
 import { Link } from 'react-router'
 import { asUnknown } from 'cleaners'
 import type { CloudBudget } from '../../../../shared/api/admin.js'
+import { NOMAC_MAX_MACS } from '../../../../master/cloud/nomacLimits.js'
 import type { CloudAccountView } from '../../../../shared/api/cloud.js'
 import {
   asPool,
@@ -158,7 +159,7 @@ export function PoolSheet({
         ? {}
         : { region: form.region, size: form.size, image: form.image }),
       labels: listOf(form.labels),
-      maxNodes: mac ? 1 : form.maxNodes,
+      maxNodes: mac ? Math.min(form.maxNodes, NOMAC_MAX_MACS) : form.maxNodes,
       slots: form.slots,
       ttlMinutes: Number(form.ttlMinutes),
       maxHoursPerNode: Number(form.maxHoursPerNode),
@@ -249,8 +250,9 @@ export function PoolSheet({
           />
           {mac ? (
             <p className="m-t-subhead m-secondary m-nodes__wide m-nodes__flush">
-              NoMac runs one Apple silicon Mac with Xcode at a time, for up to
-              eight hours.
+              NoMac runs an Apple silicon Mac with Xcode for up to eight hours,
+              and two at once when the account has bought credit and NoMac has a
+              Mac to spare.
             </p>
           ) : (
             <MachineFields
@@ -274,13 +276,14 @@ export function PoolSheet({
         </FormSection>
         <FormSection legend="Capacity and retirement">
           {mac ? (
-            <TextInput
+            <StepperInput
               label="Max machines"
-              value="1"
-              onChange={() => undefined}
-              readOnly
-              mono
-              help="NoMac pools run one machine."
+              value={Math.min(form.maxNodes, NOMAC_MAX_MACS)}
+              onChange={(maxNodes) => set({ maxNodes })}
+              min={1}
+              max={NOMAC_MAX_MACS}
+              unit="machines"
+              help={`1–${NOMAC_MAX_MACS}. The second starts beside the first when NoMac has a Mac to spare.`}
             />
           ) : (
             <StepperInput

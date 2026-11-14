@@ -16,6 +16,7 @@ import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeCloud } from '../../test/fakeCloud.js'
 import { quietMac } from '../../test/fakeMac.js'
 import { ProviderError } from './digitalocean.js'
+import { refusalBackoff } from './pools.js'
 import { pinnedFetch } from '../../node/pinnedFetch.js'
 import { MASTER_SESSION_COOKIE } from '../auth.js'
 import { poolInput } from '../cloudApi.js'
@@ -611,6 +612,42 @@ export async function work(ctx: Stage) {
     offset += 6 * MINUTE
     await wait(() => machines().length === 0, 15_000, 'retired')
     assert(new ProviderError('x', 'rate').kind === 'rate')
+  })
+
+  it('U11.6 a machine the provider fails after accepting it is dropped, and the pool waits five minutes when it had none to spare', async () => {
+    cloud.failMachines = 'capacity'
+    const before = cloud.created.length
+    const id = await run()
+    const waiting = await wait(
+      () => {
+        const value = c.master.master!.run(id) as Json
+        return /failed to start/.test(stage(value)?.reason ?? '')
+          ? stage(value)
+          : undefined
+      },
+      10_000,
+      'the failed machine’s reason',
+    )
+    assert.match(
+      waiting.reason,
+      /The last linux-cloud machine failed to start: Fake machine \S+ failed/,
+    )
+    assert.equal(waiting.status, 'queued')
+    // Dropped at once, not polled until the pairing timeout.
+    await wait(() => machines().length === 0, 10_000, 'the failed machine gone')
+    assert.equal(cloud.created.length, before + 1)
+    // A minute on, no machine: it had none to spare.
+    cloud.failMachines = undefined
+    offset += 61_000
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+    assert.equal(cloud.created.length, before + 1)
+    offset += 5 * MINUTE
+    assert.equal((await finish(id)).status, 'succeeded')
+    assert.equal(cloud.created.length, before + 2)
+    offset += 6 * MINUTE
+    await wait(() => machines().length === 0, 15_000, 'retired')
+    assert.equal(refusalBackoff(new ProviderError('x', 'capacity')), 5 * MINUTE)
+    assert.equal(refusalBackoff(new ProviderError('x', 'quota')), 60_000)
   })
 
   it('U11.6 starts no machine while the master runs no GitHub release, or its release has no linux-x64 tarball', async () => {

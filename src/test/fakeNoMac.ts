@@ -16,12 +16,18 @@ const { Server: SshServer, utils } = ssh2
 
 interface FakeSession {
   id: string
-  state: 'provisioning' | 'ready' | 'stopping' | 'stopped'
+  state: 'provisioning' | 'ready' | 'stopping' | 'stopped' | 'failed'
+  failure_code?: string
   publicKey: string
   limits: Record<string, unknown>
   polls: number
   node?: RunningNode
   cleanup_confirmed?: boolean
+  /** The drive it holds: `default` unless the start named one. */
+  drive: string
+  parallel: boolean
+  /** Started while `limits` were on, so they count it. */
+  counted: boolean
 }
 
 /**
@@ -46,6 +52,15 @@ export class FakeNoMac {
   failSetup: number | undefined
   /** Polls before a new session is ready. */
   readyAfter = 2
+  /**
+   * NoMac's limits on Macs at once, when a test turns them on: one, and a
+   * second only with `parallel` while `spare` (NoMac has a Mac for the
+   * account); a named drive on a running Mac is `drive_in_use`. They count
+   * only the sessions started while they are on.
+   */
+  limits: { spare: boolean } | undefined
+  /** Make the next start's session, then answer 503 as if the answer were lost. */
+  loseNextStart = false
   /** A fetch and TLS options that trust this server. */
   fetch: typeof fetch = fetch
   ca = ''
@@ -181,15 +196,56 @@ export class FakeNoMac {
         return send(402, {
           error: { code: 'insufficient_credit', message: 'No credit left' },
         })
+      const parallel = body?.parallel === true
+      const named = (body?.access as { drive?: unknown } | undefined)?.drive
+      const running = [...this.sessions.values()].filter(
+        (session) =>
+          session.counted &&
+          session.state !== 'stopped' &&
+          session.state !== 'failed',
+      )
+      let drive = typeof named === 'string' ? named : 'default'
+      if (this.limits != null) {
+        if (running.length > 0 && !parallel)
+          return send(409, {
+            error: {
+              code: 'session_limit_reached',
+              message: `Mac ${running[0]!.id} is running`,
+            },
+          })
+        if (running.length > 0 && (!this.limits.spare || running.length >= 2))
+          return send(409, {
+            error: {
+              code: 'capacity_unavailable',
+              message: 'No Mac to spare',
+            },
+          })
+        const holder = running.find((session) => session.drive === drive)
+        if (holder != null && typeof named === 'string')
+          return send(409, {
+            error: { code: 'drive_in_use', message: holder.id },
+          })
+        // A start naming no drive while another Mac has the default gets its own.
+        if (holder != null) drive = `drive-${this.sessions.size + 1}`
+      }
       const session: FakeSession = {
         id: `ses_${randomBytes(6).toString('hex')}`,
         state: 'provisioning',
         publicKey: String(body?.public_key ?? ''),
         limits: (body?.limits ?? {}) as Record<string, unknown>,
         polls: 0,
+        drive,
+        parallel,
+        counted: this.limits != null,
       }
       this.sessions.set(session.id, session)
       if (key != null) this.byKey.set(key, session.id)
+      if (this.loseNextStart) {
+        this.loseNextStart = false
+        return send(503, {
+          error: { code: 'unavailable', message: 'The answer was lost' },
+        })
+      }
       return send(201, { session: this.view(session) })
     }
     if (route === 'GET /mac/sessions')
@@ -293,6 +349,9 @@ export class FakeNoMac {
     return {
       id: session.id,
       state: session.state,
+      ...(session.failure_code == null
+        ? {}
+        : { failure_code: session.failure_code }),
       ...(session.cleanup_confirmed === true
         ? { cleanup_confirmed: true }
         : {}),

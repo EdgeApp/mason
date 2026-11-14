@@ -472,7 +472,7 @@ describe('Cloud pools', () => {
     )
   })
 
-  it('adds a NoMac pool: one Mac for up to eight hours, no region, size or image', async () => {
+  it('adds a NoMac pool: up to two Macs for up to eight hours, no region, size or image', async () => {
     const add = held()
     openNodes({ [`POST ${PATHS.pools}`]: add.reply })
     fireEvent.click(
@@ -484,7 +484,7 @@ describe('Cloud pools', () => {
       name: 'Add a pool on NoMac',
     })
     within(sheet).getByText(
-      'NoMac runs one Apple silicon Mac with Xcode at a time, for up to eight hours.',
+      'NoMac runs an Apple silicon Mac with Xcode for up to eight hours, and two at once when the account has bought credit and NoMac has a Mac to spare.',
     )
     assert.equal(within(sheet).queryByLabelText('Region'), null)
     assert.equal(within(sheet).queryByLabelText('Size'), null)
@@ -499,7 +499,11 @@ describe('Cloud pools', () => {
     )
     const max = within(sheet).getByLabelText('Max machines') as HTMLInputElement
     assert.equal(max.value, '1')
-    assert.equal(max.readOnly, true)
+    const more = within(sheet).getByRole('button', { name: 'More machines' })
+    fireEvent.click(more)
+    assert.equal(max.value, '2')
+    // Two at most: NoMac runs the second beside the first, and no third.
+    assert.equal((more as HTMLButtonElement).disabled, true)
     const hours = within(sheet).getByLabelText(
       'Retire after hours up',
     ) as HTMLInputElement
@@ -515,7 +519,7 @@ describe('Cloud pools', () => {
       name: 'macos-cloud',
       type: 'macos-arm64',
       labels: ['setup'],
-      maxNodes: 1,
+      maxNodes: 2,
       slots: 1,
       ttlMinutes: 60,
       maxHoursPerNode: 6,

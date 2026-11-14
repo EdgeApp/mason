@@ -259,9 +259,16 @@ until it has been idle for an hour:
 - A pool can also run on **NoMac** (Apple silicon Macs with Xcode, by the
   minute): the master starts a NoMac Mac, installs Mason on it for the user,
   runs the worker as a NoMac service, and reaches it through NoMac's SSH
-  gateway, so the Mac accepts no inbound connection. NoMac runs one Mac at a
-  time per account for up to eight hours; its Macs are never snapshotted, and
-  a retired one is stopped.
+  gateway, so the Mac accepts no inbound connection. NoMac runs a Mac for up
+  to eight hours, and an account two at once: when one runs, Mason starts the
+  second beside it (NoMac's `parallel`), which NoMac allows an account that
+  has bought credit while it has a Mac to spare. The second Mac starts on its
+  own drive, `mason-parallel`, since the first usually has the account's
+  default (when `mason-parallel` is on a Mac too, NoMac gives it the default
+  drive or a new, empty one). A Mac the account runs outside Mason (a
+  person's, another master's) counts as the first, so Mason's Mac then starts
+  as the second. With no Mac to spare, the pool asks again five minutes later.
+  Its Macs are never snapshotted, and a retired one is stopped.
 - DigitalOcean (Linux) is the first provider. A provider's API key is a cloud
   account on the master: an administrator or manager adds it on the Cloud page
   (or with `mason cloud accounts add --key-stdin`), where Mason checks it and
