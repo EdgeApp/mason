@@ -4,6 +4,7 @@ import path from 'node:path'
 import { after, before, describe, it } from 'mocha'
 import type { RunningNode } from '../node/serve.js'
 import { cluster, type Cluster } from '../test/cluster.js'
+import { clusterCheck } from '../master/clusterCheck.js'
 import { localOperator } from '../master/roles.js'
 import { Link, LinkError } from '../link/link.js'
 import type { Sync } from '../master/changes.js'
@@ -195,6 +196,16 @@ describe('Host syncs larger than one link message', function () {
           revision: number
         }
         assert.equal(status.revision, 0)
+        // Linked but still syncing: mason cluster check says so.
+        const syncing = (await clusterCheck(master)).nodes.find(
+          (node) => node.role === 'host',
+        )!
+        assert(
+          syncing.problems.includes(
+            'has not finished its opening sync with the master',
+          ),
+          syncing.problems.join('; '),
+        )
         release!()
         await c.until(() => host.host!.online() || undefined, 20_000, 'online')
       } finally {
@@ -224,6 +235,12 @@ describe('Host syncs larger than one link message', function () {
         220,
       )
       assert.equal(paged(c).size, 0)
+      const report = await clusterCheck(master)
+      assert.deepEqual(
+        report.nodes.find((node) => node.role === 'host')!.problems,
+        [],
+      )
+      assert(report.green)
     })
 
     it('answers a relayed request that needs a newer copy with the host’s “catching up” while its opening sync fetches pages', async () => {

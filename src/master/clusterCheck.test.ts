@@ -93,6 +93,56 @@ describe('Cluster check', function () {
     assert.match(text, /Something needs a person\./)
   })
 
+  it('U19.1 names a host that has not finished its opening sync, unless it is updating or too old to say', async () => {
+    const status = (online?: boolean): unknown => ({
+      request: async (): Promise<unknown> => ({
+        revision: 10,
+        outbox: 0,
+        refused: 0,
+        version,
+        ...(online == null ? {} : { online }),
+      }),
+    })
+    const links = new Map<string, unknown>([
+      ['syncing', status(false)],
+      ['synced', status(true)],
+      ['earlier', status()],
+      ['updating', status(false)],
+    ])
+    const fake = {
+      changes: { revision: () => 10 },
+      registry: {
+        list: () =>
+          [...links.keys()].map((name) => ({
+            name,
+            role: 'host',
+            fingerprint: name,
+            host: '192.0.2.1',
+            version,
+          })),
+        link: (fingerprint: string) => links.get(fingerprint),
+      },
+      cloudHosts: {
+        list: () => [
+          { fingerprint: 'updating', state: 'updating', version: '99.0.0' },
+        ],
+      },
+    } as unknown as Master
+    const report = await clusterCheck(fake, 50)
+    assert.deepEqual(
+      Object.fromEntries(
+        report.nodes.map((entry) => [entry.name, entry.problems]),
+      ),
+      {
+        syncing: ['has not finished its opening sync with the master'],
+        synced: [],
+        earlier: [],
+        updating: [],
+      },
+    )
+    assert(!report.green)
+  })
+
   it('U19.1 reports lag, outbox depth, refused messages, versions, unlinked nodes and hosts that do not answer', async () => {
     const node = (
       name: string,

@@ -531,6 +531,7 @@ export class HostRuntime {
           outbox: this.outbox.pending().length,
           refused: this.outbox.refused().length,
           version,
+          online: this.online(),
         }),
       },
       events: {

@@ -30,6 +30,8 @@ export interface HostStatus {
   outbox: number
   refused: number
   version: string
+  /** Whether it has finished its opening sync on this link; an earlier release leaves it out. */
+  online?: boolean
 }
 
 /**
@@ -102,6 +104,11 @@ export async function clusterCheck(
         }
         check.version = status.version
         behind(status.version)
+        // An updating host relinks and syncs on its new release for a while.
+        if (status.online === false && check.updating == null)
+          check.problems.push(
+            'has not finished its opening sync with the master',
+          )
         if (check.cache.lag > 0)
           check.problems.push(`is ${check.cache.lag} changes behind`)
         if (status.outbox > 0)

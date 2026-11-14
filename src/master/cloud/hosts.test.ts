@@ -509,7 +509,9 @@ describe('Mason hosts on DigitalOcean', function () {
     const after = (await clusterCheck(c.master.master!)).nodes[0]!
     assert.equal(after.updating, undefined)
     assert.deepEqual(
-      after.problems.filter((problem) => !/changes behind/.test(problem)),
+      after.problems.filter(
+        (problem) => !/changes behind|opening sync/.test(problem),
+      ),
       [],
     )
   })
