@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { MAX_MESSAGE } from '../link/link.js'
 import type { ProjectDetails } from './projectDetails.js'
 import type { DatabaseSync } from 'node:sqlite'
 import { reservedBuildNumber } from './buildNumbers.js'
@@ -28,13 +29,112 @@ export interface Change {
   value?: Projected
 }
 
+/** The first page of a sync answered in pages, and how the host asks for the rest (`host.syncPage`). */
+export interface SyncPage {
+  token: string
+  count: number
+}
+
 export type Sync =
-  | { kind: 'changes'; revision: number; changes: Change[] }
+  | { kind: 'changes'; revision: number; changes: Change[]; page?: SyncPage }
   | {
       kind: 'snapshot'
       revision: number
       entities: Record<string, Projected[]>
+      page?: SyncPage
     }
+
+/**
+ * The most a page of a sync holds, measured as its items' JSON: a link
+ * message may be 1 MiB (`MAX_MESSAGE`), and the envelope and the page's own
+ * fields fit in the rest.
+ */
+export const SYNC_PAGE_BYTES = 768 * 1024
+
+/**
+ * The largest one item may be: a page with that item alone, in its link
+ * message's envelope, still fits in MAX_MESSAGE.
+ */
+export const SYNC_ITEM_BYTES = MAX_MESSAGE - 16 * 1024
+
+/**
+ * A sync split into pages of at most `budget` bytes of items, in order: a
+ * snapshot's rows entity by entity, or a sync's changes. A snapshot's pages
+ * carry its revision, and its first page names every entity, an empty one
+ * as `[]`, so the merged pages are the snapshot. A changes page carries its
+ * last change's revision and the last page the sync's. A sync that fits is
+ * one page, itself. An item larger than `budget` takes a page of its own;
+ * only one too large for a link message (SYNC_ITEM_BYTES) is refused.
+ */
+export function syncPages(sync: Sync, budget = SYNC_PAGE_BYTES): Sync[] {
+  const size = (item: unknown): number =>
+    Buffer.byteLength(JSON.stringify(item))
+  const tooLarge = (name: string): Error =>
+    new Error(`${name} is larger than a link message`)
+  if (sync.kind === 'changes') {
+    const pages: Change[][] = [[]]
+    let used = 0
+    for (const change of sync.changes) {
+      const bytes = size(change)
+      if (bytes > SYNC_ITEM_BYTES)
+        throw tooLarge(`${change.entity} ${change.key}`)
+      if (used + bytes > budget && pages.at(-1)!.length > 0) {
+        pages.push([])
+        used = 0
+      }
+      pages.at(-1)!.push(change)
+      used += bytes
+    }
+    if (pages.length === 1) return [sync]
+    return pages.map((changes, index) => ({
+      kind: 'changes',
+      revision:
+        index === pages.length - 1 ? sync.revision : changes.at(-1)!.revision,
+      changes,
+    }))
+  }
+  const pages: Array<Record<string, Projected[]>> = [
+    Object.fromEntries(Object.keys(sync.entities).map((name) => [name, []])),
+  ]
+  let used = 0
+  for (const [name, values] of Object.entries(sync.entities))
+    values.forEach((value, index) => {
+      const bytes = size(value)
+      if (bytes > SYNC_ITEM_BYTES) throw tooLarge(`${name} row ${index}`)
+      if (used + bytes > budget && used > 0) {
+        pages.push({})
+        used = 0
+      }
+      ;(pages.at(-1)![name] ??= []).push(value)
+      used += bytes
+    })
+  if (pages.length === 1) return [sync]
+  return pages.map((entities) => ({
+    kind: 'snapshot',
+    revision: sync.revision,
+    entities,
+  }))
+}
+
+/** The sync a host's pages make: the last page's revision, and every page's items in order. */
+export function mergePages(pages: Sync[]): Sync {
+  const first = pages[0]!
+  const revision = pages.at(-1)!.revision
+  if (first.kind === 'changes')
+    return {
+      kind: 'changes',
+      revision,
+      changes: pages.flatMap((page) =>
+        page.kind === 'changes' ? page.changes : [],
+      ),
+    }
+  const entities: Record<string, Projected[]> = {}
+  for (const page of pages)
+    if (page.kind === 'snapshot')
+      for (const [name, values] of Object.entries(page.entities))
+        (entities[name] ??= []).push(...values)
+  return { kind: 'snapshot', revision, entities }
+}
 
 const digest = (value: string): string =>
   createHash('sha256').update(value).digest('hex')

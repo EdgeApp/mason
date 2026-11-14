@@ -6,7 +6,12 @@ import {
   type MethodTable,
   type Stream,
 } from '../link/link.js'
-import type { Changes, Sync } from './changes.js'
+import {
+  SYNC_PAGE_BYTES,
+  syncPages,
+  type Changes,
+  type Sync,
+} from './changes.js'
 import type { MasterDatabase } from './database.js'
 import type { Jobs } from './jobs.js'
 import { repositoryName } from './mirrors.js'
@@ -77,6 +82,10 @@ export class HostLinks {
       artifacts?: Artifacts
       /** How long writes are gathered before a push; well under a second. */
       pushMs?: number
+      /** The most of a sync one page holds; tests set it below SYNC_PAGE_BYTES. */
+      syncPageBytes?: number
+      /** Where the master's log lines go. */
+      log?: (line: string) => void
       /** Called after a device or a prepare request arrives, to provision it. */
       onDevices?: () => void
       /** Runs a request the host forwards to the master's API. */
@@ -117,23 +126,51 @@ export class HostLinks {
     this.pending.unref()
   }
 
-  /** Sends every connected host what changed since its last revision. */
+  /**
+   * Sends every connected host what changed since its last revision, one
+   * `changes` event per page, so a burst larger than one link message
+   * still arrives. Anything that goes wrong for a host stops its sends
+   * until its link reopens; it never escapes the push timer.
+   */
   push(): void {
     for (const node of this.options.registry.list()) {
       if (node.role !== 'host') continue
       const link = this.options.registry.link(node.fingerprint)
       const revision = this.sent.get(node.fingerprint)
       if (link == null || link.closed || revision == null) continue
-      const sync = this.options.changes.since(revision)
-      if (sync.revision === revision) continue
       try {
-        link.event('changes', sync)
-        this.sent.set(node.fingerprint, sync.revision)
-      } catch {
+        const sync = this.options.changes.since(revision)
+        if (sync.revision === revision) continue
+        const pages = syncPages(sync, this.pageBytes)
+        // A host applies a pushed snapshot as the whole cache: one that
+        // takes several pages goes to its opening sync, which fetches them.
+        if (sync.kind === 'snapshot' && pages.length > 1) {
+          this.sent.delete(node.fingerprint)
+          this.log(`Changes for host ${node.name} need a full sync`)
+          link.close()
+          continue
+        }
+        for (const page of pages) {
+          link.event('changes', page)
+          this.sent.set(node.fingerprint, page.revision)
+        }
+      } catch (error) {
         // The host syncs again when its link reopens.
         this.sent.delete(node.fingerprint)
+        this.log(
+          `Changes for host ${node.name} could not be sent: ${(error as Error).message}`,
+        )
       }
     }
+  }
+
+  /** The most of a sync one page holds. */
+  private get pageBytes(): number {
+    return this.options.syncPageBytes ?? SYNC_PAGE_BYTES
+  }
+
+  private log(line: string): void {
+    ;(this.options.log ?? console.log)(line)
   }
 
   /** The host a request came from, by the fingerprint its handshake proved. */
