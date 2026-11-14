@@ -103,6 +103,7 @@ export interface NodeOptions {
     | 'now'
     | 'log'
     | 'syncPageBytes'
+    | 'pageHoldMs'
   >
   pollMs?: number
   /**

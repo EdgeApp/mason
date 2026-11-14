@@ -51,8 +51,12 @@ export class HostCatalog {
       devices: DeviceRelay
       /** Throws a 503 refusal before the first sync and past the grace window. */
       ready: () => void
-      /** Brings the cache up to the master now: a session newer than it waits for this. */
-      catchUp?: () => Promise<void>
+      /**
+       * Brings the cache up to the master now: a session newer than it waits
+       * for this. False when the opening sync has not finished and it did
+       * not ask; the cache is checked again either way.
+       */
+      catchUp?: () => Promise<boolean>
     },
   ) {}
 

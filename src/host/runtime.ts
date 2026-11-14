@@ -13,7 +13,7 @@ import { Accounts } from '../auth/accounts.js'
 import { Providers } from '../auth/providers.js'
 import { backoffDelay } from '../link/backoff.js'
 import type { Link, MethodTable, Stream } from '../link/link.js'
-import type { Change, Sync } from '../master/changes.js'
+import { mergePages, type Change, type Sync } from '../master/changes.js'
 import { HostCache } from './cache.js'
 import { Outbox } from './outbox.js'
 import type { HostStatus } from '../master/clusterCheck.js'
@@ -40,6 +40,10 @@ export interface HostOptions {
   testEndpoints?: boolean
   /** How long to wait before retrying a failed opening sync. Tests set this. */
   syncRetryMs?: (attempt: number) => number
+  /** How long a sync waits for the one before it (FETCH_WAIT_MS). Tests set this. */
+  fetchWaitMs?: number
+  /** How long a catch-up waits for an unfinished opening sync (CATCH_UP_WAIT_MS). Tests set this. */
+  catchUpWaitMs?: number
 }
 
 /**
@@ -129,7 +133,7 @@ export class HostRuntime {
       accounts: this.accounts,
       devices: this.devices,
       ready: (): void => this.builds.ready(),
-      catchUp: async (): Promise<void> => await this.catchUp(),
+      catchUp: async (): Promise<boolean> => await this.catchUp(),
     })
     this.webhooks = new Webhooks({
       db: this.cache.db,
@@ -270,17 +274,21 @@ export class HostRuntime {
           previous = link
         }
         try {
-          const sync = (await link.request(
-            'host.sync',
-            {
+          const sync = await this.fetchSync(
+            link,
+            () => ({
               revision: this.cache.syncFrom(),
               ...(this.web == null ? {} : { web: this.web }),
-            },
+            }),
             5 * 60_000,
-          )) as Sync
+          )
           if (this.stopped) return
-          if (this.replaced(link)) continue
+          if (this.replaced(link)) {
+            this.drainQueued()
+            continue
+          }
           this.apply(sync, true)
+          this.drainQueued()
           this.synced = link
           await this.outbox.flush(link)
           // A link that arrived while a flush ran still needs its own sync,
@@ -292,6 +300,7 @@ export class HostRuntime {
           return
         } catch (error) {
           if (this.stopped) return
+          this.drainQueued()
           if (this.replaced(link)) continue
           // The master's failures carry no code that marks one as lasting, so
           // every one is retried; the backoff caps a lasting one at one a minute.
@@ -331,17 +340,69 @@ export class HostRuntime {
     })
   }
 
+  /** Pushes that arrived while a sync was being fetched, applied after it. */
+  private readonly queued: Sync[] = []
+
+  /** Applies what of the queued pushes is newer than the cache now. */
+  private drainQueued(): void {
+    for (const sync of this.queued.splice(0)) {
+      const part = newerPart(sync, this.cache.revision())
+      if (part != null) this.apply(part)
+    }
+  }
+
+  /** The last sync fetch asked for: each waits for the one before it. */
+  private fetching: Promise<void> | undefined
+
+  /**
+   * Asks the master for a sync in pages (`host.sync`, then `host.syncPage`
+   * for the rest) and gives it whole. It first waits for the fetch before
+   * it, at most FETCH_WAIT_MS: a new `host.sync` gives up the pages the
+   * master holds for this host, so within that wait the opening and
+   * on-demand syncs do not ask while the other is fetching. A fetch that
+   * asks after the wait gives up the other's pages, and that sync retries
+   * from the same revision.
+   */
+  private fetchSync(
+    link: Link,
+    params: () => Record<string, unknown>,
+    timeoutMs: number,
+  ): Promise<Sync> {
+    const before = this.fetching
+    const mine = (async (): Promise<Sync> => {
+      if (before != null) await settledWithin(before, this.fetchWaitMs)
+      // Read once the wait is over: the fetch before may have moved the cache.
+      const first = (await link.request(
+        'host.sync',
+        { ...params(), pages: true },
+        timeoutMs,
+      )) as Sync
+      return await wholeSync(link, first, timeoutMs)
+    })()
+    const settled = mine.then(
+      () => undefined,
+      () => undefined,
+    )
+    this.fetching = settled
+    void settled.then(() => {
+      if (this.fetching === settled) this.fetching = undefined
+    })
+    return mine
+  }
+
   /** The catch-up in flight, and the one queued after it for callers since. */
-  private catching: Promise<void> | undefined
-  private trailing: Promise<void> | undefined
+  private catching: Promise<boolean> | undefined
+  private trailing: Promise<boolean> | undefined
 
   /**
    * Brings the cache up to the master's latest revision now, as a link open
    * does. One sync runs at a time; a caller arriving while one runs waits for
    * it and then for one more, started after it and shared by every such
    * caller, so each sees a revision at least as new as when it called.
+   * Answers whether it did: while the opening sync has not finished on the
+   * link it does not ask the master (see `syncNow`), and answers false.
    */
-  async catchUp(): Promise<void> {
+  async catchUp(): Promise<boolean> {
     if (this.catching == null) {
       this.catching = this.syncNow().finally(() => {
         this.catching = undefined
@@ -352,23 +413,50 @@ export class HostRuntime {
       .catch(() => undefined)
       .then(async () => {
         this.trailing = undefined
-        await this.catchUp()
+        return await this.catchUp()
       })
-    await this.trailing
+    return await this.trailing
   }
 
-  /** One on-demand sync, applied only for what is newer than the cache. */
-  private async syncNow(): Promise<void> {
+  private get fetchWaitMs(): number {
+    return this.options.fetchWaitMs ?? FETCH_WAIT_MS
+  }
+
+  /** One on-demand sync, applied only for what is newer than the cache; false when it did not ask. */
+  private async syncNow(): Promise<boolean> {
     const link = this.options.link()
-    if (link == null || link.closed || this.stopped) return
-    const from = this.cache.revision()
+    if (link == null || link.closed || this.stopped) return false
+    // While the opening sync has not finished on this link it brings the
+    // cache to the master's revision: never ask meanwhile, which would give
+    // up its pages. Wait a little for it while it is fetching, not through
+    // its backoff, so a caller that finds the cache still behind says so
+    // (the catalog's 503) well before the master stops waiting for it.
+    if (this.syncRunning && this.synced !== link && this.syncing != null) {
+      if (this.syncWake == null)
+        await settledWithin(
+          this.syncing,
+          this.options.catchUpWaitMs ?? CATCH_UP_WAIT_MS,
+        )
+      if (this.synced !== link) return false
+    }
+    let from = this.cache.revision()
     try {
       const sync = newerPart(
-        (await link.request('host.sync', { revision: from }, 30_000)) as Sync,
+        await this.fetchSync(
+          link,
+          () => {
+            from = this.cache.revision()
+            return { revision: from }
+          },
+          30_000,
+        ),
         this.cache.revision(),
       )
       if (sync != null) this.apply(sync)
+      this.drainQueued()
+      return true
     } catch (error) {
+      this.drainQueued()
       // The master counts an answer as sent even when it never arrives, and
       // pushes what follows it: hand the range to the opening sync, which
       // asks again from it on this link.
@@ -447,7 +535,11 @@ export class HostRuntime {
       },
       events: {
         changes: (params): void => {
-          this.apply(params as Sync)
+          // A push that arrives while a sync is being fetched (with its
+          // last page, on a slow link) waits for that sync: applied first,
+          // the older sync would write over it.
+          if (this.fetching != null) this.queued.push(params as Sync)
+          else this.apply(params as Sync)
         },
       },
       streams: {
@@ -551,6 +643,56 @@ export class HostRuntime {
       return false
     }
   }
+}
+
+/** How long a sync fetch waits for the one before it to settle. */
+export const FETCH_WAIT_MS = 30_000
+
+/**
+ * How long a catch-up waits for an opening sync that is fetching: well
+ * under the 30 seconds the master gives a relayed request (`askHost`).
+ */
+export const CATCH_UP_WAIT_MS = 5_000
+
+/** Resolves once `work` settles or `ms` pass, whichever is first. */
+function settledWithin(work: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms)
+    timer.unref()
+    void work.then(
+      () => {
+        clearTimeout(timer)
+        resolve()
+      },
+      () => {
+        clearTimeout(timer)
+        resolve()
+      },
+    )
+  })
+}
+
+/**
+ * The whole of a sync the master answered: when it came in pages, the rest
+ * are asked for in order (`host.syncPage`) and merged into one sync, which
+ * applies as one (a snapshot still replaces the cache).
+ */
+export async function wholeSync(
+  link: Link,
+  first: Sync,
+  timeoutMs: number,
+): Promise<Sync> {
+  if (first.page == null) return first
+  const pages: Sync[] = [first]
+  for (let index = 1; index < first.page.count; index++)
+    pages.push(
+      (await link.request(
+        'host.syncPage',
+        { token: first.page.token, index },
+        timeoutMs,
+      )) as Sync,
+    )
+  return mergePages(pages)
 }
 
 /**
