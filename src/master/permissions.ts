@@ -1,9 +1,15 @@
+import {
+  permissions,
+  type Permission,
+  type Role,
+} from '../shared/permissions.js'
 import { matches } from './rules.js'
-import { atLeast, Forbidden, type Actor, type Role } from './roles.js'
+import { atLeast, Forbidden, type Actor } from './roles.js'
 
 /**
  * The policy table: every action the master's API, UI and host replication
- * check, and the lowest role allowed it. Each role includes the ones below.
+ * check (the names in src/shared/permissions.ts, every one and no other),
+ * and the lowest role allowed it. Each role includes the ones below.
  */
 export const policy = {
   /** Their groups' published builds; register devices. */
@@ -51,13 +57,23 @@ export const policy = {
   'hosts.change': 'admin',
   /** The backup key is shown to administrators only. */
   'backups.key': 'admin',
-} as const satisfies Record<string, Role>
+} as const satisfies Record<Permission, Role>
 
-export type Action = keyof typeof policy
+export type Action = Permission
+
+/** The permissions a role holds, in the shared list's order. */
+export function permissionsOf(role: Role): Permission[] {
+  return permissions.filter((name) => atLeast(role, policy[name]))
+}
+
+/** Whether a role allows an action. */
+export function roleCan(role: Role, action: Action): boolean {
+  return atLeast(role, policy[action])
+}
 
 /** Whether an actor's role allows an action. */
 export function can(actor: Actor, action: Action): boolean {
-  return atLeast(actor.role, policy[action])
+  return roleCan(actor.role, action)
 }
 
 /**

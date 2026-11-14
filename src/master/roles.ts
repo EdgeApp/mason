@@ -1,18 +1,15 @@
-/** Account roles, lowest first; each includes everything below it. */
-export const roles = ['tester', 'developer', 'manager', 'admin'] as const
-export type Role = (typeof roles)[number]
+import { isRole, roles, type Role } from '../shared/permissions.js'
+
+export { roles, type Role }
 
 export const rank = (role: Role): number => roles.indexOf(role)
 export const atLeast = (role: Role, minimum: Role): boolean =>
   rank(role) >= rank(minimum)
 
 export function asRole(value: unknown): Role {
-  if (
-    typeof value !== 'string' ||
-    !(roles as readonly string[]).includes(value)
-  )
+  if (!isRole(value))
     throw new Error('Expected a role: admin, manager, developer or tester')
-  return value as Role
+  return value
 }
 
 /** Who did something, for authorization and the audit log. */

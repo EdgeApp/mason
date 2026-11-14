@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { describe, it } from 'mocha'
@@ -45,9 +45,15 @@ describe('Master sign-in in a real browser', () => {
         { mode: 0o700 },
       )
       const require = createRequire(import.meta.url)
-      const { MaestroD } = require(
+      // The client root is the npm package, or the maestro-d checkout holding it.
+      const client = [
         path.join(clientRoot, 'dist/cjs/index.js'),
-      ) as { MaestroD: { connect: (options: object) => Promise<Daemon> } }
+        path.join(clientRoot, 'npm/maestro-d/dist/cjs/index.js'),
+      ].find((file) => existsSync(file))
+      assert(client, `No maestro-d client under ${clientRoot}`)
+      const { MaestroD } = require(client) as {
+        MaestroD: { connect: (options: object) => Promise<Daemon> }
+      }
       const daemon = await MaestroD.connect({ name: daemonName })
       try {
         const device = await daemon.attach({
@@ -85,34 +91,40 @@ describe('Master sign-in in a real browser', () => {
         await visible('^Set up this master$')
         await screenshot('master-setup.png')
         const code = readFileSync(path.join(data, 'setup-code'), 'utf8').trim()
-        await type('#code', code)
-        await type('#username', 'owner')
-        await type('#password', 'Owner-Horse-9-long')
+        await type('#setup-code', code)
+        await type('#setup-username', 'owner')
+        await type('#setup-password', 'Owner-Horse-9-long')
         await device.command('tapOn', {
-          css: 'form[data-mason="setup"] button',
+          css: 'form[name="setup"] button[type="submit"]',
         })
         // The worker computed the client hash in the page's CSP; the account exists.
         await visible('Every hour the master encrypts a snapshot')
         await screenshot('master-backup-prompt.png')
         assert.equal(node.master!.configured(), true)
-        // The account icon opens Your account, which holds Sign out.
-        await device.command('tapOn', { css: 'a[aria-label="Your account"]' })
-        await visible('^Your account$')
+        // The account menu holds Sign out, which loads sign-in afresh.
         await device.command('tapOn', {
-          css: 'form[data-mason="sign-out"] button',
+          css: 'button[aria-label="Your account"]',
+        })
+        await device.command('evalBrowserScript', {
+          script:
+            "const item = [...document.querySelectorAll('[role=menu] [role=menuitem], [role=menu] button')].find((e) => e.textContent.replace(/[\\uE000-\\uF8FF]/g, '').trim() === 'Sign out'); if (item == null) throw new Error('No Sign out in the account menu'); item.click()",
         })
         await visible('^Sign in$')
-        await type('#username', 'owner')
-        await type('#password', 'Owner-Horse-9-long')
+        await device.command('evalBrowserScript', {
+          script:
+            "if (location.pathname !== '/sign-in') throw new Error('Signed out to ' + location.pathname)",
+        })
+        await type('#sign-in-username', 'owner')
+        await type('#sign-in-password', 'Owner-Horse-9-long')
         await device.command('tapOn', {
-          css: 'form[data-mason="sign-in"] button',
+          css: 'form[name="sign-in"] button[type="submit"]',
         })
         // The browser's hash matches the one the server stored at setup. A
         // master with no host yet opens on Projects & apps.
         await visible('their latest builds and runs')
         await device.command('evalBrowserScript', {
           script:
-            "if (location.pathname !== '/' || document.querySelector('nav.rail a[aria-current=page]').getAttribute('href') !== '/projects') throw new Error('Not the lone master home')",
+            "if (location.pathname !== '/' || document.querySelector('.m-sidebar nav[aria-label=\"Destinations\"] a[aria-current=page]')?.getAttribute('href') !== '/projects') throw new Error('Not the lone master home')",
         })
         await screenshot('master-signed-in.png')
       } finally {

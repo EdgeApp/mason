@@ -205,7 +205,7 @@ describe('Permanent cloud nodes on DigitalOcean', function () {
     return await response.text()
   }
 
-  it('U3.6b/U6.4b the Nodes and Settings pages render cloud nodes and every card from what is stored', async () => {
+  it('U3.6b/U6.4b the Nodes and Settings pages read cloud nodes and every card from what is stored', async () => {
     const master = c.master.master!
     // A host row as one made with a DNS name and a Space leaves it.
     master.database.db
@@ -223,25 +223,51 @@ describe('Permanent cloud nodes on DigitalOcean', function () {
         secretAccessKey: 'page-secret-123',
       },
     })
-    const nodes = await page('/nodes')
+    const read = async (route: string): Promise<Json> => {
+      const reply = await c.api('GET', route)
+      assert.equal(reply.status, 200, reply.text)
+      assert(!reply.text.includes('page-secret-123'), route)
+      assert(!reply.text.includes('g-secret-value'), route)
+      return reply.json
+    }
+    // The Nodes page is the web app's.
+    assert.match(await page('/nodes'), /<div id="root"><\/div>/)
+    const pageHost = ((await read('/api/v2/cloud/hosts')) as Json[]).find(
+      (entry) => entry.name === 'page-host',
+    )
     master.database.db
       .prepare("DELETE FROM cloud_hosts WHERE name='page-host'")
       .run()
-    assert.match(
-      nodes,
-      /id="host-page-host"[\s\S]*?builds\.example\.test[\s\S]*?Builds Space <span class="mono">mason-page<\/span>/,
+    assert.deepEqual(
+      [
+        pageHost.dns_name,
+        pageHost.dns_domain,
+        pageHost.space_bucket,
+        pageHost.space_region,
+        pageHost.certificate,
+      ],
+      ['builds', 'example.test', 'mason-page', 'sfo3', 'waiting'],
     )
-    assert.match(nodes, /Waiting for its certificate/)
-    assert.match(
-      nodes,
-      /<section class="panel" id="storage"><h3>[\s\S]*?<span class="mono">mason-page<\/span>[^<]*<\/td><td>[^<]*<span class="icon"[^>]*>[^<]*<\/span> New builds go here/,
+    const storage = await read('/api/v2/storage')
+    assert.deepEqual(
+      (storage.locations as Json[])
+        .filter((location) => location.active)
+        .map((location) => location.bucket),
+      ['mason-page'],
     )
-    assert.match(
-      nodes,
-      /id="cloud-node-linux-node" data-state="ready"[\s\S]*?linux-x86 · e2e · fast · sfo3/,
+    const cloudNodes = (await read('/api/v2/cloud/nodes')) as Json[]
+    const linux = cloudNodes.find((entry) => entry.name === 'linux-node')
+    assert.deepEqual(
+      [linux.state, linux.node_type, linux.labels, linux.region],
+      ['ready', 'linux-x86', ['e2e', 'fast'], 'sfo3'],
     )
-    assert.match(nodes, /id="cloud-node-second-node"/)
-    assert.match(nodes, /id="add-node-do"/)
+    assert(cloudNodes.some((entry) => entry.name === 'second-node'))
+    // Add node offers the DigitalOcean account.
+    assert(
+      ((await read('/api/v2/cloud/accounts')) as Json[]).some(
+        (account) => account.id === 'do' && account.provider === 'digitalocean',
+      ),
+    )
     await master.settings.set(localOperator, 'signIn', {
       methods: [
         {
@@ -258,26 +284,15 @@ describe('Permanent cloud nodes on DigitalOcean', function () {
       'linux-x86': { software: { apt: ['jq'], node: '24' } },
     })
     try {
-      const settings = await page('/settings')
-      assert.match(
-        settings,
-        /data-path="\/api\/v2\/settings\/signIn\/methods\/google" data-method="PUT"/,
+      assert.match(await page('/settings'), /<div id="root"><\/div>/)
+      const signIn = await read('/api/v2/settings/signIn')
+      assert.deepEqual(
+        (signIn.methods as Json[]).map((method) => [method.id, method.type]),
+        [['google', 'oidc']],
       )
-      assert(!settings.includes('g-secret-value'))
-      assert(!settings.includes('page-secret-123'))
-      assert.match(
-        settings,
-        /id="node-type-linux-x86"[\s\S]*?name="software\.node" value="24"/,
-      )
-      assert.match(
-        settings,
-        /<span class="mono">mason-page<\/span>[^<]*<\/td><td>[^<]*<span class="icon"[^>]*>[^<]*<\/span> New builds go here/,
-      )
-      assert.match(
-        settings,
-        /<select id="new-space-account" name="account"><option value="do">DigitalOcean<\/option><\/select>/,
-      )
-      assert.match(settings, /name="monthlyBudget" value="200"/)
+      const types = await read('/api/v2/settings/nodeTypes')
+      assert.equal(types['linux-x86'].software.node, '24')
+      assert.equal((await read('/api/v2/cloud/budget')).monthly, 200)
     } finally {
       await master.settings.set(localOperator, 'signIn', { methods: [] })
       await master.settings.set(localOperator, 'nodeTypes', {})

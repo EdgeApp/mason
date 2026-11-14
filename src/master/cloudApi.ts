@@ -8,7 +8,12 @@ import {
   NotFound,
 } from './api.js'
 import { MissingAccount } from './cloud/accounts.js'
-import type { CloudSetting, PoolSetting } from './cloud/pools.js'
+import {
+  DEFAULT_MONTHLY_BUDGET,
+  type CloudSetting,
+  type PoolSetting,
+} from './cloud/pools.js'
+import type { CloudBudget } from '../shared/api/index.js'
 import { allow } from './permissions.js'
 import type { Master } from './runtime.js'
 
@@ -98,6 +103,34 @@ export function cloudApi(master: Master): Router {
           `Account ${id}'s provider has no regions or sizes to choose`,
         )
       return catalog
+    }),
+  )
+
+  router.get(
+    '/api/v2/cloud/accounts/:id/domains',
+    json(async (req, res): Promise<string[]> => {
+      allow(actorOf(res), 'nodes.read')
+      const id = String(req.params.id)
+      if (master.cloudAccounts.get(id) == null)
+        throw new NotFound(`No cloud account named ${id}`)
+      // NoMac has no DNS; a listing that fails names no domains.
+      return await (
+        master.cloudHosts.provider(id)?.domains?.() ?? Promise.resolve([])
+      ).catch((): string[] => [])
+    }),
+  )
+  router.get(
+    '/api/v2/cloud/budget',
+    json((_req, res): CloudBudget => {
+      allow(actorOf(res), 'settings.read')
+      const notice = master.pools.notice()
+      return {
+        monthly: Number(
+          ((master.settings.value('cloud') ?? {}) as { monthlyBudget?: number })
+            .monthlyBudget ?? DEFAULT_MONTHLY_BUDGET,
+        ),
+        ...(notice == null ? {} : { notice }),
+      }
     }),
   )
 

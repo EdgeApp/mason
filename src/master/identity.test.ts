@@ -16,6 +16,7 @@ import { nodeMain, type MainIO } from '../node/main.js'
 import { pinnedAgent } from '../node/pinnedFetch.js'
 import { startNode } from '../node/serve.js'
 import { cluster, type Cluster } from '../test/cluster.js'
+import { assertShell } from '../test/webShell.js'
 import { applyPendingRestore, PENDING_RESTORE } from './backup.js'
 import {
   IdentityMismatch,
@@ -233,14 +234,17 @@ describe("The master's identity travels with its database", function () {
     assert.notEqual(fresh, original)
     const origin = node.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:')
     try {
+      // The first-run page (the web app's, which warns to stop the old
+      // master: src/web/pages/auth/auth.test.tsx) answers before setup.
       const page = await fetch(origin + '/', {
         // @ts-expect-error undici's dispatcher option
         dispatcher: pinnedAgent(node.web!.certificate!.pin),
       })
-      assert.match(
-        await page.text(),
-        /It comes back as the same master, so its nodes reconnect: stop the master the backup came from first\./,
-      )
+      assertShell({
+        status: page.status,
+        headers: page.headers,
+        text: await page.text(),
+      })
       const code = readFileSync(path.join(data, 'setup-code'), 'utf8').trim()
       const keyFile = path.join(c.root, 'backup.key')
       const done = await fetch(origin + '/api/setup/restore', {

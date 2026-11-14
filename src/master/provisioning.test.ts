@@ -21,6 +21,7 @@ import { pinnedFetch } from '../node/pinnedFetch.js'
 import type { RunningNode } from '../node/serve.js'
 import { insertBuild } from '../store.js'
 import { cluster, type Cluster } from '../test/cluster.js'
+import { assertShell } from '../test/webShell.js'
 import {
   FakeAppleConnect,
   fakeConnectKey,
@@ -108,26 +109,55 @@ describe('Devices across nodes', function () {
       host.web!.certificate!.pin,
     )
   }
-  const form = async (
+  /** A JSON request as the host's web app makes it, with the session's proof. */
+  const api = async (
+    method: 'GET' | 'POST',
     route: string,
     who: { cookie: string; csrf: string },
-    fields: Record<string, string> = {},
     cookie = '',
-  ): Promise<Reply> =>
-    await hostRequest(route, {
-      method: 'POST',
+    body?: unknown,
+  ): Promise<{ status: number; json: Json }> => {
+    const reply = await hostRequest(route, {
+      method,
       cookie: who.cookie + cookie,
-      headers: {
-        origin: hostUrl(),
-        'content-type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({ csrf: who.csrf, ...fields }),
+      headers:
+        method === 'GET'
+          ? {}
+          : {
+              origin: host.host!.cache.store.config.origin,
+              'x-mason-csrf': who.csrf,
+              ...(body === undefined
+                ? {}
+                : { 'content-type': 'application/json' }),
+            },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
+    const text = await reply.text()
+    assert.match(
+      reply.headers.get('content-type') ?? '',
+      /^application\/json/,
+      `${route}: ${text.slice(0, 200)}`,
+    )
+    return { status: reply.status, json: JSON.parse(text) }
+  }
+  /** Asserts a host reply is the web app's shell, with its status. */
+  const shell = async (reply: Reply, status = 200): Promise<void> => {
+    assertShell(
+      {
+        status: reply.status,
+        headers: reply.headers,
+        text: await reply.text(),
+      },
+      status,
+    )
+  }
   /** Registers a device on the host the way an iPhone does: profile, then signed callback. */
   const register = async (
     udid: string,
   ): Promise<{ token: string; callback: Reply }> => {
-    const profile = await form('/devices/profile', session())
+    const made = await api('POST', '/api/v2/devices/registrations', session())
+    assert.equal(made.status, 200, JSON.stringify(made.json))
+    const profile = await hostRequest(made.json.url)
     assert.equal(profile.status, 200, await profile.clone().text())
     const token = /<key>Challenge<\/key><string>([^<]+)<\/string>/.exec(
       await profile.text(),
@@ -294,7 +324,12 @@ describe('Devices across nodes', function () {
     const waiting = await hostRequest(`/devices/complete/${token}`, {
       cookie: session().cookie,
     })
-    assert.match(await waiting.text(), /Registering device|Device registered/)
+    await shell(waiting)
+    assert.match(
+      (await api('GET', `/api/v2/devices/complete/${token}`, session())).json
+        .state,
+      /^(registering|registered)$/,
+    )
     // The registration went through the outbox; the master registered it with Apple.
     const device = await c.until(
       () =>
@@ -355,8 +390,14 @@ describe('Devices across nodes', function () {
     const done = await hostRequest(`/devices/complete/${token}`, {
       cookie: session().cookie,
     })
-    assert.match(await done.text(), /You've registered the following device/)
-    // A used link is refused, and a second device does not queue the waiting branch again.
+    await shell(done)
+    const registered = (
+      await api('GET', `/api/v2/devices/complete/${token}`, session())
+    ).json
+    assert.deepEqual(registered, {
+      state: 'registered',
+      device: { id: device.id, model: 'iPhone13' },
+    })
     const reused = await hostRequest(`/devices/callback/${token}`, {
       method: 'POST',
       body: new Uint8Array(sign(answer(token, udidA))),
@@ -385,14 +426,13 @@ describe('Devices across nodes', function () {
     )
     // No Apple credential reached the host.
     assert.equal(host.host!.cache.setting('apple'), undefined)
-    assert.equal(
-      (
-        await hostRequest(`/devices/complete/${'x'.repeat(43)}`, {
-          cookie: session().cookie,
-        })
-      ).status,
-      410,
+    const unavailable = await hostRequest(
+      `/devices/complete/${'x'.repeat(43)}`,
+      {
+        cookie: session().cookie,
+      },
     )
+    await shell(unavailable, 410)
   })
 
   it('U15.3 retries Apple at most three times, then shows an error the tester can retry', async () => {
@@ -647,14 +687,14 @@ describe('Devices across nodes', function () {
     const device = db()
       .prepare('SELECT id FROM devices WHERE udid=?')
       .get(udidA) as Json
-    const prepared = await form(
-      `/builds/${build.id}/prepare`,
+    const prepared = await api(
+      'POST',
+      `/api/v2/catalog/builds/${build.id}/prepare`,
       session(),
-      {},
       `; ${DEVICE_COOKIE}=${device.id}`,
     )
     assert.equal(prepared.status, 200)
-    assert.match(await prepared.text(), /Preparing build/)
+    assert.deepEqual(prepared.json, { prepared: true })
     const job = await c.until(
       () =>
         db()
@@ -671,17 +711,26 @@ describe('Devices across nodes', function () {
         .status,
       'queued',
     )
-    // Without a selected device the tester is sent to register one.
-    assert.equal(
-      (await form(`/builds/${build.id}/prepare`, session())).headers.get(
-        'location',
-      ),
-      '/devices',
+    // Without a selected device nothing is prepared: the web app sends the
+    // tester to register one.
+    assert.deepEqual(
+      (
+        await api(
+          'POST',
+          `/api/v2/catalog/builds/${build.id}/prepare`,
+          session(),
+        )
+      ).json,
+      { prepared: false },
     )
-    const renamed = await form(`/devices/${device.id}/rename`, session(), {
-      name: 'Work phone',
-    })
-    assert.equal(renamed.status, 303)
+    const renamed = await api(
+      'POST',
+      `/api/v2/devices/${device.id}/rename`,
+      session(),
+      '',
+      { name: 'Work phone' },
+    )
+    assert.equal(renamed.status, 200)
     await c.until(
       () =>
         (
@@ -692,11 +741,14 @@ describe('Devices across nodes', function () {
       10_000,
       'the rename on the master',
     )
-    const listing = await hostRequest('/devices', { cookie: session().cookie })
-    assert.match(await listing.text(), /Your devices/)
+    const listing = await api('GET', '/api/v2/devices', session())
+    assert(
+      (listing.json.devices as Json[]).some((entry) => entry.id === device.id),
+    )
     assert.equal(
-      (await form(`/devices/${device.id}/remove`, session())).status,
-      303,
+      (await api('POST', `/api/v2/devices/${device.id}/remove`, session()))
+        .status,
+      200,
     )
     await c.until(
       () =>

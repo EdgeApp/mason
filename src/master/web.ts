@@ -1,10 +1,5 @@
-import { readFileSync } from 'node:fs'
 import type express from 'express'
-import {
-  masterContentSecurityPolicy,
-  nodeWebApp,
-  type WebAppContext,
-} from '../node/webApp.js'
+import { nodeWebApp, type WebAppContext } from '../node/webApp.js'
 import { accountsApi } from './accountsApi.js'
 import { masterApi } from './api.js'
 import { backupApi } from './backupApi.js'
@@ -20,7 +15,16 @@ import { providerSignInRoutes } from './providerSignIn.js'
 import { wizardApi } from './wizard.js'
 import { runsApi } from './runsApi.js'
 import type { Master } from './runtime.js'
+import { nodeInfoRoutes, releaseInfo } from '../node/nodeInfo.js'
+import type { NodeInfo } from '../shared/api/index.js'
+import { version } from '../version.js'
 import { secretsApi } from './secretsApi.js'
+import { adminApi } from './adminApi.js'
+import { masterReader, nodeViews } from './reads.js'
+import { readApi } from '../node/readApi.js'
+import { masterCatalogApi, masterCatalogShell } from './catalogPages.js'
+import { cookie } from '../auth/routes.js'
+import { MASTER_SESSION_COOKIE } from './auth.js'
 
 export interface MasterWebContext extends WebAppContext {
   configured: () => boolean
@@ -31,37 +35,48 @@ export interface MasterWebContext extends WebAppContext {
   restore?: Parameters<typeof accountsApi>[1]['restore']
 }
 
-const bundle = (name: string): string =>
-  readFileSync(
-    new URL(`../browser/bundles/${name}.js`, import.meta.url),
-    'utf8',
-  )
+/** The master's `GET /api/v2/node`. */
+export function masterNodeInfo(context: MasterWebContext): NodeInfo {
+  const settings = context.master.settings
+  const origin = (area: string): string | undefined => {
+    const value = (settings.value(area) as { origin?: unknown } | undefined)
+      ?.origin
+    return typeof value === 'string' ? value : undefined
+  }
+  const masterOrigin = origin('master')
+  const hostOrigin = origin('host')
+  return {
+    role: 'master',
+    version,
+    ...(masterOrigin == null ? {} : { masterOrigin }),
+    ...(hostOrigin == null ? {} : { hostOrigin }),
+    setupNeeded: !context.configured(),
+    signIn: {
+      password: true,
+      providers: context.master.providerSignIn
+        .offered()
+        .map(({ id, name }) => ({ id, name })),
+    },
+    state: 'ok',
+    testEndpoints: context.testEndpoints,
+    ...releaseInfo(),
+  }
+}
 
 /** The master's web listener: its UI and API. */
 export function masterApp(context: MasterWebContext): express.Express {
   const app = nodeWebApp(context)
   const master = context.master
-  for (const name of [
-    'groups',
-    'master',
-    'password-worker',
-    'people',
-    'run',
-    'secrets',
-  ])
-    app.get(`/assets/${name}.js`, (_req, res) => {
-      if (name === 'password-worker')
-        res.set('Content-Security-Policy', masterContentSecurityPolicy)
-      res.type('js').send(bundle(name))
-    })
-  // The catalog's platform switch, local times and iPad check.
-  app.get('/assets/catalog.js', (_req, res) => {
-    res
-      .type('js')
-      .send(
-        readFileSync(new URL('../browser/client.js', import.meta.url), 'utf8'),
-      )
-  })
+  app.use(nodeInfoRoutes(() => masterNodeInfo(context)))
+  // The pages' reads, which the host answers the same from its cache.
+  app.use(readApi(masterReader(master, context)))
+  app.use(adminApi(master))
+  // Install apps and Devices, from the host over the link.
+  app.use(
+    masterCatalogApi(master, (req) =>
+      master.auth.session(cookie(req, MASTER_SESSION_COOKIE)),
+    ),
+  )
   app.use(
     accountsApi(master, {
       setupCode: context.setupCode ?? ((): undefined => undefined),
@@ -90,6 +105,7 @@ export function masterApp(context: MasterWebContext): express.Express {
       settings: master.settings,
       registry: master.registry,
       nodeDetails: (fingerprint) => master.nodeDetails(fingerprint),
+      nodes: () => nodeViews(master),
       apple: {
         status: () => master.apple.status(),
         signIn: async (actor, appleId, password) =>
@@ -101,9 +117,13 @@ export function masterApp(context: MasterWebContext): express.Express {
   // After the provider routes, whose limiter covers every /auth request.
   app.use(providerSignInRoutes(master))
   app.use(invitationRoutes(master))
-  masterPages(app, context, master)
-  app.use((_req, res) => {
-    res.status(404).send('Not found')
-  })
+  // Install apps' and Devices' own addresses: the QR code, the completion
+  // link and the grants' files; their pages are the web app's.
+  app.use(
+    masterCatalogShell(master, (req) =>
+      master.auth.session(cookie(req, MASTER_SESSION_COOKIE)),
+    ),
+  )
+  masterPages(app, master)
   return app
 }

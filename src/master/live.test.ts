@@ -6,7 +6,7 @@ import { after, before, describe, it } from 'mocha'
 import { WebSocket } from 'ws'
 import { Link, type Stream } from '../link/link.js'
 import { memoryPair } from '../link/wire.js'
-import type { QueueEntry } from '../view/dashboard.js'
+import type { QueueEntry } from './queue.js'
 import { FakeLiveSource, liveRun, liveStage } from '../test/fakeLiveSource.js'
 import {
   asLiveStreamParams,
@@ -313,6 +313,25 @@ describe('Live socket sessions', () => {
       (scoped.frames[0]!.data as { error: string }).error,
       /does not cover/,
     )
+    // Nor the shell's status, the whole cluster's, as GET /api/v2/status.
+    const shellStatus = Object.assign(new FakeLiveSource(source.dir), {
+      status: (): never => assert.fail('a scoped key read the status'),
+    })
+    const shell = open(shellStatus, () => ({
+      role: 'developer',
+      keyId: 'k',
+      label: 'key:k',
+      scopes: { projects: ['app'], branches: [] },
+    }))
+    shell.session.receive(JSON.stringify({ subscribe: 'status', key: 'shell' }))
+    assert.deepEqual(shell.frames, [
+      {
+        key: 'shell',
+        event: 'error',
+        data: { error: 'This key is scoped to projects and cannot do that' },
+      },
+    ])
+    shell.session.end()
     // The queue shows only the runs a key covers, and only when they change.
     source.entries = [
       {
@@ -690,6 +709,32 @@ describe('Live socket sessions', () => {
     for (let n = 0; n < 21; n++)
       page.session.receive(JSON.stringify({ subscribe: 'status', run: 'r' }))
     assert.equal(refused(), 11)
+  })
+
+  it('names the subscription a message over the budget leaves unsent, so the page can send it again', () => {
+    const source = new FakeLiveSource(mkdtempSync(path.join(root, 'k-')))
+    source.runs.set('r', liveRun('r', []))
+    const now = 0
+    const page = open(source, undefined, { now: () => now })
+    // A burst, then one more that reaches the node with it.
+    for (let n = 0; n < 50; n++)
+      page.session.receive(
+        JSON.stringify({ subscribe: 'status', run: 'r', key: `k${n}` }),
+      )
+    page.frames.length = 0
+    page.session.receive(
+      JSON.stringify({ subscribe: 'status', run: 'r', key: 'late' }),
+    )
+    page.session.receive(JSON.stringify({ subscribe: 'queue' }))
+    page.session.receive(JSON.stringify({ unsubscribe: 'k0' }))
+    page.session.receive('not json')
+    const error = { error: 'Too many messages: send fewer' }
+    assert.deepEqual(page.frames, [
+      { key: 'late', event: 'error', data: error },
+      { key: 'queue', event: 'error', data: error },
+      { key: 'k0', event: 'error', data: error },
+      { event: 'error', data: error },
+    ])
   })
 
   it('sends a followed stage’s last megabyte of log, numbered from the line it starts on', () => {

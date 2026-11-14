@@ -1,0 +1,74 @@
+/* The React app's additions to the design language's components.css: what
+   the samples draw statically but the app needs live (the <dialog> overlay
+   layer, anchored popovers and menus, the toast region, tooltips' timing),
+   and where the iOS 27 library's button rules would override Mason's.
+   Tokens only (--m-*), as everywhere outside tokens.css. */
+
+/* Overlays sit in a <dialog> shown with showModal(): the dialog is a clear
+   full-screen layer in the top layer, and .m-scrim inside it dims the page
+   and places the panel, as in the samples. */
+.m-dialog { position: fixed; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: transparent; color: inherit; overflow: visible; }
+.m-dialog::backdrop { background: transparent; }
+.m-dialog:focus-visible { outline: none; }
+/* The palette hangs from the top, clear of the on-screen keyboard. */
+.m-scrim--top { place-items: start center; padding-top: max(var(--m-space-9), 12dvh); }
+@media (max-width: 46.49em) { .m-scrim--top { place-items: start stretch; padding: calc(env(safe-area-inset-top) + var(--m-space-4)) var(--m-space-4) 0; } }
+.m-palette__results { max-height: min(60dvh, 28rem); overflow-y: auto; }
+.m-palette__item { cursor: pointer; }
+.m-palette__item:hover { background: var(--m-surface-hover); }
+.m-palette__status { padding: var(--m-space-3) var(--m-space-5); }
+
+/* Popovers and menus hang below their trigger, aligned to its end. */
+.m-anchor { position: relative; display: inline-flex; }
+.m-anchor > .m-popover, .m-anchor > .m-menu { position: absolute; top: calc(100% + var(--m-space-2)); right: 0; z-index: var(--m-z-dropdown); }
+/* Sized to the screen, not to the 32 px trigger they hang from. */
+.m-anchor > .m-popover { max-width: calc(100vw - 2 * var(--m-space-4)); }
+.m-anchor > .m-menu { min-width: min(14rem, 100vw - 2 * var(--m-space-4)); max-width: min(20rem, 100vw - 2 * var(--m-space-4)); width: max-content; }
+.m-popover .m-list { max-height: min(70dvh, 32rem); overflow-y: auto; }
+.m-popover__head h2:focus-visible { outline-offset: 4px; }
+
+/* A count on an icon button (notifications). */
+.m-iconbadge { position: relative; }
+.m-iconbadge > .m-badge { position: absolute; top: 2px; right: 0; pointer-events: none; }
+
+/* The sidebar's node pill and version chip, as the samples place them. */
+.m-sidebar__node { align-self: flex-start; margin: 0 var(--m-space-3); }
+.m-sidebar__brand .m-chip { margin-left: auto; }
+.m-rail__logo { width: 2rem; height: 2rem; border-radius: var(--m-radius-sm); margin-bottom: var(--m-space-2); }
+
+/* The tab bar's More sheet: the remaining destinations as a list. */
+.m-more { margin: calc(var(--m-space-6) * -1); }
+.m-more .m-list__row[aria-current='page'] { background: var(--m-surface-selected); font-weight: 600; }
+
+/* The toast region exists before any toast, so each is announced. */
+.m-toasts:empty { display: none; }
+
+/* Tooltips: after 500 ms of hover, at once on focus; Esc hides one; the
+   pointer can move onto it; long ones wrap at 20rem. */
+.m-tip__bubble { white-space: normal; width: max-content; max-width: 20rem; }
+.m-tip:hover .m-tip__bubble { transition-delay: 500ms; }
+.m-tip:focus-within .m-tip__bubble, .m-tip[data-open] .m-tip__bubble { transition-delay: 0s; }
+.m-tip:hover .m-tip__bubble, .m-tip:focus-within .m-tip__bubble { pointer-events: auto; }
+.m-tip__bubble::after { content: ''; position: absolute; left: 0; right: 0; top: 100%; height: 6px; }
+.m-tip[data-dismissed] .m-tip__bubble { opacity: 0; pointer-events: none; }
+.m-tip__bubble:empty { display: none; }
+
+/* The library's button rules come first in app.css but some are more
+   specific than Mason's: keep Mason's focus ring, and let a disabled button
+   still show the tooltip that says why. */
+.m-btn.ios27-btn:focus-visible { outline: 2px solid var(--m-focus-ring); outline-offset: 2px; box-shadow: none; }
+.m-btn.ios27-btn:disabled, .m-btn.ios27-btn[aria-disabled='true'] { pointer-events: auto; opacity: 0.45; }
+.m-btn.ios27-btn:active:not(:disabled) { opacity: 1; }
+.m-btn.ios27-btn { border-radius: var(--m-radius-pill); letter-spacing: normal; }
+
+/* The full-page states (waiting for the master, maintenance) and loading. */
+.m-bare__main--state { justify-content: center; }
+.m-shell-loading { display: flex; flex-direction: column; gap: var(--m-space-5); }
+
+/* The tab bar's More is a button among links. */
+button.m-tabbar__item { border: 0; background: transparent; font-family: inherit; line-height: inherit; cursor: pointer; }
+
+/* A build chip's number reads in text colour; "+N more" in link colour. */
+.m-runchip__num--build { color: var(--m-text); }
+.m-runchip--more { color: var(--m-text-link); }
+.m-runchip--more:hover { color: var(--m-text-link); }

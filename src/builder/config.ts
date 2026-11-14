@@ -1,8 +1,5 @@
 import { asArray, asBoolean, asOptional, asString } from 'cleaners'
-import path from 'node:path'
-import { realpathSync } from 'node:fs'
 import { integer, object, text, asPlatform } from '../validation.js'
-import { readPrivateJson } from '../config.js'
 
 export function relativePath(value: unknown): string {
   const out = text(240)(value)
@@ -156,14 +153,6 @@ export const asBuilderConfig = object({
   port: asOptional(integer(1, 65535), 9300),
 })
 export type BuilderConfig = ReturnType<typeof asBuilderConfig>
-export function loadBuilderConfig(file: string): BuilderConfig {
-  file = realpathSync(file)
-  const config = asBuilderConfig(readPrivateJson(file))
-  return {
-    ...config,
-    workspace: path.resolve(path.dirname(file), config.workspace),
-  }
-}
 function asEnvVars(value: unknown): Array<Record<string, string>> {
   const entries = asArray((map: unknown) => {
     if (map == null || typeof map !== 'object' || Array.isArray(map))

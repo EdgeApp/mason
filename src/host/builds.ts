@@ -29,6 +29,7 @@ import {
 } from '../validation.js'
 import type { HostObjects } from './artifacts.js'
 import type { HostCache } from './cache.js'
+import type { BuildView as SharedBuildView } from '../shared/api/builds.js'
 
 /** How long a signed Space URL for a download lasts. */
 export const SIGNED_URL_SECONDS = 300
@@ -126,6 +127,8 @@ export interface BuildsQuery {
   platform?: Platform
   /** `''` is the default variant. */
   variant?: string
+  /** The run that published it. */
+  run?: string
   latest: boolean
   limit: number
 }
@@ -149,6 +152,7 @@ export function asBuildsQuery(value: unknown): BuildsQuery {
   const branch = field('branch', text(256))
   const platform = field('platform', asPlatform)
   const variant = field('variant', asVariant)
+  const run = field('run', text(64))
   const latest = field('latest', (raw) => {
     if (raw === '1' || raw === 'true') return true
     if (raw === '0' || raw === 'false') return false
@@ -163,32 +167,15 @@ export function asBuildsQuery(value: unknown): BuildsQuery {
     ...(branch == null ? {} : { branch }),
     ...(platform == null ? {} : { platform }),
     ...(variant == null ? {} : { variant }),
+    ...(run == null ? {} : { run }),
     latest: latest ?? false,
     limit: limit ?? 50,
   }
 }
 
-/** A published build as the API answers it. */
-export interface BuildView {
-  id: number
-  /** The app ID. */
-  app: string
-  appName: string
-  project: string | null
-  branch: string
-  platform: Platform
-  variant: string
-  version: string
-  buildNumber: string
-  commit: string
-  bundleId: string
+/** A published build as the API answers it: the shared contract's, with its format typed. */
+export interface BuildView extends SharedBuildView {
   format: Format
-  size: number
-  digest: string
-  publishedAt: number
-  expiresAt: number
-  run: string | null
-  download: string
 }
 
 interface Row {
@@ -374,7 +361,10 @@ export class HostBuilds {
 
   private rows(
     filter: Partial<
-      Pick<BuildsQuery, 'project' | 'app' | 'branch' | 'platform' | 'variant'>
+      Pick<
+        BuildsQuery,
+        'project' | 'app' | 'branch' | 'platform' | 'variant' | 'run'
+      >
     > & {
       id?: number
     },
@@ -389,7 +379,7 @@ export class HostBuilds {
         LEFT JOIN project_apps pa ON pa.app_id=b.app_id LEFT JOIN projects p ON p.id=pa.project_id
         WHERE b.state='ready' AND b.expires_at>?7 AND a.enabled=1 AND c.enabled=1
         AND (?1 IS NULL OR b.id=?1) AND (?2 IS NULL OR p.slug=?2) AND (?3 IS NULL OR a.slug=?3)
-        AND (?4 IS NULL OR b.branch=?4) AND (?5 IS NULL OR b.platform=?5) AND (?6 IS NULL OR COALESCE(b.variant,'')=?6)
+        AND (?4 IS NULL OR b.branch=?4) AND (?5 IS NULL OR b.platform=?5) AND (?6 IS NULL OR COALESCE(b.variant,'')=?6) AND (?8 IS NULL OR b.run=?8)
         ORDER BY b.published_at DESC,b.id DESC`,
       )
       .iterate(
@@ -400,6 +390,7 @@ export class HostBuilds {
         optional(filter.platform),
         optional(filter.variant),
         this.options.now(),
+        optional(filter.run),
       ) as unknown as IterableIterator<Row>
   }
 

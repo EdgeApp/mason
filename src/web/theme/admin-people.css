@@ -1,0 +1,124 @@
+/* people pages (DESIGN-LANGUAGE.md §14), on tokens only:
+   People (screen-12-people, screen-12b-people-overlays) and Your account
+   (screen-13-account). */
+
+/* The role filter and the search, side by side until they wrap. */
+.m-people__toolbar {
+  flex-wrap: wrap;
+  gap: var(--m-space-4);
+}
+.m-people__search {
+  width: min(100%, 16rem);
+}
+
+/* A person: their initial and name on one line. */
+.m-people__who {
+  flex-wrap: nowrap;
+  gap: var(--m-space-3);
+}
+
+/* Email lines: the address, its tags and its buttons. */
+.m-people__emails {
+  gap: var(--m-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.m-people__email {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--m-space-2) var(--m-space-3);
+  min-width: 0;
+}
+.m-people__address {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.m-people__email--removed .m-people__address {
+  text-decoration: line-through;
+  color: var(--m-text-tertiary);
+}
+.m-people__email--added .m-people__address {
+  color: var(--m-success-text);
+}
+.m-people__email .m-status {
+  min-height: 1.25rem;
+}
+.m-people__addemail {
+  align-self: flex-start;
+}
+
+/* The invitation's state and when its link expires. */
+.m-people__invite {
+  gap: var(--m-space-1);
+  align-items: flex-start;
+}
+
+/* The edit block fills its row; a stacked table gives it the card's width. */
+.m-people__editcell {
+  padding: 0;
+}
+.m-people__editrow > td {
+  padding: 0;
+}
+.m-people__nochange {
+  margin-right: auto;
+  align-self: center;
+}
+.m-people__errorrow > td {
+  padding-top: 0;
+}
+
+/* A confirm's change lines, one to a line, left-aligned under the title. */
+.m-people__changes {
+  display: grid;
+  gap: var(--m-space-1);
+  text-align: left;
+}
+.m-people__change {
+  display: block;
+}
+.m-people__change::before {
+  content: '•';
+  margin-right: var(--m-space-2);
+  color: var(--m-text-tertiary);
+}
+
+/* Invite's footer: Revoke on the left, away from Done. */
+.m-people__revoke {
+  margin-right: auto;
+}
+
+/* Your account: the profile beside Appearance and Sign-in. */
+.m-account {
+  align-items: start;
+}
+.m-account .m-seg {
+  width: 100%;
+  max-width: 24rem;
+}
+
+/* On a phone the row's Edit and Remove go under the name, so a name keeps
+   the card's width and breaks only between words. */
+@container table (max-width: 29.99rem) {
+  .m-people td[data-primary],
+  .m-people td[data-actions] {
+    grid-column: 1 / -1;
+  }
+  .m-people td[data-actions] {
+    grid-row: auto;
+  }
+  .m-people td[data-actions] .m-table__actions {
+    justify-content: flex-start;
+  }
+}
+.m-people__who {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+/* Row buttons keep their words on one line. */
+.m-people .m-btn {
+  white-space: nowrap;
+}

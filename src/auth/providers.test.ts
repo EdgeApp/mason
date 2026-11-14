@@ -26,10 +26,19 @@ interface Fixture {
   /** Overrides the email claims the OIDC providers assert, until reset with `{}`. */
   setClaims: (claims: { email?: string; email_verified?: boolean }) => void
 }
-/** Real HTTPS authorization, token, JWKS and user-info endpoints; no TLS bypass. */
+/**
+ * Real HTTPS authorization, token, JWKS and user-info endpoints; no TLS
+ * bypass. Each provider calls back to Mason's origin, and to each of
+ * `otherOrigins` too (a master and its host).
+ */
 export async function fixture(
   masonOrigin = 'https://builds.example.test',
+  otherOrigins: string[] = [],
 ): Promise<Fixture> {
+  const callbacks = (id: string): string[] =>
+    [masonOrigin, ...otherOrigins].map(
+      (mason) => `${mason}/auth/callback/${id}`,
+    )
   assert(process.env.MASON_TEST_ROOT)
   const root = mkdtempSync(path.join(process.env.MASON_TEST_ROOT, 'protocol-'))
   execFileSync(
@@ -97,7 +106,7 @@ export async function fixture(
         {
           client_id: 'fixture',
           client_secret: 'fixture-secret',
-          redirect_uris: [`${masonOrigin}/auth/callback/${id}`],
+          redirect_uris: callbacks(id),
           response_types: ['code'],
           grant_types: ['authorization_code'],
           token_endpoint_auth_method:
@@ -164,7 +173,7 @@ export async function fixture(
   app.get('/plain/authorize', (req, res) => {
     assert.equal(req.query.client_id, 'fixture')
     assert.equal(req.query.code_challenge_method, 'S256')
-    assert.equal(req.query.redirect_uri, masonOrigin + '/auth/callback/plain')
+    assert(callbacks('plain').includes(String(req.query.redirect_uri)))
     const code = randomToken()
     codes.set(code, {
       challenge: String(req.query.code_challenge),

@@ -1,0 +1,131 @@
+/* Install apps and Devices (DESIGN-LANGUAGE.md §14, screen-16-install,
+   16b-install-app, 16c-install-results, 17-devices, 17b-devices-complete),
+   on tokens only. Narrow first: the phone is where testers install. */
+
+/* The platform switch stays under the top bar while the builds scroll. */
+.m-catalog-platforms {
+  position: sticky;
+  top: calc(var(--m-topbar-height) + var(--m-space-3));
+  z-index: 5;
+  align-self: flex-start;
+  max-width: 100%;
+}
+.m-catalog-platforms .m-seg {
+  background: var(--m-surface-sunken);
+  box-shadow: var(--m-shadow-1);
+}
+.m-catalog-platforms .m-seg__opt {
+  text-decoration: none;
+}
+.m-catalog-platforms .m-seg__opt[aria-current='true'] {
+  background: var(--m-surface-hover);
+  color: var(--m-text);
+  box-shadow:
+    var(--m-shadow-1),
+    inset 0 0 0 1px var(--m-border-strong);
+}
+@media (forced-colors: active) {
+  .m-catalog-platforms .m-seg__opt[aria-current='true'] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
+
+/* Branch names are machine values: mono, breaking anywhere on a phone. */
+.m-catalog-branch {
+  font-family: var(--m-font-mono);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+/* A build row: its facts wrap beside the action, which never wraps. */
+.m-catalog-build .m-list__main {
+  min-width: 0;
+}
+.m-catalog-build .m-list__sub {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--m-space-2);
+}
+.m-catalog-build > .m-btn {
+  flex: none;
+  white-space: nowrap;
+}
+.m-catalog-build--off .m-t-headline {
+  color: var(--m-text-secondary);
+}
+@container main (max-width: 37.49rem) {
+  .m-catalog-build > .m-btn {
+    width: 100%;
+    justify-content: center;
+  }
+}
+
+/* What pressing a control answered sits above the builds it came from. */
+.m-catalog-result:focus-within {
+  scroll-margin-top: calc(var(--m-topbar-height) + var(--m-space-5));
+}
+
+/* Registration: the steps beside the QR code, stacked on a phone. */
+.m-catalog-register {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--m-space-7);
+  align-items: flex-start;
+}
+.m-catalog-register > .m-howto,
+.m-catalog-register > .m-stack {
+  flex: 1 1 20rem;
+  min-width: 0;
+}
+.m-catalog-start {
+  align-self: flex-start;
+}
+.m-catalog-qr {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--m-space-3);
+  flex: 0 1 12rem;
+  text-align: center;
+}
+.m-catalog-qr .m-qr {
+  width: auto;
+  height: auto;
+  padding: var(--m-space-3);
+}
+.m-catalog-qr img {
+  display: block;
+}
+
+/* A device card: the glyph box at the name's first line, the state pill
+   its own width, Remove apart. */
+.m-catalog-device .m-card__body > .m-status {
+  align-self: flex-start;
+}
+.m-catalog-device__head {
+  align-items: flex-start;
+}
+.m-catalog-device__actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.m-catalog-device__remove {
+  margin-left: auto;
+}
+.m-catalog-rename {
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.m-catalog-rename > .m-field {
+  flex: 1 1 14rem;
+}
+
+/* The completion page's spinner is the size of a state's glyph. */
+.m-spinner--lg {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-width: 3px;
+}

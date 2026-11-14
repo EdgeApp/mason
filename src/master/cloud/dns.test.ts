@@ -4,7 +4,6 @@ import path from 'node:path'
 import { after, before, describe, it } from 'mocha'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeCloud } from '../../test/fakeCloud.js'
-import { nodesView } from '../../view/admin.js'
 import { localOperator } from '../roles.js'
 import type { CloudHostRow } from './hosts.js'
 
@@ -106,32 +105,17 @@ describe('DNS records for cloud hosts', function () {
     assert.equal(row().dns_owned, 1)
     assert.match(cloud.created.at(-1)!.userData, /^builds\.example\.com \{$/m)
     assert.equal(ready.certificate, 'waiting')
-    const view = (): string =>
-      nodesView({
-        nodes: [],
-        types: {},
-        pools: [],
-        cloudHosts: [
-          {
-            name: 'e2e',
-            state: 'ready',
-            account: 'do',
-            region: 'sfo3',
-            size: 's-1vcpu-1gb',
-            address: row().address,
-            origin: row().origin,
-            dnsName: 'builds.example.com',
-            certificate: row().certificate_at == null ? 'waiting' : 'trusted',
-            error: null,
-          },
-        ],
-        budget: { monthly: 200 },
-        canChange: true,
-      })
-    assert.match(view(), /Waiting for its certificate/)
+    // The Nodes page reads the host's DNS name and certificate from the list.
+    const listed = async (): Promise<Json> =>
+      (await c.api('GET', '/api/v2/cloud/hosts')).json.find(
+        (entry: Json) => entry.name === 'e2e',
+      )
+    assert.equal((await listed()).dns_domain, 'example.com')
+    assert.equal((await listed()).dns_name, 'builds')
+    assert.equal((await listed()).certificate, 'waiting')
     trusted = true
     assert.equal((await reconcile()).certificate, 'trusted')
-    assert.doesNotMatch(view(), /Waiting for its certificate/)
+    assert.equal((await listed()).certificate, 'trusted')
     // Reconciling again changes no record.
     const before = cloud.dnsCalls.length
     await reconcile()

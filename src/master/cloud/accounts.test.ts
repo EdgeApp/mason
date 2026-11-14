@@ -7,6 +7,7 @@ import { nodeMain, type MainIO } from '../../node/main.js'
 import { pinnedFetch } from '../../node/pinnedFetch.js'
 import { cluster, type Cluster } from '../../test/cluster.js'
 import { MASTER_SESSION_COOKIE } from '../auth.js'
+import { assertShell, type ShellReply } from '../../test/webShell.js'
 import { localOperator } from '../roles.js'
 import { migrateMaster } from '../schema.js'
 import { accountId, cloudAccountsArea, storedAccounts } from './accounts.js'
@@ -81,7 +82,12 @@ describe('Cloud accounts', function () {
     method: string,
     route: string,
     options: { cookie?: string; csrf?: string; body?: unknown } = {},
-  ): Promise<{ status: number; text: string; json: Json }> => {
+  ): Promise<{
+    status: number
+    text: string
+    json: Json
+    headers: ShellReply['headers']
+  }> => {
     const response = await pinnedFetch(
       origin() + route,
       {
@@ -109,7 +115,14 @@ describe('Cloud accounts', function () {
     } catch {
       json = undefined
     }
-    return { status: response.status, text, json }
+    return { status: response.status, text, json, headers: response.headers }
+  }
+  /** Asserts a reply is the web app's shell with that status. */
+  const shell = (
+    reply: Awaited<ReturnType<typeof request>>,
+    status = 200,
+  ): void => {
+    assertShell(reply, status)
   }
   const signIn = (role: string): { cookie: string; csrf: string } => {
     const { token, session } = c.master.master!.auth.start(
@@ -560,31 +573,35 @@ describe('Cloud accounts', function () {
 
   it('U1.5 /cloud is for administrators and managers, sends changes with CSRF, and never echoes a key', async () => {
     const admin = signIn('admin')
-    const page = await request('GET', '/cloud', admin)
-    assert.equal(page.status, 200)
-    assert.match(page.text, /<h1>Cloud<\/h1>/)
-    assert.match(page.text, /href="\/cloud"/)
-    assert.match(page.text, /data-account="mac"/)
-    assert.match(page.text, /\$10\.00 \(12\.5 hours\)/)
-    assert.match(
-      page.text,
-      /<input id="account-key" name="key" type="password" autocomplete="off" required>/,
+    // The page is the web app's; it reads the accounts with their last
+    // check, and Check asks the provider again.
+    shell(await request('GET', '/cloud', admin))
+    const checked = await request(
+      'POST',
+      '/api/v2/cloud/accounts/mac/check',
+      admin,
     )
-    assert.match(
-      page.text,
-      /data-path="\/api\/v2\/cloud\/accounts\/mac\/check"/,
-    )
-    assert.match(
-      page.text,
-      /data-path="\/api\/v2\/cloud\/accounts\/mac" data-method="DELETE"/,
-    )
+    assert.equal(checked.status, 200, checked.text)
+    const page = await request('GET', '/api/v2/cloud/accounts', admin)
+    assert.equal(page.status, 200, page.text)
+    const mac = (page.json as Json[]).find((account) => account.id === 'mac')
+    assert.deepEqual(mac.key, { set: true })
+    assert.equal(mac.check.nomac.credit, 10)
+    assert.equal(mac.check.nomac.spendableSeconds, 45000)
     assert(!page.text.includes(MAC_KEY))
-    const manager = await request('GET', '/cloud', signIn('manager'))
-    assert.equal(manager.status, 200)
-    assert.match(manager.text, /Add account/)
-    const developer = await request('GET', '/cloud', signIn('developer'))
-    assert.equal(developer.status, 403)
-    assert.doesNotMatch(developer.text, /href="\/cloud"/)
+    shell(await request('GET', '/cloud', signIn('manager')))
+    const managerSession = await request(
+      'GET',
+      '/api/v2/session',
+      signIn('manager'),
+    )
+    assert(managerSession.json.permissions.includes('settings.change'))
+    shell(await request('GET', '/cloud', signIn('developer')), 403)
+    assert.equal(
+      (await request('GET', '/api/v2/cloud/accounts', signIn('developer')))
+        .status,
+      403,
+    )
     assert.equal((await request('GET', '/cloud')).status, 303)
     // Changes need the session's CSRF token.
     const body = { provider: 'digitalocean', name: 'Session', key: DO_KEY }
@@ -608,60 +625,13 @@ describe('Cloud accounts', function () {
     mode = 'down'
     await c.api('POST', '/api/v2/cloud/accounts/session/check', {}, c.admin)
     mode = 'ok'
-    const failed = await request('GET', '/cloud', admin)
-    assert.match(failed.text, /Unavailable: DigitalOcean answered 502/)
-    const view = await import('../../view/admin.js')
-    const now = Date.now()
-    const rendered = view.cloudView({
-      accounts: [
-        { id: 'a', name: 'A', provider: 'nomac' },
-        {
-          id: 'b',
-          name: 'B',
-          provider: 'digitalocean',
-          check: { state: 'refused', checkedAt: now, message: 'no' },
-        },
-        {
-          id: 'c',
-          name: 'C',
-          provider: 'digitalocean',
-          check: { state: 'timeout', checkedAt: now },
-        },
-        {
-          id: 'd',
-          name: 'D',
-          provider: 'digitalocean',
-          check: { state: 'error', checkedAt: now },
-        },
-        {
-          id: 'e',
-          name: 'E',
-          provider: 'nomac',
-          check: {
-            state: 'ok',
-            checkedAt: now - 120_000,
-            nomac: {
-              credit: 0,
-              spendableSeconds: 0,
-              concurrency: 1,
-              spendingBlocked: true,
-            },
-          },
-        },
-      ],
-      canChange: false,
-      now,
-    })
-    assert.match(rendered, /Not checked yet/)
-    assert.match(rendered, /Key refused: no/)
-    assert.match(rendered, /No answer/)
-    assert.match(rendered, /Check failed/)
-    assert.match(rendered, /Paused for the account/)
-    assert.match(rendered, /Checked 2m ago/)
-    assert.doesNotMatch(rendered, /Add account|data-method="DELETE"/)
-    assert.match(
-      view.cloudView({ accounts: [], canChange: true, now }),
-      /No cloud accounts yet/,
+    const failed = (
+      (await request('GET', '/api/v2/cloud/accounts', admin)).json as Json[]
+    ).find((account) => account.id === 'session')
+    assert.equal(failed.check.state, 'unavailable')
+    assert.equal(
+      failed.check.message,
+      'DigitalOcean answered 502; try again later',
     )
     await c.api('DELETE', '/api/v2/cloud/accounts/session', undefined, c.admin)
   })

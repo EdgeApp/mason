@@ -48,6 +48,7 @@ import {
   buildRelease,
   releaseCreateArgs,
   releaseMain,
+  releaseVersion,
   tarballName,
 } from './build.js'
 import {
@@ -298,7 +299,18 @@ describe('Releases, install.sh and updates', function () {
     dist = nodeDist(work, '24.22.0')
     distServer = await serve(dist)
     distBase = distServer.base
-    for (const version of ['0.1.1', '0.1.2']) {
+    // The fixture releases are the checkout's major version and sort above
+    // it, as a worker run from it reports it: always an update it may take.
+    const running = (
+      JSON.parse(readFileSync(path.join(repo, 'package.json'), 'utf8')) as {
+        version: string
+      }
+    ).version
+    assert(
+      /^1\.([0-9]|[1-8][0-9]|9[0-8])\./.test(running),
+      `Mason ${running} is not a 1.x below the 1.99.x fixture releases: renumber them`,
+    )
+    for (const version of ['1.99.1', '1.99.2']) {
       const out = path.join(work, 'out', version)
       await buildRelease({
         repo,
@@ -319,11 +331,11 @@ describe('Releases, install.sh and updates', function () {
   })
 
   it('U9.1 builds self-contained tarballs, install.sh and SHA256SUMS', () => {
-    const out = releases['0.1.1']!
+    const out = releases['1.99.1']!
     const sums = readFileSync(path.join(out, 'SHA256SUMS'), 'utf8')
     for (const name of [
-      tarballName('0.1.1', here as never),
-      tarballName('0.1.1', 'linux-x64'),
+      tarballName('1.99.1', here as never),
+      tarballName('1.99.1', 'linux-x64'),
       'install.sh',
     ])
       assert.match(
@@ -335,20 +347,44 @@ describe('Releases, install.sh and updates', function () {
       )
     const list = execFileSync(
       'tar',
-      ['-tzf', path.join(out, tarballName('0.1.1', 'linux-x64'))],
+      ['-tzf', path.join(out, tarballName('1.99.1', 'linux-x64'))],
       { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
     )
     for (const entry of [
-      'mason-0.1.1/mason',
-      'mason-0.1.1/node/bin/node',
-      'mason-0.1.1/lib/cli.js',
-      'mason-0.1.1/package.json',
-      'mason-0.1.1/THIRD_PARTY_LICENCES.md',
-      'mason-0.1.1/src/devices/apple-roots.pem',
+      'mason-1.99.1/mason',
+      'mason-1.99.1/node/bin/node',
+      'mason-1.99.1/lib/cli.js',
+      // The web app: its shell, theme boot script and fonts.
+      'mason-1.99.1/lib/web/bundles/index.html',
+      'mason-1.99.1/lib/web/bundles/theme-boot.js',
+      'mason-1.99.1/assets/fonts/geist-variable.woff2',
+      'mason-1.99.1/package.json',
+      'mason-1.99.1/THIRD_PARTY_LICENCES.md',
+      'mason-1.99.1/src/devices/apple-roots.pem',
     ])
       assert(list.includes(entry + '\n'), entry)
+    // Of the web app only its bundle, which is all the nodes serve; no
+    // tests or their helpers anywhere in lib/.
+    const shipped = list
+      .split('\n')
+      .filter((entry) => entry.startsWith('mason-1.99.1/lib/'))
+    assert.deepEqual(
+      shipped.filter(
+        (entry) =>
+          entry.startsWith('mason-1.99.1/lib/web/') &&
+          entry !== 'mason-1.99.1/lib/web/' &&
+          !entry.startsWith('mason-1.99.1/lib/web/bundles/'),
+      ),
+      [],
+    )
+    assert.deepEqual(
+      shipped.filter(
+        (entry) => entry.includes('.test.js') || /\/test\//.test(entry),
+      ),
+      [],
+    )
     assert(
-      list.includes('mason-0.1.1/node_modules/argon2/prebuilds/linux-x64/'),
+      list.includes('mason-1.99.1/node_modules/argon2/prebuilds/linux-x64/'),
     )
     assert(
       !list.includes('prebuilds/darwin-arm64/'),
@@ -359,7 +395,7 @@ describe('Releases, install.sh and updates', function () {
       'no argon2 compiled for the building computer',
     )
     assert.deepEqual(
-      appleDouble(path.join(out, tarballName('0.1.1', 'linux-x64'))),
+      appleDouble(path.join(out, tarballName('1.99.1', 'linux-x64'))),
       [],
     )
     assert(!list.includes('node/bin/npm'))
@@ -368,25 +404,38 @@ describe('Releases, install.sh and updates', function () {
     mkdirSync(unpacked)
     execFileSync('tar', [
       '-xzf',
-      path.join(out, tarballName('0.1.1', 'linux-x64')),
+      path.join(out, tarballName('1.99.1', 'linux-x64')),
       '-C',
       unpacked,
-      'mason-0.1.1/package.json',
+      'mason-1.99.1/package.json',
+      'mason-1.99.1/THIRD_PARTY_LICENCES.md',
     ])
     assert.equal(
       (
         JSON.parse(
           readFileSync(
-            path.join(unpacked, 'mason-0.1.1', 'package.json'),
+            path.join(unpacked, 'mason-1.99.1', 'package.json'),
             'utf8',
           ),
         ) as { masonReleases?: string }
       ).masonReleases,
       'EdgeApp/mason',
     )
+    // The notice names the web app's bundled packages, which are not installed.
+    const notice = readFileSync(
+      path.join(unpacked, 'mason-1.99.1', 'THIRD_PARTY_LICENCES.md'),
+      'utf8',
+    )
+    const bundled = notice.split(
+      '\n# Bundled into the web app (lib/web/bundles)\n',
+    )[1]
+    assert(bundled != null, 'the web app’s licences')
+    for (const name of ['react', 'react-dom', 'react-router', 'scheduler'])
+      assert.match(bundled, new RegExp(`^## ${name}\n\n`, 'm'), name)
+    assert.match(notice, /^## express\n\n/m)
     assert(!list.includes('node/include/'))
-    assert(!/mason-0\.1\.1\/lib\/[^\n]*\.test\.js\n/.test(list))
-    assert(!list.includes('mason-0.1.1/lib/test/'))
+    assert(!/mason-1\.99\.1\/lib\/[^\n]*\.test\.js\n/.test(list))
+    assert(!list.includes('mason-1.99.1/lib/test/'))
   })
 
   it('U9.1 builds the darwin-x64 argon2 binary the package does not ship', async () => {
@@ -464,7 +513,7 @@ describe('Releases, install.sh and updates', function () {
     ): Promise<{ status: number; out: string }> =>
       await run(
         'bash',
-        [path.join(releases['0.1.1']!, 'install.sh'), ...args],
+        [path.join(releases['1.99.1']!, 'install.sh'), ...args],
         {
           PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
           HOME: home,
@@ -478,14 +527,14 @@ describe('Releases, install.sh and updates', function () {
       const home = root()
       mkdirSync(path.join(home, 'tmp'))
       const first = await bash(
-        ['--user', '--version', '0.1.1'],
+        ['--user', '--version', '1.99.1'],
         { GITHUB_TOKEN: 'read-token' },
         home,
       )
       assert.equal(first.status, 0, first.out)
       assert.match(
         first.out,
-        /Installed Mason 0\.1\.1 in .*\.mason\/app\/0\.1\.1/,
+        /Installed Mason 1\.99\.1 in .*\.mason\/app\/1\.99\.1/,
       )
       // ~/.mason doubles as the node's data directory: private.
       assert.equal(statSync(path.join(home, '.mason')).mode & 0o777, 0o700)
@@ -496,7 +545,7 @@ describe('Releases, install.sh and updates', function () {
       )
       assert.equal(
         readlinkSync(path.join(home, '.mason', 'app', 'current')),
-        '0.1.1',
+        '1.99.1',
       )
       // The launcher runs the release's own Node; PATH has no node at all.
       const help = await run(link, ['help'], {
@@ -507,13 +556,13 @@ describe('Releases, install.sh and updates', function () {
       assert.match(help.stdout, /mason worker \[options\]/)
       assert.equal(
         readFileSync(
-          path.join(home, '.mason', 'app', '0.1.1', 'release', 'SHA256SUMS'),
+          path.join(home, '.mason', 'app', '1.99.1', 'release', 'SHA256SUMS'),
           'utf8',
         ),
-        readFileSync(path.join(releases['0.1.1']!, 'SHA256SUMS'), 'utf8'),
+        readFileSync(path.join(releases['1.99.1']!, 'SHA256SUMS'), 'utf8'),
       )
       const again = await bash(
-        ['--user', '--version', '0.1.1'],
+        ['--user', '--version', '1.99.1'],
         { GITHUB_TOKEN: 'read-token' },
         home,
       )
@@ -524,10 +573,10 @@ describe('Releases, install.sh and updates', function () {
         { GITHUB_TOKEN: 'read-token' },
         home,
       )
-      assert.match(latest.out, /Installed Mason 0\.1\.2/)
+      assert.match(latest.out, /Installed Mason 1\.99\.2/)
       assert.equal(
         readlinkSync(path.join(home, '.mason', 'app', 'current')),
-        '0.1.2',
+        '1.99.2',
       )
     })
 
@@ -538,7 +587,7 @@ describe('Releases, install.sh and updates', function () {
       mkdirSync(path.join(openHome, 'tmp'))
       const open = await bash(['--user'], {}, openHome)
       assert.equal(open.status, 0, open.out)
-      assert.match(open.out, /Installed Mason 0\.1\.2/)
+      assert.match(open.out, /Installed Mason 1\.99\.2/)
       const none = await bash(
         ['--user'],
         { MASON_REPO: 'example/private-mason' },
@@ -551,13 +600,13 @@ describe('Releases, install.sh and updates', function () {
       )
       const wrong = await bash(['--user'], { GITHUB_TOKEN: 'other' }, home)
       assert.match(wrong.out, /has no latest release this token can read/)
-      tampered.add(tarballName('0.1.2', here as never))
+      tampered.add(tarballName('1.99.2', here as never))
       try {
         const bad = await bash(['--user'], { GITHUB_TOKEN: 'read-token' }, home)
         assert.notEqual(bad.status, 0)
         assert.match(bad.out, /checksum mismatch .*refusing to install it/)
         assert.equal(
-          existsSync(path.join(home, '.mason', 'app', '0.1.2')),
+          existsSync(path.join(home, '.mason', 'app', '1.99.2')),
           false,
         )
       } finally {
@@ -571,7 +620,7 @@ describe('Releases, install.sh and updates', function () {
         home,
       )
       assert.equal(system.status, 0, system.out)
-      assert.match(system.out, /Installed Mason 0\.1\.2 in .*\/opt\/0\.1\.2/)
+      assert.match(system.out, /Installed Mason 1\.99\.2 in .*\/opt\/1\.99\.2/)
       assert.match(system.out, /sudo mason worker --install/)
       assert.equal(
         readlinkSync(path.join(bin, 'mason')),
@@ -622,13 +671,13 @@ describe('Releases, install.sh and updates', function () {
         home,
       )
       assert.equal(master.status, 0, master.out)
-      assert.match(master.out, /Installed Mason 0\.1\.2 in .*\/opt\/0\.1\.2/)
+      assert.match(master.out, /Installed Mason 1\.99\.2 in .*\/opt\/1\.99\.2/)
       assert.doesNotMatch(master.out, /Next:/)
       assert.equal(
         readFileSync(record, 'utf8'),
         `${path.join(bin, 'mason')} master --install --worker --port 9500\n`,
       )
-      const worker = await bash(['--version', '0.1.1', 'worker'], env, home)
+      const worker = await bash(['--version', '1.99.1', 'worker'], env, home)
       assert.equal(worker.status, 0, worker.out)
       assert.match(
         readFileSync(record, 'utf8'),
@@ -675,7 +724,7 @@ describe('Releases, install.sh and updates', function () {
       assert.equal(
         (
           await bash(
-            ['--user', '--version', '0.1.1'],
+            ['--user', '--version', '1.99.1'],
             { GITHUB_TOKEN: 'read-token' },
             home,
           )
@@ -709,7 +758,7 @@ describe('Releases, install.sh and updates', function () {
         const out = io({
           install: () => ({
             kind: 'user',
-            appRoot: path.join(prefix, '0.1.1'),
+            appRoot: path.join(prefix, '1.99.1'),
             prefix,
           }),
           system: () =>
@@ -721,7 +770,7 @@ describe('Releases, install.sh and updates', function () {
               run: (command: string, args: string[]) => {
                 ran.push([command, ...args])
                 if (args.at(-1) === 'system/app.mason.helper')
-                  helper = `/bin/sh ${prefix}/0.1.2/mason helper --user paul`
+                  helper = `/bin/sh ${prefix}/1.99.2/mason helper --user paul`
               },
             }) as unknown as ServiceSystem,
           processes: () => [helper],
@@ -731,11 +780,11 @@ describe('Releases, install.sh and updates', function () {
           },
         })
         assert.equal(await nodeMain(['update'], out), 0, out.errors.join('\n'))
-        assert.equal(readlinkSync(path.join(prefix, 'current')), '0.1.2')
+        assert.equal(readlinkSync(path.join(prefix, 'current')), '1.99.2')
         // Only the new release and the one that ran before it stay.
         assert.deepEqual(readdirSync(prefix).sort(), [
-          '0.1.1',
-          '0.1.2',
+          '1.99.1',
+          '1.99.2',
           'current',
         ])
         assert.match(
@@ -776,7 +825,7 @@ describe('Releases, install.sh and updates', function () {
       assert.equal(
         (
           await bash(
-            ['--user', '--version', '0.1.1'],
+            ['--user', '--version', '1.99.1'],
             { GITHUB_TOKEN: 'read-token' },
             home,
           )
@@ -803,10 +852,10 @@ describe('Releases, install.sh and updates', function () {
         } = {},
       ): Promise<{ status: number; out: ReturnType<typeof io> }> => {
         const out = io({
-          version: '0.1.1',
+          version: '1.99.1',
           install: () => ({
             kind: 'user',
-            appRoot: path.join(prefix, '0.1.1'),
+            appRoot: path.join(prefix, '1.99.1'),
             prefix,
           }),
           system: () =>
@@ -838,8 +887,8 @@ describe('Releases, install.sh and updates', function () {
       const asked: string[][] = []
       try {
         for (const [body, refusal] of [
-          ['{"version":"0.1.2 --user"}', /not a release version/],
-          ['{"version":"0.1.0"}', /older than the running 0\.1\.1/],
+          ['{"version":"1.99.2 --user"}', /not a release version/],
+          ['{"version":"0.1.0"}', /older than the running 1\.99\.1/],
         ] as const) {
           writeFileSync(request, body)
           const refused = await update(['--request', request])
@@ -850,20 +899,20 @@ describe('Releases, install.sh and updates', function () {
         const missing = await update(['--request', request])
         assert.equal(missing.status, 1)
         assert.match(missing.out.errors.join(''), /No update request/)
-        writeFileSync(request, '{"version":"0.1.2"}')
-        const both = await update(['--request', request, '--version', '0.1.2'])
+        writeFileSync(request, '{"version":"1.99.2"}')
+        const both = await update(['--request', request, '--version', '1.99.2'])
         assert.equal(both.status, 1)
         assert.match(both.out.errors.join(''), /not both/)
-        writeFileSync(request, '{"version":"0.1.1"}')
+        writeFileSync(request, '{"version":"1.99.1"}')
         const same = await update(['--request', request])
         assert.equal(same.status, 0)
-        assert.match(same.out.lines.join('\n'), /Already on 0\.1\.1/)
-        assert.equal(readlinkSync(path.join(prefix, 'current')), '0.1.1')
-        writeFileSync(request, '{"version":"0.1.2","at":1}')
+        assert.match(same.out.lines.join('\n'), /Already on 1\.99\.1/)
+        assert.equal(readlinkSync(path.join(prefix, 'current')), '1.99.1')
+        writeFileSync(request, '{"version":"1.99.2","at":1}')
         const updated = await update(['--request', request])
         assert.equal(updated.status, 0, updated.out.errors.join('\n'))
         assert(!existsSync(request))
-        assert.equal(readlinkSync(path.join(prefix, 'current')), '0.1.2')
+        assert.equal(readlinkSync(path.join(prefix, 'current')), '1.99.2')
         // The updater restarts the services, then asks the root helper to
         // restart once what it is doing is done.
         const services = [
@@ -884,7 +933,7 @@ describe('Releases, install.sh and updates', function () {
         ): Promise<string> => {
           ran.length = 0
           asked.length = 0
-          writeFileSync(request, '{"version":"0.1.2","at":2}')
+          writeFileSync(request, '{"version":"1.99.2","at":2}')
           const result = await update(['--request', request], helper)
           assert.equal(result.status, 0, result.out.errors.join('\n'))
           return result.out.lines.join('\n')
@@ -931,10 +980,10 @@ describe('Releases, install.sh and updates', function () {
       db,
       path.join(dir, 'releases'),
       identity,
-      '0.1.2',
+      '1.99.2',
     )
     assert.equal(store.current(), undefined)
-    assert.equal(await store.add(releases['0.1.1']!), '0.1.1')
+    assert.equal(await store.add(releases['1.99.1']!), '1.99.1')
     assert.equal(
       store.current(),
       undefined,
@@ -944,11 +993,11 @@ describe('Releases, install.sh and updates', function () {
       () => store.setCurrent('0.2.0'),
       /0\.2\.0 is not in the store/,
     )
-    store.setCurrent('0.1.1')
-    assert.equal(store.current(), '0.1.1')
+    store.setCurrent('1.99.1')
+    assert.equal(store.current(), '1.99.1')
     assert.deepEqual(store.list(), [
       {
-        version: '0.1.1',
+        version: '1.99.1',
         platforms: [here, 'linux-x64'].sort(),
         current: true,
       },
@@ -958,26 +1007,26 @@ describe('Releases, install.sh and updates', function () {
     for (const name of [
       'SHA256SUMS',
       'install.sh',
-      tarballName('0.1.2', 'linux-x64'),
+      tarballName('1.99.2', 'linux-x64'),
     ])
       writeFileSync(
         path.join(bad, name),
-        readFileSync(path.join(releases['0.1.2']!, name)),
+        readFileSync(path.join(releases['1.99.2']!, name)),
       )
     await assert.rejects(store.add(bad), /listed in SHA256SUMS but missing/)
     writeFileSync(
-      path.join(bad, tarballName('0.1.2', here as never)),
+      path.join(bad, tarballName('1.99.2', here as never)),
       'tampered',
     )
     await assert.rejects(store.add(bad), /does not match SHA256SUMS/)
     const github = await serve(work, githubApi(releases))
     try {
       assert.equal(
-        await store.fetch('v0.1.2', 'read-token', dir, github.base),
-        '0.1.2',
+        await store.fetch('v1.99.2', 'read-token', dir, github.base),
+        '1.99.2',
       )
       await assert.rejects(
-        store.fetch('v0.1.2', 'wrong', dir, github.base),
+        store.fetch('v1.99.2', 'wrong', dir, github.base),
         /GitHub answered 401/,
       )
       await assert.rejects(
@@ -987,7 +1036,7 @@ describe('Releases, install.sh and updates', function () {
       // Another repository is asked for its own releases; none named is refused.
       await assert.rejects(
         store.fetch(
-          'v0.1.2',
+          'v1.99.2',
           undefined,
           dir,
           github.base,
@@ -996,7 +1045,7 @@ describe('Releases, install.sh and updates', function () {
         /GitHub answered 404/,
       )
       await assert.rejects(
-        store.fetch('v0.1.2', 'read-token', dir, github.base, 'not a repo'),
+        store.fetch('v1.99.2', 'read-token', dir, github.base, 'not a repo'),
         /Name the repository/,
       )
       assert.equal(repository, 'EdgeApp/mason')
@@ -1027,26 +1076,26 @@ describe('Releases, install.sh and updates', function () {
     db.db.prepare("DELETE FROM meta WHERE key='release_current'").run()
     assert.equal(
       store.current(),
-      '0.1.2',
+      '1.99.2',
       'with nothing set, the master’s own stored version is current',
     )
-    const signed = (await store.signed('0.1.2', 'linux-x64'))!
+    const signed = (await store.signed('1.99.2', 'linux-x64'))!
     assert(verifyRelease(signed, signed.signature, identity.publicKey))
-    assert.equal(await store.signed('0.1.2', 'windows-x64'), undefined)
+    assert.equal(await store.signed('1.99.2', 'windows-x64'), undefined)
     // The copy install.sh leaves beside an install has only its own platform.
-    const own = new Releases(db, path.join(dir, 'own'), identity, '0.1.1')
+    const own = new Releases(db, path.join(dir, 'own'), identity, '1.99.1')
     const appRoot = path.join(dir, 'app')
     mkdirSync(path.join(appRoot, 'release'), { recursive: true })
     for (const name of [
       'SHA256SUMS',
       'install.sh',
-      tarballName('0.1.1', here as never),
+      tarballName('1.99.1', here as never),
     ])
       writeFileSync(
         path.join(appRoot, 'release', name),
-        readFileSync(path.join(releases['0.1.1']!, name)),
+        readFileSync(path.join(releases['1.99.1']!, name)),
       )
-    assert.equal(await own.importOwn(appRoot), '0.1.1')
+    assert.equal(await own.importOwn(appRoot), '1.99.1')
     assert.deepEqual(own.list()[0]!.platforms, [here])
     assert.equal(await own.importOwn(appRoot), undefined)
   })
@@ -1136,11 +1185,11 @@ describe('Releases, install.sh and updates', function () {
       const spki = (key: typeof master.publicKey): string =>
         key.export({ type: 'spki', format: 'der' }).toString('base64')
       const tarball = path.join(
-        releases['0.1.2']!,
-        tarballName('0.1.2', here as never),
+        releases['1.99.2']!,
+        tarballName('1.99.2', here as never),
       )
       const manifest = {
-        version: '0.1.2',
+        version: '1.99.2',
         platform: here,
         sha256: sha256(tarball),
       }
@@ -1193,10 +1242,10 @@ describe('Releases, install.sh and updates', function () {
         },
         ctx,
       )) as Json
-      assert.equal(installed.installed, path.join(ctx.paths.prefix, '0.1.2'))
+      assert.equal(installed.installed, path.join(ctx.paths.prefix, '1.99.2'))
       assert.equal(
         readlinkSync(path.join(ctx.paths.prefix, 'current')),
-        '0.1.2',
+        '1.99.2',
       )
       assert.equal(
         readlinkSync(path.join(ctx.paths.bindir, 'mason')),
@@ -1209,9 +1258,9 @@ describe('Releases, install.sh and updates', function () {
       assert.deepEqual(ctx.restarts, ['worker', 'helper'])
       const older = {
         ...manifest,
-        version: '0.1.1',
+        version: '1.99.1',
         sha256: sha256(
-          path.join(releases['0.1.1']!, tarballName('0.1.1', here as never)),
+          path.join(releases['1.99.1']!, tarballName('1.99.1', here as never)),
         ),
       }
       await assert.rejects(
@@ -1219,17 +1268,17 @@ describe('Releases, install.sh and updates', function () {
           'release.install',
           {
             tarball: path.join(
-              releases['0.1.1']!,
-              tarballName('0.1.1', here as never),
+              releases['1.99.1']!,
+              tarballName('1.99.1', here as never),
             ),
             manifest: older,
             signature: signRelease(older, master.privateKey),
           },
           ctx,
         ),
-        /older than 0\.1\.2/,
+        /older than 1\.99\.2/,
       )
-      const next = { ...manifest, version: '1.0.0' }
+      const next = { ...manifest, version: '2.0.0' }
       await assert.rejects(
         perform(
           'release.install',
@@ -1433,11 +1482,11 @@ describe('Releases, install.sh and updates', function () {
       mkdirSync(path.join(dir, 'master'))
       const master = loadIdentity(path.join(dir, 'master'))
       const tarball = path.join(
-        releases['0.1.2']!,
-        tarballName('0.1.2', here as never),
+        releases['1.99.2']!,
+        tarballName('1.99.2', here as never),
       )
       const manifest = {
-        version: '0.1.2',
+        version: '1.99.2',
         platform: here,
         sha256: sha256(tarball),
       }
@@ -1472,7 +1521,7 @@ describe('Releases, install.sh and updates', function () {
             manifest,
             signature: signRelease(manifest, master.privateKey),
           }),
-          { installed: path.join(ctx.paths.prefix, '0.1.2') },
+          { installed: path.join(ctx.paths.prefix, '1.99.2') },
         )
         await new Promise((resolve) => setTimeout(resolve, 1300))
         assert.deepEqual(ctx.restarts, ['worker'])
@@ -1561,7 +1610,11 @@ describe('Releases, install.sh and updates', function () {
       )
       assert.deepEqual(
         serviceProgram(
-          { kind: 'system', appRoot: '/opt/mason/0.1.2', prefix: '/opt/mason' },
+          {
+            kind: 'system',
+            appRoot: '/opt/mason/1.99.2',
+            prefix: '/opt/mason',
+          },
           '/n',
           '/c',
         ),
@@ -1577,9 +1630,9 @@ describe('Releases, install.sh and updates', function () {
 
   it('U9.13 records an update installed when the worker comes back on its version after the link closed', async () => {
     const dir = root()
-    const file = path.join(dir, 'mason-0.1.1-linux-x64.tar.gz')
+    const file = path.join(dir, 'mason-1.99.1-linux-x64.tar.gz')
     writeFileSync(file, 'tarball')
-    let version = '0.1.0'
+    let version = '1.99.0'
     const node = { fingerprint: 'fp', role: 'worker', name: 'pool-1' }
     // The helper installs and restarts the worker: the link closes before the answer.
     const link = {
@@ -1596,9 +1649,9 @@ describe('Releases, install.sh and updates', function () {
     const updates = new Updates(
       { list: () => [node], link: () => link } as never,
       {
-        current: () => '0.1.1',
+        current: () => '1.99.1',
         signed: async () => ({
-          version: '0.1.1',
+          version: '1.99.1',
           platform: 'linux-x64',
           sha256: 'x',
           signature: 's',
@@ -1611,9 +1664,9 @@ describe('Releases, install.sh and updates', function () {
     await updates.tick()
     assert.deepEqual(
       { ...updates.state('fp'), at: 0 },
-      { version: '0.1.1', status: 'failed', reason: 'Link closed', at: 0 },
+      { version: '1.99.1', status: 'failed', reason: 'Link closed', at: 0 },
     )
-    version = '0.1.1'
+    version = '1.99.1'
     await updates.tick()
     assert.equal(updates.state('fp')?.status, 'installed')
     assert.equal(updates.state('fp')?.reason, undefined)
@@ -1656,8 +1709,8 @@ describe('Releases, install.sh and updates', function () {
     })
     try {
       const master = c.master.master!
-      await master.releases.add(releases['0.1.1']!)
-      master.releases.setCurrent('0.1.1')
+      await master.releases.add(releases['1.99.1']!)
+      master.releases.setCurrent('1.99.1')
       await master.updates.tick()
       await c.until(
         () =>
@@ -1667,8 +1720,8 @@ describe('Releases, install.sh and updates', function () {
         60000,
         'alpha installed',
       )
-      assert.equal(readlinkSync(path.join(prefixes.alpha, 'current')), '0.1.1')
-      assert(existsSync(path.join(prefixes.alpha, '0.1.1', 'mason')))
+      assert.equal(readlinkSync(path.join(prefixes.alpha, 'current')), '1.99.1')
+      assert(existsSync(path.join(prefixes.alpha, '1.99.1', 'mason')))
       await c.until(() => restarts.includes('alpha'), 5000, 'restart')
       const beta = await c.until(
         () => master.updates.state(c.fingerprint('beta')),
@@ -1685,8 +1738,8 @@ describe('Releases, install.sh and updates', function () {
       // A tarball changed after it was stored is refused by the worker's digest check.
       const tarball = path.join(
         master.releases.root,
-        '0.1.1',
-        tarballName('0.1.1', here as never),
+        '1.99.1',
+        tarballName('1.99.1', here as never),
       )
       chmodSync(tarball, 0o600)
       writeFileSync(
@@ -1695,7 +1748,7 @@ describe('Releases, install.sh and updates', function () {
       )
       const tampered = await master.updates.push(
         c.fingerprint('alpha'),
-        '0.1.1',
+        '1.99.1',
         here,
       )
       assert.equal(tampered.status, 'failed')
@@ -1708,22 +1761,19 @@ describe('Releases, install.sh and updates', function () {
   describe('release tooling paths', () => {
     it('U9.1 scripts/release.ts installs production modules with npm ci, refuses bad arguments, and publishes with gh', async () => {
       const out = path.join(work, 'main')
+      // A release is the version package.json carries.
+      const current = (
+        JSON.parse(readFileSync(path.join(repo, 'package.json'), 'utf8')) as {
+          version: string
+        }
+      ).version
       const published: string[][] = []
       const write = process.stdout.write.bind(process.stdout)
       process.stdout.write = (() => true) as typeof process.stdout.write
       try {
         assert.equal(
           await releaseMain(
-            [
-              '--version',
-              '0.1.8',
-              '--out',
-              out,
-              '--platform',
-              here,
-              '--publish',
-              'v0.1.8',
-            ],
+            ['--out', out, '--platform', here, '--publish', `v${current}`],
             repo,
             {
               build: { nodeVersion: '24.22.0', nodeSource: distBase },
@@ -1740,7 +1790,7 @@ describe('Releases, install.sh and updates', function () {
       assert.deepEqual(published[0]!.slice(0, 5), [
         'release',
         'create',
-        'v0.1.8',
+        `v${current}`,
         '--repo',
         'EdgeApp/mason',
       ])
@@ -1748,32 +1798,98 @@ describe('Releases, install.sh and updates', function () {
       assert(!published[0]!.includes('--prerelease'), 'a release is latest')
       const list = execFileSync(
         'tar',
-        ['-tzf', path.join(out, tarballName('0.1.8', here as never))],
+        ['-tzf', path.join(out, tarballName(current, here as never))],
         { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
       )
-      assert(list.includes('mason-0.1.8/node_modules/express/'))
-      assert(
-        !list.includes('mason-0.1.8/node_modules/mocha/'),
-        'no development modules',
+      assert(list.includes(`mason-${current}/node_modules/express/`))
+      // The web app's packages are bundled into it, never installed (npm
+      // leaves an empty @ios27_design_system scope directory).
+      for (const name of [
+        'mocha',
+        'react',
+        'react-dom',
+        'react-router',
+        '@ios27_design_system/react',
+        '@ios27_design_system/tokens',
+      ])
+        assert(
+          !list.includes(`mason-${current}/node_modules/${name}/`),
+          `no development module ${name}`,
+        )
+      // Their licences still ship, from the bundle's list.
+      const notice = execFileSync(
+        'tar',
+        [
+          '-xzOf',
+          path.join(out, tarballName(current, here as never)),
+          `mason-${current}/THIRD_PARTY_LICENCES.md`,
+        ],
+        { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
       )
+      assert.match(notice, /^## express\n/m)
+      assert.match(notice, /^## react-dom\n/m)
       const error = console.error
       console.error = (): void => undefined
       try {
-        assert.equal(await releaseMain(['--out', out], repo), 2)
+        assert.equal(await releaseMain(['--version', current], repo), 2)
       } finally {
         console.error = error
       }
       await assert.rejects(
-        releaseMain(
-          ['--version', '0.1.8', '--out', out, '--platform', 'windows-x64'],
-          repo,
-        ),
+        releaseMain(['--out', out, '--platform', 'windows-x64'], repo),
         /Unknown platform windows-x64/,
       )
       await assert.rejects(
         buildRelease({ repo: work, version: '0.1.8', out }),
         /Build lib\/ first/,
       )
+    })
+
+    it('U9.1 cuts a release only as the version package.json carries, or a prerelease of it, tagged v<version>', async () => {
+      assert.deepEqual(releaseVersion('1.0.0'), {
+        version: '1.0.0',
+        prerelease: false,
+      })
+      assert.deepEqual(
+        releaseVersion('1.0.0', { version: '1.0.0', tag: 'v1.0.0' }),
+        { version: '1.0.0', prerelease: false },
+      )
+      // A prerelease of it is always published as one.
+      assert.deepEqual(
+        releaseVersion('1.0.0', {
+          version: '1.0.0-dev.2',
+          tag: 'v1.0.0-dev.2',
+        }),
+        { version: '1.0.0-dev.2', prerelease: true },
+      )
+      assert.deepEqual(releaseVersion('1.0.0', { prerelease: true }), {
+        version: '1.0.0',
+        prerelease: true,
+      })
+      for (const version of [
+        '0.6.0',
+        '1.0.1',
+        '1.0.0.1',
+        '1.0.0dev',
+        '2.0.0-dev.1',
+      ])
+        assert.throws(
+          () => releaseVersion('1.0.0', { version }),
+          /package\.json says 1\.0\.0/,
+          version,
+        )
+      assert.throws(
+        () =>
+          releaseVersion('1.0.0', { version: '1.0.0-dev.2', tag: 'v1.0.0' }),
+        /Tag 1\.0\.0-dev\.2 as v1\.0\.0-dev\.2, not v1\.0\.0/,
+      )
+      // The script refuses before it builds anything.
+      const out = path.join(work, 'refused')
+      await assert.rejects(
+        releaseMain(['--version', '0.0.1', '--out', out], repo),
+        /package\.json says/,
+      )
+      assert(!existsSync(out))
     })
 
     it('U1.7 a --prerelease publish is never marked latest', () => {
@@ -1970,20 +2086,23 @@ describe('Releases, install.sh and updates', function () {
         )
         assert.equal(
           await nodeMain(
-            ['releases', 'add', releases['0.1.1']!, '--data', data],
+            ['releases', 'add', releases['1.99.1']!, '--data', data],
             cli,
           ),
           0,
         )
         assert.equal(
           await nodeMain(
-            ['releases', 'add', releases['0.1.2']!, '--data', data],
+            ['releases', 'add', releases['1.99.2']!, '--data', data],
             cli,
           ),
           0,
         )
         assert.equal(
-          await nodeMain(['releases', 'current', '0.1.1', '--data', data], cli),
+          await nodeMain(
+            ['releases', 'current', '1.99.1', '--data', data],
+            cli,
+          ),
           0,
         )
         assert.equal(
@@ -2011,12 +2130,12 @@ describe('Releases, install.sh and updates', function () {
         )
         assert.deepEqual(cli.lines.slice(0, 7), [
           'No releases are stored.',
-          'Stored release 0.1.1',
-          'Stored release 0.1.2',
-          'Current release: 0.1.1',
-          'Current release: 0.1.1',
-          `* 0.1.1  ${[here, 'linux-x64'].sort().join(' ')}`,
-          `  0.1.2  ${[here, 'linux-x64'].sort().join(' ')}`,
+          'Stored release 1.99.1',
+          'Stored release 1.99.2',
+          'Current release: 1.99.1',
+          'Current release: 1.99.1',
+          `* 1.99.1  ${[here, 'linux-x64'].sort().join(' ')}`,
+          `  1.99.2  ${[here, 'linux-x64'].sort().join(' ')}`,
         ])
         assert.equal(JSON.parse(cli.lines[7]!).length, 2)
         assert.match(cli.errors.join('\n'), /Usage:/)
@@ -2034,22 +2153,22 @@ describe('Releases, install.sh and updates', function () {
       const spki = (key: typeof master.publicKey): string =>
         key.export({ type: 'spki', format: 'der' }).toString('base64')
       const tarball = path.join(
-        releases['0.1.2']!,
-        tarballName('0.1.2', here as never),
+        releases['1.99.2']!,
+        tarballName('1.99.2', here as never),
       )
       const manifest = {
-        version: '0.1.2',
+        version: '1.99.2',
         platform: here,
         sha256: sha256(tarball),
       }
       const signature = signRelease(manifest, master.privateKey)
       const base: UpdateContext = {
         masterKey: () => master.publicKey,
-        version: '0.1.1',
+        version: '1.99.1',
         busy: () => false,
         install: {
           kind: 'system',
-          appRoot: path.join(dir, 'opt', '0.1.1'),
+          appRoot: path.join(dir, 'opt', '1.99.1'),
           prefix: path.join(dir, 'opt'),
         },
         scratch: path.join(dir, 'scratch'),
@@ -2074,8 +2193,8 @@ describe('Releases, install.sh and updates', function () {
         refused({}, manifest, signRelease(manifest, other.privateKey)),
         /does not verify/,
       )
-      assert.match(refused({ version: '1.0.0' }), /another major version/)
-      assert.match(refused({ version: '0.1.2' }), /not newer/)
+      assert.match(refused({ version: '2.0.0' }), /another major version/)
+      assert.match(refused({ version: '1.99.2' }), /not newer/)
       const foreign = {
         ...manifest,
         platform: here === 'linux-x64' ? 'darwin-arm64' : 'linux-x64',
@@ -2151,9 +2270,9 @@ describe('Releases, install.sh and updates', function () {
         await receiving
         assert.equal(stream.aborted, undefined)
         assert.deepEqual(JSON.parse(Buffer.concat(stream.written).toString()), {
-          installed: '0.1.2',
+          installed: '1.99.2',
         })
-        assert.equal(readlinkSync(path.join(dir, 'opt', 'current')), '0.1.2')
+        assert.equal(readlinkSync(path.join(dir, 'opt', 'current')), '1.99.2')
         // The helper answers before it restarts the worker's service.
         assert.equal(restarted, 0)
         const deadline = Date.now() + 5000

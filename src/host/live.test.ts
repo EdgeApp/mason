@@ -9,6 +9,11 @@ import { Link } from '../link/link.js'
 import { memoryPair } from '../link/wire.js'
 import { serveLive, serveLiveStream, type LiveFrame } from '../master/live.js'
 import type { Actor } from '../master/roles.js'
+import {
+  LIVE_MAX_SUBSCRIPTIONS,
+  LIVE_MESSAGE_BURST,
+  LIVE_TOO_MANY,
+} from '../shared/live.js'
 import { FakeLiveSource, liveRun, liveStage } from '../test/fakeLiveSource.js'
 import { hostLive } from './live.js'
 import type { HostRuntime } from './runtime.js'
@@ -83,6 +88,8 @@ describe('The host’s live socket', () => {
       },
       options: { link: () => hostLink },
       online: () => online,
+      cache: { syncedAt: () => undefined },
+      maintenance: () => false,
     } as unknown as HostRuntime
     server = createServer((_req, res) => res.end())
     fakeHost = host
@@ -197,6 +204,12 @@ describe('The host’s live socket', () => {
       'status:r',
     )
     assert.deepEqual(asked.at(-1), { authorization: key })
+    // The shell's status is relayed too, so the master checks the key
+    // before anything is answered: this one has no status to follow.
+    script.ws.send(JSON.stringify({ subscribe: 'status', key: 'shell' }))
+    const shell = await script.next((frame) => frame.key === 'shell')
+    assert.equal(shell.event, 'error')
+    assert.deepEqual(shell.data, { error: 'This node has no status to follow' })
     script.ws.close()
     // One the master refuses is closed with its code.
     const refused = await connect({ authorization: other })
@@ -289,6 +302,89 @@ describe('The host’s live socket', () => {
       slowLive.close()
       await new Promise<void>((resolve) => slow.close(() => resolve()))
       source.runs.delete('big')
+    }
+  })
+
+  it('keeps the shell’s status to the master’s limits: a budget shared with relayed messages, and a cap on its keys', async () => {
+    // A clock the test moves, so the budget refills only when it says.
+    let now = 0
+    const own = createServer((_req, res) => res.end())
+    const ownLive = serveLive(own, hostLive(fakeHost, { now: () => now }))
+    await new Promise<void>((resolve) => own.listen(0, '127.0.0.1', resolve))
+    const at = `127.0.0.1:${(own.address() as { port: number }).port}`
+    try {
+      const socket = await connect({ ...page, origin: `http://${at}` }, at)
+      assert(typeof socket !== 'number')
+      const send = (message: unknown): void =>
+        socket.ws.send(JSON.stringify(message))
+      const refusals = (): LiveFrame[] =>
+        socket.frames.filter(
+          (frame) =>
+            (frame.data as { error?: string } | undefined)?.error ===
+            LIVE_TOO_MANY,
+        )
+      // A burst of the shell's status, a relayed run's and a further one
+      // that arrives with them: the last is refused, naming its key.
+      for (let n = 0; n < LIVE_MESSAGE_BURST - 1; n++)
+        send({ subscribe: 'status', key: `s${n}` })
+      send({ subscribe: 'status', run: 'r', key: 'run' })
+      send({ subscribe: 'status', key: 'late' })
+      send({ subscribe: 'status', run: 'r', key: 'relayed' })
+      send({ unsubscribe: 's0' })
+      await socket.next(
+        (frame) => frame.key === 's0' && frame.event === 'error',
+      )
+      await socket.next((frame) => frame.key === 'run')
+      assert.deepEqual(refusals(), [
+        { key: 'late', event: 'error', data: { error: LIVE_TOO_MANY } },
+        { key: 'relayed', event: 'error', data: { error: LIVE_TOO_MANY } },
+        { key: 's0', event: 'error', data: { error: LIVE_TOO_MANY } },
+      ])
+      // Each status key answered once; the master never heard of them.
+      assert.equal(
+        socket.frames.filter((frame) => frame.event === 'status').length,
+        LIVE_MESSAGE_BURST - 1,
+      )
+      // With its budget refilled, a page holds no more than the master's cap
+      // of status keys. The clock moves before each, as the host reads it
+      // when the message arrives.
+      const answer = async (message: {
+        key: string
+        [field: string]: unknown
+      }): Promise<LiveFrame> => {
+        now += 1000
+        send(message)
+        return await socket.next(
+          (frame) => frame.key === message.key && !seen.has(frame),
+        )
+      }
+      const seen = new Set(socket.frames)
+      for (let n = LIVE_MESSAGE_BURST - 1; n < LIVE_MAX_SUBSCRIPTIONS; n++)
+        seen.add(await answer({ subscribe: 'status', key: `s${n}` }))
+      assert.deepEqual(
+        await answer({
+          subscribe: 'status',
+          key: `s${LIVE_MAX_SUBSCRIPTIONS}`,
+        }),
+        {
+          key: `s${LIVE_MAX_SUBSCRIPTIONS}`,
+          event: 'error',
+          data: { error: 'Too many subscriptions' },
+        },
+      )
+      // One already held may be sent again; one dropped frees its place.
+      const held = await answer({ subscribe: 'status', key: 's2' })
+      assert.equal(held.event, 'status')
+      now += 1000
+      send({ unsubscribe: 's1' })
+      const again = await answer({ subscribe: 'status', key: 'again' })
+      assert.equal(again.event, 'status')
+      assert.equal(refusals().length, 3)
+      socket.ws.close()
+      await socket.closed
+    } finally {
+      ownLive.close()
+      await new Promise<void>((resolve) => own.close(() => resolve()))
     }
   })
 

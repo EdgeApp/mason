@@ -1,6 +1,5 @@
 import express, { Router, type Response } from 'express'
-import { cookie, invitationPage, sameOrigin } from '../auth/routes.js'
-import { masterContentSecurityPolicy } from '../node/webApp.js'
+import { cookie, sameOrigin } from '../auth/routes.js'
 import { Conflict } from './api.js'
 import { sessionCookieOptions } from './accountsApi.js'
 import { MASTER_SESSION_COOKIE, type MasterAuth } from './auth.js'
@@ -43,25 +42,16 @@ function refused(res: Response, error: unknown): void {
 }
 
 /**
- * The invitation page on the master and the two requests its script makes:
+ * The two requests the invitation page (the web app's) makes on the master:
  * whom the token is for, and using it to set the username and password,
  * which signs the person in to the master.
  */
 export function invitationRoutes(master: {
-  configured: () => boolean
   auth: MasterAuth
   people: People
 }): Router {
   const router = Router()
   const json = express.json({ limit: '4kb' })
-  router.get('/auth/invite', (_req, res) => {
-    if (!master.configured()) {
-      res.redirect(303, '/')
-      return
-    }
-    res.set('Content-Security-Policy', masterContentSecurityPolicy)
-    res.send(invitationPage())
-  })
   router.post('/auth/invite/lookup', json, (req, res) => {
     try {
       // The page may be open at the master's public name or another one.

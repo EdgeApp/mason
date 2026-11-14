@@ -24,6 +24,8 @@ import { policy, type Action } from './permissions.js'
 import { localOperator, roles, type Role } from './roles.js'
 import { masterApp } from './web.js'
 import { seedSecret } from '../test/secrets.js'
+import { assertShell } from '../test/webShell.js'
+import { NO_HOST_ERROR } from '../shared/api/index.js'
 
 // API responses are read field by field in assertions.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -239,26 +241,35 @@ describe('Master sign-in, setup, people and permissions', function () {
     // The pages need the session; the session ends at sign-out.
     assert.equal((await request(c.master, 'GET', '/')).status, 303)
     assert.equal((await request(c.master, 'GET', '/projects')).status, 303)
+    // Projects & apps is the web app's: it reads the session and the status.
     const home = await request(c.master, 'GET', '/projects', { cookie })
-    assert.equal(home.status, 200)
+    assertShell(home)
+    const viewer = (
+      await request(c.master, 'GET', '/api/v2/session', { cookie })
+    ).json
+    assert.deepEqual([viewer.name, viewer.role], ['paul', 'admin'])
     assert.match(
-      home.text,
-      /aria-label="Your account" title="paul · admin · master"/,
+      (await request(c.master, 'GET', '/api/v2/notifications', { cookie }))
+        .text,
+      /This master is not backed up/,
     )
-    assert.match(home.text, /Projects &amp; apps/)
-    assert.match(home.text, /This master is not backed up/)
-    // Only the pages that hash a password, and the worker, may run WebAssembly.
+    // Only the password workers may run WebAssembly: sign-in is the web
+    // app's shell, which starts its worker and compiles nothing itself.
     assert.doesNotMatch(
       home.headers.get('content-security-policy')!,
       /wasm-unsafe-eval/,
     )
-    assert.match(
-      (await request(c.master, 'GET', '/sign-in')).headers.get(
-        'content-security-policy',
-      )!,
-      /script-src 'self' 'wasm-unsafe-eval'/,
+    const signInPage = await request(c.master, 'GET', '/sign-in')
+    assertShell(signInPage)
+    // The old pages' worker is gone; the shell names the hashed one.
+    assert.equal(
+      (await request(c.master, 'GET', '/assets/password-worker.js')).status,
+      404,
     )
-    const bundle = await request(c.master, 'GET', '/assets/password-worker.js')
+    const worker = /name="mason-password-worker" content="([^"]+)"/.exec(
+      signInPage.text,
+    )![1]!
+    const bundle = await request(c.master, 'GET', worker)
     assert.equal(bundle.status, 200)
     assert.match(bundle.headers.get('content-type')!, /javascript/)
     assert.match(
@@ -395,11 +406,13 @@ describe('Master sign-in, setup, people and permissions', function () {
       quiet,
     )
     try {
-      const page = await request(node, 'GET', '/')
-      assert.match(page.text, /Set up this master/)
-      assert.match(page.text, /data-mason="setup"/)
-      assert.match(page.text, /data-mason="restore"/)
-      // Before the first account: sign-in and backups lead to setup; other pages are 404.
+      // Setup and restore are the web app's (its node info says setup is needed).
+      assertShell(await request(node, 'GET', '/'))
+      assert.equal(
+        (await request(node, 'GET', '/api/v2/node')).json.setupNeeded,
+        true,
+      )
+      // Before the first account: every page leads to setup.
       assert.equal(
         (await request(node, 'GET', '/sign-in')).headers.get('location'),
         '/',
@@ -408,7 +421,10 @@ describe('Master sign-in, setup, people and permissions', function () {
         (await request(node, 'GET', '/backups')).headers.get('location'),
         '/',
       )
-      assert.equal((await request(node, 'GET', '/elsewhere')).status, 404)
+      assert.equal(
+        (await request(node, 'GET', '/elsewhere')).headers.get('location'),
+        '/',
+      )
       const code = (await import('node:fs'))
         .readFileSync(path.join(data, 'setup-code'), 'utf8')
         .trim()
@@ -460,59 +476,90 @@ describe('Master sign-in, setup, people and permissions', function () {
       assert.equal(signedOut.headers.get('location'), '/sign-in')
       assert.equal((await request(node, 'GET', '/backups')).status, 303)
       assert.equal((await request(node, 'GET', '/api/v2/projects')).status, 401)
-      assert.match(
-        (await request(node, 'GET', '/sign-in')).text,
-        /data-mason="sign-in"/,
+      assertShell(await request(node, 'GET', '/sign-in'))
+      assertShell(await request(node, 'GET', '/sign-in?signed_out=1'))
+      assert.equal(
+        (await request(node, 'GET', '/api/v2/node')).json.setupNeeded,
+        false,
       )
-      const home = await request(node, 'GET', '/', { cookie })
-      assert.equal(home.status, 200)
-      assert.match(home.text, /This master is not backed up/)
-      // A master with no host yet opens Projects & apps for developers and up.
-      assert.match(home.text, /<h1>Projects &amp; apps<\/h1>/)
-      assert.match(home.text, /<a href="\/projects" aria-current="page"/)
-      // Testers, and everyone's Install apps and Devices, hear installs come from a host.
-      const someone = async (role: Role): Promise<string> => {
+      // A master with no host yet opens Projects & apps (the web app's) for
+      // developers and up; the backup notice is among its notifications.
+      assertShell(await request(node, 'GET', '/', { cookie }))
+      assert.match(
+        (await request(node, 'GET', '/api/v2/notifications', { cookie })).text,
+        /This master is not backed up/,
+      )
+      // Testers, and everyone's Install apps and Devices, hear installs come
+      // from a host: the pages answer the web app's shell, their JSON 503.
+      const someone = async (
+        role: Role,
+      ): Promise<{ cookie: string; csrf: string }> => {
         const person = await node.master!.people.create(localOperator, {
           name: `A ${role}`,
           emails: [`${role}@lone.example.test`],
           role,
         })
-        return `__Host-mason-master=${node.master!.auth.start(person.id, '127.0.0.1').token}`
+        const started = node.master!.auth.start(person.id, '127.0.0.1')
+        return {
+          cookie: `__Host-mason-master=${started.token}`,
+          csrf: started.session.csrf,
+        }
       }
       const tester = await someone('tester')
       const developer = await someone('developer')
-      const NOTICE = /No host is linked yet — installs come from a host/
-      for (const [who, route, active] of [
-        [tester, '/', 'apps'],
-        [tester, '/apps', 'apps'],
-        [tester, '/devices', 'devices'],
-        [developer, '/apps', 'apps'],
-        [developer, `/apps/1`, 'apps'],
-        [developer, '/devices', 'devices'],
-      ] as const) {
-        const reply = await request(node, 'GET', route, { cookie: who })
-        assert.equal(reply.status, 200, route)
-        assert.match(reply.text, NOTICE, route)
-        assert.match(
-          reply.text,
-          new RegExp(`<a href="/${active}" aria-current="page"`),
-          route,
-        )
+      for (const [who, route] of [
+        [tester, '/'],
+        [tester, '/apps'],
+        [tester, '/devices'],
+        [developer, '/apps'],
+        [developer, `/apps/1`],
+        [developer, '/apps/1/branches/bWFzdGVy'],
+        [developer, '/devices'],
+        [developer, `/devices/complete/${'A'.repeat(43)}`],
+      ] as const)
+        assertShell(await request(node, 'GET', route, { cookie: who.cookie }))
+      for (const route of [
+        '/api/v2/catalog/apps',
+        '/api/v2/catalog/apps/1',
+        '/api/v2/devices',
+      ]) {
+        const reply = await request(node, 'GET', route, {
+          cookie: tester.cookie,
+        })
+        assert.equal(reply.status, 503, route)
+        assert.deepEqual(reply.json, { error: NO_HOST_ERROR }, route)
       }
-      const lone = await request(node, 'GET', '/', { cookie: developer })
-      assert.match(lone.text, /<h1>Projects &amp; apps<\/h1>/)
-      assert.equal(
-        (await request(node, 'GET', '/projects', { cookie: tester })).status,
+      assertShell(await request(node, 'GET', '/', { cookie: developer.cookie }))
+      assertShell(
+        await request(node, 'GET', '/projects', { cookie: tester.cookie }),
         404,
       )
-      // Nothing can be installed without a host.
+      // Nothing can be installed without a host, nor a grant's file fetched.
+      const install = await request(
+        node,
+        'POST',
+        '/api/v2/catalog/builds/1/install',
+        {
+          cookie: tester.cookie,
+          csrf: tester.csrf,
+          origin: node.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:'),
+        },
+      )
+      assert.deepEqual(
+        [install.status, install.json],
+        [503, { error: NO_HOST_ERROR }],
+      )
       assert.equal(
-        (await request(node, 'POST', '/builds/1/install', { cookie: tester }))
+        (await request(node, 'GET', `/install/${'A'.repeat(43)}/artifact`))
           .status,
         503,
       )
-      const backups = await request(node, 'GET', '/backups', { cookie })
-      assert.match(backups.text, /data-mason="backup"/)
+      assertShell(await request(node, 'GET', '/backups', { cookie }))
+      assert.equal(
+        (await request(node, 'GET', '/api/v2/settings/backup', { cookie })).json
+          .configured,
+        false,
+      )
       assert.equal(
         (await request(node, 'GET', '/sign-in', { cookie })).status,
         303,
@@ -1405,6 +1452,7 @@ describe('Master sign-in, setup, people and permissions', function () {
   it('U13.13 every API route is checked against the policy table for every role', async () => {
     // Open routes: sign-in and first-run setup.
     const open = [
+      'GET /api/v2/node',
       'GET /api/setup',
       'POST /api/setup',
       'POST /api/setup/restore',
@@ -1502,6 +1550,36 @@ describe('Master sign-in, setup, people and permissions', function () {
       'POST /api/v2/projects/:slug/wizard/rules': 'projects.change',
       'POST /api/v2/projects/:slug/webhook': 'projects.change',
       'GET /api/v2/projects/:slug/masonfile': 'projects.read',
+      // The pages' reads, which the host also answers from its cache.
+      'GET /api/v2/status': 'builds.read',
+      'GET /api/v2/notifications': 'builds.read',
+      'GET /api/v2/search': 'builds.read',
+      'GET /api/v2/dashboard': 'projects.read',
+      'GET /api/v2/queue': 'runs.read',
+      'GET /api/v2/artifacts': 'runs.read',
+      'GET /api/v2/artifacts/runs/:id': 'runs.read',
+      'GET /api/v2/projects/:slug/overview': 'projects.read',
+      'GET /api/v2/projects/:slug/runs': 'projects.read',
+      'GET /api/v2/projects/:slug/apps/:appId': 'projects.read',
+      'GET /api/v2/projects/:slug/masonfile/commits': 'projects.read',
+      // Every role has an account; a key is answered 401, never 403.
+      'GET /api/v2/account': 'builds.read',
+      'GET /api/v2/projects/:slug/secrets/backups': 'projects.read',
+      'GET /api/v2/groups/:id': 'groups.read',
+      'GET /api/v2/apps': 'apps.read',
+      'GET /api/v2/apple/signing': 'settings.read',
+      'GET /api/v2/cloud/accounts/:id/domains': 'nodes.read',
+      'GET /api/v2/cloud/budget': 'settings.read',
+      // Install apps and Devices are a signed-in person's: a key gets 401.
+      'GET /api/v2/catalog/apps': 'builds.read',
+      'GET /api/v2/catalog/apps/:id': 'builds.read',
+      'GET /api/v2/catalog/apps/:id/branches/:key': 'builds.read',
+      'POST /api/v2/catalog/builds/:id/install': 'builds.read',
+      'POST /api/v2/catalog/builds/:id/prepare': 'devices.register',
+      'GET /api/v2/devices': 'devices.register',
+      'POST /api/v2/devices/registrations': 'devices.register',
+      'GET /api/v2/devices/complete/:token': 'devices.register',
+      'POST /api/v2/devices/:id/:action': 'devices.register',
       'GET /api/v2/settings/:area': 'settings.read',
       'PUT /api/v2/settings/:area': 'settings.change',
       'GET /api/v2/keys': 'keys.read',
@@ -1936,30 +2014,35 @@ export async function one(ctx: Stage) { return 1 }
     await master().people.update(admin, paulId, {
       emails: before.emails.map((entry) => entry.email),
     })
-    // Your account on the host: editable over the link, read-only without it.
-    const account = await request(host, 'GET', '/account', { cookie })
-    assert.equal(account.status, 200)
-    assert.match(account.text, /<h1>Your account<\/h1>/)
+    // Your account on the host is the web app's, read from the cache:
+    // editable over the link, read-only without it.
+    assertShell(await request(host, 'GET', '/account', { cookie }))
+    const account = await request(host, 'GET', '/api/v2/account', { cookie })
+    assert.equal(account.status, 200, account.text)
+    assert.equal(account.json.id, dev.id)
+    assert.equal(account.json.editable, true)
     // A developer sets their password on the master, not through the host.
-    assert.match(account.text, /Change your password on the master/)
-    assert.doesNotMatch(account.text, /data-open="password-own"/)
-    assert.match(account.text, /data-edit="self"/)
-    assert.match(
-      account.text,
-      /mine@example\.test<\/span><small class="tag">unconfirmed/,
+    assert.equal(account.json.passwordHere, false)
+    assert.deepEqual(
+      (account.json.emails as Json[]).find(
+        (entry) => entry.email === 'mine@example.test',
+      ),
+      { email: 'mine@example.test', confirmed: false },
     )
-    assert.match(
-      account.text,
-      /<script type="module" src="\/assets\/people\.js">/,
-    )
-    assert.match(account.text, /action="\/auth\/logout"/)
-    let offline = ''
+    let offline: Json
     await c.drop('host', 2000, async () => {
-      offline = (await request(host, 'GET', '/account', { cookie })).text
+      assertShell(await request(host, 'GET', '/account', { cookie }))
+      offline = (await request(host, 'GET', '/api/v2/account', { cookie })).json
     })
-    assert.match(offline, /cannot reach the master/)
-    assert.match(offline, /data-edit="none"/)
-    assert.doesNotMatch(offline, /data-add-email|data-open="password-own"/)
+    assert.equal(offline.editable, false)
+    assert.equal(offline.id, dev.id)
+    // Signed out, it sends to sign in and back.
+    const signedOut = await request(host, 'GET', '/account')
+    assert.equal(signedOut.status, 303)
+    assert.equal(
+      signedOut.headers.get('location'),
+      '/auth/login?return=%2Faccount',
+    )
     // A tester's session is refused by its role; a stale permission version by the master.
     const answer = async (
       params: unknown,
@@ -2146,7 +2229,7 @@ export async function one(ctx: Stage) { return 1 }
     assert(!isAccountChange('PUT', '/api/v2/people'))
   })
 
-  it('U13.10 the master’s pages: Backups first for an administrator until they confirm the key, and sessions on every page', async () => {
+  it('U13.10 the master’s pages: Backups is the web app’s, which reads the backup state that sends an administrator there; sessions on every page', async () => {
     const { cookie } = await signIn('paul', 'Correct-Horse-9')
     assert.equal((await request(c.master, 'GET', '/elsewhere')).status, 303)
     assert.equal(
@@ -2162,9 +2245,8 @@ export async function one(ctx: Stage) { return 1 }
       password: await newPassword('Pages-Horse-9'),
     })
     const developer = await signIn('pagesdev', 'Pages-Horse-9')
-    assert.equal(
-      (await request(c.master, 'GET', '/backups', { cookie: developer.cookie }))
-        .status,
+    assertShell(
+      await request(c.master, 'GET', '/backups', { cookie: developer.cookie }),
       403,
     )
     const bare = path.join(c.root, 'pages-backup.git')
@@ -2183,63 +2265,65 @@ export async function one(ctx: Stage) { return 1 }
       ).status,
       200,
     )
+    /** Backups as the signed-in administrator reads it. */
+    const backup = async (): Promise<Json> => {
+      const reply = await request(c.master, 'GET', '/api/v2/settings/backup', {
+        cookie,
+      })
+      assert.equal(reply.status, 200, reply.text)
+      return reply.json
+    }
+    // The server sends no one to Backups: the web app does, once per browser
+    // session, for an administrator whose key is not confirmed.
     const home = await request(c.master, 'GET', '/', { cookie })
-    assert.equal(home.headers.get('location'), '/backups')
-    // Once: the redirect itself lets "Projects & apps" through for this browser session.
-    const once = home.headers.get('set-cookie')!.split(';')[0]!
-    const dashboard = await request(c.master, 'GET', '/', {
-      cookie: `${cookie}; ${once}`,
-    })
-    assert.equal(dashboard.status, 200)
-    assert.match(dashboard.text, /This master is not backed up/)
-    // "Skip for now" lets the dashboard through for this browser session, with a reminder.
-    const later = await request(c.master, 'GET', '/?later=backups', { cookie })
-    assert.equal(later.headers.get('location'), '/')
-    const skip = later.headers.get('set-cookie')!.split(';')[0]!
-    const through = await request(c.master, 'GET', '/', {
-      cookie: `${cookie}; ${skip}`,
-    })
-    assert.equal(through.status, 200)
-    assert.match(through.text, /This master is not backed up/)
-    let page = await request(c.master, 'GET', '/backups', { cookie })
-    assert.match(page.text, /No backup has run yet/)
-    assert.match(page.text, /data-mason="backup-confirm"/)
+    assertShell(home)
+    assert.equal(home.headers.get('set-cookie'), null)
+    // "Skip for now" is the web app's too: the old address is the home page.
+    assertShell(await request(c.master, 'GET', '/?later=backups', { cookie }))
+    // The reminder is the banner the web app reads from the status.
+    const banners = async (): Promise<string> =>
+      JSON.stringify(
+        (await request(c.master, 'GET', '/api/v2/status', { cookie })).json
+          .banners,
+      )
+    assert.match(await banners(), /This master is not backed up/)
+    assertShell(await request(c.master, 'GET', '/backups', { cookie }))
+    let state = await backup()
+    assert.equal(state.repository, bare)
+    assert.equal(state.branch, 'b')
+    assert.match(state.deployKey, /^ssh-ed25519 /)
+    assert.equal(state.backedUp, false)
+    assert.equal(state.lastSuccess, undefined)
+    assert.equal(state.lastFailure, undefined)
+    assert.equal(typeof state.backupKey, 'string')
+    assert.equal(state.keyConfirmed, false)
     assert.equal(
       (await c.api('POST', '/api/v2/backups', {})).json.backedUp,
       true,
     )
-    page = await request(c.master, 'GET', '/backups', { cookie })
-    assert.match(page.text, /Last backup /)
+    state = await backup()
+    assert.equal(state.backedUp, true)
     // It names what pushed the backup.
-    assert.match(page.text, /, pushed with the deploy key\./)
+    assert.equal(state.lastSuccess.auth, 'deployKey')
     c.master
       .master!.database.db.prepare(
         "UPDATE backup_runs SET auth='github' WHERE id=(SELECT MAX(id) FROM backup_runs)",
       )
       .run()
-    assert.match(
-      (await request(c.master, 'GET', '/backups', { cookie })).text,
-      /, pushed with the GitHub connection\./,
-    )
+    assert.equal((await backup()).lastSuccess.auth, 'github')
     // Backed up, the reminder is the key still to confirm.
-    assert.match(
-      (await request(c.master, 'GET', '/', { cookie: `${cookie}; ${skip}` }))
-        .text,
-      /The backup key is not confirmed as stored/,
-    )
+    assert.match(await banners(), /The backup key is not confirmed as stored/)
     assert.equal(
       (await c.api('POST', '/api/v2/settings/backup/confirm', {})).status,
       200,
     )
-    page = await request(c.master, 'GET', '/backups', { cookie })
-    assert.match(page.text, /You confirmed you stored this key/)
-    assert.equal((await request(c.master, 'GET', '/', { cookie })).status, 200)
+    assert.equal((await backup()).keyConfirmed, true)
+    assertShell(await request(c.master, 'GET', '/', { cookie }))
     await c.api('PUT', '/api/v2/settings/backup', {
       repository: path.join(c.root, 'missing.git'),
     })
     await c.api('POST', '/api/v2/backups', {})
-    page = await request(c.master, 'GET', '/backups', { cookie })
-    assert.match(page.text, /The last backup failed/)
+    assert.equal(typeof (await backup()).lastFailure.error, 'string')
     // `mason backup` exits 1 on a failure.
     const out = cliIO()
     assert.equal(await nodeMain(['backup', '--data', c.master.dir], out), 1)

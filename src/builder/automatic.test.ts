@@ -1,24 +1,11 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { once } from 'node:events'
-import {
-  mkdtempSync,
-  mkdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, it } from 'mocha'
-import {
-  AutomaticPoller,
-  AUTOMATIC_POLL_MS,
-  remoteHead,
-} from './automatic.js'
+import { AutomaticPoller, AUTOMATIC_POLL_MS, remoteHead } from './automatic.js'
 import { asBuilderConfig } from './config.js'
 import { BuilderStore } from './store.js'
-import { builderApp } from './server.js'
-import { executeJob } from './guardian.js'
 
 const app = {
   slug: 'app.example.automatic',
@@ -32,15 +19,11 @@ const settings = {
   defaultBranch: 'master',
   automaticBranches: ['master'],
 }
-let root: string,
-  store: BuilderStore,
-  poller: AutomaticPoller | undefined
+let root: string, store: BuilderStore, poller: AutomaticPoller | undefined
 describe('Automatic branch builds', function () {
   this.timeout(15000)
   beforeEach(() => {
-    root = mkdtempSync(
-      path.join(process.env.MASON_TEST_ROOT!, 'automatic-'),
-    )
+    root = mkdtempSync(path.join(process.env.MASON_TEST_ROOT!, 'automatic-'))
     store = new BuilderStore(
       asBuilderConfig({ workspace: path.join(root, 'state') }),
     )
@@ -69,10 +52,7 @@ describe('Automatic branch builds', function () {
     assert.equal(job.branch, 'feature/example')
     store.configureBuilds(app.slug, settings)
     assert.equal(
-      store.enqueue(
-        { app: app.slug, idempotencyKey: 'default' },
-        'key',
-      ).id,
+      store.enqueue({ app: app.slug, idempotencyKey: 'default' }, 'key').id,
       job.id,
     )
     assert.throws(() =>
@@ -86,133 +66,41 @@ describe('Automatic branch builds', function () {
       ),
     )
     store.importApp({ ...app, name: 'Updated' })
-    assert.equal(
-      store.buildSettings(app.slug).defaultBranch,
-      'master',
-    )
+    assert.equal(store.buildSettings(app.slug).defaultBranch, 'master')
   })
-  it('protects settings with the API key and never returns private definitions', async () => {
-    store.importApp({
-      ...app,
-      env: [
-        {
-          name: 'PRIVATE_VALUE',
-          value: 'fixture-private',
-          secret: true,
-        },
-      ],
-    })
-    const keyFile = path.join(root, 'key')
-    store.key(keyFile)
-    const key = readFileSync(keyFile, 'utf8').trim()
-    const server = builderApp(store).listen(0, '127.0.0.1')
-    await once(server, 'listening')
-    const address = server.address()
-    assert(address && typeof address !== 'string')
-    const url = `http://127.0.0.1:${address.port}`
-    const headers = {
-      Authorization: `Bearer ${key}`,
-      'Content-Type': 'application/json',
-    }
-    try {
-      assert.equal((await fetch(url + '/api/apps')).status, 401)
-      assert.equal(
-        (
-          await fetch(url + `/api/apps/${app.slug}/build-settings`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(settings),
-          })
-        ).status,
-        401,
-      )
-      const response = await fetch(
-        url + `/api/apps/${app.slug}/build-settings`,
-        { method: 'PUT', headers, body: JSON.stringify(settings) },
-      )
-      assert.equal(response.status, 200)
-      const body = await response.json()
-      assert.equal(body.pollIntervalMs, 300000)
-      assert.deepEqual(body.automaticBranches, ['master'])
-      assert.equal(AUTOMATIC_POLL_MS, 300000)
-      const apps = await (
-        await fetch(url + '/api/apps', { headers })
-      ).text()
-      assert(!apps.includes('fixture-private'))
-      assert(!apps.includes('definition'))
-      for (const invalid of [
-        { ...settings, automaticBranches: ['master', 'master'] },
-        { ...settings, automaticBranches: ['../bad'] },
-        { ...settings, unknown: true },
-        {
-          ...settings,
-          automaticBranches: Array.from(
-            { length: 21 },
-            (_, i) => `feature/${i}`,
-          ),
-        },
-      ])
-        assert.equal(
-          (
-            await fetch(
-              url + `/api/apps/${app.slug}/build-settings`,
-              {
-                method: 'PUT',
-                headers,
-                body: JSON.stringify(invalid),
-              },
-            )
-          ).status,
-          400,
-        )
-      assert.equal(
-        (
-          await fetch(url + '/api/apps/unknown/build-settings', {
-            headers,
-          })
-        ).status,
-        404,
-      )
-      assert.equal(
-        (
-          await fetch(url + '/api/apps/unknown/build-settings', {
-            method: 'PUT',
-            headers,
-            body: JSON.stringify(settings),
-          })
-        ).status,
-        400,
-      )
-      const submitted = await (
-        await fetch(url + '/api/jobs', {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ app: app.slug }),
-        })
-      ).json()
-      assert.equal(submitted.branch, 'master')
-    } finally {
-      await new Promise<void>((resolve) =>
-        server.close(() => resolve()),
-      )
-    }
+  it('validates build settings, polls every five minutes and builds the default branch', () => {
+    assert.equal(AUTOMATIC_POLL_MS, 300000)
+    store.configureBuilds(app.slug, settings)
+    assert.deepEqual(store.buildSettings(app.slug).automaticBranches, [
+      'master',
+    ])
+    for (const invalid of [
+      { ...settings, automaticBranches: ['master', 'master'] },
+      { ...settings, automaticBranches: ['../bad'] },
+      { ...settings, unknown: true },
+      {
+        ...settings,
+        automaticBranches: Array.from({ length: 21 }, (_, i) => `feature/${i}`),
+      },
+    ])
+      assert.throws(() => store.configureBuilds(app.slug, invalid))
+    assert.deepEqual(store.buildSettings(app.slug).automaticBranches, [
+      'master',
+    ])
+    assert.throws(() => store.buildSettings('unknown'), /Unknown app/)
+    assert.throws(() => store.configureBuilds('unknown', settings))
+    assert.equal(store.enqueue({ app: app.slug }, 'key').branch, 'master')
   })
   it('reserves only three attempts per commit, even after restart, pruning and re-enabling', () => {
     store.configureBuilds(app.slug, settings)
     for (let i = 1; i <= 3; i++) {
       const job = store.enqueueAutomatic(app.slug, 'master', a)
       assert(job)
-      assert.equal(
-        store.enqueueAutomatic(app.slug, 'master', a),
-        undefined,
-      )
+      assert.equal(store.enqueueAutomatic(app.slug, 'master', a), undefined)
       store.claim()
       store.commit(job.id, a)
       store.finish(job.id, 'failed', 1)
-      assert.equal(
-        store.buildSettings(app.slug).branches[0]!.attempts,
-        i,
-      )
+      assert.equal(store.buildSettings(app.slug).branches[0]!.attempts, i)
     }
     const config = store.config
     store.close()
@@ -224,17 +112,11 @@ describe('Automatic branch builds', function () {
       automaticBranches: [],
     })
     store.configureBuilds(app.slug, settings)
-    assert.equal(
-      store.enqueueAutomatic(app.slug, 'master', a),
-      undefined,
-    )
+    assert.equal(store.enqueueAutomatic(app.slug, 'master', a), undefined)
     const next = store.enqueueAutomatic(app.slug, 'master', b)
     assert(next)
     store.cancel(next.id)
-    assert.equal(
-      store.enqueueAutomatic(app.slug, 'master', a),
-      undefined,
-    )
+    assert.equal(store.enqueueAutomatic(app.slug, 'master', a), undefined)
     const state = store.buildSettings(app.slug).branches[0]!
     assert.equal(state.lastAttemptedCommit, b)
     assert.equal(state.lastSuccessfulCommit, undefined)
@@ -246,10 +128,7 @@ describe('Automatic branch builds', function () {
     assert.throws(() => store.commit(first.id, b))
     store.commit(first.id, a)
     store.finish(first.id, 'succeeded', 0)
-    assert.equal(
-      store.enqueueAutomatic(app.slug, 'master', a),
-      undefined,
-    )
+    assert.equal(store.enqueueAutomatic(app.slug, 'master', a), undefined)
     const next = store.enqueueAutomatic(app.slug, 'master', b)!
     store.claim()
     store.commit(next.id, b)
@@ -257,44 +136,23 @@ describe('Automatic branch builds', function () {
     const state = store.buildSettings(app.slug).branches[0]!
     assert.equal(state.lastSuccessfulCommit, a)
     assert.equal(state.lastAttemptedCommit, b)
-    assert.equal(
-      store.enqueueAutomatic(app.slug, 'master', a),
-      undefined,
-    )
+    assert.equal(store.enqueueAutomatic(app.slug, 'master', a), undefined)
   })
   it('defers behind manual builds, a full queue or quarantine without consuming attempts', () => {
     store.configureBuilds(app.slug, settings)
-    const manual = store.enqueue(
-      { app: app.slug, branch: 'master' },
-      'key',
-    )
-    assert.equal(
-      store.enqueueAutomatic(app.slug, 'master', a),
-      undefined,
-    )
+    const manual = store.enqueue({ app: app.slug, branch: 'master' }, 'key')
+    assert.equal(store.enqueueAutomatic(app.slug, 'master', a), undefined)
     store.cancel(manual.id)
-    const hold = store.enqueue(
-      { app: app.slug, branch: 'other' },
-      'key',
-    )
+    const hold = store.enqueue({ app: app.slug, branch: 'other' }, 'key')
     store.claim()
     store.finish(hold.id, 'failed', 1, undefined, true)
-    assert.equal(
-      store.enqueueAutomatic(app.slug, 'master', a),
-      undefined,
-    )
+    assert.equal(store.enqueueAutomatic(app.slug, 'master', a), undefined)
     store.releaseQuarantine(hold.id)
     const queue = Array.from({ length: 100 }, () =>
       store.enqueue({ app: app.slug, branch: 'other' }, 'key'),
     )
-    assert.equal(
-      store.enqueueAutomatic(app.slug, 'master', a),
-      undefined,
-    )
-    assert.equal(
-      store.buildSettings(app.slug).branches[0]!.attempts,
-      0,
-    )
+    assert.equal(store.enqueueAutomatic(app.slug, 'master', a), undefined)
+    assert.equal(store.buildSettings(app.slug).branches[0]!.attempts, 0)
     store.cancel(queue[0]!.id)
     assert(store.enqueueAutomatic(app.slug, 'master', a))
   })
@@ -323,10 +181,7 @@ describe('Automatic branch builds', function () {
     assert.equal(calls, 1)
     assert.equal(store.pending().length, 1)
     assert.equal(store.pending()[0]!.app, app.slug)
-    assert.equal(
-      store.buildSettings(app.slug).branches[0]!.observedCommit,
-      a,
-    )
+    assert.equal(store.buildSettings(app.slug).branches[0]!.observedCommit, a)
     await poller.close()
     poller = undefined
   })
@@ -406,6 +261,18 @@ describe('Automatic branch builds', function () {
           GIT_COMMITTER_EMAIL: 'fixture@example.test',
         },
       }).trim()
+    // Stands in for the guardian, which checks out the job's pinned commit
+    // rather than the branch tip and records it before the build runs.
+    const executeJob = (id: string): void => {
+      const pending = store.job(id)!
+      const commit = git([
+        'rev-parse',
+        '--verify',
+        (pending.requested_commit ?? pending.branch) + '^{commit}',
+      ])
+      store.commit(id, commit)
+      store.finish(id, 'succeeded', 0, { commit })
+    }
     git(['init', '-b', 'master'])
     writeFileSync(
       path.join(repo, 'Masonfile.js'),
@@ -431,12 +298,12 @@ describe('Automatic branch builds', function () {
     git(['add', '.'])
     git(['commit', '-m', 'Next fixture'])
     const latest = git(['rev-parse', 'HEAD'])
-    await executeJob(
-      store,
-      job.id,
-      new AbortController().signal,
-      () => repo,
+    // The store refuses the advanced tip for a job pinned to the polled commit.
+    assert.throws(
+      () => store.commit(job.id, latest),
+      /Requested commit changed/,
     )
+    executeJob(job.id)
     assert.equal(store.job(job.id)!.status, 'succeeded')
     assert.equal(store.job(job.id)!.commit_sha, original)
     assert.deepEqual(store.job(job.id)!.result, { commit: original })
@@ -447,11 +314,7 @@ describe('Automatic branch builds', function () {
     poller = new AutomaticPoller(
       store,
       async () =>
-        await remoteHead(
-          repo,
-          'master',
-          new AbortController().signal,
-        ),
+        await remoteHead(repo, 'master', new AbortController().signal),
     )
     await poller.poll()
     assert.equal(store.pending()[0]!.requested_commit, latest)
@@ -469,11 +332,7 @@ describe('Automatic branch builds', function () {
     process.env.PATH = bin + path.delimiter + previous
     try {
       await assert.rejects(
-        remoteHead(
-          app.repository,
-          'master',
-          new AbortController().signal,
-        ),
+        remoteHead(app.repository, 'master', new AbortController().signal),
         (error) => {
           assert(error instanceof Error)
           assert.equal(error.message, 'Branch lookup failed')

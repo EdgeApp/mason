@@ -1,37 +1,12 @@
 import type { BuildNumbers } from './buildNumbers.js'
 import type { Project } from './projects.js'
 import type { Pushes } from './pushes.js'
+import type {
+  BuildNumberSequence,
+  ProjectDetails,
+} from '../shared/api/projects.js'
 
-/**
- * What a project's pages show beyond its name: the same object on the master,
- * which builds it, and on the host, which keeps the copy the master sends.
- */
-export interface ProjectDetails {
-  repository: string
-  defaultBranch: string
-  format: string
-  apps: Array<{
-    bundleId: string
-    platforms: string[]
-    apple?: { team: string }
-  }>
-  rules: Array<{ pattern: string; mode: string }>
-  webhook: boolean
-  signingLabel?: string
-  /** The branches Runs and builds lists first: those its push trigger builds. */
-  pinned: string[]
-  buildNumbers: BuildNumberSequence[]
-}
-
-/** One build-number sequence: its scheme and the last number per branch (`''` across branches). */
-export interface BuildNumberSequence {
-  key: string
-  format: string
-  scope: string
-  /** Other app IDs that take their numbers from it. */
-  apps: string[]
-  last: Array<{ branch: string; value: string }>
-}
+export type { BuildNumberSequence, ProjectDetails }
 
 /** What the Masonfile tab says of a project with none. */
 export const SCRIPT_PROJECT =

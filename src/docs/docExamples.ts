@@ -56,10 +56,16 @@ export function codeBlocks(markdown: string): CodeBlock[] {
 
 /**
  * Typechecks every complete `ts` block as its own module against the Mason
- * type declarations, mapping each diagnostic back to its Markdown line. The
- * blocks are compiled in memory; nothing is written to disk.
+ * type declarations (`@mason/types`) and any further modules by name (the
+ * API reference imports the shared contract as `@mason/api`), mapping each
+ * diagnostic back to its Markdown line. The blocks are compiled in memory;
+ * nothing is written to disk.
  */
-export function checkExamples(markdown: string, types: string): ExampleError[] {
+export function checkExamples(
+  markdown: string,
+  types: string,
+  modules: Record<string, string> = {},
+): ExampleError[] {
   const blocks = codeBlocks(markdown)
   if (blocks.length === 0) return []
   const root = path.resolve('.mason-doc-examples')
@@ -78,7 +84,15 @@ export function checkExamples(markdown: string, types: string): ExampleError[] {
     verbatimModuleSyntax: true,
     types: [],
     lib: ['lib.es2023.d.ts', 'lib.dom.d.ts'],
-    paths: { '@mason/types': [path.resolve(types)] },
+    paths: {
+      '@mason/types': [path.resolve(types)],
+      ...Object.fromEntries(
+        Object.entries(modules).map(([name, file]) => [
+          name,
+          [path.resolve(file)],
+        ]),
+      ),
+    },
   }
   const host = ts.createCompilerHost(options)
   const fileExists = host.fileExists.bind(host)

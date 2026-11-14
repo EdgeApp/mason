@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import express, { Router } from 'express'
-import { lineAt, plainLog } from '../view/log.js'
+import { lineAt, plainLog } from './logText.js'
 import { AUTOMATIC_POLL_MS } from '../builder/automatic.js'
 import { branchName } from '../builder/config.js'
 import { actorOf, apiErrors, authenticate, json, NotFound } from './api.js'
@@ -263,8 +263,11 @@ export async function runLines(
   }
   const file = master.scheduler.logFile(id, options.stage)
   const size = statSync(file, { throwIfNoEntry: false })?.size ?? 0
+  // A stage that has written nothing yet (an approval, one still queued) has no lines.
+  if (size === 0 && options.step == null)
+    return { start: 1, total: 0, first: 1, text: '', end: 0 }
   if (options.step == null) {
-    const total = size === 0 ? 0 : await lineCount(file, size)
+    const total = await lineCount(file, size)
     const first = pick(1, total)
     const part = await fileLines(file, first, count)
     return { start: 1, total, first, text: part.text, end: part.end }

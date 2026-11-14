@@ -45,7 +45,11 @@ export class ProviderError extends Error {
       | 'missing'
       /** The machine started, and its first-boot setup failed. */
       | 'setup'
+      /** The provider has no machine to spare for the account now. */
+      | 'capacity'
       | 'other',
+    /** The provider's own error code, when it gives one. */
+    readonly code?: string,
   ) {
     super(message)
   }

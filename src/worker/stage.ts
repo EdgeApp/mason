@@ -97,7 +97,7 @@ import {
 import { xcodeLaunches } from './system/index.js'
 import { checkout } from './checkout.js'
 import { localImports } from '../pipeline/localImports.js'
-import { duration } from '../view/html.js'
+import { duration } from '../shared/format.js'
 import {
   fetchArtifacts,
   publish,

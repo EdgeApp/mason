@@ -4,11 +4,20 @@ import type { Request } from 'express'
 import { cookie, SESSION_COOKIE } from '../auth/routes.js'
 import type { Link, Stream } from '../link/link.js'
 import {
+  parseMessage,
   sameOrigin,
   streamLines,
   type LiveStreamParams,
   type LiveViewer,
 } from '../master/live.js'
+import {
+  LIVE_MAX_SUBSCRIPTIONS,
+  LIVE_UNAVAILABLE,
+  LiveBudget,
+  liveRefusal,
+  type LiveMessage,
+} from '../shared/live.js'
+import { hostStatus } from './reads.js'
 import type { HostRuntime } from './runtime.js'
 
 /** The longest frame the master sends: a log frame's text, escaped. */
@@ -22,8 +31,10 @@ const BEARER =
   /^Bearer (mason_v1_[a-f0-9]{32}\.[A-Za-z0-9_-]{43}|[a-f0-9]{64})$/
 /** Why a master that serves no live pages (an older one) refuses the stream. */
 const UNSERVED = /(^live is not allowed$)|does not serve live pages/
-/** The close code a page takes as final: this node cannot serve live updates. */
-export const LIVE_UNAVAILABLE = 4000
+export { LIVE_UNAVAILABLE }
+
+/** How often the host checks its link for a shell status subscription. */
+const STATUS_MS = 2000
 
 /** Live streams open on each link. */
 const streams = new WeakMap<Link, number>()
@@ -36,11 +47,20 @@ const streams = new WeakMap<Link, number>()
  * master trusts only on this link; a script's API key goes to the master
  * as it is. While the master is unreachable the upgrade is refused with
  * 503; when the link drops, each page is closed with 1012 and reconnects.
+ * The shell's `status` (a `status` subscription without a run) is the
+ * host's own link state, answered here and never sent to the master. Every
+ * message, answered here or relayed, spends the socket's one budget, as
+ * the master's would.
  */
 export function hostLive(
   host: HostRuntime,
-  options: { maxStreams?: number } = {},
+  options: {
+    maxStreams?: number
+    testEndpoints?: boolean
+    now?: () => number
+  } = {},
 ): (req: IncomingMessage) => LiveViewer | number {
+  const now = options.now ?? Date.now
   return (req) => {
     const origin = sameOrigin(req)
     if (origin === false) return 403
@@ -139,12 +159,75 @@ export function hostLive(
           uncount()
           close(1000)
         })
+        // The shell's status subscriptions, by key, with what each was sent last.
+        const shells = new Map<string, string>()
+        let ticker: ReturnType<typeof setInterval> | undefined
+        const current = (): string =>
+          JSON.stringify(hostStatus(host, options.testEndpoints === true))
+        const status = (key: string, data: string): void => {
+          if (shells.get(key) === data) return
+          shells.set(key, data)
+          out.send(
+            `{"key":${JSON.stringify(key)},"event":"status","data":${data}}`,
+          )
+        }
+        const local = (message: LiveMessage): boolean => {
+          if ('unsubscribe' in message) {
+            if (!shells.delete(message.unsubscribe)) return false
+            if (shells.size === 0) {
+              clearInterval(ticker)
+              ticker = undefined
+            }
+            return true
+          }
+          // The host answers the shell's status only on a session it checked
+          // itself; a key's socket relays it, so the master checks the key.
+          if (
+            message.subscribe !== 'status' ||
+            message.run != null ||
+            'authorization' in params
+          )
+            return false
+          const key = message.key
+          if (!shells.has(key) && shells.size >= LIVE_MAX_SUBSCRIPTIONS) {
+            out.send(
+              JSON.stringify({
+                key,
+                event: 'error',
+                data: { error: 'Too many subscriptions' },
+              }),
+            )
+            return true
+          }
+          shells.delete(key)
+          status(key, current())
+          ticker ??= setInterval(() => {
+            const data = current()
+            for (const key of shells.keys()) status(key, data)
+          }, STATUS_MS)
+          ticker.unref?.()
+          return true
+        }
+        const budget = new LiveBudget(now())
         return {
           receive: (text): void => {
+            // A message the master would refuse goes to it as it is, to answer.
+            let message: LiveMessage | undefined
+            try {
+              message = parseMessage(text)
+            } catch {
+              message = undefined
+            }
+            if (!budget.take(now())) {
+              out.send(JSON.stringify(liveRefusal(message)))
+              return
+            }
+            if (message != null && local(message)) return
             stream.write(Buffer.from(text + '\n')).catch(() => undefined)
           },
           end: (): void => {
             closed = true
+            clearInterval(ticker)
             stream.end()
           },
         }

@@ -16,6 +16,7 @@ import { cluster, type Cluster } from '../../test/cluster.js'
 import { FakeCloud } from '../../test/fakeCloud.js'
 import { quietMac } from '../../test/fakeMac.js'
 import { ProviderError } from './digitalocean.js'
+import { refusalBackoff } from './pools.js'
 import { pinnedFetch } from '../../node/pinnedFetch.js'
 import { MASTER_SESSION_COOKIE } from '../auth.js'
 import { poolInput } from '../cloudApi.js'
@@ -613,6 +614,42 @@ export async function work(ctx: Stage) {
     assert(new ProviderError('x', 'rate').kind === 'rate')
   })
 
+  it('U11.6 a machine the provider fails after accepting it is dropped, and the pool waits five minutes when it had none to spare', async () => {
+    cloud.failMachines = 'capacity'
+    const before = cloud.created.length
+    const id = await run()
+    const waiting = await wait(
+      () => {
+        const value = c.master.master!.run(id) as Json
+        return /failed to start/.test(stage(value)?.reason ?? '')
+          ? stage(value)
+          : undefined
+      },
+      10_000,
+      'the failed machine’s reason',
+    )
+    assert.match(
+      waiting.reason,
+      /The last linux-cloud machine failed to start: Fake machine \S+ failed/,
+    )
+    assert.equal(waiting.status, 'queued')
+    // Dropped at once, not polled until the pairing timeout.
+    await wait(() => machines().length === 0, 10_000, 'the failed machine gone')
+    assert.equal(cloud.created.length, before + 1)
+    // A minute on, no machine: it had none to spare.
+    cloud.failMachines = undefined
+    offset += 61_000
+    await new Promise((resolve) => setTimeout(resolve, 1000))
+    assert.equal(cloud.created.length, before + 1)
+    offset += 5 * MINUTE
+    assert.equal((await finish(id)).status, 'succeeded')
+    assert.equal(cloud.created.length, before + 2)
+    offset += 6 * MINUTE
+    await wait(() => machines().length === 0, 15_000, 'retired')
+    assert.equal(refusalBackoff(new ProviderError('x', 'capacity')), 5 * MINUTE)
+    assert.equal(refusalBackoff(new ProviderError('x', 'quota')), 60_000)
+  })
+
   it('U11.6 starts no machine while the master runs no GitHub release, or its release has no linux-x64 tarball', async () => {
     const created = cloud.created.length
     // A master built from source runs no GitHub release: nothing to install.
@@ -793,30 +830,45 @@ export async function work(ctx: Stage) {
       .list({ role: 'admin', label: 'pools' })
       .find((person) => person.username === 'paul')!
     const { token } = master.auth.start(paul.id, '127.0.0.1')
-    const page = async (): Promise<string> =>
-      await (
-        await pinnedFetch(
-          c.master.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') + '/nodes',
-          { headers: { cookie: `${MASTER_SESSION_COOKIE}=${token}` } },
-          c.master.web!.certificate!.pin,
-        )
-      ).text()
-    const nodes = await page()
-    assert.match(nodes, /<h2>.*Cloud pools<\/h2>/)
-    assert.match(nodes, /Add a pool on DigitalOcean/)
-    assert.match(
-      nodes,
-      /<option value="sfo3"[^>]*>San Francisco 3 \(sfo3\)<\/option>/,
+    // The Nodes page is the web app's; its Pools panel reads the pools and
+    // each DigitalOcean account's regions, sizes and images.
+    const nodes = await pinnedFetch(
+      c.master.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') + '/nodes',
+      { headers: { cookie: `${MASTER_SESSION_COOKIE}=${token}` } },
+      c.master.web!.certificate!.pin,
     )
-    assert.match(
-      nodes,
-      /<option value="s-2vcpu-4gb"[^>]*>s-2vcpu-4gb · Basic · \$24\/month<\/option>/,
+    assert.equal(nodes.status, 200)
+    assert.match(await nodes.text(), /<div id="root"><\/div>/)
+    const readCatalog = async (): Promise<Json> => {
+      const reply = await c.api(
+        'GET',
+        '/api/v2/cloud/accounts/do/catalog',
+        undefined,
+        admin,
+      )
+      assert.equal(reply.status, 200, reply.text)
+      return reply.json
+    }
+    const offered = await readCatalog()
+    assert.deepEqual(
+      offered.regions.find((region: Json) => region.slug === 'sfo3'),
+      { slug: 'sfo3', name: 'San Francisco 3' },
     )
-    assert.match(nodes, /<option value="ubuntu-24-04-x64"/)
-    assert.match(nodes, /id="pool-linux-cloud"/)
+    const size = offered.sizes.find(
+      (entry: Json) => entry.slug === 's-2vcpu-4gb',
+    )
+    assert.deepEqual([size.description, size.priceMonthly], ['Basic', 24])
+    assert(
+      offered.images.some((image: Json) => image.slug === 'ubuntu-24-04-x64'),
+    )
+    assert(
+      (await c.api('GET', '/api/v2/cloud/pools', undefined, admin)).json.some(
+        (pool: Json) => pool.name === 'linux-cloud',
+      ),
+    )
     // The catalog is asked once for ten minutes.
     const calls = cloud.catalogCalls
-    await page()
+    await readCatalog()
     assert.equal(cloud.catalogCalls, calls)
     // A form's text fields are typed for the area.
     assert.deepEqual(
@@ -943,6 +995,14 @@ export async function work(ctx: Stage) {
     db.prepare(
       "UPDATE cloud_machines SET state='ready',fingerprint='mldsa65:gone' WHERE pool='big'",
     ).run()
+    // The Pools panel lists each pool's machines with their state.
+    const panel = await c.api('GET', '/api/v2/cloud/pools', undefined, admin)
+    assert.deepEqual(
+      panel.json
+        .find((pool: Json) => pool.name === 'big')
+        .machines.map((machine: Json) => machine.state),
+      ['ready'],
+    )
     assert.equal(
       (await c.api('DELETE', '/api/v2/cloud/pools/big', undefined, admin))
         .status,
@@ -957,59 +1017,6 @@ export async function work(ctx: Stage) {
       () => machines().every((row) => row.pool !== 'big'),
       10_000,
       'the removed pool’s machine retired',
-    )
-    // An account without a catalog, and a catalog that fails, still render the form.
-    const view = await import('../../view/admin.js')
-    const html = view.nodesView({
-      nodes: [],
-      types: {},
-      pools: [
-        {
-          name: 'old',
-          type: 'linux',
-          account: 'gone',
-          region: 'ams3',
-          size: 's-1vcpu-1gb',
-          image: 'ubuntu-24-04-x64',
-          labels: ['a'],
-          maxNodes: 1,
-          slots: 1,
-          ttlMinutes: 5,
-          maxHoursPerNode: 1,
-          machines: [{ id: 7, state: 'ready', address: '203.0.113.9:9310' }],
-        },
-      ],
-      poolAccounts: [
-        { id: 'do', name: 'DigitalOcean', error: 'Could not list regions' },
-        {
-          id: 'cat',
-          name: 'Catalogued',
-          catalog: {
-            regions: [{ slug: 'sfo3', name: 'SF' }],
-            sizes: [],
-            images: [],
-          },
-        },
-      ],
-      budget: { monthly: 200 },
-      canChange: true,
-    })
-    assert.match(html, /<p class="notice">Could not list regions<\/p>/)
-    assert.match(
-      html,
-      /<input id="new-do-region" name="region" value="" required placeholder="sfo3">/,
-    )
-    assert.match(html, /203\.0\.113\.9:9310/)
-    assert.match(html, /machine · 1 stage at a time/)
-    assert.match(
-      view.nodesView({
-        nodes: [],
-        types: {},
-        pools: [],
-        budget: { monthly: 1 },
-        canChange: true,
-      }),
-      /Add a DigitalOcean or NoMac account on the <a href="\/cloud">Cloud<\/a> page/,
     )
   })
 })

@@ -36,8 +36,10 @@ import { DatabaseSync } from 'node:sqlite'
 import { LinkError, type Link } from '../link/link.js'
 import { Outbox } from './outbox.js'
 import { HostCache } from './cache.js'
+import { hostMasonfileCommits } from './reads.js'
 import { proofLog } from '../test/proofLog.js'
-import { crumbTrail } from '../test/crumbs.js'
+import { assertShell } from '../test/webShell.js'
+import type { NodeInfo } from '../shared/api/index.js'
 import { migrateMaster } from '../master/schema.js'
 import { entities, type Change } from '../master/changes.js'
 import { seedLegacySecrets } from '../test/secrets.js'
@@ -156,6 +158,19 @@ class Browser {
       },
       body: new URLSearchParams(body),
     })
+  }
+}
+
+/** A page as a browser reads it: its status, text and headers. */
+async function shellOf(
+  b: Browser,
+  route: string,
+): Promise<{ status: number; text: string; headers: Headers }> {
+  const reply = await b.get(route)
+  return {
+    status: reply.status,
+    text: await reply.text(),
+    headers: reply.headers,
   }
 }
 
@@ -687,13 +702,36 @@ describe('Host cache, sign-in and offline serving', function () {
       2000,
       'the disabled method on the host',
     )
+    // The web app's sign-in offers what the host's description lists.
     const login = await browser().get('/auth/login?return=/&signed_out=1')
-    const page = await login.text()
-    assert.match(page, /Sign in with first/)
-    assert.doesNotMatch(page, /Sign in with second/)
-    assert.equal(
-      (await browser().get('/auth/start/second?return=/')).status,
-      400,
+    assertShell({
+      status: login.status,
+      headers: login.headers,
+      text: await login.text(),
+    })
+    const node = (await (
+      await browser().get('/api/v2/node')
+    ).json()) as NodeInfo
+    assert.deepEqual(
+      node.signIn.providers.map((provider) => provider.id),
+      ['first'],
+    )
+    // The sign-in protocol's refusals are the web app's to show.
+    const refused = await browser().get('/auth/start/second?return=/')
+    assert.deepEqual(
+      assertShell(
+        {
+          status: refused.status,
+          headers: refused.headers,
+          text: await refused.text(),
+        },
+        400,
+      ),
+      {
+        state: 'invalid',
+        message:
+          'The request is invalid or has expired. Return to sign in and try again.',
+      },
     )
     // The host never holds the disabled method's client secret.
     const stored = JSON.stringify(runtime().cache.setting('signIn'))
@@ -743,9 +781,14 @@ describe('Host cache, sign-in and offline serving', function () {
         .status,
       303,
     )
-    const page = await (await fresh.get('/')).text()
-    assert.match(page, /Edge Wallet/)
-    assert.match(page, /Zcash/)
+    assertShell(await shellOf(fresh, '/'))
+    const listed = (await (
+      await fresh.get('/api/v2/catalog/apps')
+    ).json()) as Json
+    assert.deepEqual(
+      (listed.apps as Json[]).map((app) => app.name),
+      ['Edge Wallet', 'Zcash'],
+    )
     const row = master.database.db
       .prepare(
         'SELECT a.role, a.open_admission, a.name FROM accounts a JOIN account_emails x ON x.account_id=a.id WHERE x.email=?',
@@ -799,75 +842,118 @@ describe('Host cache, sign-in and offline serving', function () {
   it('U10.4/U10.7 serves the catalog and installs of the tester’s apps from the cache with the master link down', async () => {
     const tess = browser()
     await signIn(tess, 'first', { email: 'tess@example.com' })
-    const online = await (await tess.get('/')).text()
-    assert.match(online, /Edge Wallet/)
-    assert.doesNotMatch(online, /Zcash/, 'testers see only their groups’ apps')
-    assert.doesNotMatch(online, /master is unreachable/)
+    /** A JSON answer the web app reads, with its status. */
+    const readJson = async (
+      b: Browser,
+      route: string,
+    ): Promise<{ status: number; json: Json }> => {
+      const reply = await b.get(route)
+      return { status: reply.status, json: await reply.json() }
+    }
+    /** Install, as the web app asks for it: the session's proof in its header. */
+    const install = async (
+      id: number,
+    ): Promise<{ status: number; json: Json }> => {
+      const reply = await tess.get(`/api/v2/catalog/builds/${id}/install`, {
+        method: 'POST',
+        headers: {
+          origin: ORIGIN,
+          'x-mason-csrf': runtime().accounts.session(session(tess))!.session
+            .csrf,
+        },
+      })
+      return { status: reply.status, json: await reply.json() }
+    }
+    const names = (json: Json): string[] =>
+      (json.apps as Json[]).map((app) => app.name)
+    const banners = async (): Promise<string[]> =>
+      ((await readJson(tess, '/api/v2/status')).json.banners as Json[]).map(
+        (banner) => banner.kind,
+      )
+    const develop =
+      '/apps/1/branches/' +
+      Buffer.from('develop').toString('base64url') +
+      '?platform=android'
+    assertShell(await shellOf(tess, '/'))
+    assert.deepEqual(
+      names((await readJson(tess, '/api/v2/catalog/apps')).json),
+      ['Edge Wallet'],
+      'testers see only their groups’ apps',
+    )
+    assert(!(await banners()).includes('offline'))
     await c.drop('host', 3000, async () => {
       await c.until(() => !runtime().online(), 2000, 'the host offline')
-      const catalog = await tess.get('/')
-      assert.equal(catalog.status, 200, 'catalog')
-      const text = await catalog.text()
-      assert.match(text, /The Mason master is unreachable/)
-      assert.match(text, /Edge Wallet/)
-      const branch = await (
-        await tess.get(
-          '/apps/1/branches/' +
-            Buffer.from('develop').toString('base64url') +
-            '?platform=android',
-        )
-      ).text()
-      assert.match(branch, /1\.0\.100/)
-      assert.equal((await tess.get('/apps/2')).status, 404)
+      // The shell and its JSON come from the cache; the web app shows the
+      // offline banner from the status.
+      assertShell(await shellOf(tess, '/'))
+      assert((await banners()).includes('offline'))
+      assert.deepEqual(
+        names((await readJson(tess, '/api/v2/catalog/apps')).json),
+        ['Edge Wallet'],
+      )
+      assertShell(await shellOf(tess, develop))
+      const branch = await readJson(tess, `/api/v2/catalog${develop}`)
+      assert.equal(branch.status, 200)
+      assert(
+        (branch.json.builds as Json[]).some(
+          (build) => build.version === '1.0.100',
+        ),
+      )
+      assertShell(await shellOf(tess, '/apps/2'), 404)
+      assert.equal((await readJson(tess, '/api/v2/catalog/apps/2')).status, 404)
       // A tester has no project pages on the host; Install apps holds her apps.
       assert.equal((await tess.get('/projects/edge')).status, 404)
-      const csrf = runtime().accounts.session(session(tess))!.session.csrf
-      const install = await tess.post('/builds/100/install', { csrf })
-      assert.equal(install.status, 303)
-      const artifact = await tess.get(install.headers.get('location')!)
-      assert.equal(
-        artifact.status,
-        200,
-        `artifact ${install.headers.get('location')}`,
-      )
+      const installed = await install(100)
+      assert.equal(installed.status, 200, JSON.stringify(installed.json))
+      assert.equal(installed.json.kind, 'download')
+      const artifact = await tess.get(installed.json.url)
+      assert.equal(artifact.status, 200, `artifact ${installed.json.url}`)
       assert.equal(await artifact.text(), `apk ${KEY}`)
-      assert.equal(
-        (await tess.post('/builds/101/install', { csrf })).status,
-        404,
-        'another group’s build',
-      )
+      assert.equal((await install(101)).status, 404, 'another group’s build')
       // An expired build stops at once, even offline.
       runtime().advanceClock(120_000)
-      const later = await (
-        await tess.get(
-          '/apps/1/branches/' +
-            Buffer.from('develop').toString('base64url') +
-            '?platform=android',
-        )
-      ).text()
-      assert.doesNotMatch(later, /1\.0\.102/)
-      assert.equal(
-        (await tess.post('/builds/102/install', { csrf })).status,
-        404,
+      const later = await readJson(tess, `/api/v2/catalog${develop}`)
+      assert(
+        !(later.json.builds as Json[]).some(
+          (build) => build.version === '1.0.102',
+        ),
       )
+      assert.equal((await install(102)).status, 404)
       // Sign-in keeps working from the cache.
       const again = browser()
       assert.equal(
         (await signIn(again, 'first', { email: 'tess@example.com' })).status,
         303,
       )
-      assert.equal((await again.get('/')).status, 200)
+      assertShell(await shellOf(again, '/'))
     })
     await c.until(() => runtime().online(), 10000, 'the host back online')
     runtime().resetClock()
     const developer = browser()
     await signIn(developer, 'first', { email: 'dev@example.com' })
-    const all = await (await developer.get('/')).text()
-    assert.match(all, /Zcash/, 'developers see every app')
-    // The project's Overview, as on the master.
-    assert.match(
-      await (await developer.get('/projects/edge')).text(),
-      /<nav class="tabs" aria-label="Project">/,
+    assertShell(await shellOf(developer, '/'))
+    assert.deepEqual(
+      (
+        (await (await developer.get('/api/v2/catalog/apps')).json()) as Json
+      ).apps.map((app: Json) => app.name),
+      ['Edge Wallet', 'Zcash'],
+      'developers see every app',
+    )
+    // A project's pages are the web app's; its Overview reads the host's
+    // copy, read-only and with no Secrets tab.
+    const shell = async (route: string): Promise<void> => {
+      const page = await developer.get(route)
+      assert.equal(page.status, 200, route)
+      assert.equal(page.headers.get('cache-control'), 'no-store', route)
+      assert.match(await page.text(), /<div id="root"><\/div>/, route)
+    }
+    await shell('/projects/edge')
+    const overview = (await (
+      await developer.get('/api/v2/projects/edge/overview')
+    ).json()) as { slug: string; canSeed: boolean; secrets: boolean }
+    assert.deepEqual(
+      [overview.slug, overview.canSeed, overview.secrets],
+      ['edge', false, false],
     )
     // Runs and builds lists each run, which opens its page on the host.
     const master = c.master.master!.database
@@ -885,27 +971,30 @@ describe('Host cache, sign-in and offline serving', function () {
       10000,
       'the run on the host',
     )
-    const runs = await (await developer.get('/projects/edge/runs')).text()
-    assert.match(runs, /href="\/runs\/m4-run"/)
+    await shell('/projects/edge/runs')
+    const runs = (await (
+      await developer.get('/api/v2/projects/edge/runs')
+    ).json()) as { runs: Array<{ id: string }> }
+    assert(runs.runs.some((run) => run.id === 'm4-run'))
+    // The run page is the web app's, read from the host's copy: its trail
+    // starts from Mason Host (src/web/pages/run).
     const runPage = await developer.get('/runs/m4-run')
     assert.equal(runPage.status, 200)
-    // The host's run page starts its breadcrumbs from Mason Host.
-    assert.deepEqual(crumbTrail(await runPage.text()), [
-      'Mason Host /',
-      'Projects /projects',
-      'Edge /projects/edge',
-      'Runs and builds /projects/edge/runs',
-      'develop /projects/edge/runs?branch=develop',
-      'Run 4242 /runs/m4-run *',
-    ])
-    const masonfile = await (
-      await developer.get('/projects/edge/masonfile')
-    ).text()
-    assert.deepEqual(crumbTrail(masonfile).slice(-2), [
-      'Edge /projects/edge',
-      'Masonfile /projects/edge/masonfile *',
-    ])
-    assert.equal(crumbTrail(masonfile)[0], 'Mason Host /')
+    assert.match(await runPage.text(), /<div id="root"><\/div>/)
+    const read = (await (
+      await developer.get(
+        '/api/v2/runs/m4-run?include=graph,steps,history,details',
+      )
+    ).json()) as { number: number; project: { slug: string }; branch: string }
+    assert.deepEqual(
+      [read.number, read.project.slug, read.branch],
+      [4242, 'edge', 'develop'],
+    )
+    await shell('/projects/edge/masonfile')
+    assert.equal(
+      (await developer.get('/api/v2/projects/edge/masonfile/commits')).status,
+      200,
+    )
     master.db.prepare("DELETE FROM jobs WHERE id='m4-run'").run()
     master.change('job', 'm4-run', 'delete')
   })
@@ -988,9 +1077,16 @@ describe('Host cache, sign-in and offline serving', function () {
       await c.until(() => !runtime().online(), 2000, 'offline')
       assert.equal((await b.get('/')).status, 200)
       runtime().advanceClock(73 * 3_600_000)
+      // The web app's shell, which reads why from /api/v2/node.
       const maintenance = await b.get('/')
       assert.equal(maintenance.status, 503)
-      assert.match(await maintenance.text(), /Maintenance/)
+      assert.match(await maintenance.text(), /<div id="root"><\/div>/)
+      const node = (await (await b.get('/api/v2/node')).json()) as Json
+      assert.equal(node.state, 'maintenance')
+      // Install apps' JSON has nothing to serve either.
+      const apps = await b.get('/api/v2/catalog/apps')
+      assert.equal(apps.status, 503)
+      assert.match(((await apps.json()) as Json).error, /for too long/)
       assert.equal((await b.get('/health')).status, 200)
     })
     await c.until(() => runtime().online(), 10000, 'online')
@@ -1174,17 +1270,17 @@ describe('Host cache, sign-in and offline serving', function () {
       'Hugo on the host',
     )
     const hugoBrowser = browser()
+    // The web app's sign-in, which names its own hashed password worker;
+    // the old pages' worker is gone.
     const login = await hugoBrowser.get('/auth/login?return=/apps')
-    const form = await login.text()
-    assert.match(form, /data-session="\/auth\/password"/)
-    assert.match(form, /data-return="\/apps"/)
-    assert.match(
-      login.headers.get('content-security-policy')!,
-      /'wasm-unsafe-eval'/,
-    )
+    assertShell({
+      status: login.status,
+      headers: login.headers,
+      text: await login.text(),
+    })
     assert.equal(
       (await hugoBrowser.get('/assets/password-worker.js')).status,
-      200,
+      404,
     )
     const json = async (route: string, value: unknown): Promise<Response> =>
       await hugoBrowser.get(route, {
@@ -1429,10 +1525,13 @@ describe('Host cache, sign-in and offline serving', function () {
     })
     const b = new Browser(() => imported.web!.url)
     b.cookies.set('__Host-mason-session', token)
-    const catalog = await b.get('/')
-    const text = await catalog.text()
-    assert.equal(catalog.status, 200, text)
-    assert.match(text, /Edge Wallet/)
+    // The imported session still opens Install apps, which lists her apps.
+    assertShell(await shellOf(b, '/'))
+    const listed = (await (await b.get('/api/v2/catalog/apps')).json()) as Json
+    assert.deepEqual(
+      (listed.apps as Json[]).map((app) => app.name),
+      ['Edge Wallet'],
+    )
     assert(
       existsSync(path.join(data, 'storage', 'files', 'e'.repeat(32) + '.apk')),
     )
@@ -1491,11 +1590,15 @@ describe('Host cache, sign-in and offline serving', function () {
       'the host synced',
     )
     await master.settings.set(admin, 'host', before)
-    assert.equal((await b.get('/install.sh')).status, 404)
-    assert.equal(
-      (await b.get('/releases/current/mason-0.2.0-linux-x64.tar.gz')).status,
-      404,
-    )
+    // Their addresses are no files: signed out, they send to sign in.
+    for (const route of [
+      '/install.sh',
+      '/releases/current/mason-0.2.0-linux-x64.tar.gz',
+    ]) {
+      const reply = await b.get(route)
+      assert.equal(reply.status, 303, route)
+      assert.match(reply.headers.get('location')!, /^\/auth\/login\?return=/)
+    }
     assert(!existsSync(path.join(host.dir, 'storage', 'releases')))
   })
 
@@ -1618,9 +1721,30 @@ describe('Host cache, sign-in and offline serving', function () {
     )
     assert.equal((await tess.get('/projects/hidden')).status, 404)
     assert.equal((await tess.get('/projects/none')).status, 404)
-    const script = await tess.get('/assets/catalog.js')
-    assert.equal(script.status, 200)
-    assert.match(script.headers.get('content-type')!, /javascript/)
+    // Install apps is the web app's: the old catalog script is gone, and an
+    // app or a branch she may not see is a 404 inside the shell.
+    assert.equal((await tess.get('/assets/catalog.js')).status, 404)
+    assertShell(await shellOf(tess, '/apps/2'), 404)
+    assertShell(await shellOf(tess, '/apps/nope'), 404)
+    assertShell(await shellOf(tess, '/apps/1/branches/not*a*key'), 404)
+    // Devices answers 403 to someone who may not register; signed out, it
+    // and the QR code ask for a sign-in, and a grant's part that is no file
+    // is not found.
+    const login2 = await anonymous.get('/devices')
+    assert.equal(login2.status, 303)
+    assert.match(
+      login2.headers.get('location')!,
+      /^\/auth\/login\?return=%2Fdevices$/,
+    )
+    assert.equal((await anonymous.get('/devices/qr')).status, 303)
+    assert.equal(
+      (await tess.get(`/install/${'A'.repeat(43)}/other`)).status,
+      404,
+    )
+    assert.equal(
+      (await tess.get(`/install/${'A'.repeat(43)}/artifact`)).status,
+      404,
+    )
     assert.equal((await tess.get('/nothing-here')).status, 404)
     assert.equal((await tess.get('/releases/current/..%2Fsecret')).status, 404)
     // A granted Xcode the host does not have.
@@ -1634,8 +1758,7 @@ describe('Host cache, sign-in and offline serving', function () {
     // Offline, plain answers pass through without the banner.
     await c.drop('host', 1000, async () => {
       await c.until(() => !runtime().online(), 2000, 'offline')
-      const missing = await tess.get('/nothing-here')
-      assert.equal(await missing.text(), 'Not found')
+      assertShell(await shellOf(tess, '/nothing-here'), 404)
     })
     await c.until(() => runtime().online(), 10000, 'online')
     // A host started before it has a runtime only says it is waiting.
@@ -1648,8 +1771,16 @@ describe('Host cache, sign-in and offline serving', function () {
     const waiting = await fetch(
       `http://127.0.0.1:${(server.address() as { port: number }).port}/anything`,
     )
+    // A page is the web app's shell, which reads why from /api/v2/node;
+    // anything else says so plainly.
     assert.equal(waiting.status, 503)
-    assert.match(await waiting.text(), /waiting for its master/)
+    assert.match(await waiting.text(), /<div id="root"><\/div>/)
+    const posted = await fetch(
+      `http://127.0.0.1:${(server.address() as { port: number }).port}/anything`,
+      { method: 'POST' },
+    )
+    assert.equal(posted.status, 503)
+    assert.match(await posted.text(), /waiting for its master/)
     server.close()
   })
 
@@ -1964,5 +2095,43 @@ describe('Plain emails on the host', () => {
       [],
     )
     db.close()
+  })
+})
+
+describe('Masonfile commits on the host', () => {
+  it('offers each commit once, with its newest run’s branch, newest first and 30 at most, as the master does', () => {
+    const dir = mkdtempSync(
+      path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'host-commits-'),
+    )
+    const cache = new HostCache(dir)
+    try {
+      const job = cache.db.prepare(
+        "INSERT INTO jobs(id,project_id,workflow,number,branch,commit_sha,trigger,status,created,params,actor) VALUES(?,7,'build',?,?,?,'request','succeeded',?,'{}','test')",
+      )
+      const masonfile = cache.db.prepare(
+        "INSERT INTO masonfiles(key,project_id,commit_sha,file,text) VALUES(?,7,?,'Masonfile.ts','')",
+      )
+      const commits = (): string[][] =>
+        hostMasonfileCommits({ cache } as unknown as HostRuntime, 7).map(
+          (commit) => [commit.sha, commit.branch],
+        )
+      // One commit run on two branches, the newer run copied first; and a
+      // commit the host has no Masonfile copy for.
+      job.run('b-newer', 2, 'feature', 'shared', 2000)
+      job.run('a-older', 1, 'master', 'shared', 1000)
+      masonfile.run('7:shared', 'shared')
+      job.run('c-bare', 3, 'master', 'bare', 3000)
+      assert.deepEqual(commits(), [['shared', 'feature']])
+      for (let i = 0; i < 31; i++) {
+        job.run(`d-${i}`, 10 + i, 'develop', `c${i}`, 10_000 + i)
+        masonfile.run(`7:c${i}`, `c${i}`)
+      }
+      assert.deepEqual(
+        commits(),
+        Array.from({ length: 30 }, (_, i) => [`c${30 - i}`, 'develop']),
+      )
+    } finally {
+      cache.close()
+    }
   })
 })

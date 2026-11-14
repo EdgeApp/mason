@@ -10,16 +10,27 @@ import {
 } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { once } from 'node:events'
+import type { Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import express from 'express'
 import { after, before, describe, it } from 'mocha'
 import { SESSION_COOKIE } from '../auth/routes.js'
 import { branchKey } from '../catalog/platform.js'
+import {
+  catalogShellRoutes,
+  catalogStatus,
+  type CatalogShellOptions,
+} from '../catalog/shell.js'
+import { CatalogRefused, type CatalogSource } from '../catalog/source.js'
 import { DEVICE_COOKIE } from '../devices/store.js'
+import { HOST_UNREACHABLE_ERROR } from '../shared/api/index.js'
+import { assertShell } from '../test/webShell.js'
 import { HostCache } from '../host/cache.js'
 import { pinnedFetch } from '../node/pinnedFetch.js'
 import type { RunningNode } from '../node/serve.js'
 import { digest, insertBuild } from '../store.js'
 import { cluster, type Cluster } from '../test/cluster.js'
-import { crumbTrail } from '../test/crumbs.js'
 import { MASTER_SESSION_COOKIE } from './auth.js'
 import { localOperator } from './roles.js'
 
@@ -69,30 +80,19 @@ describe('Install apps and Devices on the master, through the host', function ()
       method?: string
       cookie?: string
       headers?: Record<string, string>
-      form?: Record<string, string>
       body?: Uint8Array
     } = {},
   ): Promise<Reply> => {
     const response = await pinnedFetch(
       url(node) + route,
       {
-        method: init.method ?? (init.form == null ? 'GET' : 'POST'),
+        method: init.method ?? 'GET',
         redirect: 'manual',
         headers: {
           ...(init.cookie == null ? {} : { cookie: init.cookie }),
-          ...(init.form == null
-            ? {}
-            : {
-                origin: url(node),
-                'content-type': 'application/x-www-form-urlencoded',
-              }),
           ...init.headers,
         },
-        ...(init.form == null
-          ? init.body == null
-            ? {}
-            : { body: init.body }
-          : { body: new URLSearchParams(init.form).toString() }),
+        ...(init.body == null ? {} : { body: init.body }),
       },
       node.web!.certificate!.pin,
     )
@@ -104,6 +104,67 @@ describe('Install apps and Devices on the master, through the host', function ()
       headers: response.headers,
     }
   }
+  /**
+   * A JSON call as the web app makes it: a change carries the session's
+   * proof in its header, from the node's own origin.
+   */
+  const api = async (
+    node: RunningNode,
+    method: 'GET' | 'POST',
+    route: string,
+    who: { cookie: string; csrf: string },
+    extra = '',
+    body?: unknown,
+  ): Promise<Reply & { json: Json }> => {
+    const reply = await request(node, route, {
+      method,
+      cookie: who.cookie + extra,
+      headers:
+        method === 'GET'
+          ? {}
+          : {
+              origin:
+                node === host
+                  ? host.host!.cache.store.config.origin
+                  : url(node),
+              'x-mason-csrf': who.csrf,
+              ...(body === undefined
+                ? {}
+                : { 'content-type': 'application/json' }),
+            },
+      ...(body === undefined
+        ? {}
+        : { body: new TextEncoder().encode(JSON.stringify(body)) }),
+    })
+    let json: Json
+    try {
+      json = JSON.parse(reply.text)
+    } catch {
+      json = undefined
+    }
+    return { ...reply, json }
+  }
+  /** A branch's JSON, as the web app reads it. */
+  const branchOf = async (
+    node: RunningNode,
+    who: { cookie: string; csrf: string },
+    platform: string,
+    extra = '',
+    app = ALPHA,
+  ): Promise<Json> => {
+    const reply = await api(
+      node,
+      'GET',
+      `/api/v2/catalog/apps/${apps[app]}/branches/${branchKey('master')}?platform=${platform}`,
+      who,
+      extra,
+    )
+    assert.equal(reply.status, 200, reply.text)
+    return reply.json
+  }
+  /** A build's row in a branch's JSON. */
+  const row = (branch: Json, id: number): Json =>
+    (branch.builds as Json[]).find((build) => build.id === id)
   /** A master session: its cookie, its form proof, and its token for signing out. */
   const onMaster = (
     person: string,
@@ -126,17 +187,6 @@ describe('Install apps and Devices on the master, through the host', function ()
   const setOrigin = async (origin: string): Promise<void> => {
     await c.master.master!.settings.set(admin, 'master', { origin })
   }
-  /** The side menu's links on a page, in order; the current one starred. */
-  const rail = (html: string): string[] =>
-    [
-      ...(/<nav class="rail"[^>]*>(.*?)<\/nav>/.exec(html)?.[1] ?? '').matchAll(
-        /<a href="([^"]+)"( aria-current="page")?/g,
-      ),
-    ].map((match) => match[1]! + (match[2] == null ? '' : '*'))
-  const cards = (html: string): string[] =>
-    [...html.matchAll(/<a class="app-card" href="([^"]+)"/g)].map(
-      (match) => match[1]!,
-    )
   const openssl = (args: string[]): void => {
     execFileSync('openssl', args, { cwd: root, stdio: 'ignore' })
   }
@@ -328,34 +378,41 @@ describe('Install apps and Devices on the master, through the host', function ()
 
   it('opens Install apps at a tester’s home on the master, which lists what the host lists for them', async () => {
     const tess = onMaster('tess')
-    const home = await request(c.master, '/?platform=android', {
-      cookie: tess.cookie,
-    })
-    assert.equal(home.status, 200)
-    assert.deepEqual(cards(home.text), [
-      `/apps/${apps[ALPHA]}?platform=android`,
-    ])
-    const signedOut = await request(c.master, '/apps')
-    assert.equal(signedOut.status, 303)
-    assert.equal(signedOut.headers.get('location'), '/sign-in')
-    const page = await request(c.master, '/apps?platform=android', {
-      cookie: tess.cookie,
-    })
-    assert.equal(page.status, 200, page.text)
-    const onHostPage = await request(host, '/apps?platform=android', {
-      cookie: onHost('tess').cookie,
-    })
-    assert.deepEqual(cards(page.text), cards(onHostPage.text))
-    assert.deepEqual(cards(page.text), [
-      `/apps/${apps[ALPHA]}?platform=android`,
-    ])
-    // In the master's shell, with the platform switch; Devices is in the side menu.
-    assert.match(page.text, /href="\/account" aria-label="Your account"/)
-    assert.match(
-      page.text,
-      /<nav class="catalog-nav" data-catalog-platforms aria-label="Build platform"><div class="platforms"[^>]*>.*iOS.*Android.*<\/div><\/nav>/,
+    // Her home and Install apps are the web app's, which reads the apps as JSON.
+    assertShell(
+      await request(c.master, '/?platform=android', { cookie: tess.cookie }),
     )
-    assert.doesNotMatch(page.text, /Register Device</)
+    assertShell(
+      await request(c.master, '/apps?platform=android', {
+        cookie: tess.cookie,
+      }),
+    )
+    // Signed out, each page asks for a sign-in.
+    for (const route of [
+      '/apps',
+      `/apps/${apps[ALPHA]}`,
+      '/devices',
+      '/devices/qr',
+      `/devices/complete/${'A'.repeat(43)}`,
+    ]) {
+      const signedOut = await request(c.master, route)
+      assert.equal(signedOut.status, 303, route)
+      assert.equal(signedOut.headers.get('location'), '/sign-in', route)
+    }
+    const list = await api(c.master, 'GET', '/api/v2/catalog/apps', tess)
+    assert.equal(list.status, 200, list.text)
+    const onHostList = await api(
+      host,
+      'GET',
+      '/api/v2/catalog/apps',
+      onHost('tess'),
+    )
+    assert.deepEqual(list.json, onHostList.json)
+    assert.deepEqual(
+      (list.json.apps as Json[]).map((app) => app.id),
+      [apps[ALPHA]],
+    )
+    assert.deepEqual(list.json.platforms, ['android', 'ios'])
     // The relay session the host keeps for it never signs a browser in.
     const relay = host
       .host!.cache.db.prepare(
@@ -365,7 +422,7 @@ describe('Install apps and Devices on the master, through the host', function ()
     assert.equal(relay.relayed, 1)
   })
 
-  it('M7 keeps the side menu for a tester on both nodes, with only Install apps and Devices; to her /projects does not exist', async () => {
+  it('M7 answers a tester’s Install apps and Devices with the web app’s shell on both nodes; to her /projects does not exist', async () => {
     const device = `; ${DEVICE_COOKIE}=${devices.tess}`
     const branch = `/apps/${apps[ALPHA]}/branches/${branchKey('master')}?platform=ios`
     for (const [node, who] of [
@@ -373,74 +430,56 @@ describe('Install apps and Devices on the master, through the host', function ()
       [host, onHost('tess')],
     ] as const) {
       const name = node === host ? 'host' : 'master'
-      // The breadcrumbs start from the node; the platform is left out here.
-      const root = node === host ? 'Mason Host /' : 'Mason Master /'
-      const app = `/apps/${apps[ALPHA]}`
-      for (const [route, menu, crumbs] of [
-        ['/', ['/apps*', '/devices'], ['Install apps /apps *']],
-        ['/apps', ['/apps*', '/devices'], ['Install apps /apps *']],
-        [app, ['/apps*', '/devices'], ['Install apps /apps', `Alpha ${app} *`]],
-        [
-          branch,
-          ['/apps*', '/devices'],
-          [
-            'Install apps /apps',
-            `Alpha ${app}`,
-            `master ${app}/branches/${branchKey('master')} *`,
-          ],
-        ],
-        ['/devices', ['/apps', '/devices*'], ['Devices /devices *']],
-      ] as const) {
+      // The side menu, the breadcrumbs and the account button are the web
+      // app's; each address answers its shell.
+      for (const route of [
+        '/',
+        '/apps',
+        `/apps/${apps[ALPHA]}`,
+        branch,
+        '/devices',
+      ]) {
         const reply = await request(node, route, {
           cookie: who.cookie + device,
         })
-        assert.equal(reply.status, 200, `${name} ${route}`)
-        assert.deepEqual(rail(reply.text), menu, `${name} ${route}`)
-        assert.deepEqual(
-          crumbTrail(reply.text).map((crumb) =>
-            crumb.replace(/\?platform=[a-z]+/, ''),
-          ),
-          [root, ...crumbs],
-          `${name} ${route}`,
-        )
-        assert.match(
-          reply.text,
-          /href="\/account" aria-label="Your account"/,
-          `${name} ${route}`,
-        )
-        assert.match(
-          reply.text,
-          new RegExp(
-            `<div class="section">${node === host ? 'Host' : 'Master'}</div>`,
-          ),
-        )
+        assertShell(reply)
       }
-      // The iOS installer page, after Install.
-      const installed = await request(node, `/builds/${builds.ipa}/install`, {
-        cookie: who.cookie + device,
-        form: { csrf: who.csrf },
-      })
+      // Install answers the installer's link on the node's own address.
+      const installed = await api(
+        node,
+        'POST',
+        `/api/v2/catalog/builds/${builds.ipa}/install`,
+        who,
+        device,
+      )
       assert.equal(installed.status, 200, `${name}: ${installed.text}`)
-      assert.match(installed.text, /<h1>Install app<\/h1>/)
-      assert.deepEqual(rail(installed.text), ['/apps*', '/devices'])
+      assert.equal(installed.json.kind, 'itms', name)
+      assert.match(
+        installed.json.url,
+        /^itms-services:\/\/\?action=download-manifest&url=/,
+        name,
+      )
       for (const route of [
         '/projects',
         '/projects/relay',
         '/projects/relay/runs',
         '/projects/relay/masonfile',
       ]) {
-        const reply = await request(node, route, { cookie: who.cookie })
-        assert.equal(reply.status, 404, `${name} ${route}`)
-        assert.deepEqual(rail(reply.text), ['/apps*', '/devices'])
+        assertShell(await request(node, route, { cookie: who.cookie }), 404)
       }
     }
-    assert.equal(
-      (
-        await request(c.master, '/projects/new', {
-          cookie: onMaster('tess').cookie,
-        })
-      ).status,
+    assertShell(
+      await request(c.master, '/projects/new', {
+        cookie: onMaster('tess').cookie,
+      }),
       404,
+    )
+    // A developer reads the wizard's 403 inside the web app.
+    assertShell(
+      await request(c.master, '/projects/new', {
+        cookie: onMaster('dev').cookie,
+      }),
+      403,
     )
   })
 
@@ -450,44 +489,34 @@ describe('Install apps and Devices on the master, through the host', function ()
       [host, onHost('dev')],
     ] as const) {
       const name = node === host ? 'host' : 'master'
-      const home = await request(node, '/', { cookie: who.cookie })
-      assert.equal(home.status, 200, name)
-      if (node === host) {
-        assert.match(home.text, /<h1>Apps<\/h1>/)
+      // Both homes are the web app's: Projects & apps on the master,
+      // Install apps (which lists every app to a developer) on the host.
+      assertShell(await request(node, '/', { cookie: who.cookie }))
+      if (node === host)
         assert.deepEqual(
-          rail(home.text),
-          ['/apps*', '/projects', '/artifacts', '/devices'],
+          (
+            (await api(node, 'GET', '/api/v2/catalog/apps', who)).json
+              .apps as Json[]
+          ).map((app) => app.id),
+          [apps[ALPHA], apps[BETA]],
           name,
         )
-      } else {
-        assert.match(home.text, /<h1>Projects &amp; apps<\/h1>/)
-        assert.deepEqual(
-          rail(home.text),
-          ['/apps', '/projects*', '/artifacts', '/devices'],
-          name,
-        )
-      }
+      // Projects & apps is the web app's on both nodes, filters and all.
       const projects = await request(node, '/projects?platform=android', {
         cookie: who.cookie,
       })
-      assert.equal(projects.status, 200, name)
-      assert.match(projects.text, /<h1>Projects &amp; apps<\/h1>/)
-      assert.deepEqual(crumbTrail(projects.text), [
-        node === host ? 'Mason Host /' : 'Mason Master /',
-        'Projects /projects *',
+      assertShell(projects)
+      // A project's pages are the web app's too.
+      for (const route of [
+        '/projects/relay',
+        '/projects/relay/runs',
+        '/projects/relay/masonfile',
       ])
-      assert.deepEqual(rail(projects.text), [
-        '/apps',
-        '/projects*',
-        '/artifacts',
-        '/devices',
-      ])
-      // The filter chips stay on Projects & apps.
-      assert.match(projects.text, /href="\/projects\?platform=ios"/)
-      const project = await request(node, '/projects/relay', {
-        cookie: who.cookie,
-      })
-      assert.equal(project.status, 200, name)
+        assertShell(await request(node, route, { cookie: who.cookie }))
+      assertShell(
+        await request(node, '/projects/none', { cookie: who.cookie }),
+        404,
+      )
     }
     // Signed out, /projects asks for a sign-in on both nodes.
     assert.equal(
@@ -505,15 +534,17 @@ describe('Install apps and Devices on the master, through the host', function ()
     for (const route of [
       `/apps/${apps[BETA]}`,
       `/apps/${apps[BETA]}/branches/${branchKey('master')}`,
-    ]) {
-      const reply = await request(c.master, route, { cookie: tess.cookie })
-      assert.equal(reply.status, 404, route)
-      assert.match(reply.text, /This app is unavailable/)
-      assert.equal(
-        (await request(host, route, { cookie: onHost('tess').cookie })).status,
-        404,
-      )
-    }
+    ])
+      for (const [node, session] of [
+        [c.master, tess],
+        [host, onHost('tess')],
+      ] as const) {
+        // The page's shell carries the status; its JSON says why.
+        assertShell(await request(node, route, { cookie: session.cookie }), 404)
+        const reply = await api(node, 'GET', `/api/v2/catalog${route}`, session)
+        assert.equal(reply.status, 404, route)
+        assert.deepEqual(reply.json, { error: 'App unavailable' }, route)
+      }
     // An install or a device rebuild of that app's build is refused too, on
     // both nodes, and nothing is queued for it.
     const device = `; ${DEVICE_COOKIE}=${devices.tess}`
@@ -522,16 +553,19 @@ describe('Install apps and Devices on the master, through the host', function ()
       [host, onHost('tess')],
     ] as const)
       for (const action of ['install', 'prepare']) {
-        const reply = await request(node, `/builds/${builds.beta}/${action}`, {
-          cookie: session.cookie + device,
-          form: { csrf: session.csrf },
-        })
+        const reply = await api(
+          node,
+          'POST',
+          `/api/v2/catalog/builds/${builds.beta}/${action}`,
+          session,
+          device,
+        )
         assert.equal(
           reply.status,
           404,
           `${action}: ${reply.text.slice(0, 200)}`,
         )
-        assert.match(reply.text, /App unavailable/)
+        assert.deepEqual(reply.json, { error: 'App unavailable' })
       }
     assert.equal(
       db()
@@ -543,23 +577,22 @@ describe('Install apps and Devices on the master, through the host', function ()
 
   it('streams the host’s bytes from the master, with HEAD, a range and an unsatisfiable range', async () => {
     const tess = onMaster('tess')
-    const branch = await request(
+    // An Android build installs by download: no grant until Install.
+    const branch = await branchOf(c.master, tess, 'android')
+    const apk = row(branch, builds.apk!)
+    assert.deepEqual(
+      [apk.eligible, apk.token, apk.installUrl],
+      [true, undefined, undefined],
+    )
+    const install = await api(
       c.master,
-      `/apps/${apps[ALPHA]}/branches/${branchKey('master')}?platform=android`,
-      { cookie: tess.cookie },
+      'POST',
+      `/api/v2/catalog/builds/${builds.apk}/install`,
+      tess,
     )
-    assert.match(
-      branch.text,
-      new RegExp(
-        `<form id="build-${builds.apk}" method="post" action="/builds/${builds.apk}/install">`,
-      ),
-    )
-    const install = await request(c.master, `/builds/${builds.apk}/install`, {
-      cookie: tess.cookie,
-      form: { csrf: tess.csrf },
-    })
-    assert.equal(install.status, 303, install.text)
-    const artifact = install.headers.get('location')!
+    assert.equal(install.status, 200, install.text)
+    assert.equal(install.json.kind, 'download')
+    const artifact = install.json.url as string
     assert.match(artifact, /^\/install\/[A-Za-z0-9_-]{43}\/artifact$/)
     const full = await request(c.master, artifact)
     assert.equal(full.status, 200)
@@ -615,27 +648,24 @@ describe('Install apps and Devices on the master, through the host', function ()
   it('links a grant from the master’s branch page to the master’s manifest, and refuses it once the master session signs out', async () => {
     const tess = onMaster('tess')
     const device = `; ${DEVICE_COOKIE}=${devices.tess}`
-    const page = await request(
-      c.master,
-      `/apps/${apps[ALPHA]}/branches/${branchKey('master')}?platform=ios`,
-      { cookie: tess.cookie + device },
+    const page = await branchOf(c.master, tess, 'ios', device)
+    assert.deepEqual([page.ios, page.device], [{ via: 'here' }, true])
+    const ipa = row(page, builds.ipa!)
+    const href = /^itms-services:\/\/\?action=download-manifest&url=(.+)$/.exec(
+      ipa.installUrl,
     )
-    assert.equal(page.status, 200, page.text)
-    const href = new RegExp(
-      `<a id="build-${builds.ipa}" class="list-row build-row" data-install aria-label="[^"]*" href="itms-services://\\?action=download-manifest&amp;url=([^"]+)"`,
-    ).exec(page.text)
-    assert(href != null, page.text)
+    assert(href != null, ipa.installUrl)
     const manifestUrl = decodeURIComponent(href[1]!)
     const token = new RegExp(
       `^${MASTER_ORIGIN}/install/([A-Za-z0-9_-]{43})/manifest\\.plist$`,
     ).exec(manifestUrl)?.[1]
     assert(token != null, manifestUrl)
-    // The build the device is not in offers Prepare instead.
-    assert.match(
-      page.text,
-      new RegExp(
-        `<form id="build-${builds.stale}" method="post" action="/builds/${builds.stale}/install">.*Prepare for device`,
-      ),
+    assert.equal(ipa.token, token)
+    // The build the device is not in has no grant: the web app offers Prepare.
+    const stale = row(page, builds.stale!)
+    assert.deepEqual(
+      [stale.eligible, stale.token, stale.installUrl],
+      [false, undefined, undefined],
     )
     const manifest = await request(c.master, `/install/${token}/manifest.plist`)
     assert.equal(manifest.status, 200)
@@ -647,8 +677,8 @@ describe('Install apps and Devices on the master, through the host', function ()
         `<string>${MASTER_ORIGIN}/install/${token}/artifact</string>.*<string>${ALPHA}</string>`,
       ),
     )
-    const ipa = await request(c.master, `/install/${token}/artifact`)
-    assert.equal(sha(ipa.body), sha(files.ipa))
+    const bytes = await request(c.master, `/install/${token}/artifact`)
+    assert.equal(sha(bytes.body), sha(files.ipa))
     // Signing out of the master ends the relay session and its grants.
     c.master.master!.auth.signOut(tess.token)
     await c.until(
@@ -713,94 +743,111 @@ describe('Install apps and Devices on the master, through the host', function ()
 
   it('selects a device on the master only when it is the person’s, and the branch page and Install follow it', async () => {
     const tess = onMaster('tess')
-    const own = await request(c.master, `/devices/${devices.tess}/select`, {
-      cookie: tess.cookie,
-      form: { csrf: tess.csrf },
-    })
-    assert.equal(own.status, 303)
-    assert.equal(own.headers.get('location'), '/devices')
+    const own = await api(
+      c.master,
+      'POST',
+      `/api/v2/devices/${devices.tess}/select`,
+      tess,
+    )
+    assert.equal(own.status, 200, own.text)
+    assert.equal(own.json.selected, devices.tess)
     assert.match(
       own.headers.get('set-cookie')!,
       new RegExp(`^${DEVICE_COOKIE}=${devices.tess}; .*HttpOnly; Secure`),
     )
     // Another account's device: refused, and no cookie.
-    const other = await request(c.master, `/devices/${devices.nora}/select`, {
-      cookie: tess.cookie,
-      form: { csrf: tess.csrf },
-    })
+    const other = await api(
+      c.master,
+      'POST',
+      `/api/v2/devices/${devices.nora}/select`,
+      tess,
+    )
     assert.equal(other.status, 404)
-    assert.match(other.text, /Device unavailable/)
+    assert.deepEqual(other.json, { error: 'Device unavailable' })
     assert.equal(other.headers.get('set-cookie'), null)
-    // A form without the session's proof.
-    assert.equal(
-      (
-        await request(c.master, `/devices/${devices.tess}/select`, {
-          cookie: tess.cookie,
-          form: { csrf: 'wrong' },
-        })
-      ).status,
-      400,
+    // A request without the session's proof.
+    const unproven = await api(
+      c.master,
+      'POST',
+      `/api/v2/devices/${devices.tess}/select`,
+      { ...tess, csrf: 'wrong' },
     )
-    const branch = `/apps/${apps[ALPHA]}/branches/${branchKey('master')}?platform=ios`
-    // With Nora's device in the cookie the page offers registration, as with none.
-    const forged = await request(c.master, branch, {
-      cookie: `${tess.cookie}; ${DEVICE_COOKIE}=${devices.nora}`,
-    })
-    assert.match(forged.text, /aria-label="Register Device for 1\.0 build 2"/)
-    assert.doesNotMatch(forged.text, /itms-services/)
-    const none = await request(c.master, `/builds/${builds.ipa}/install`, {
-      cookie: tess.cookie,
-      form: { csrf: tess.csrf },
-    })
-    assert.equal(none.status, 409)
-    assert.match(none.text, /Register or select your iPhone or iPad/)
-    // With hers: Install for the build she is in; the other is refused.
+    assert.equal(unproven.status, 403)
+    assert.equal(unproven.headers.get('set-cookie'), null)
+    // With Nora's device in the cookie the branch offers registration, as with none.
+    const forged = await branchOf(
+      c.master,
+      tess,
+      'ios',
+      `; ${DEVICE_COOKIE}=${devices.nora}`,
+    )
+    assert.equal(forged.device, false)
+    for (const build of forged.builds as Json[])
+      assert.deepEqual(
+        [build.eligible, build.token, build.installUrl],
+        [false, undefined, undefined],
+      )
+    const none = await api(
+      c.master,
+      'POST',
+      `/api/v2/catalog/builds/${builds.ipa}/install`,
+      tess,
+    )
+    assert.deepEqual(none.json, { kind: 'register' })
+    // With hers: Install for the build she is in; the other is to prepare.
     const device = `; ${DEVICE_COOKIE}=${devices.tess}`
-    const page = await request(c.master, branch, {
-      cookie: tess.cookie + device,
-    })
-    assert.match(page.text, /aria-label="Install 1\.0 build 2"/)
-    const refused = await request(c.master, `/builds/${builds.stale}/install`, {
-      cookie: tess.cookie + device,
-      form: { csrf: tess.csrf },
-    })
-    assert.equal(refused.status, 409)
-    assert.match(
-      refused.text,
-      new RegExp(
-        `<form method="post" action="/builds/${builds.stale}/prepare">`,
-      ),
+    const page = await branchOf(c.master, tess, 'ios', device)
+    assert.equal(row(page, builds.ipa!).eligible, true)
+    const refused = await api(
+      c.master,
+      'POST',
+      `/api/v2/catalog/builds/${builds.stale}/install`,
+      tess,
+      device,
     )
-    const installed = await request(c.master, `/builds/${builds.ipa}/install`, {
-      cookie: tess.cookie + device,
-      form: { csrf: tess.csrf },
-    })
+    assert.deepEqual(refused.json, { kind: 'prepare', buildId: builds.stale })
+    const installed = await api(
+      c.master,
+      'POST',
+      `/api/v2/catalog/builds/${builds.ipa}/install`,
+      tess,
+      device,
+    )
     assert.equal(installed.status, 200)
+    assert.equal(installed.json.kind, 'itms')
     assert.match(
-      installed.text,
+      installed.json.url,
       new RegExp(
-        `href="itms-services://\\?action=download-manifest&amp;url=${encodeURIComponent(MASTER_ORIGIN)}%2Finstall%2F[A-Za-z0-9_-]{43}%2Fmanifest\\.plist"`,
+        `^itms-services://\\?action=download-manifest&url=${encodeURIComponent(MASTER_ORIGIN)}%2Finstall%2F[A-Za-z0-9_-]{43}%2Fmanifest\\.plist$`,
       ),
     )
-    assert.match(installed.text, /src="\/assets\/catalog\.js"/)
-    // The Devices page lists what the host has for her, with hers selected.
-    const list = await request(c.master, '/devices', {
-      cookie: tess.cookie + device,
-    })
-    assert.equal(list.status, 200)
-    assert.match(list.text, /iPhone of tess/)
-    assert.doesNotMatch(list.text, /iPhone of nora/)
-    assert.match(list.text, /Selected device/)
-    assert.match(
-      (await request(host, '/devices', { cookie: onHost('tess').cookie })).text,
-      /iPhone of tess/,
+    assert.equal(typeof installed.json.expiresAt, 'number')
+    // Devices lists what the host has for her, with hers selected.
+    assertShell(await request(c.master, '/devices', { cookie: tess.cookie }))
+    const list = await api(c.master, 'GET', '/api/v2/devices', tess, device)
+    assert.equal(list.status, 200, list.text)
+    const names = (list.json.devices as Json[]).map((entry) => entry.name)
+    assert(names.includes('iPhone of tess'), names.join())
+    assert(!names.includes('iPhone of nora'), names.join())
+    assert.equal(list.json.selected, devices.tess)
+    assert.equal(list.json.registration, true)
+    assert.equal(list.json.via, undefined)
+    assert(
+      (
+        (await api(host, 'GET', '/api/v2/devices', onHost('tess'))).json
+          .devices as Json[]
+      ).some((entry) => entry.name === 'iPhone of tess'),
     )
-    // Removing the selected device clears the cookie; the device stays hers until the master hears it.
-    const rename = await request(c.master, `/devices/${devices.tess}/rename`, {
-      cookie: tess.cookie,
-      form: { csrf: tess.csrf, name: 'Tess phone' },
-    })
-    assert.equal(rename.status, 303)
+    // A rename reaches the master.
+    const rename = await api(
+      c.master,
+      'POST',
+      `/api/v2/devices/${devices.tess}/rename`,
+      tess,
+      device,
+      { name: 'Tess phone' },
+    )
+    assert.equal(rename.status, 200, rename.text)
     await c.until(
       () =>
         (
@@ -813,10 +860,12 @@ describe('Install apps and Devices on the master, through the host', function ()
     )
     assert.equal(
       (
-        await request(c.master, `/devices/${devices.tess}/dance`, {
-          cookie: tess.cookie,
-          form: { csrf: tess.csrf },
-        })
+        await api(
+          c.master,
+          'POST',
+          `/api/v2/devices/${devices.tess}/dance`,
+          tess,
+        )
       ).status,
       404,
     )
@@ -825,16 +874,15 @@ describe('Install apps and Devices on the master, through the host', function ()
   it('reaches the host with Prepare for this device from the master', async () => {
     const tess = onMaster('tess')
     const device = `; ${DEVICE_COOKIE}=${devices.tess}`
-    const prepared = await request(
+    const prepared = await api(
       c.master,
-      `/builds/${builds.stale}/prepare`,
-      {
-        cookie: tess.cookie + device,
-        form: { csrf: tess.csrf },
-      },
+      'POST',
+      `/api/v2/catalog/builds/${builds.stale}/prepare`,
+      tess,
+      device,
     )
     assert.equal(prepared.status, 200, prepared.text)
-    assert.match(prepared.text, /Preparing build/)
+    assert.deepEqual(prepared.json, { prepared: true })
     await c.until(
       () =>
         db()
@@ -845,24 +893,36 @@ describe('Install apps and Devices on the master, through the host', function ()
       5000,
       'the prepare request on the master',
     )
-    // Without a device, or with another's, it goes to Devices.
+    // Without a device, or with another's, nothing is prepared: the web
+    // app sends her to Devices.
     for (const cookie of ['', `; ${DEVICE_COOKIE}=${devices.nora}`]) {
-      const reply = await request(c.master, `/builds/${builds.stale}/prepare`, {
-        cookie: tess.cookie + cookie,
-        form: { csrf: tess.csrf },
-      })
-      assert.equal(reply.status, 303)
-      assert.equal(reply.headers.get('location'), '/devices')
+      const reply = await api(
+        c.master,
+        'POST',
+        `/api/v2/catalog/builds/${builds.stale}/prepare`,
+        tess,
+        cookie,
+      )
+      assert.equal(reply.status, 200, reply.text)
+      assert.deepEqual(reply.json, { prepared: false })
     }
   })
 
   it('registers a device from the master: the callback returns to the master, and the device appears on the host', async () => {
     const tess = onMaster('tess')
-    const profile = await request(c.master, '/devices/profile', {
-      cookie: tess.cookie,
-      form: { csrf: tess.csrf },
-    })
+    // Registering answers a profile to download once, the way the web app
+    // hands it to the iPhone.
+    const made = await api(
+      c.master,
+      'POST',
+      '/api/v2/devices/registrations',
+      tess,
+    )
+    assert.equal(made.status, 200, made.text)
+    assert.match(made.json.url, /^\/devices\/profiles\/[A-Za-z0-9_-]{43}$/)
+    const profile = await request(c.master, made.json.url)
     assert.equal(profile.status, 200, profile.text)
+    assert.equal((await request(c.master, made.json.url)).status, 404)
     assert.equal(
       profile.headers.get('content-type'),
       'application/x-apple-aspen-config; charset=utf-8',
@@ -894,11 +954,17 @@ describe('Install apps and Devices on the master, through the host', function ()
       callback.headers.get('location'),
       `${MASTER_ORIGIN}/devices/complete/${token}`,
     )
-    const waiting = await request(c.master, `/devices/complete/${token}`, {
-      cookie: tess.cookie,
-    })
-    assert.equal(waiting.status, 200)
-    assert.match(waiting.text, /Registering device|Device registered/)
+    // The completion link answers the shell; its JSON says how far it is.
+    assertShell(
+      await request(c.master, `/devices/complete/${token}`, {
+        cookie: tess.cookie,
+      }),
+    )
+    assert.match(
+      (await api(c.master, 'GET', `/api/v2/devices/complete/${token}`, tess))
+        .json.state,
+      /^(registering|registered)$/,
+    )
     const id = await c.until(
       () =>
         (
@@ -911,29 +977,46 @@ describe('Install apps and Devices on the master, through the host', function ()
       10_000,
       'the device on the host',
     )
+    // Once registered, the link selects the device, then answers the shell.
     const done = await request(c.master, `/devices/complete/${token}`, {
       cookie: tess.cookie,
     })
-    assert.match(done.text, /Device registered/)
+    assertShell(done)
     assert.match(
       done.headers.get('set-cookie')!,
-      new RegExp(`^${DEVICE_COOKIE}=${id}; `),
+      new RegExp(`^${DEVICE_COOKIE}=${id}; .*HttpOnly; Secure`),
     )
-    assert.match(
-      (await request(host, '/devices', { cookie: onHost('tess').cookie })).text,
-      new RegExp(udidNew),
+    const registered = await api(
+      c.master,
+      'GET',
+      `/api/v2/devices/complete/${token}`,
+      tess,
+    )
+    assert.equal(registered.json.state, 'registered')
+    assert.equal(registered.json.device.id, id)
+    assert(
+      (
+        (await api(host, 'GET', '/api/v2/devices', onHost('tess'))).json
+          .devices as Json[]
+      ).some((entry) => entry.udid === udidNew),
     )
     // Another person's registration link is not hers.
-    assert.equal(
-      (
-        await request(c.master, `/devices/complete/${token}`, {
-          cookie: onMaster('nora').cookie,
-        })
-      ).status,
-      410,
+    const nora = onMaster('nora')
+    const unavailable = await request(c.master, `/devices/complete/${token}`, {
+      cookie: nora.cookie,
+    })
+    assertShell(unavailable, 410)
+    assert.equal(unavailable.headers.get('set-cookie'), null)
+    assert.deepEqual(
+      (await api(c.master, 'GET', `/api/v2/devices/complete/${token}`, nora))
+        .json,
+      { state: 'unavailable' },
     )
+    // The QR code opens Devices on the master's public address.
     const qr = await request(c.master, '/devices/qr', { cookie: tess.cookie })
+    assert.equal(qr.status, 200)
     assert.equal(qr.headers.get('content-type'), 'image/svg+xml; charset=utf-8')
+    assert.match(qr.text, /^<svg /)
   })
 
   it('without a public master address, links iOS installs and registration to the host', async () => {
@@ -941,66 +1024,68 @@ describe('Install apps and Devices on the master, through the host', function ()
     try {
       const tess = onMaster('tess')
       const device = `; ${DEVICE_COOKIE}=${devices.tess}`
-      const page = await request(
-        c.master,
-        `/apps/${apps[ALPHA]}/branches/${branchKey('master')}?platform=ios`,
-        { cookie: tess.cookie + device },
-      )
-      assert.match(
-        page.text,
-        new RegExp(
-          `<a id="build-${builds.ipa}" class="list-row build-row" aria-label="Install on the host 1\\.0 build 2" href="${url(host)}/apps/${apps[ALPHA]}/branches/${branchKey('master')}\\?platform=ios">`,
-        ),
-      )
-      assert.match(
-        page.text,
-        /go through the host until the master has a public address/,
-      )
-      assert.doesNotMatch(page.text, /itms-services/)
+      // iOS installs go through the host's own pages: no installer link here.
+      const page = await branchOf(c.master, tess, 'ios', device)
+      assert.deepEqual(page.ios, { via: 'host', host: url(host) })
+      assert.equal(row(page, builds.ipa!).eligible, true)
+      for (const build of page.builds as Json[])
+        assert.equal(build.installUrl, undefined)
       // An Android build still downloads from the master.
-      const android = await request(
+      const android = await branchOf(c.master, tess, 'android')
+      assert.deepEqual(android.ios, { via: 'host', host: url(host) })
+      const download = await api(
         c.master,
-        `/apps/${apps[ALPHA]}/branches/${branchKey('master')}?platform=android`,
-        { cookie: tess.cookie },
+        'POST',
+        `/api/v2/catalog/builds/${builds.apk}/install`,
+        tess,
       )
-      assert.match(android.text, /action="\/builds\/\d+\/install"/)
-      const list = await request(c.master, '/devices', { cookie: tess.cookie })
+      assert.equal(download.json.kind, 'download')
       assert.match(
-        list.text,
-        new RegExp(
-          `<a class="button register-device" href="${url(host)}/devices">Register on the host</a>`,
-        ),
+        download.json.url,
+        /^\/install\/[A-Za-z0-9_-]{43}\/artifact$/,
       )
-      assert.doesNotMatch(list.text, /action="\/devices\/profile"/)
+      // Devices register on the host, and its QR code opens the host's Devices.
+      const list = await api(c.master, 'GET', '/api/v2/devices', tess)
+      assert.equal(list.json.via, url(host))
+      const qr = await request(c.master, '/devices/qr', { cookie: tess.cookie })
+      assert.equal(qr.status, 200)
     } finally {
       await setOrigin(MASTER_ORIGIN)
     }
   })
 
-  it('loads the catalog script on the master under its CSP', async () => {
+  it('answers Install apps with the web app’s shell under its CSP, and plain statuses for what it cannot show', async () => {
     const tess = onMaster('tess')
-    const page = await request(c.master, `/apps/${apps[ALPHA]}`, {
-      cookie: tess.cookie,
-    })
-    assert.match(
-      page.text,
-      /<script type="module" src="\/assets\/catalog\.js">/,
+    // The shell carries the web app's policy; the old catalog script is gone.
+    assertShell(
+      await request(c.master, `/apps/${apps[ALPHA]}`, { cookie: tess.cookie }),
     )
-    assert.match(
-      page.headers.get('content-security-policy')!,
-      /script-src 'self'[;]/,
+    // An id that names nothing is a 404, as its JSON is.
+    for (const route of ['/apps/nope', '/apps/0']) {
+      assertShell(await request(c.master, route, { cookie: tess.cookie }), 404)
+      assert.equal(
+        (await api(c.master, 'GET', `/api/v2/catalog${route}`, tess)).status,
+        404,
+        route,
+      )
+    }
+    // So is a branch key that is no key; its JSON refuses the request.
+    const key = `/apps/${apps[ALPHA]}/branches/not*a*key`
+    assertShell(await request(c.master, key, { cookie: tess.cookie }), 404)
+    assert.deepEqual(
+      (await api(c.master, 'GET', `/api/v2/catalog${key}`, tess)).json,
+      { error: 'Invalid branch key' },
     )
-    const script = await request(c.master, '/assets/catalog.js')
-    assert.equal(script.status, 200)
-    assert.match(script.headers.get('content-type')!, /javascript/)
-    assert.match(script.text, /mason-platform/)
   })
 
   it('gives a tester on the master app results that open Install apps, and no projects', async () => {
     const tess = onMaster('tess')
     const results = JSON.parse(
-      (await request(c.master, '/search?q=alpha', { cookie: tess.cookie }))
-        .text,
+      (
+        await request(c.master, '/api/v2/search?q=alpha', {
+          cookie: tess.cookie,
+        })
+      ).text,
     ) as Json[]
     assert.deepEqual(
       results.map((result) => [result.kind, result.href]),
@@ -1008,8 +1093,11 @@ describe('Install apps and Devices on the master, through the host', function ()
     )
     assert.deepEqual(
       JSON.parse(
-        (await request(c.master, '/search?q=relay', { cookie: tess.cookie }))
-          .text,
+        (
+          await request(c.master, '/api/v2/search?q=relay', {
+            cookie: tess.cookie,
+          })
+        ).text,
       ),
       [],
     )
@@ -1060,12 +1148,12 @@ describe('Install apps and Devices on the master, through the host', function ()
       )
       .run(people.nora!)
     const ahead = onMaster('nora')
-    const lagging = await request(c.master, '/apps', { cookie: ahead.cookie })
+    assertShell(await request(c.master, '/apps', { cookie: ahead.cookie }), 503)
+    const lagging = await api(c.master, 'GET', '/api/v2/catalog/apps', ahead)
     assert.equal(lagging.status, 503)
-    assert.match(lagging.text, /catching up with the master/)
+    assert.match(lagging.json.error, /catching up with the master/)
     c.master.master!.database.change('account', people.nora!)
-    const caught = await request(c.master, '/apps', { cookie: ahead.cookie })
-    assert.equal(caught.status, 200, caught.text.slice(0, 300))
+    assertShell(await request(c.master, '/apps', { cookie: ahead.cookie }))
     // A relay request naming no master session is refused.
     const answer = (await c.master
       .master!.hosts.askHost('catalog.apps', { accountId: people.tess! })
@@ -1075,14 +1163,28 @@ describe('Install apps and Devices on the master, through the host', function ()
     })
   })
 
-  it('shows “The host is unreachable” (503) while the host is away', async () => {
+  it('answers 503, the host unreachable, while the host is away', async () => {
     const tess = onMaster('tess')
     await c.drop('host', 0, async () => {
-      for (const route of ['/apps', '/devices', `/apps/${apps[ALPHA]}`]) {
-        const reply = await request(c.master, route, { cookie: tess.cookie })
+      // Each page's shell carries the 503; its JSON says why.
+      for (const route of [
+        '/apps',
+        '/devices',
+        `/apps/${apps[ALPHA]}`,
+        `/devices/complete/${'A'.repeat(43)}`,
+      ])
+        assertShell(
+          await request(c.master, route, { cookie: tess.cookie }),
+          503,
+        )
+      for (const route of [
+        '/api/v2/catalog/apps',
+        `/api/v2/catalog/apps/${apps[ALPHA]}`,
+        '/api/v2/devices',
+      ]) {
+        const reply = await api(c.master, 'GET', route, tess)
         assert.equal(reply.status, 503, route)
-        assert.match(reply.text, /The host is unreachable/)
-        assert.match(reply.text, /aria-label="Your account"/)
+        assert.deepEqual(reply.json, { error: HOST_UNREACHABLE_ERROR }, route)
       }
       const file = await request(
         c.master,
@@ -1127,5 +1229,176 @@ describe('Install apps and Devices on the master, through the host', function ()
       reopened.close()
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('Install apps and Devices addresses on any node', function () {
+  // The shell's routes over a source that fails as a node's can: a person
+  // who may not register, a refusal, a failure the node knows, and one it
+  // does not.
+  let server: Server
+  let base = ''
+  let mayRegister = true
+  let failure: Error | undefined
+  let known: number | undefined
+  const options: CatalogShellOptions = {
+    caller: (req) =>
+      req.get('cookie') == null
+        ? undefined
+        : {
+            accountId: 1,
+            source: source as CatalogSource,
+            checkCsrf: () => undefined,
+            mayRegister,
+            registration: true,
+          },
+    signIn: (req) => `/sign-in?return=${encodeURIComponent(req.originalUrl)}`,
+    files: () => source as CatalogSource,
+    qr: () => 'https://node.example.test/devices',
+    failure: () => known,
+  }
+  /** The pages' statuses, as a node's page routes answer them. */
+  const pages =
+    (subject: 'catalog' | 'devices'): express.RequestHandler =>
+    (req, res, next) => {
+      catalogStatus(options, subject, req).then((answer) => {
+        if (typeof answer === 'number')
+          res.status(answer).type('text/plain').send('shell')
+        else res.redirect(303, answer.redirect)
+      }, next)
+    }
+  const fail = async (): Promise<never> => {
+    throw failure ?? new Error('Nothing here')
+  }
+  const source: Partial<CatalogSource> = {
+    apps: fail,
+    app: fail,
+    devices: fail,
+    complete: fail,
+    installFile: async (_token, part, _request, res) => {
+      if (part === 'manifest.plist') {
+        res.status(200).type('application/xml')
+        res.write('<?xml')
+        throw new Error('The stream broke')
+      }
+      await fail()
+    },
+  }
+  const get = async (
+    route: string,
+    signedIn = true,
+  ): Promise<{ status: number; text: string; location: string | null }> => {
+    const reply = await fetch(base + route, {
+      redirect: 'manual',
+      headers: signedIn ? { cookie: 'session=1' } : {},
+    })
+    return {
+      status: reply.status,
+      text: await reply.text(),
+      location: reply.headers.get('location'),
+    }
+  }
+
+  before(async () => {
+    const app = express()
+    app.use(catalogShellRoutes(options))
+    app.get(
+      ['/apps', '/apps/:appId', '/apps/:appId/branches/:branchKey'],
+      pages('catalog'),
+    )
+    app.get('/devices', pages('devices'))
+    // The server's own error, without its stack on the console.
+    app.use(
+      (
+        _error: unknown,
+        _req: express.Request,
+        res: express.Response,
+        _next: express.NextFunction,
+      ) => {
+        res.status(500).send('Server error')
+      },
+    )
+    server = app.listen(0, '127.0.0.1')
+    await once(server, 'listening')
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  })
+  after(() => {
+    server?.close()
+  })
+
+  it('sends a signed-out person to sign in, back to the address', async () => {
+    const reply = await get('/apps/1', false)
+    assert.deepEqual(
+      [reply.status, reply.location],
+      [303, '/sign-in?return=%2Fapps%2F1'],
+    )
+  })
+
+  it('answers 403 at Devices, its completion link and its QR code to someone who may not register', async () => {
+    mayRegister = false
+    try {
+      assert.deepEqual(await get('/devices'), {
+        status: 403,
+        text: 'shell',
+        location: null,
+      })
+      // The completion link answers the app's shell itself.
+      const complete = await fetch(
+        `${base}/devices/complete/${'A'.repeat(43)}`,
+        { redirect: 'manual', headers: { cookie: 'session=1' } },
+      )
+      assertShell(
+        {
+          status: complete.status,
+          text: await complete.text(),
+          headers: complete.headers,
+        },
+        403,
+      )
+      const qr = await get('/devices/qr')
+      assert.deepEqual([qr.status, qr.text], [403, 'Tester access required'])
+    } finally {
+      mayRegister = true
+    }
+  })
+
+  it('answers a refusal’s status, a known failure’s, else 400', async () => {
+    failure = new CatalogRefused(404, 'App unavailable')
+    for (const route of ['/apps', '/apps/1', '/devices', '/devices/complete/x'])
+      assert.equal((await get(route)).status, 404, route)
+    failure = new Error('Away')
+    known = 503
+    assert.equal((await get('/apps')).status, 503)
+    known = undefined
+    assert.equal((await get('/apps')).status, 400)
+    failure = undefined
+  })
+
+  it('answers a grant file’s refusal and known failure plainly, and stops a broken stream', async () => {
+    const file = `/install/${'A'.repeat(43)}`
+    failure = new CatalogRefused(410, 'This install link has expired')
+    assert.deepEqual(
+      [
+        (await get(`${file}/artifact`)).status,
+        (await get(`${file}/artifact`)).text,
+      ],
+      [410, 'This install link has expired'],
+    )
+    failure = new Error('The host is away')
+    known = 503
+    assert.deepEqual(
+      [
+        (await get(`${file}/artifact`)).status,
+        (await get(`${file}/artifact`)).text,
+      ],
+      [503, 'The host is away'],
+    )
+    // A failure the node does not know is the server's own error.
+    known = undefined
+    assert.equal((await get(`${file}/artifact`)).status, 500)
+    failure = undefined
+    // A file that fails once its headers are out ends the response.
+    await assert.rejects(get(`${file}/manifest.plist`))
+    assert.equal((await get(`${file}/other`)).status, 404)
   })
 })

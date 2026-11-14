@@ -5,16 +5,31 @@ import type { Request } from 'express'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { cookie } from '../auth/routes.js'
 import type { Stream } from '../link/link.js'
-import { queueEntries, type QueueEntry } from '../view/dashboard.js'
+import { queueEntries, type QueueEntry } from './queue.js'
 import { hostSessionActor } from './api.js'
 import { MASTER_SESSION_COOKIE, sessionActor } from './auth.js'
 import { allow, allowRole, covers } from './permissions.js'
 import type { Actor } from './roles.js'
 import type { FeedEvent } from './runFeed.js'
 import type { Master } from './runtime.js'
+import { masterStatus } from './reads.js'
+import type { StatusInfo } from '../shared/api/shell.js'
+import {
+  LIVE_MAX_SUBSCRIPTIONS as MAX_SUBSCRIPTIONS,
+  LIVE_PATH,
+  LiveBudget,
+  liveRefusal,
+  type LiveEvent,
+  type LiveFrame,
+  type LiveMessage,
+  type LiveRun,
+  type LiveStage,
+  type LiveStep,
+} from '../shared/live.js'
 
-/** Where the master and the host accept the live pages' socket. */
-export const LIVE_PATH = '/live'
+export { LIVE_PATH }
+export type { LiveFrame, LiveRun, LiveStage, LiveStep }
+
 /** How often the socket pings; a client that misses two is closed. */
 const PING_MS = 25_000
 /** The largest message a page may send. */
@@ -29,12 +44,10 @@ const HIGH_WATER = 1024 * 1024
 const FOLLOW_TAIL = 1024 * 1024
 /** What a page that stops reading may hold unsent before it is dropped. */
 const MAX_BUFFERED = 16 * 1024 * 1024
-const MAX_SUBSCRIPTIONS = 200
-/** Messages a page may send at once, and how many more it may send each second. */
-const MESSAGE_BURST = 50
-const MESSAGES_PER_SECOND = 20
 /** Sockets one viewer may hold open at once on a node. */
 export const MAX_SOCKETS_PER_VIEWER = 16
+/** How often a shell status subscription is checked for a change. */
+const STATUS_MS = 2000
 /** A stage in these states writes no more lines. */
 const SETTLED = new Set([
   'succeeded',
@@ -46,64 +59,16 @@ const SETTLED = new Set([
   'interrupted',
 ])
 
-/** One stage of a run, as the run page draws it. */
-export interface LiveStage {
-  name: string
-  kind: string
-  status: string
-  attempt: number
-  node?: string
-  started?: number
-  finished?: number
-  reason?: string
-  disconnected?: true
-}
-
-/** A run's state, as the live pages show it. */
-export interface LiveRun {
-  project: string
-  branch: string
-  finished: boolean
-  /** The run's status line: what the `run` event carries. */
-  summary: {
-    id: string
-    number: number
-    workflow: string
-    branch: string
-    status: string
-    created: number
-    started?: number
-    finished?: number
-    description?: string
-    reason?: string
-  }
-  stages: LiveStage[]
-}
-
-export interface LiveStep {
-  id: number
-  kind: string
-  title: string
-  status: string
-  ms: number | null
-  parent: number | null
-}
-
 /** What the live socket reads: the master's runs, their stage logs and the queue. */
 export interface LiveSource {
   subscribe(listener: (events: FeedEvent[]) => void): () => void
+  /** The shell's status for a viewer; a node without one refuses the subscription. */
+  status?(actor: Actor): StatusInfo
   run(id: string): LiveRun | undefined
   /** A stage's steps, of its latest attempt. */
   steps(id: string, stage: string): LiveStep[]
   logFile(id: string, stage: string): string
   queue(): QueueEntry[]
-}
-
-/** A frame the server sends: an event of one subscription, or an error. */
-export interface LiveFrame {
-  key?: string
-  event: string
-  data?: unknown
 }
 
 /** One end of a live connection, a WebSocket or a host's link stream. */
@@ -142,23 +107,8 @@ class Backlog {
   }
 }
 
-type Message =
-  | { unsubscribe: string }
-  | {
-      subscribe: 'run' | 'status' | 'queue'
-      key: string
-      run?: string
-      stage?: string
-      after?: number
-      follow?: boolean
-      /** Start at the log's end, as a page with none of its own. */
-      tail?: boolean
-      /** False for a page that shows no more of the log (a step's lines). */
-      log?: boolean
-    }
-
 /** Reads and checks one message a page sent. */
-export function parseMessage(text: string): Message {
+export function parseMessage(text: string): LiveMessage {
   if (text.length > MAX_MESSAGE) throw new Error('The message is too large')
   let value: Record<string, unknown>
   try {
@@ -183,6 +133,9 @@ export function parseMessage(text: string): Message {
   const key = text100('key', 200)
   if (kind === 'queue') return { subscribe: kind, key: key ?? 'queue' }
   const run = text100('run', 64)
+  // A status without a run is the shell's.
+  if (run == null && kind === 'status')
+    return { subscribe: kind, key: key ?? 'status' }
   if (run == null) throw new Error('Name the run')
   const stage = text100('stage', 500)
   const after = value.after
@@ -458,7 +411,8 @@ export function followed(
 }
 
 interface Watch {
-  kind: 'run' | 'status' | 'queue'
+  /** `shell`: the shell's status, a `status` subscription without a run. */
+  kind: 'run' | 'status' | 'queue' | 'shell'
   run: string
   /** Whether the stage follows the running one. */
   follow: boolean
@@ -497,7 +451,9 @@ interface Watch {
  * gets every later line once. Without a stage it follows the running one,
  * sending that stage's steps and the last megabyte of its log, from a
  * line's start, whenever it changes.
- * `status` sends only `run`; `queue`, the queue panel's entries. Every
+ * `status` sends only `run`; without a run, the shell's `status` whenever
+ * it changes (checked on every change of a run, and every two seconds);
+ * `queue`, the queue panel's entries. Every
  * subscription is checked as the HTTP routes check the same read; a run's
  * subscription ends with `end` once it has finished and its log is
  * drained, or `gone` when it is deleted.
@@ -507,8 +463,9 @@ export class LiveSession {
   private readonly stop: () => void
   private ended = false
   /** Messages it may still send now, refilled each second. */
-  private allowance = MESSAGE_BURST
-  private counted: number
+  private readonly budget: LiveBudget
+  /** Checks the shell's status while a subscription to it is open. */
+  private ticker: ReturnType<typeof setInterval> | undefined
 
   constructor(
     private readonly source: LiveSource,
@@ -516,32 +473,26 @@ export class LiveSession {
     private readonly out: LiveOutput,
     private readonly now: () => number = Date.now,
   ) {
-    this.counted = now()
+    this.budget = new LiveBudget(now())
     // Registered before any snapshot is read: nothing written after it is missed.
     this.stop = source.subscribe((events) => this.hear(events))
   }
 
   receive(text: string): void {
     if (this.ended) return
-    const now = this.now()
-    this.allowance = Math.min(
-      MESSAGE_BURST,
-      this.allowance + ((now - this.counted) / 1000) * MESSAGES_PER_SECOND,
-    )
-    this.counted = now
-    if (this.allowance < 1) {
-      this.send({
-        event: 'error',
-        data: { error: 'Too many messages: send fewer' },
-      })
-      return
-    }
-    this.allowance--
-    let message: Message
+    // Parsed first, so a refusal names the subscription it leaves unsent.
+    let message: LiveMessage | Error
     try {
       message = parseMessage(text)
     } catch (error) {
-      this.send({ event: 'error', data: { error: (error as Error).message } })
+      message = error as Error
+    }
+    if (!this.budget.take(this.now())) {
+      this.send(liveRefusal(message instanceof Error ? undefined : message))
+      return
+    }
+    if (message instanceof Error) {
+      this.send({ event: 'error', data: { error: message.message } })
       return
     }
     if ('unsubscribe' in message) {
@@ -558,6 +509,18 @@ export class LiveSession {
     try {
       if (!this.watches.has(key) && this.watches.size >= MAX_SUBSCRIPTIONS)
         throw new Error('Too many subscriptions')
+      if (message.subscribe === 'status' && message.run == null) {
+        // The cluster's state, as GET /api/v2/status: no project-scoped key's.
+        allow(actor, 'builds.read')
+        if (this.source.status == null)
+          throw new Error('This node has no status to follow')
+        const watch = this.watch('shell', '')
+        this.watches.set(key, watch)
+        this.shell(key, watch, actor)
+        this.ticker ??= setInterval(() => this.tick(), STATUS_MS)
+        this.ticker.unref?.()
+        return
+      }
       allowRole(actor, 'runs.read')
       if (message.subscribe === 'queue') {
         const watch = this.watch('queue', '')
@@ -611,6 +574,38 @@ export class LiveSession {
   private forget(key: string): void {
     this.watches.get(key)?.cancel?.()
     this.watches.delete(key)
+    if (
+      this.ticker != null &&
+      ![...this.watches.values()].some((watch) => watch.kind === 'shell')
+    ) {
+      clearInterval(this.ticker)
+      this.ticker = undefined
+    }
+  }
+
+  /** Sends the shell's status to a subscription when it changed. */
+  private shell(key: string, watch: Watch, actor: Actor): void {
+    this.changed(key, watch, 'status', this.source.status!(actor))
+  }
+
+  /** Checks every shell status subscription; a viewer who has gone closes the socket. */
+  private tick(): void {
+    if (this.ended) return
+    const shells = [...this.watches].filter(
+      ([, watch]) => watch.kind === 'shell',
+    )
+    if (shells.length === 0) return
+    const actor = this.viewer()
+    if (actor == null) {
+      this.out.close(1008)
+      return
+    }
+    for (const [key, watch] of shells)
+      try {
+        this.shell(key, watch, actor)
+      } catch (error) {
+        this.fail(key, error)
+      }
   }
 
   private watch(kind: Watch['kind'], run: string): Watch {
@@ -678,7 +673,7 @@ export class LiveSession {
   private changed(
     key: string,
     watch: Watch,
-    event: string,
+    event: LiveEvent,
     data: unknown,
   ): void {
     const text = JSON.stringify(data)
@@ -697,7 +692,16 @@ export class LiveSession {
     for (const [key, watch] of [...this.watches]) {
       if (this.watches.get(key) !== watch) continue
       try {
-        if (watch.kind === 'queue') {
+        if (watch.kind === 'shell') {
+          // A stage starting or ending changes the workers; log lines do not.
+          if (runs.size === 0) continue
+          const actor = this.viewer()
+          if (actor == null) {
+            this.out.close(1008)
+            return
+          }
+          this.shell(key, watch, actor)
+        } else if (watch.kind === 'queue') {
           if (runs.size === 0) continue
           const actor = this.viewer()
           if (actor == null) {
@@ -1015,11 +1019,16 @@ export function serveLive(
   }
 }
 
-/** The master's runs, stage logs and queue, for the live socket. */
-export function masterLiveSource(master: Master): LiveSource {
+/** The master's runs, stage logs, queue and shell status, for the live socket. */
+export function masterLiveSource(
+  master: Master,
+  options: { testEndpoints?: boolean } = {},
+): LiveSource {
   const db = master.database.db
   return {
     subscribe: (listener) => master.feed.subscribe(listener),
+    status: (actor) =>
+      masterStatus(master, actor, options.testEndpoints === true),
     run: (id): LiveRun | undefined => {
       const job = db
         .prepare(

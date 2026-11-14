@@ -13,7 +13,7 @@ import {
   simulatorZip,
   zip,
 } from '../upload/fixtures.test.js'
-import { artifactsView } from '../view/artifacts.js'
+import { artifactRunData } from './pageData/artifacts.js'
 import { olderVersion } from './artifacts.js'
 import { localOperator } from './roles.js'
 
@@ -117,8 +117,10 @@ describe('iPhone Simulator and tvOS builds', function () {
       `the ${mode} run`,
     )
   }
-  const hostGet = async (route: string): Promise<string> => {
+  /** A branch of an app on the host, as Install apps reads it. */
+  const hostBranch = async (appId: number, platform: string): Promise<Json> => {
     const started = host.host!.accounts.startSession(tester.id)
+    const route = `/api/v2/catalog/apps/${appId}/branches/${Buffer.from('master').toString('base64url')}?platform=${platform}`
     const response = await pinnedFetch(
       host.web!.url.replace(/\/\/[^:]+:/, '//127.0.0.1:') + route,
       {
@@ -128,7 +130,7 @@ describe('iPhone Simulator and tvOS builds', function () {
       host.web!.certificate!.pin,
     )
     assert.equal(response.status, 200, route)
-    return await response.text()
+    return await response.json()
   }
 
   before(async () => {
@@ -219,44 +221,64 @@ describe('iPhone Simulator and tvOS builds', function () {
           .get(APP) as Json
       ).id,
     )
-    const page = await hostGet(
-      `/apps/${appId}/branches/${Buffer.from('master').toString('base64url')}?platform=ios`,
+    const page = await hostBranch(appId, 'ios')
+    const builds = new Map(
+      (page.builds as Json[]).map((build) => [build.id, build]),
     )
-    const maestro = page.slice(
-      page.indexOf(`id="build-${rows[1].id}"`),
-      page.indexOf('</form>', page.indexOf(`id="build-${rows[1].id}"`)),
+    // The simulator build downloads, for the iPhone Simulator: no grant, no installer.
+    const maestro = builds.get(rows[1].id)
+    assert.deepEqual(
+      [
+        maestro.variant,
+        maestro.version,
+        maestro.buildNumber,
+        maestro.download,
+        maestro.size,
+        maestro.eligible,
+        maestro.token,
+        maestro.installUrl,
+      ],
+      [
+        'maestro',
+        '1.2.3',
+        number,
+        'iPhone Simulator',
+        simulator.length,
+        true,
+        undefined,
+        undefined,
+      ],
     )
-    assert.match(
-      maestro,
-      new RegExp(
-        `aria-label="Download 1\\.2\\.3 build ${number} \\(maestro\\) for the iPhone Simulator"`,
-      ),
-    )
-    assert.match(maestro, /iPhone Simulator · 0\.0 MB/)
-    assert.doesNotMatch(maestro, /itms-services/)
     // The device build waits for a registered device; the simulator build checks none.
-    assert.match(
-      page,
-      new RegExp(
-        `aria-label="Register Device for 1\\.2\\.3 build ${number} \\(Default\\)"`,
-      ),
+    const phone = builds.get(rows[0].id)
+    assert.deepEqual(
+      [phone.variant, phone.download, phone.eligible, phone.token],
+      ['', undefined, false, undefined],
     )
-    // The run's page lists it as an iPhone Simulator download.
-    const runPage = artifactsView(
+    assert.equal(page.device, false)
+    // Artifacts' run detail lists it as an iPhone Simulator download (the
+    // web app labels such a build Download, to /apps/:id, on the host).
+    const detail = artifactRunData(
       {
         db: host.host!.cache.db,
-        viewer: { name: 'Sam', role: 'admin', node: 'host', signOut: '' },
+        viewer: { role: 'admin', node: 'host' },
         now: Date.now(),
         appVisible: () => true,
         artifactBase: '',
       },
-      { run: value.id },
-    )
-    assert.match(
-      runPage,
-      new RegExp(
-        `Phone 1\\.2\\.3 \\(${number}\\) maestro</span><small><span class="platform">.*?iOS</span> · iPhone Simulator · [^<]+</small></div><a href="/apps/${appId}">Download</a>`,
-      ),
+      value.id,
+    )!
+    const download = detail.builds.find((build) => build.variant === 'maestro')!
+    assert.deepEqual(
+      [
+        download.app,
+        download.version,
+        download.buildNumber,
+        download.platform,
+        download.downloadOnly,
+        download.appId,
+      ],
+      ['Phone', '1.2.3', number, 'ios', 'iPhone Simulator', appId],
     )
   })
 
@@ -414,10 +436,12 @@ describe('iPhone Simulator and tvOS builds', function () {
           .get(TV) as Json
       ).id,
     )
-    const page = await hostGet(
-      `/apps/${appId}/branches/${Buffer.from('master').toString('base64url')}?platform=tvos`,
+    // It downloads for the Apple TV: no grant, no installer.
+    const page = await hostBranch(appId, 'tvos')
+    const tv = (page.builds as Json[]).find((entry) => entry.id === build.id)
+    assert.deepEqual(
+      [tv.version, tv.buildNumber, tv.download, tv.token, tv.installUrl],
+      ['2.0', '6', 'Apple TV', undefined, undefined],
     )
-    assert.match(page, /aria-label="Download 2\.0 build 6 for the Apple TV"/)
-    assert.doesNotMatch(page, /itms-services/)
   })
 })

@@ -131,7 +131,15 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
   rmSync(work, { recursive: true, force: true })
   mkdirSync(work, { recursive: true })
   mkdirSync(options.out, { recursive: true })
-  if (!existsSync(path.join(options.repo, 'lib', 'cli.js')))
+  // The node and its web app: tsc's output and the React app's bundle,
+  // built from the development install, with its packages' licences.
+  const bundles = path.join(options.repo, 'lib', 'web', 'bundles')
+  const bundled = path.join(bundles, 'THIRD_PARTY_LICENCES.md')
+  if (
+    !existsSync(path.join(options.repo, 'lib', 'cli.js')) ||
+    !existsSync(path.join(bundles, 'index.html')) ||
+    !existsSync(bundled)
+  )
     throw new Error('Build lib/ first (npm run build)')
 
   let modules = options.modules
@@ -152,7 +160,9 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
     )
     modules = path.join(deps, 'node_modules')
   }
-  const notice = licences(modules)
+  // React and the web app's other packages are development dependencies,
+  // so the production modules leave them out; the bundle lists theirs.
+  const notice = `${licences(modules)}\n# Bundled into the web app (lib/web/bundles)\n\n${readFileSync(bundled, 'utf8')}`
   const sums = await fetchText(`${nodeSource}/v${nodeVersion}/SHASUMS256.txt`)
   const files: string[] = []
   const context: InstallContext = {
@@ -203,17 +213,23 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
       rmSync(path.join(node, extra), { recursive: true, force: true })
     for (const name of readdirSync(path.join(node, 'bin')))
       if (name !== 'node') rmSync(path.join(node, 'bin', name), { force: true })
-    // Mason itself, without its tests.
+    // Mason itself, with the web app's bundle (lib/web/bundles), without its tests.
     cpSync(path.join(options.repo, 'lib'), path.join(root, 'lib'), {
       recursive: true,
-      // Tests and their helpers stay out of a release.
-      filter: (source) =>
-        !source.endsWith('.test.js') &&
-        path
+      // Tests and their helpers stay out of a release, and so does tsc's
+      // copy of the web app: the nodes serve only its bundle.
+      filter: (source) => {
+        const parts = path
           .relative(path.join(options.repo, 'lib'), source)
-          .split(path.sep)[0] !== 'test',
+          .split(path.sep)
+        return (
+          !/\.test\.js(\.map)?$/.test(source) &&
+          !parts.includes('test') &&
+          (parts[0] !== 'web' || parts.length === 1 || parts[1] === 'bundles')
+        )
+      },
     })
-    // The fonts, icons and logo the pages are drawn with, and their licences.
+    // The fonts, icons and logo the web app is drawn with, and their licences.
     cpSync(path.join(options.repo, 'assets'), path.join(root, 'assets'), {
       recursive: true,
     })
@@ -324,7 +340,30 @@ export function releaseCreateArgs(
   ]
 }
 
-/** `scripts/release.ts --version <x.y.z> --out <dir> [--platform <p>]… [--publish <tag> [--prerelease]]`. */
+/**
+ * The version a release is cut as: the checkout's package.json version, or a
+ * prerelease of it (`1.0.0-dev.2`), so the repository always carries the
+ * version it ships. A published release's tag is `v<version>`, and a
+ * prerelease version is always published as a prerelease.
+ */
+export function releaseVersion(
+  repoVersion: string,
+  options: { version?: string; tag?: string; prerelease?: boolean } = {},
+): { version: string; prerelease: boolean } {
+  const version = options.version ?? repoVersion
+  if (version !== repoVersion && !version.startsWith(`${repoVersion}-`))
+    throw new Error(
+      `package.json says ${repoVersion}: release ${repoVersion} or a prerelease of it such as ${repoVersion}-dev.1, not ${version}`,
+    )
+  if (options.tag != null && options.tag !== `v${version}`)
+    throw new Error(`Tag ${version} as v${version}, not ${options.tag}`)
+  return {
+    version,
+    prerelease: version.includes('-') || options.prerelease === true,
+  }
+}
+
+/** `scripts/release.ts --out <dir> [--version <package.json version[-pre]>] [--platform <p>]… [--publish v<version> [--prerelease]]`. */
 export async function releaseMain(
   argv: string[],
   repo: string,
@@ -339,14 +378,23 @@ export async function releaseMain(
     const i = argv.indexOf(flag)
     return i < 0 ? undefined : argv[i + 1]
   }
-  const version = value('--version')
   const out = value('--out')
-  if (version == null || out == null) {
+  if (out == null) {
     console.error(
-      'Usage: scripts/release.ts --version <x.y.z> --out <dir> [--platform <p>]… [--publish <tag> [--repo <owner/name>] [--prerelease]]',
+      'Usage: scripts/release.ts --out <dir> [--version <package.json version[-pre]>] [--platform <p>]… [--publish v<version> [--repo <owner/name>] [--prerelease]]',
     )
     return 2
   }
+  const pkg = JSON.parse(
+    readFileSync(path.join(repo, 'package.json'), 'utf8'),
+  ) as Parameters<typeof releasesRepository>[0] & { version: string }
+  const tag = value('--publish')
+  const asked = value('--version')
+  const { version, prerelease } = releaseVersion(pkg.version, {
+    ...(asked == null ? {} : { version: asked }),
+    ...(tag == null ? {} : { tag }),
+    prerelease: argv.includes('--prerelease'),
+  })
   const chosen = argv.flatMap((arg, i) =>
     arg === '--platform' ? [argv[i + 1] as ReleasePlatform] : [],
   )
@@ -361,26 +409,18 @@ export async function releaseMain(
     log: (text) => process.stdout.write(text),
     ...overrides.build,
   })
-  const tag = value('--publish')
   const gh =
     overrides.gh ??
     (async (args: string[]): Promise<void> => {
       await run('gh', args, { env: process.env })
     })
   // The GitHub repository: --repo, or the checkout's package.json.
-  const publishTo =
-    value('--repo') ??
-    releasesRepository(
-      JSON.parse(
-        readFileSync(path.join(repo, 'package.json'), 'utf8'),
-      ) as Parameters<typeof releasesRepository>[0],
-    )
+  const publishTo = value('--repo') ?? releasesRepository(pkg)
   if (tag != null && publishTo == null)
     throw new Error(
       'Name the GitHub repository to publish to with --repo owner/name, or in package.json',
     )
   if (tag != null && publishTo != null) {
-    const prerelease = argv.includes('--prerelease')
     await gh(releaseCreateArgs(tag, publishTo, version, files, prerelease))
     console.log(`Published ${tag}${prerelease ? ' as a prerelease' : ''}`)
   }

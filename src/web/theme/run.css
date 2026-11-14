@@ -1,0 +1,367 @@
+/* The run page's arrangements of the design language's components
+   (screen-04-run, screen-04b-run-states, §8.3 run page on narrow), on tokens
+   only. */
+
+/* Header. */
+.m-run__title {
+  color: inherit;
+}
+.m-run__title:hover {
+  color: inherit;
+}
+.m-run__meta {
+  gap: var(--m-space-2) var(--m-space-5);
+}
+.m-run__fact {
+  gap: var(--m-space-2);
+}
+.m-run__desc {
+  color: var(--m-text);
+}
+.m-run__reason {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--m-space-2);
+  margin: 0;
+  font-size: 0.875rem;
+}
+.m-run__reason .m-icon {
+  font-size: 1.125rem;
+  flex: none;
+}
+.m-run__params > summary {
+  cursor: pointer;
+  min-height: 1.75rem;
+  display: inline-flex;
+  align-items: center;
+}
+.m-run__params > pre {
+  margin: var(--m-space-3) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.m-run__dots {
+  gap: var(--m-space-1);
+  flex-wrap: wrap;
+}
+.m-commit__sha[tabindex]:focus-visible {
+  outline: 2px solid var(--m-focus-ring);
+  outline-offset: 2px;
+}
+@container main (max-width: 37.49rem) {
+  .m-run__hint {
+    display: none;
+  }
+}
+
+/* Approvals. */
+.m-approval__message {
+  margin: 0;
+}
+.m-approval__fields {
+  display: grid;
+  gap: var(--m-space-4);
+  max-width: 28rem;
+}
+.m-approval--waiting {
+  background: var(--m-surface);
+  border-color: var(--m-border);
+}
+
+/* The graph: it scrolls sideways, at most 70 % of the window tall. */
+.m-graph__scroll {
+  overflow: auto;
+  max-height: 70vh;
+  padding: var(--m-space-8) var(--m-space-3) var(--m-space-3);
+}
+.m-graph[data-full] {
+  max-height: none;
+  background: var(--m-canvas);
+}
+.m-graph[data-full] .m-graph__scroll {
+  max-height: 100vh;
+}
+.m-pipeline {
+  display: block;
+  flex: none;
+  overflow: visible;
+}
+.m-grail {
+  fill: none;
+  stroke: var(--m-border-strong);
+  stroke-width: 2;
+  transition:
+    opacity var(--m-dur-fast) var(--m-ease-snappy),
+    stroke var(--m-dur-fast) var(--m-ease-snappy);
+}
+.m-grail[data-related] {
+  stroke: var(--m-accent);
+}
+.m-grail[data-dim] {
+  opacity: 0.35;
+}
+.m-gbubble {
+  cursor: pointer;
+  transition: opacity var(--m-dur-fast) var(--m-ease-snappy);
+}
+.m-gbubble[data-dim] {
+  opacity: 0.45;
+}
+.m-gbubble:focus {
+  outline: none;
+}
+.m-gbubble:focus-visible .m-gbubble__disc {
+  stroke: var(--m-focus-ring);
+  stroke-width: 3;
+}
+.m-gbubble__selected {
+  stroke: var(--m-accent);
+  stroke-width: 3;
+}
+.m-gbubble__glyph {
+  font-family: var(--m-font-icon);
+  font-size: 15px;
+  pointer-events: none;
+}
+.m-gbubble__ring {
+  stroke-width: 1.5;
+  stroke-dasharray: 4 5;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: m-graph-spin 1.2s linear infinite;
+}
+@keyframes m-graph-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .m-gbubble__ring {
+    animation: none;
+  }
+  .m-grail,
+  .m-gbubble {
+    transition: none;
+  }
+}
+.m-glabel-box {
+  font: 600 12px/16px var(--m-font-sans);
+  color: var(--m-text);
+  text-align: center;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow-wrap: anywhere;
+}
+.m-gend .m-gsub {
+  font-family: var(--m-font-sans);
+}
+
+/* Timeline rows lay out on the timeline's grid. */
+.m-timeline__row {
+  display: contents;
+}
+.m-timeline__critical {
+  outline: 2px solid var(--m-accent);
+  outline-offset: 1px;
+}
+.m-timeline__legend {
+  gap: var(--m-space-5);
+}
+.m-timeline__swatch {
+  width: 0.875rem;
+  height: 0.625rem;
+  border-radius: 2px;
+  outline: 2px solid var(--m-accent);
+}
+
+/* The stage panel, the stage list and the narrow picker. */
+.m-stagepanel {
+  min-width: 0;
+}
+.m-stagepanel__head {
+  align-items: flex-start;
+  gap: var(--m-space-3);
+  flex-wrap: wrap;
+}
+.m-stagepanel__head h2 {
+  gap: var(--m-space-3);
+  overflow-wrap: anywhere;
+}
+.m-stagepanel__grow {
+  flex: 1;
+}
+.m-stagepanel__whole {
+  margin: 0;
+  padding: 0 var(--m-space-5) var(--m-space-4);
+  font-size: 0.875rem;
+}
+.m-stagepanel__artifacts {
+  border-top: 1px solid var(--m-border-subtle);
+}
+.m-stagepanel__artifacts h3 {
+  margin: 0 0 var(--m-space-3);
+}
+.m-stagepanel__artifacts .m-list {
+  gap: var(--m-space-2);
+}
+.m-restart {
+  gap: var(--m-space-3);
+  flex-wrap: wrap;
+}
+.m-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 var(--m-space-3);
+}
+.m-steps__row {
+  display: flex;
+  align-items: center;
+  gap: var(--m-space-3);
+  min-height: 2.25rem;
+  padding: var(--m-space-1) var(--m-space-5) var(--m-space-1) var(--m-space-3);
+  color: var(--m-text);
+  border-radius: var(--m-radius-sm);
+}
+.m-steps__row:hover {
+  background: var(--m-surface-hover);
+  text-decoration: none;
+  color: var(--m-text);
+}
+.m-steps__row[aria-current='true'] {
+  background: var(--m-surface-selected);
+  box-shadow: inset 3px 0 0 var(--m-accent);
+}
+.m-steps__title {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.m-steps__meta {
+  flex: none;
+  font-family: var(--m-font-mono);
+  font-size: 0.75rem;
+}
+.m-steps__none {
+  margin: 0;
+  padding: 0 var(--m-space-5) var(--m-space-4);
+}
+.m-stagelist__filters {
+  gap: var(--m-space-3);
+  padding-top: var(--m-space-3);
+}
+.m-stagelist__tree {
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--m-space-3) var(--m-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.m-stagelist__tree .m-stage {
+  text-decoration: none;
+}
+.m-stagelist__none {
+  padding: var(--m-space-3) var(--m-space-4);
+}
+.m-stagelist--sheet .m-stagelist__filters {
+  padding: 0 0 var(--m-space-3);
+}
+.m-stagelist--sheet .m-stagelist__tree {
+  padding: 0;
+}
+.m-stage .m-spinner--sm {
+  flex: none;
+}
+
+/* The log: a frame that keeps its round button in view, 60 % of the window tall. */
+.m-log__frame {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.m-log__body {
+  max-height: 60vh;
+  min-height: 12rem;
+  padding: 0;
+  overscroll-behavior: contain;
+}
+.m-log__body:focus-visible {
+  outline: 2px solid var(--m-focus-ring);
+  outline-offset: -2px;
+}
+.m-log--tall {
+  min-height: 0;
+  height: 100%;
+  border-radius: var(--m-radius-md);
+}
+.m-log--tall .m-log__body {
+  max-height: none;
+  height: calc(100dvh - 12rem);
+}
+.m-log__rows {
+  position: relative;
+  width: 100%;
+}
+.m-log__window {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+}
+.m-log--wrap .m-log__window {
+  right: 0;
+}
+.m-log__line {
+  min-height: 1.25rem;
+}
+.m-log__pending {
+  color: var(--m-term-muted);
+}
+.m-log__gap {
+  flex-direction: column;
+  align-items: center;
+  gap: var(--m-space-3);
+  text-align: center;
+  padding: var(--m-space-8) var(--m-space-5);
+  font-size: 0.8125rem;
+}
+.m-log__end[hidden] {
+  display: none;
+}
+.m-log__end:focus-visible {
+  outline: 2px solid var(--m-term-text);
+  outline-offset: 2px;
+}
+.m-log__tool:focus-visible {
+  outline: 2px solid var(--m-term-text);
+  outline-offset: 1px;
+}
+a.m-log__tool {
+  color: var(--m-term-text);
+  text-decoration: none;
+}
+.a-underline {
+  text-decoration: underline;
+}
+.m-log-fullscreen {
+  display: none;
+  align-self: flex-start;
+}
+@container main (max-width: 37.49rem) {
+  .m-log-fullscreen {
+    display: inline-flex;
+  }
+}
+/* The log's title keeps a line of its own before its tools wrap under it. */
+.m-log__bar .m-log__title {
+  flex: 1 1 14rem;
+  overflow-wrap: anywhere;
+}
+.m-stagepanel__whole-head {
+  padding: 0 var(--m-space-1);
+}

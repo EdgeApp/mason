@@ -16,7 +16,7 @@ import {
 } from '../validation.js'
 import { randomUUID } from 'node:crypto'
 import { models } from './models.js'
-import { escape } from '../view/html.js'
+import { escape } from '../shared/format.js'
 
 const states = ['pending', 'processing', 'registered', 'error'] as const
 export const asDevice = asObject({

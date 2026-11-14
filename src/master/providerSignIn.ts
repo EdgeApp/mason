@@ -7,8 +7,7 @@ import {
 } from '../auth/providerConfig.js'
 import { Providers } from '../auth/providers.js'
 import { authLimiter, cookie, returnPath } from '../auth/routes.js'
-import { escape } from '../view/html.js'
-import { shell } from '../view/shell.js'
+import { sendShell } from '../node/webRoutes.js'
 import { sessionCookieOptions } from './accountsApi.js'
 import { MASTER_SESSION_COOKIE, type MasterAuth } from './auth.js'
 import type { MasterDatabase } from './database.js'
@@ -103,35 +102,18 @@ export class ProviderSignIn {
   }
 }
 
-/** A page of the sign-in flow, outside any session. */
-function flowPage(
-  res: Response,
-  status: number,
-  title: string,
-  body: string,
-  head = '',
-): void {
-  res.status(status).send(
-    shell({
-      title,
-      body: `<h1>${escape(title)}</h1>${body}`,
-      head,
-    }),
-  )
-}
-
-/** Why a sign-in failed: a refusal's own reason, otherwise nothing that could leak. */
+/** Why a sign-in failed, as the web app shows it: a refusal's own reason, otherwise nothing that could leak. */
 function failed(res: Response, error: unknown): void {
-  flowPage(
-    res,
-    error instanceof ProviderRefused ? 403 : 400,
-    'Sign-in failed',
-    `<section class="card"><p>${escape(
-      error instanceof ProviderRefused
-        ? error.message
-        : 'The sign-in is invalid or has expired.',
-    )}</p><p><a class="button" href="/sign-in">Sign in again</a></p></section>`,
-  )
+  sendShell(res, {
+    status: error instanceof ProviderRefused ? 403 : 400,
+    flow: {
+      state: 'failed',
+      message:
+        error instanceof ProviderRefused
+          ? error.message
+          : 'The sign-in is invalid or has expired.',
+    },
+  })
 }
 
 /**
@@ -155,12 +137,7 @@ export function providerSignInRoutes(master: {
   const available = (req: Request, res: Response): Providers | undefined => {
     const providers = signIn.providers()
     if (!master.configured() || providers == null) {
-      flowPage(
-        res,
-        404,
-        'Sign-in unavailable',
-        '<section class="card"><p>This master offers only its username and password sign-in.</p><p><a class="button" href="/sign-in">Sign in</a></p></section>',
-      )
+      sendShell(res, { status: 404, flow: { state: 'unavailable' } })
       return undefined
     }
     providers.provider(asProviderId(req.params.provider))
@@ -230,16 +207,11 @@ export function providerSignInRoutes(master: {
         sessionCookieOptions(session.expiresAt),
       )
       // The session cookie is SameSite=Strict: a redirect continuing the
-      // provider's cross-site navigation would arrive without it, so this
-      // page moves on from the master's own origin.
-      const next = returnPath(destination)
-      flowPage(
-        res,
-        200,
-        'Signed in',
-        `<section class="card"><p>You are signed in.</p><p><a class="button" href="${escape(next)}">Continue</a></p></section>`,
-        `<meta http-equiv="refresh" content="0;url=${escape(next)}">`,
-      )
+      // provider's cross-site navigation would arrive without it, so the web
+      // app moves on from the master's own origin.
+      sendShell(res, {
+        flow: { state: 'signedIn', next: returnPath(destination) },
+      })
     } catch (error) {
       failed(res, error)
     }

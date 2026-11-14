@@ -210,6 +210,21 @@ export function storedNodeType(value: unknown): NodeType | undefined {
   }
 }
 
+/**
+ * The `nodeTypes` area as Settings reads it: each stored type in this
+ * release's shape, with a type that is no longer valid left out.
+ */
+export function nodeTypesView(
+  value: Record<string, unknown>,
+): Record<string, NodeType> {
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([name, entry]) => {
+      const type = storedNodeType(entry)
+      return type == null ? [] : [[name, type]]
+    }),
+  )
+}
+
 export interface NodeProgress {
   items: Record<string, Progress>
   at: number

@@ -1,744 +1,146 @@
-import express, { type ErrorRequestHandler, type RequestHandler } from 'express'
-import { existsSync, readFileSync } from 'node:fs'
+import express, { type ErrorRequestHandler } from 'express'
+import { existsSync } from 'node:fs'
 import {
   authRoutes,
   cookieOptions,
+  csrf,
+  returnPath,
   SESSION_COOKIE,
   sessionContext,
   type AuthOptions,
-  type Frame,
+  type PasswordRelay,
 } from '../auth/routes.js'
 import { LinkError, type Link } from '../link/link.js'
 import type { Session } from '../auth/accounts.js'
 import { forwardRoutes } from './forward.js'
 import { deviceCallbackRoutes } from '../devices/routes.js'
-import {
-  catalogRoutes,
-  deviceRoutes,
-  installationRoutes,
-} from '../catalog/routes.js'
-import {
-  masterContentSecurityPolicy,
-  nodeWebApp,
-  sendPage,
-  testBanner,
-  type WebAppContext,
-} from '../node/webApp.js'
-import {
-  accountView,
-  appBuildNumbersView,
-  appMissingView,
-  masonfileView,
-  projectRunsView,
-  projectView,
-} from '../view/admin.js'
-import {
-  SCRIPT_PROJECT,
-  storedDetails,
-  type ProjectDetails,
-} from '../master/projectDetails.js'
-import { artifactsView, projectRunsData } from '../view/artifacts.js'
-import { dashboardData, dashboardView } from '../view/dashboard.js'
-import {
-  approvalNotifications,
-  approvalRolesFromGraph,
-  notificationsFor,
-} from '../view/notifications.js'
-import { graphFromJson, runData, runTitle, runView } from '../view/run.js'
-import { search } from '../view/search.js'
-import { page, shell, type FramedPage, type Viewer } from '../view/shell.js'
-import { escape } from '../view/html.js'
-import { stylesheet } from '../view/stylesheet.js'
+import { nodeWebApp, type WebAppContext } from '../node/webApp.js'
+import { storedDetails } from '../master/projectDetails.js'
+import { isRole, type Role } from '../shared/permissions.js'
 import type { Projected } from '../master/changes.js'
 import type { HostRuntime } from './runtime.js'
 import { hostLogin } from './sessions.js'
+import { hostNodeInfo, hostSessionApi } from './sessionApi.js'
+import { nodeInfoRoutes } from '../node/nodeInfo.js'
+import { catalogApi, type CatalogApiCaller } from '../catalog/api.js'
+import {
+  catalogShellRoutes,
+  catalogStatus,
+  type CatalogShellOptions,
+} from '../catalog/shell.js'
+import { StoreCatalogSource } from '../catalog/source.js'
+import { Devices } from '../devices/store.js'
+import { Refused } from './builds.js'
+import { readApi } from '../node/readApi.js'
+import {
+  pageFallback,
+  pageRoutes,
+  sendShell,
+  type PageAnswer,
+  type PageNode,
+  type PageSubject,
+} from '../node/webRoutes.js'
+import { hostReader } from './reads.js'
 
-const OFFLINE_BANNER =
-  '<p class="notice" role="status">The Mason master is unreachable. You are seeing the last synced builds.</p>'
-
-/** Every HTML page carries the banner while the master is unreachable. */
-function offlineBanner(host: HostRuntime): RequestHandler {
-  return (_req, res, next) => {
-    if (host.online()) {
-      next()
-      return
-    }
-    const send = res.send.bind(res)
-    res.send = ((body: unknown) => {
-      if (typeof body === 'string' && body.startsWith('<!doctype html>'))
-        return send(body.replace('<main>', `<main>${OFFLINE_BANNER}`))
-      return send(body)
-    }) as typeof res.send
-    next()
-  }
-}
-
-/** The signed-in person as the views see them, from the host's cache. */
-function hostViewer(
-  host: HostRuntime,
-  req: express.Request,
-): { viewer: Viewer; accountId: number; csrf: string } | undefined {
+/** The signed-in person's role on the host, from its cache. */
+function hostRole(host: HostRuntime, req: express.Request): Role | undefined {
   const context = sessionContext(req, host.accounts)
   if (context == null) return undefined
   const row = host.cache.db
-    .prepare('SELECT name,role FROM accounts WHERE id=?')
-    .get(context.account.id) as { name: string; role: string } | undefined
-  const role = (['admin', 'manager', 'developer', 'tester'] as const).find(
-    (entry) => entry === row?.role,
-  )
-  if (row == null || role == null) return undefined
-  return {
-    accountId: context.account.id,
-    csrf: context.session.csrf,
-    viewer: {
-      name: row.name,
-      role,
-      node: 'host',
-      signOut: `<form method="post" action="/auth/logout"><input type="hidden" name="csrf" value="${escape(context.session.csrf)}"><button class="secondary">Sign out</button></form>`,
-    },
-  }
+    .prepare('SELECT role FROM accounts WHERE id=?')
+    .get(context.account.id) as { role: string } | undefined
+  return isRole(row?.role) ? row.role : undefined
 }
 
 /**
- * A page in the host's shell: the side menu, search, the approvals that
- * wait for the viewer, and the test banner.
+ * The host's pages, from the web app's route table, read from the copy the
+ * master sends: a project, app ID or run the host does not hold (or the
+ * viewer may not see) answers its unknown state with 404; `/` is Install
+ * apps for everyone here.
  */
-function hostShell(
+function hostPageNode(
   host: HostRuntime,
-  context: WebAppContext,
-  viewer: Viewer | undefined,
-  framed: FramedPage,
-): string {
-  return shell({
-    title: framed.title,
-    body: framed.body,
-    ...(viewer == null ? {} : { viewer }),
-    ...(framed.active == null ? {} : { active: framed.active }),
-    ...(framed.scripts == null ? {} : { scripts: framed.scripts }),
-    ...(framed.head == null ? {} : { head: framed.head }),
-    banners: testBanner(context),
-    notifications:
-      viewer == null
-        ? []
-        : notificationsFor(
-            viewer,
-            approvalNotifications(host.cache.db, viewer, (job, stage) => {
-              const row = host.cache.db
-                .prepare('SELECT workflow,graph FROM jobs WHERE id=?')
-                .get(job) as
-                | { workflow: string; graph: string | null }
-                | undefined
-              return row == null
-                ? undefined
-                : approvalRolesFromGraph(row.graph, row.workflow, stage)
-            }),
-          ),
-  })
-}
-
-/** The host's shell for the person a request is from: the catalog, device and sign-in pages. */
-function hostFrame(host: HostRuntime, context: WebAppContext): Frame {
-  return (req, framed) =>
-    hostShell(host, context, hostViewer(host, req)?.viewer, framed)
-}
-
-/**
- * Projects & apps, the project pages, Artifacts, runs and search for
- * developers and up, and Your account for everyone; `/` and the rest of
- * Install apps are the catalog's.
- */
-function viewRoutes(host: HostRuntime, context: WebAppContext): express.Router {
-  const router = express.Router()
-  const visible =
-    (accountId: number) =>
-    (appId: number): boolean =>
-      host.cache.store.visible(accountId, appId)
-  const render = (
-    res: express.Response,
-    viewer: Viewer,
-    title: string,
-    body: string,
-    active: string,
-    csrf?: string,
-    scripts: string[] = [],
-  ): void => {
-    res.send(
-      hostShell(host, context, viewer, {
-        title,
-        body,
-        active,
-        scripts: ['/assets/run.js', ...scripts],
-        ...(csrf == null
-          ? {}
-          : { head: `<meta name="mason-csrf" content="${escape(csrf)}">` }),
-      }),
-    )
-  }
-  /** Sends someone not signed in to sign in, and back. */
-  const signIn = (req: express.Request, res: express.Response): void => {
-    res.redirect(
-      303,
-      '/auth/login?return=' + encodeURIComponent(req.originalUrl),
-    )
-  }
-  // Projects are for developers and up: to a tester they do not exist.
-  router.use('/projects', (req, res, next) => {
-    const found = hostViewer(host, req)
-    if (found?.viewer.role !== 'tester') {
-      next()
-      return
-    }
-    render(
-      res.status(404),
-      found.viewer,
-      'Not found',
-      '<h1>Not found</h1><p class="empty-state">There is no such page.</p>',
-      'catalog',
-    )
-  })
-  /**
-   * A project's pages on the host: the master's views over the copy the
-   * master sends, read-only, for developers and up and only for a project
-   * with an app they may see. Testers reach apps through Install apps.
-   */
-  const projectPage = (
-    req: express.Request,
-    res: express.Response,
-  ):
-    | {
-        found: NonNullable<ReturnType<typeof hostViewer>>
-        project: { id: number; slug: string; name: string }
-        details: ProjectDetails
-      }
-    | undefined => {
-    const found = hostViewer(host, req)
-    if (found == null) {
-      signIn(req, res)
-      return undefined
-    }
+  catalog: CatalogShellOptions,
+): PageNode {
+  /** Whether the enabled project at `:slug` is here, and the viewer sees its app ID `app`. */
+  const projectKnown = (req: express.Request, app?: string): boolean => {
+    const context = sessionContext(req, host.accounts)
+    if (context == null) return false
     const db = host.cache.db
     const row = db
-      .prepare(
-        'SELECT id,slug,name,details FROM projects WHERE slug=? AND enabled=1',
-      )
+      .prepare('SELECT id,details FROM projects WHERE slug=? AND enabled=1')
       .get(String(req.params.slug)) as
-      | { id: number; slug: string; name: string; details: string | null }
+      | { id: number; details: string | null }
       | undefined
-    const details = storedDetails(row?.details)
-    const sees =
-      row != null &&
-      (
-        db
-          .prepare('SELECT app_id FROM project_apps WHERE project_id=?')
-          .all(row.id) as Array<{ app_id: number }>
-      ).some((app) => host.cache.store.visible(found.accountId, app.app_id))
-    if (
-      row == null ||
-      details == null ||
-      !sees ||
-      found.viewer.role === 'tester'
-    ) {
-      render(
-        res.status(404),
-        found.viewer,
-        'Project',
-        '<p class="empty-state">There is no such project.</p>',
-        'dashboard',
+    // As on the master, a project's pages need only the project (and its
+    // reads only the role and scope); an app ID page needs that app ID,
+    // enabled and visible.
+    if (row == null || storedDetails(row.details) == null) return false
+    if (app == null) return true
+    const found = db
+      .prepare(
+        'SELECT a.id FROM apps a JOIN project_apps pa ON pa.app_id=a.id WHERE pa.project_id=? AND a.slug=? AND a.enabled=1',
       )
-      return undefined
-    }
-    return {
-      found,
-      project: { id: row.id, slug: row.slug, name: row.name },
-      details,
-    }
+      .get(row.id, app) as { id: number } | undefined
+    return (
+      found != null && host.cache.store.visible(context.account.id, found.id)
+    )
   }
-  /** What a project's or an app ID's Runs and builds reads on the host. */
-  const runsSource = (
-    found: NonNullable<ReturnType<typeof hostViewer>>,
-    now: number,
-  ): Parameters<typeof projectRunsData>[0] => ({
-    db: host.cache.db,
-    viewer: found.viewer,
-    now,
-    appVisible: visible(found.accountId),
-    artifactBase: '',
-    // The app build number each run reserved, which the master replicates.
-    reserved: (run): string | undefined =>
-      (
-        host.cache.db
-          .prepare('SELECT build_number FROM jobs WHERE id=?')
-          .get(run) as { build_number: string | null } | undefined
-      )?.build_number ?? undefined,
-  })
-  router.get('/projects/:slug', (req, res) => {
-    const page = projectPage(req, res)
-    if (page == null) return
-    render(
-      res,
-      page.found.viewer,
-      page.project.name,
-      projectView({
-        viewer: page.found.viewer,
-        slug: page.project.slug,
-        name: page.project.name,
-        ...page.details,
-        canSeed: false,
-        secrets: false,
-      }),
-      'dashboard',
-    )
-  })
-  router.get('/projects/:slug/runs', (req, res) => {
-    const page = projectPage(req, res)
-    if (page == null) return
-    const branch =
-      typeof req.query.branch === 'string' && req.query.branch !== ''
-        ? req.query.branch
-        : undefined
-    const now = host.now()
-    const { branches, runs } = projectRunsData(
-      runsSource(page.found, now),
-      page.project.slug,
-      { ...(branch == null ? {} : { branch }), pinned: page.details.pinned },
-    )
-    render(
-      res,
-      page.found.viewer,
-      `${page.project.name} · Runs and builds`,
-      projectRunsView(
-        {
-          viewer: page.found.viewer,
-          slug: page.project.slug,
-          name: page.project.name,
-          ...(branch == null ? {} : { branch }),
-          branches,
-          runs,
-          secrets: false,
-        },
-        now,
-      ),
-      'dashboard',
-    )
-  })
-  /**
-   * An app ID page's project and app ID: the project's own, enabled app ID
-   * that the viewer may see; otherwise 404 under the project.
-   */
-  const appPage = (
+  const signIn = (req: express.Request): string =>
+    '/auth/login?return=' + encodeURIComponent(req.originalUrl)
+  const check = (
+    subject: PageSubject,
     req: express.Request,
-    res: express.Response,
-  ):
-    | (NonNullable<ReturnType<typeof projectPage>> & {
-        app: { id: number; bundleId: string; name: string; platforms: string[] }
-      })
-    | undefined => {
-    const page = projectPage(req, res)
-    if (page == null) return undefined
-    const row = host.cache.db
-      .prepare(
-        'SELECT a.id,a.slug,a.name FROM apps a JOIN project_apps pa ON pa.app_id=a.id WHERE pa.project_id=? AND a.slug=? AND a.enabled=1',
-      )
-      .get(page.project.id, String(req.params.appId)) as
-      | { id: number; slug: string; name: string }
-      | undefined
-    if (row == null || !visible(page.found.accountId)(row.id)) {
-      render(
-        res.status(404),
-        page.found.viewer,
-        'App ID unavailable',
-        appMissingView(page.found.viewer, page.project.slug, page.project.name),
-        'dashboard',
-      )
-      return undefined
-    }
-    return {
-      ...page,
-      app: {
-        id: row.id,
-        bundleId: row.slug,
-        name: row.name,
-        platforms:
-          page.details.apps.find((entry) => entry.bundleId === row.slug)
-            ?.platforms ?? [],
-      },
+    role: Role | undefined,
+  ): PageAnswer | Promise<PageAnswer> => {
+    switch (subject) {
+      case 'home':
+        return role == null
+          ? { redirect: signIn(req) }
+          : check('catalog', req, role)
+      case 'signIn':
+        // Where it goes back to must be a path on this node.
+        returnPath(req.query.return)
+        return 200
+      case 'invite':
+        // The web app reads the token from the fragment, then drops it.
+        return 200
+      case 'project':
+        return projectKnown(req) ? 200 : 404
+      case 'app':
+        return projectKnown(req, String(req.params.appId)) ? 200 : 404
+      case 'run':
+        return host.cache.db
+          .prepare('SELECT 1 FROM jobs WHERE id=?')
+          .get(String(req.params.id)) == null
+          ? 404
+          : 200
+      case 'catalog':
+      case 'devices':
+        return catalogStatus(catalog, subject, req)
+      case 'group':
+        return 404
     }
   }
-  router.get('/projects/:slug/apps/:appId', (req, res) => {
-    const page = appPage(req, res)
-    if (page == null) return
-    const branch =
-      typeof req.query.branch === 'string' && req.query.branch !== ''
-        ? req.query.branch
-        : undefined
-    const now = host.now()
-    const { branches, runs } = projectRunsData(
-      runsSource(page.found, now),
-      page.project.slug,
-      {
-        ...(branch == null ? {} : { branch }),
-        pinned: page.details.pinned,
-        app: page.app.bundleId,
-      },
-    )
-    render(
-      res,
-      page.found.viewer,
-      `${page.app.bundleId} · Runs and builds`,
-      projectRunsView(
-        {
-          viewer: page.found.viewer,
-          slug: page.project.slug,
-          name: page.project.name,
-          ...(branch == null ? {} : { branch }),
-          branches,
-          runs,
-          app: page.app,
-        },
-        now,
-      ),
-      'dashboard',
-    )
-  })
-  router.get('/projects/:slug/apps/:appId/build-numbers', (req, res) => {
-    const page = appPage(req, res)
-    if (page == null) return
-    render(
-      res,
-      page.found.viewer,
-      `${page.app.bundleId} · Build numbers`,
-      appBuildNumbersView({
-        viewer: page.found.viewer,
-        slug: page.project.slug,
-        name: page.project.name,
-        app: page.app,
-        projectApps: page.details.apps.map((entry) => entry.bundleId),
-        buildNumbers: page.details.buildNumbers,
-        // The host keeps a read-only copy: sequences are set on the master.
-        canSeed: false,
-      }),
-      'dashboard',
-    )
-  })
-  router.get('/projects/:slug/masonfile', (req, res) => {
-    const page = projectPage(req, res)
-    if (page == null) return
-    const db = host.cache.db
-    // The commits the host has a copy for, newest run first.
-    const commits = db
-      .prepare(
-        "SELECT j.commit_sha AS sha, j.branch FROM jobs j JOIN masonfiles m ON m.key=j.project_id || ':' || j.commit_sha WHERE j.project_id=? GROUP BY j.commit_sha ORDER BY MAX(j.created) DESC LIMIT 50",
-      )
-      .all(page.project.id) as Array<{ sha: string; branch: string }>
-    const commit =
-      typeof req.query.commit === 'string' ? req.query.commit : commits[0]?.sha
-    const kept =
-      commit == null
-        ? undefined
-        : (db
-            .prepare('SELECT file,text FROM masonfiles WHERE key=?')
-            .get(`${page.project.id}:${commit}`) as
-            | { file: string; text: string | null }
-            | undefined)
-    render(
-      res,
-      page.found.viewer,
-      `${page.project.name} · Masonfile`,
-      masonfileView({
-        viewer: page.found.viewer,
-        slug: page.project.slug,
-        name: page.project.name,
-        commits,
-        ...(commit == null ? {} : { commit }),
-        ...(kept?.text == null ? {} : { file: kept.file, text: kept.text }),
-        ...(kept?.text != null
-          ? {}
-          : {
-              error:
-                page.details.format === 'script'
-                  ? SCRIPT_PROJECT
-                  : commit == null
-                    ? 'No run has a commit yet.'
-                    : kept != null
-                      ? 'The host is still copying that commit’s Masonfile from the master.'
-                      : 'The host has no copy of that commit’s Masonfile.',
-            }),
-        secrets: false,
-      }),
-      'dashboard',
-    )
-  })
-  // Your account: the person's own record from the cache; changes go to the
-  // master over the link, so the page is read-only while it is down.
-  router.get('/account', (req, res) => {
-    const found = hostViewer(host, req)
-    if (found == null) {
-      signIn(req, res)
+  return {
+    node: 'host',
+    role: (req) => hostRole(host, req),
+    signIn,
+    check,
+  }
+}
+
+/** E2E only: a browser that cannot be handed a cookie (Safari in a Simulator) opens the session a test.session control request started. */
+function testSessionRoutes(host: HostRuntime): express.Router {
+  const router = express.Router()
+  router.get('/test/session/:token', (req, res) => {
+    const token = String(req.params.token)
+    if (host.accounts.session(token) == null) {
+      res.status(404).send('Not found')
       return
     }
-    const db = host.cache.db
-    const row = db
-      .prepare(
-        'SELECT id,name,username,role,has_password FROM accounts WHERE id=?',
-      )
-      .get(found.accountId) as {
-      id: number
-      name: string
-      username: string | null
-      role: string
-      has_password: number
-    }
-    const link = host.options.link()
-    res.set('Content-Security-Policy', masterContentSecurityPolicy)
-    render(
-      res,
-      found.viewer,
-      'Your account',
-      accountView({
-        viewer: found.viewer,
-        person: {
-          id: row.id,
-          name: row.name,
-          role: row.role,
-          ...(row.username == null ? {} : { username: row.username }),
-          password: row.has_password === 1,
-          emails: (
-            db
-              .prepare(
-                'SELECT email,confirmed FROM account_emails WHERE account_id=? ORDER BY position',
-              )
-              .all(row.id) as Array<{ email: string; confirmed: number }>
-          ).map((entry) => ({
-            email: entry.email,
-            confirmed: entry.confirmed === 1,
-          })),
-        },
-        signOut: found.viewer.signOut,
-        editable: link != null && !link.closed,
-        // The master takes a password through a host from testers only.
-        passwordHere: row.role === 'tester',
-      }),
-      'account',
-      found.csrf,
-      ['/assets/master.js', '/assets/people.js'],
-    )
-  })
-  router.get('/projects', (req, res) => {
-    const found = hostViewer(host, req)
-    if (found == null) {
-      signIn(req, res)
-      return
-    }
-    const now = host.now()
-    const platform =
-      typeof req.query.platform === 'string' ? req.query.platform : undefined
-    const project =
-      typeof req.query.project === 'string' ? req.query.project : undefined
-    // Each project's repository, webhook and push branches, from the copy of its details the master sent.
-    const details = (
-      host.cache.db.prepare('SELECT id,details FROM projects').all() as Array<{
-        id: number
-        details: string | null
-      }>
-    ).flatMap((row) => {
-      const kept = storedDetails(row.details)
-      return kept == null ? [] : [[row.id, kept] as const]
-    })
-    render(
-      res,
-      found.viewer,
-      'Projects & apps',
-      dashboardView(
-        dashboardData(
-          {
-            db: host.cache.db,
-            viewer: found.viewer,
-            now,
-            appVisible: visible(found.accountId),
-            repositories: new Map(
-              details.map(([id, kept]) => [
-                id,
-                { repository: kept.repository, webhook: kept.webhook },
-              ]),
-            ),
-            pinned: new Map(details.map(([id, kept]) => [id, kept.pinned])),
-          },
-          {
-            ...(platform == null ? {} : { platform }),
-            ...(project == null ? {} : { project }),
-          },
-        ),
-        found.viewer,
-        now,
-      ),
-      'dashboard',
-    )
-  })
-  router.get('/artifacts', (req, res) => {
-    const found = hostViewer(host, req)
-    if (found == null) {
-      signIn(req, res)
-      return
-    }
-    if (found.viewer.role === 'tester') {
-      render(
-        res.status(403),
-        found.viewer,
-        'Artifacts',
-        '<h1>Artifacts</h1><p>Artifacts are for developers and up.</p>',
-        'catalog',
-      )
-      return
-    }
-    const filter = (name: string): string | undefined =>
-      typeof req.query[name] === 'string'
-        ? (req.query[name] as string)
-        : undefined
-    const run = filter('run')
-    const project = filter('project')
-    const branch = filter('branch')
-    render(
-      res,
-      found.viewer,
-      'Artifacts',
-      artifactsView(
-        {
-          db: host.cache.db,
-          viewer: found.viewer,
-          now: host.now(),
-          appVisible: visible(found.accountId),
-          artifactBase: '',
-        },
-        {
-          ...(run == null ? {} : { run }),
-          ...(project == null ? {} : { project }),
-          ...(branch == null ? {} : { branch }),
-        },
-      ),
-      'artifacts',
-    )
-  })
-  // E2E only: a browser that cannot be handed a cookie (Safari in a
-  // Simulator) opens the session a test.session control request started.
-  if (context.testEndpoints)
-    router.get('/test/session/:token', (req, res) => {
-      const token = String(req.params.token)
-      if (host.accounts.session(token) == null) {
-        res.status(404).send('Not found')
-        return
-      }
-      res.cookie(SESSION_COOKIE, token, cookieOptions)
-      res.redirect(303, '/')
-    })
-  router.get('/runs/:id', (req, res) => {
-    const found = hostViewer(host, req)
-    if (found == null) {
-      signIn(req, res)
-      return
-    }
-    if (found.viewer.role === 'tester') {
-      render(
-        res.status(403),
-        found.viewer,
-        'Run',
-        '<h1>Run</h1><p>Runs are for developers and up.</p>',
-        'catalog',
-      )
-      return
-    }
-    const db = host.cache.db
-    const id = String(req.params.id)
-    const run = runData(db, id, (job) => {
-      const row = db
-        .prepare('SELECT workflow,graph FROM jobs WHERE id=?')
-        .get(job) as { workflow: string; graph: string | null } | undefined
-      return row == null ? undefined : graphFromJson(row.graph, row.workflow)
-    })
-    if (run == null) {
-      render(
-        res.status(404),
-        found.viewer,
-        'Run unavailable',
-        '<h1>Run unavailable</h1><p>There is no such run.</p>',
-        'dashboard',
-      )
-      return
-    }
-    const query = (name: string): string | undefined =>
-      typeof req.query[name] === 'string'
-        ? (req.query[name] as string)
-        : undefined
-    const stage = run.stages.some((entry) => entry.name === query('stage'))
-      ? query('stage')
-      : undefined
-    const step =
-      stage == null || query('step') == null ? undefined : Number(query('step'))
-    const logs = `/api/v2/runs/${encodeURIComponent(id)}/logs`
-    const role = found.viewer.role
-    render(
-      res,
-      found.viewer,
-      runTitle(run),
-      runView(run, {
-        ...(stage == null ? {} : { selected: stage }),
-        ...(step == null || !Number.isSafeInteger(step) ? {} : { step }),
-        tab: query('tab') === 'timeline' ? 'timeline' : 'graph',
-        now: host.now(),
-        // The logs are on the master. The page asks for the lines in view by
-        // number through the host, which forwards each request over the
-        // master's link; a running stage's new lines arrive by its live
-        // stream, relayed over the same link.
-        log:
-          stage == null && run.finished == null
-            ? {
-                unavailable:
-                  'The whole run’s log is shown once the run ends: choose a stage to follow its log here.',
-              }
-            : { text: '' },
-        ...(stage == null && run.finished == null
-          ? {}
-          : {
-              logLines:
-                stage == null
-                  ? logs
-                  : `${logs}?stage=${encodeURIComponent(stage)}${step != null && Number.isSafeInteger(step) ? `&step=${step}` : ''}`,
-            }),
-        // A running stage's page holds none of its log: the socket starts
-        // with its last part.
-        ...(run.finished == null ? { logTail: true } : {}),
-        can: {
-          cancel: true,
-          restart: true,
-          request: true,
-          approve: (name) =>
-            role === 'admin' ||
-            (
-              run.graph?.approvals[name]?.roles ?? ['admin', 'manager']
-            ).includes(role),
-        },
-        base: '',
-        viewer: found.viewer,
-      }),
-      'dashboard',
-      found.csrf,
-    )
-  })
-  router.get('/search', (req, res) => {
-    const found = hostViewer(host, req)
-    if (found == null) {
-      res.status(401).json([])
-      return
-    }
-    res.json(
-      search(
-        {
-          db: host.cache.db,
-          viewer: found.viewer,
-          appVisible: visible(found.accountId),
-        },
-        typeof req.query.q === 'string' ? req.query.q : '',
-      ),
-    )
+    res.cookie(SESSION_COOKIE, token, cookieOptions)
+    res.redirect(303, '/')
   })
   return router
 }
@@ -784,7 +186,7 @@ export function named(identifier: unknown): {
     : { identifier }
 }
 
-function hostPassword(host: HostRuntime): NonNullable<AuthOptions['password']> {
+function hostPassword(host: HostRuntime): PasswordRelay {
   const link = (): Link => {
     const current = host.options.link()
     if (current == null || current.closed)
@@ -867,89 +269,122 @@ function hostInvitation(
   }
 }
 
+/** The person signed in on the host, as Install apps and Devices answer for them. */
+function hostCatalogCaller(
+  host: HostRuntime,
+  req: express.Request,
+): CatalogApiCaller | undefined {
+  const store = host.cache.store
+  const context = sessionContext(req, host.accounts)
+  if (context == null) return undefined
+  return {
+    accountId: context.account.id,
+    source: new StoreCatalogSource(store, {
+      session: context.session,
+      relay: host.devices,
+    }),
+    checkCsrf: (request): void => {
+      csrf(request, store, context.session)
+    },
+    mayRegister: new Devices(store, host.devices).allowed(context.account),
+    registration: store.config.devices != null,
+    installOrigin: store.config.origin,
+  }
+}
+
+/** Install apps and Devices as JSON, from the host's cache, for its own signed-in people. */
+function hostCatalogApi(host: HostRuntime): express.Router {
+  return catalogApi({
+    caller(req) {
+      // Before the first sync and in maintenance there is nothing to serve.
+      host.builds.ready()
+      return hostCatalogCaller(host, req)
+    },
+    failure: (error) =>
+      error instanceof Refused
+        ? { status: error.status, error: error.message }
+        : undefined,
+    now: () => host.now(),
+  })
+}
+
+/**
+ * Install apps and Devices on the host, read from its cache; the QR code
+ * and the grants' files are the host's own.
+ */
+function hostCatalogOptions(host: HostRuntime): CatalogShellOptions {
+  return {
+    caller: (req) => hostCatalogCaller(host, req),
+    signIn: (req) =>
+      '/auth/login?return=' + encodeURIComponent(req.originalUrl),
+    files: () => new StoreCatalogSource(host.cache.store),
+    qr: () => host.cache.store.config.origin + '/devices',
+  }
+}
+
+/**
+ * While the host waits for its master or is in maintenance: a page answers
+ * the web app's shell with 503 (the app reads which from `/api/v2/node`),
+ * anything else a plain 503.
+ */
+function unavailable(
+  req: express.Request,
+  res: express.Response,
+  text: string,
+): void {
+  if (req.method === 'GET' && !/^\/(api|assets)(\/|$)/.test(req.path)) {
+    sendShell(res, { status: 503 })
+    return
+  }
+  res.status(503).type('text/plain').send(text)
+}
+
+const WAITING = 'This Mason host is waiting for its master.'
+
 /** The host's public web listener: catalog, installs and sign-in from its cache. */
 export function hostApp(
   context: WebAppContext & { host?: HostRuntime },
 ): express.Express {
-  const app = nodeWebApp({ ...context, styles: stylesheet })
+  const app = nodeWebApp(context)
   const host = context.host
+  // Before every gate: the web app reads it while the host waits or is in maintenance.
+  app.use(nodeInfoRoutes(() => hostNodeInfo(host, context)))
   if (host == null) {
-    app.use((_req, res) => {
-      sendPage(
-        res,
-        context,
-        'Mason',
-        '<section class="card"><p>This Mason host is waiting for its master.</p></section>',
-        503,
-      )
+    app.use((req, res) => {
+      unavailable(req, res, WAITING)
     })
     return app
   }
-  app.get('/assets/run.js', (_req, res) => {
-    res
-      .type('js')
-      .send(
-        readFileSync(
-          new URL('../browser/bundles/run.js', import.meta.url),
-          'utf8',
-        ),
-      )
-  })
-  app.get('/assets/catalog.js', (_req, res) => {
-    res
-      .type('js')
-      .send(
-        readFileSync(new URL('../browser/client.js', import.meta.url), 'utf8'),
-      )
-  })
   // Webhooks are relayed or kept for the master even past the grace window, and
   // stages upload and fetch artifacts by their tokens and grants.
   app.use(host.webhooks.routes())
   app.use(host.artifacts.routes(host.accounts))
-  // The builds API is answered here, from the cache and storage, so it keeps
-  // working while the master is away; the rest of /api/v2 is forwarded.
+  // The web app's session is the host's own; it never reaches the forwarder.
+  app.use(hostSessionApi(host, hostPassword(host)))
+  // The builds API and the pages' reads are answered here, from the cache
+  // and storage, so they keep working while the master is away; the rest of
+  // /api/v2 is forwarded.
   app.use(host.builds.routes(host.accounts))
+  app.use(readApi(hostReader(host, context)))
+  app.use(hostCatalogApi(host))
   app.use(forwardRoutes(host))
-  app.use((_req, res, next) => {
+  app.use((req, res, next) => {
     if (host.cache.host() == null) {
-      sendPage(
-        res,
-        context,
-        'Mason',
-        '<section class="card"><p>This Mason host is waiting for its master.</p></section>',
-        503,
-      )
+      unavailable(req, res, WAITING)
       return
     }
     if (host.maintenance()) {
-      sendPage(
+      unavailable(
+        req,
         res,
-        context,
-        'Maintenance',
-        '<section class="card"><p>This Mason host has not reached its master for too long to serve builds safely. It comes back as soon as the master is reachable.</p></section>',
-        503,
+        'This Mason host has not reached its master for too long to serve builds safely. It comes back as soon as the master is reachable.',
       )
       return
     }
     next()
   })
-  app.use(offlineBanner(host))
   app.use(xcodeRoutes(host))
-  // The sign-in page's script and the worker that hashes a password.
-  for (const name of ['master', 'password-worker', 'people'])
-    app.get(`/assets/${name}.js`, (_req, res) => {
-      if (name === 'password-worker')
-        res.set('Content-Security-Policy', masterContentSecurityPolicy)
-      res
-        .type('js')
-        .send(
-          readFileSync(
-            new URL(`../browser/bundles/${name}.js`, import.meta.url),
-            'utf8',
-          ),
-        )
-    })
-  const frame = hostFrame(host, context)
+  if (context.testEndpoints) app.use(testSessionRoutes(host))
   // The Profile Service posts a signed body, read raw before any form parser.
   app.use(deviceCallbackRoutes(host.cache.store, host.devices))
   app.use(express.urlencoded({ extended: false, limit: '16kb' }))
@@ -965,42 +400,24 @@ export function hostApp(
           name: identity.name,
         })) as { account: Projected }
       }),
-      people: false,
-      account: false,
-      frame,
       password: hostPassword(host),
       invitation: hostInvitation(host),
     }),
   )
-  app.use(
-    deviceRoutes(host.cache.store, host.accounts, {
-      relay: host.devices,
-      frame,
-      node: 'host',
-    }),
-  )
-  app.use(
-    installationRoutes(host.cache.store, host.accounts, {
-      frame,
-      node: 'host',
-    }),
-  )
-  app.use(viewRoutes(host, context))
-  app.use(
-    catalogRoutes(host.cache.store, host.accounts, { frame, node: 'host' }),
-  )
-  app.use((_req, res) => {
-    res.status(404).send('Not found')
-  })
+  const catalog = hostCatalogOptions(host)
+  // Install apps' and Devices' own addresses: the QR code, the completion
+  // link and the grants' files; their pages are the web app's.
+  app.use(catalogShellRoutes(catalog))
+  const pages = hostPageNode(host, catalog)
+  app.use(pageRoutes(pages))
+  app.use(pageFallback(pages))
+  // A failed request's reason is the web app's to show, with a way back to sign in.
   const errors: ErrorRequestHandler = (error, _req, res, _next) => {
-    res
-      .status(400)
-      .send(
-        page(
-          'Request could not be completed',
-          `<p>${escape(error instanceof Error && error.name === 'SignInRefused' ? error.message : 'The request is invalid or has expired. Return to sign in and try again.')}</p><a href="/auth/login">Sign in</a>`,
-        ),
-      )
+    const message =
+      error instanceof Error && error.name === 'SignInRefused'
+        ? error.message
+        : 'The request is invalid or has expired. Return to sign in and try again.'
+    sendShell(res, { status: 400, flow: { state: 'invalid', message } })
   }
   app.use(errors)
   return app

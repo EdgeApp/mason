@@ -57,6 +57,7 @@ import {
   NodeStates,
   type NodeType,
   nodeTypesSetting,
+  nodeTypesView,
   storedNodeType,
 } from './nodeTypes.js'
 import { RuntimeStore } from './runtimes.js'
@@ -506,6 +507,7 @@ export class Master {
     this.retention = new Retention(this.database, this.scheduler, this.stashes)
     this.settings.register('nodeTypes', {
       validate: nodeTypesSetting,
+      redact: (value) => nodeTypesView(value) as unknown as SettingValue,
       changed: () => {
         this.nodeStates.reconcileAll()
       },

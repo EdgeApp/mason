@@ -17,7 +17,7 @@ import { MASTER_SESSION_COOKIE } from './auth.js'
 import { localOperator } from './roles.js'
 import { declaredApps, slugFor } from './wizard.js'
 import { seedSecret } from '../test/secrets.js'
-import { crumbTrail } from '../test/crumbs.js'
+import { assertShell, type ShellReply } from '../test/webShell.js'
 
 // Rows and replies are read field by field.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -27,6 +27,7 @@ interface Reply {
   text: string
   json: Json
   type: string
+  headers: ShellReply['headers']
 }
 
 const masonfile = `
@@ -100,7 +101,12 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       text,
       json,
       type: response.headers.get('content-type') ?? '',
+      headers: response.headers,
     }
+  }
+  /** Asserts a reply is the web app's shell with that status. */
+  const shell = (reply: Reply, status = 200): void => {
+    assertShell(reply, status)
   }
   const signIn = (role: string): { cookie: string; csrf: string } => {
     const { token, session } = c.master.master!.auth.start(
@@ -239,13 +245,14 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       body: { repository },
     })
     assert.equal(refused.status, 403)
-    assert.equal(
-      (await request(c.master, 'GET', '/projects/new', signIn('developer')))
-        .status,
+    // The wizard is the web app's: a developer reads its 403 inside it, and
+    // a manager drives it through the wizard's routes.
+    shell(
+      await request(c.master, 'GET', '/projects/new', signIn('developer')),
       403,
     )
-    const page = await request(c.master, 'GET', '/projects/new', manager)
-    assert.match(page.text, /data-path="\/api\/v2\/projects\/check"/)
+    shell(await request(c.master, 'GET', '/projects/new', manager))
+    assert.equal((await request(c.master, 'GET', '/projects/new')).status, 303)
     const checked = await request(c.master, 'POST', '/api/v2/projects/check', {
       ...manager,
       body: { repository },
@@ -275,10 +282,22 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       ).status,
       201,
     )
-    assert.match(
-      (await request(c.master, 'GET', '/projects/new?slug=wizard', manager))
-        .text,
-      /Read the Masonfile on master/,
+    // Step 2 reads the Masonfile on the project's default branch.
+    shell(await request(c.master, 'GET', '/projects/new?slug=wizard', manager))
+    const saved = await request(
+      c.master,
+      'GET',
+      '/api/v2/projects/wizard',
+      manager,
+    )
+    assert.equal(saved.status, 200, saved.text)
+    assert.deepEqual(
+      [
+        saved.json.repository,
+        saved.json.defaultBranch,
+        saved.json.webhookSecret,
+      ],
+      [repository, 'master', { set: false }],
     )
     const started = await request(
       c.master,
@@ -308,14 +327,8 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       { bundleId: 'app.example.wizard', platforms: ['android', 'ios'] },
     ])
     assert.deepEqual(Object.keys(discovered.triggers), ['build', 'release'])
-    const apps = await request(
-      c.master,
-      'GET',
-      '/projects/new?slug=wizard',
-      manager,
-    )
-    assert.match(apps.text, /value="app\.example\.wizard"/)
-    assert.match(apps.text, /Android/)
+    // The read-only triggers step shows each workflow's triggers as declared.
+    assert.deepEqual(discovered.triggers.release, [{ request: true }])
     const owned = await request(
       c.master,
       'POST',
@@ -369,26 +382,28 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       `${origin(host)}/api/webhooks/github/wizard`,
     )
     assert.match(hooks[0]!.body.config.secret, /^[0-9a-f]{48}$/)
+    // The project now holds what each step set, as the wizard reads it back.
     const third = await request(
       c.master,
       'GET',
-      '/projects/new?slug=wizard',
+      '/api/v2/projects/wizard',
       manager,
     )
-    assert.match(third.text, /Branches and triggers/)
-    assert.match(third.text, /The project has a webhook secret/)
-    // Done opens the new project on Projects & apps, at /projects.
-    assert.match(
-      third.text,
-      /<a class="button" href="\/projects\?project=wizard">Done<\/a>/,
+    assert.deepEqual(third.json.webhookSecret, { set: true })
+    assert.deepEqual(
+      third.json.apps.map((app: Json) => app.bundleId),
+      ['app.example.wizard'],
     )
-    assert.match(
-      third.text,
-      /<span class="mono">release<\/span> <small class="mono">\[\{&quot;request&quot;:true\}\]<\/small>/,
+    assert.deepEqual(
+      third.json.rules.map((rule: Json) => [rule.pattern, rule.mode]),
+      [
+        ['master', 'automatic'],
+        ['*', 'request'],
+      ],
     )
     // The discovery run never shows among the project's runs.
     assert.doesNotMatch(
-      (await request(c.master, 'GET', '/projects', manager)).text,
+      (await request(c.master, 'GET', '/api/v2/dashboard', manager)).text,
       /@discover/,
     )
     assert.equal(slugFor('git@github.com:Owner/My_App.git'), 'my-app')
@@ -523,10 +538,22 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       60_000,
       'the test stage',
     )
+    // The run page is the web app's; it reads the run, its graph, steps,
+    // history and details in one request, and its log a page at a time.
     const page = await request(c.master, 'GET', `/runs/${run}`, developer)
     assert.equal(page.status, 200)
+    assert.match(page.text, /<div id="root"><\/div>/)
+    assert.doesNotMatch(page.text, /\/assets\/run\.js/)
+    const read = await request(
+      c.master,
+      'GET',
+      `/api/v2/runs/${run}?include=graph,steps,history,details`,
+      developer,
+    )
+    assert.equal(read.status, 200, read.text)
     // The header names who requested the run, and the API names them too.
-    assert.match(page.text, /Requested by developer person<\/p>/)
+    assert.equal(read.json.details.requestedBy, 'developer person')
+    assert.equal(read.json.details.trigger, 'request')
     const shown = await request(
       c.master,
       'GET',
@@ -535,18 +562,24 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
     assert.equal(shown.json.actor, `account:${people.developer}`)
     assert.equal(shown.json.requestedBy, 'developer person')
-    assert.match(page.text, /class="pipeline-graph"/)
-    assert.match(page.text, /data-stage="android"/)
-    assert.match(page.text, /data-path="\/api\/v2\/runs\/[^/]+\/cancel"/)
-    assert.match(page.text, /src="\/assets\/run\.js"/)
+    assert(
+      read.json.layout.bubbles.some(
+        (bubble: Json) => bubble.name === 'android',
+      ),
+    )
+    assert.deepEqual(
+      read.json.history.map((entry: Json) => entry.id).includes(run),
+      true,
+    )
     const stage = await request(
       c.master,
       'GET',
-      `/runs/${run}?stage=test`,
+      `/api/v2/runs/${run}/logs?stage=test&from=0&count=500`,
       developer,
     )
-    assert.match(stage.text, /class="ansi-green">green<\/span> line/)
-    assert.match(stage.text, /second line/)
+    assert.equal(stage.status, 200, stage.text)
+    assert.match(stage.json.text, /\u001b\[32mgreen\u001b\[0m line/)
+    assert.match(stage.json.text, /second line/)
     const steps = c.master
       .master!.database.db.prepare(
         "SELECT id,log_start,log_end FROM job_steps WHERE job_id=? AND stage='test' ORDER BY id",
@@ -561,24 +594,42 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
           step.log_end >= step.log_start,
       ),
     )
+    assert.deepEqual(
+      read.json.steps
+        .filter((step: Json) => step.stage === 'test')
+        .map((step: Json) => step.id),
+      steps.map((step: Json) => step.id),
+    )
     const one = await request(
       c.master,
       'GET',
-      `/runs/${run}?stage=test&step=${steps[0].id}`,
+      `/api/v2/runs/${run}/logs?stage=test&step=${steps[0].id}&from=0`,
       developer,
     )
-    assert.match(one.text, /Lines of this step/)
-    assert.match(
-      (
-        await request(
-          c.master,
-          'GET',
-          `/runs/${run}?stage=test&step=999`,
-          developer,
-        )
-      ).text,
-      /There is no such step/,
+    assert.equal(one.status, 200, one.text)
+    const none = await request(
+      c.master,
+      'GET',
+      `/api/v2/runs/${run}/logs?stage=test&step=999&from=0`,
+      developer,
     )
+    assert.equal(none.status, 404)
+    assert.match(none.json.error, /No such step/)
+    // A stage that has written nothing (an approval, one not started) has no lines.
+    const quiet = await request(
+      c.master,
+      'GET',
+      `/api/v2/runs/${run}/logs?stage=not-started&last=1`,
+      developer,
+    )
+    assert.equal(quiet.status, 200, quiet.text)
+    assert.deepEqual(quiet.json, {
+      start: 1,
+      total: 0,
+      first: 1,
+      text: '',
+      end: 0,
+    })
     const raw = await request(
       c.master,
       'GET',
@@ -664,18 +715,19 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       run,
     )
     scripted.ws.close()
-    // A live page leaves a partial last line to the socket, which sends it once the stage settles.
+    // A live log's last page holds a partial last line; the page's socket
+    // resumes after the bytes it holds and sends the line once it is whole.
     const logFile = c.master.master!.scheduler.logFile(run, 'test')
     const whole = readFileSync(logFile)
     appendFileSync(logFile, 'partial')
     const partial = await request(
       c.master,
       'GET',
-      `/runs/${run}?stage=test`,
+      `/api/v2/runs/${run}/logs?stage=test&last=1`,
       developer,
     )
-    assert.match(partial.text, new RegExp(`data-offset="${whole.length}"`))
-    assert.doesNotMatch(partial.text, /partial/)
+    assert.equal(partial.json.end, whole.length + 'partial'.length)
+    assert.match(partial.json.text, /\npartial$/)
     const rest = await live(c.master, { authorization: `Bearer ${key.token}` })
     assert(typeof rest !== 'number')
     rest.send({ subscribe: 'run', run, stage: 'test', after: whole.length })
@@ -740,37 +792,49 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       ).status,
       200,
     )
-    assert.equal(
-      (await request(c.master, 'GET', `/runs/${run}`, signIn('tester'))).status,
-      403,
-    )
-    assert.equal(
-      (await request(c.master, 'GET', '/runs/none', developer)).status,
-      404,
-    )
-    const timeline = await request(
+    // A tester reads the 403 inside the app, and a run that does not exist
+    // its unknown-run state, each with that status.
+    const refused = await request(
       c.master,
       'GET',
-      `/runs/${run}?tab=timeline`,
+      `/runs/${run}`,
+      signIn('tester'),
+    )
+    assert.equal(refused.status, 403)
+    assert.match(refused.text, /<div id="root"><\/div>/)
+    const missing = await request(c.master, 'GET', '/runs/none', developer)
+    assert.equal(missing.status, 404)
+    assert.match(missing.text, /<div id="root"><\/div>/)
+    // The Masonfile tab is the web app's; it shows the file at a run's
+    // commit, the newest by default.
+    shell(
+      await request(c.master, 'GET', '/projects/wizard/masonfile', developer),
+    )
+    const commits = await request(
+      c.master,
+      'GET',
+      '/api/v2/projects/wizard/masonfile/commits',
       developer,
     )
-    assert.match(timeline.text, /class="timeline"/)
-    // The Masonfile tab shows the file at a run's commit.
+    assert.equal(commits.status, 200, commits.text)
+    assert(commits.json.length > 0)
     const file = await request(
       c.master,
       'GET',
-      '/projects/wizard/masonfile',
+      '/api/v2/projects/wizard/masonfile',
       developer,
     )
-    assert.match(file.text, /m\.apiVersion\(1\)/)
-    assert.match(file.text, /<\/span><span class="line" data-line="2">/)
+    assert.equal(file.status, 200, file.text)
+    assert.equal(file.json.commit, commits.json[0].sha)
+    assert.equal(file.json.file, 'Masonfile.ts')
+    assert.match(file.json.text, /m\.apiVersion\(1\)/)
     const api = await request(
       c.master,
       'GET',
       `/api/v2/projects/wizard/masonfile?commit=${'0'.repeat(40)}`,
       developer,
     )
-    assert.equal(api.status, 400)
+    assert.equal(api.status, 404)
   })
 
   it('serves the run view on the host, its logs forwarded and its live updates relayed from the master, and a developer’s cancel through it', async () => {
@@ -781,6 +845,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       'the run on the host',
     )
     const developer = onHost('developer')
+    // The page is the web app's, read from the host's copy.
     const page = await request(
       host,
       'GET',
@@ -788,10 +853,11 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       developer,
     )
     assert.equal(page.status, 200)
-    assert.match(page.text, /<meta name="mason-csrf"/)
-    assert.match(page.text, /Requested by developer person<\/p>/)
-    assert.match(page.text, /data-offset="tail"/)
-    assert.match(page.text, /<title>Run \d+ /)
+    assert.match(page.text, /<div id="root"><\/div>/)
+    const include = `/api/v2/runs/${run}?include=graph,steps,history,details`
+    const read = await request(host, 'GET', include, developer)
+    assert.equal(read.status, 200, read.text)
+    assert.equal(read.json.details.requestedBy, 'developer person')
     // The build number the run reserved reaches the host with the run, and leads its page.
     const master = c.master.master!
     master.database.db
@@ -810,46 +876,32 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       10_000,
       'the build number on the host',
     )
-    const numbered = (await request(host, 'GET', `/runs/${run}`, developer))
-      .text
-    assert.match(
-      numbered,
-      /class="run-title">Build 26110299<\/a> <small class="run-number">Run \d+<\/small>/,
+    assert.equal(
+      (await request(host, 'GET', include, developer)).json.details.buildNumber,
+      '26110299',
     )
-    assert.match(numbered, /<title>Build 26110299 · Run \d+ /)
-    assert.match(
-      (await request(c.master, 'GET', `/runs/${run}`, signIn('developer')))
-        .text,
-      /class="run-title">Build 26110299<\/a>/,
+    assert.equal(
+      (await request(c.master, 'GET', include, signIn('developer'))).json
+        .details.buildNumber,
+      '26110299',
     )
     master.database.db
       .prepare('DELETE FROM build_number_reservations WHERE reservation=?')
       .run(run)
     master.database.change('job', run)
+    // A step's lines, by number, through the host over its link.
     const step = await request(
       host,
       'GET',
-      `/runs/${run}?stage=test&step=1`,
-      developer,
+      `/api/v2/runs/${run}/logs?stage=test&step=1&from=0`,
+      { cookie: developer.cookie },
     )
-    assert.match(
-      step.text,
-      /data-lines="\/api\/v2\/runs\/[^"]+\/logs\?stage=test&amp;step=1"/,
-    )
-    // A finished run's whole log is fetched through the host, over its link;
-    // a running one's waits for the run to end.
-    const whole = (await request(host, 'GET', `/runs/${run}`, developer)).text
-    if ((c.master.master!.run(run) as Json).finished == null)
-      assert.match(whole, /The whole run’s log is shown once the run ends/)
-    else
-      assert.match(
-        whole,
-        new RegExp(`<div data-log data-lines="/api/v2/runs/${run}/logs">`),
-      )
-    assert.equal(
-      (await request(host, 'GET', `/runs/${run}`, onHost('tester'))).status,
-      403,
-    )
+    assert.equal(step.status, 200, step.text)
+    assert(step.json.start >= 1)
+    // A tester reads the 403 in the app; an unknown run its 404; nobody signed in signs in.
+    const refused = await request(host, 'GET', `/runs/${run}`, onHost('tester'))
+    assert.equal(refused.status, 403)
+    assert.match(refused.text, /<div id="root"><\/div>/)
     assert.equal(
       (await request(host, 'GET', '/runs/none', developer)).status,
       404,
@@ -955,36 +1007,60 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
     )
   })
 
-  it('U18.6 the nodes page shows inventory and checklists and pairs nodes; settings edit areas and send the Apple code to the master', async () => {
+  it('U18.6 Nodes and Settings are the web app’s: nodes with their type, slots and checklists, node types, the budget, settings areas by role and the Apple session', async () => {
     const manager = signIn('manager')
-    const nodes = await request(c.master, 'GET', '/nodes', manager)
-    assert.equal(nodes.status, 200)
-    assert.match(nodes.text, /<span class="mono">w<\/span>/)
-    // A node's header names only what it has: no empty type, no slots on the host.
-    assert.match(nodes.text, /<small>worker · [^<]*\d+ slots?/)
-    assert.doesNotMatch(nodes.text, /· ·|<small>host[^<]*slot/)
-    assert.match(nodes.text, /data-path="\/api\/v2\/nodes"/)
-    assert.match(nodes.text, /install\.sh/)
-    assert.match(nodes.text, /Monthly budget: \$200/)
-    assert.match(nodes.text, /<span class="mono">worker<\/span>/)
-    const settings = await request(c.master, 'GET', '/settings', manager)
-    // Where invitation links open is an administrator's to change.
-    assert.doesNotMatch(settings.text, /data-path="\/api\/v2\/settings\/host"/)
-    assert.match(settings.text, /only an administrator changes it/)
-    assert.match(settings.text, /serves from its cache for \d+ hours/)
-    const owner = await request(c.master, 'GET', '/settings', signIn('admin'))
-    assert.match(
-      owner.text,
-      /data-path="\/api\/v2\/settings\/host" data-method="PUT"/,
+    const read = async (route: string, as = manager): Promise<Json> => {
+      const reply = await request(c.master, 'GET', route, as)
+      assert.equal(reply.status, 200, `${route}: ${reply.text}`)
+      return reply.json
+    }
+    shell(await request(c.master, 'GET', '/nodes', manager))
+    shell(await request(c.master, 'GET', '/settings', manager))
+    // A node's card names only what it has: the worker its type and slots,
+    // the host neither.
+    const nodes = (await read('/api/v2/nodes')) as Json[]
+    const worker = nodes.find((node) => node.name === 'w')
+    assert.equal(worker.role, 'worker')
+    assert.equal(worker.type, 'worker')
+    assert(worker.slots >= 1)
+    assert(Array.isArray(worker.checklist))
+    const paired = nodes.find((node) => node.role === 'host')
+    assert(paired != null, 'the host is paired')
+    assert(!paired.type, 'a host has no type')
+    assert.equal((await read('/api/v2/cloud/budget')).monthly, 200)
+    assert.deepEqual(Object.keys(await read('/api/v2/settings/nodeTypes')), [
+      'worker',
+    ])
+    // Where invitation links open is an administrator's to change; a manager
+    // reads it, with how long the host serves from its cache.
+    const hostSetting = await read('/api/v2/settings/host')
+    assert.equal(hostSetting.origin, origin(host))
+    assert.equal(hostSetting.offlineGraceHours, 72)
+    const permissions = async (role: string): Promise<string[]> =>
+      (await read('/api/v2/session', signIn(role))).permissions
+    assert(!(await permissions('manager')).includes('signIn.change'))
+    assert((await permissions('admin')).includes('signIn.change'))
+    assert.equal(
+      (
+        await request(c.master, 'PUT', '/api/v2/settings/host', {
+          ...manager,
+          body: hostSetting,
+        })
+      ).status,
+      403,
     )
-    assert.match(settings.text, /data-path="\/api\/v2\/apple\/session"/)
-    // Secrets stay write-only: the stored GitHub token is an empty field that keeps it.
-    assert.match(
-      settings.text,
-      /name="token" type="password" data-kind="secret" autocomplete="off" placeholder="Leave empty to keep the stored token"/,
+    // Settings → Apple reads the master's Apple ID session.
+    assert.equal(typeof (await read('/api/v2/apple/signing')), 'object')
+    // Secrets stay write-only: the stored GitHub token reads as set.
+    const github = await request(
+      c.master,
+      'GET',
+      '/api/v2/settings/github',
+      manager,
     )
-    assert(!settings.text.includes('ghp_fixture'))
-    assert.match(settings.text, /policy|No keys|admin/)
+    assert.deepEqual(github.json.token, { set: true })
+    assert(!github.text.includes('ghp_fixture'))
+    assert(Array.isArray(await read('/api/v2/keys')))
     // The host has no settings, nodes or Apple pages.
     for (const route of ['/settings', '/nodes', '/people', '/groups'])
       assert(
@@ -1020,52 +1096,61 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
         got.push((await request(c.master, 'GET', route, session)).status)
       assert.deepEqual(got, statuses, role)
     }
-    // Backups is top-level, as the side menu has it; the run page goes
-    // through its project's Runs and builds and its branch.
+    // Administration and the run page are the web app's, each guarded by
+    // its permission (the run page's trail goes through its project's Runs
+    // and builds and its branch: src/web/pages/run, and E2 in a browser).
     const admin = signIn('admin')
-    assert.deepEqual(
-      crumbTrail((await request(c.master, 'GET', '/backups', admin)).text),
-      ['Mason Master /', 'Backups /backups *'],
-    )
-    const runTrail = crumbTrail(
-      (await request(c.master, 'GET', `/runs/${run}`, admin)).text,
-    )
-    assert.deepEqual(runTrail.slice(0, 4), [
-      'Mason Master /',
-      'Projects /projects',
-      'wizard /projects/wizard',
-      'Runs and builds /projects/wizard/runs',
+    for (const route of [
+      '/nodes',
+      '/settings',
+      '/people',
+      '/groups',
+      '/backups',
     ])
-    assert.match(runTrail.at(-1)!, new RegExp(`^Run \\d+ /runs/${run} \\*$`))
-    const developer = (
-      await request(c.master, 'GET', '/projects', signIn('developer'))
-    ).text
-    assert.doesNotMatch(
-      developer,
-      /href="\/(nodes|settings|people|groups|backups)"|Add project/,
-    )
-    const manager = (
-      await request(c.master, 'GET', '/projects', signIn('manager'))
-    ).text
-    assert.match(manager, /href="\/nodes"/)
-    assert.match(manager, /Add project/)
-    // Only administrators change people; the form asks for an email, which
-    // any enabled sign-in method that confirms it signs them in with.
-    const adminPeople = (
-      await request(c.master, 'GET', '/people', signIn('admin'))
-    ).text
-    assert.match(adminPeople, /<form data-mason="person-add">/)
+      shell(await request(c.master, 'GET', route, admin))
+    for (const route of [
+      '/nodes',
+      '/settings',
+      '/people',
+      '/groups',
+      '/backups',
+    ])
+      shell(await request(c.master, 'GET', route, signIn('developer')), 403)
     assert.match(
-      adminPeople,
-      /data-email-fields><input id="person-email" name="email"/,
+      (await request(c.master, 'GET', `/runs/${run}`, admin)).text,
+      /<div id="root"><\/div>/,
     )
-    assert.doesNotMatch(adminPeople, /addresses\./)
-    const managerPeople = (
-      await request(c.master, 'GET', '/people', signIn('manager'))
-    ).text
-    assert.doesNotMatch(managerPeople, /data-path="\/api\/v2\/people/)
-    assert.doesNotMatch(managerPeople, /data-mason="person-(add|password)"/)
-    assert.match(managerPeople, /tester person/)
+    // Projects & apps is the web app's: its links and Add project follow the
+    // session's permissions, which it reads.
+    const permissions = async (role: string): Promise<string[]> =>
+      (await request(c.master, 'GET', '/api/v2/session', signIn(role))).json
+        .permissions
+    for (const role of ['developer', 'manager']) {
+      const page = await request(c.master, 'GET', '/projects', signIn(role))
+      assert.match(page.text, /<div id="root"><\/div>/)
+    }
+    const developer = await permissions('developer')
+    assert(!developer.includes('nodes.read'))
+    assert(!developer.includes('projects.change'))
+    const manager = await permissions('manager')
+    assert(manager.includes('nodes.read'))
+    assert(manager.includes('projects.change'))
+    // Only administrators change people; managers read them.
+    assert(!manager.includes('people.change'))
+    assert(manager.includes('people.read'))
+    assert((await permissions('admin')).includes('people.change'))
+    const managerPeople = await request(
+      c.master,
+      'GET',
+      '/api/v2/people',
+      signIn('manager'),
+    )
+    assert.equal(managerPeople.status, 200)
+    assert(
+      (managerPeople.json as Json[]).some(
+        (person) => person.name === 'tester person',
+      ),
+    )
     // A project's page names its secrets and never shows their values.
     const manager2 = signIn('manager')
     seedSecret(c.master.master!.database.db, 'wizard', {
@@ -1093,91 +1178,183 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       ).status,
       200,
     )
-    const projectPage = (
-      await request(c.master, 'GET', '/projects/wizard', manager2)
-    ).text
-    assert.match(projectPage, /app\.example\.ui<\/td><td class="mono">YYMMDDCC/)
-    assert.match(projectPage, /master<\/span> 26102107/)
-    assert.match(projectPage, /data-path="\/api\/v2\/build-numbers\/seed"/)
-    // Secrets are on their own tab, not the overview.
-    assert.doesNotMatch(projectPage, /SIGNING_TOKEN/)
-    assert.doesNotMatch(
-      projectPage,
-      /data-path="\/api\/v2\/projects\/wizard\/secrets"|data-secrets/,
+    // A project's pages are the web app's: its Overview reads the project's
+    // details, its sequences and whether the viewer may set where one stands.
+    shell(await request(c.master, 'GET', '/projects/wizard', manager2))
+    const overview = async (role: string): Promise<Json> => {
+      const reply = await request(
+        c.master,
+        'GET',
+        '/api/v2/projects/wizard/overview',
+        signIn(role),
+      )
+      assert.equal(reply.status, 200, reply.text)
+      return reply.json
+    }
+    const managerOverview = await overview('manager')
+    const sequence = managerOverview.buildNumbers.find(
+      (entry: Json) => entry.key === 'app.example.ui',
     )
-    assert(!projectPage.includes('secret-value-fixture'))
-    const developerProject = (
-      await request(c.master, 'GET', '/projects/wizard', signIn('developer'))
-    ).text
-    assert.match(developerProject, /master<\/td><td>automatic/)
-    assert.doesNotMatch(developerProject, /build-numbers\/seed/)
-    assert.doesNotMatch(
-      developerProject,
-      /data-path="\/api\/v2\/projects\/wizard\/secrets"/,
+    assert.equal(sequence.format, 'YYMMDDCC')
+    assert.deepEqual(sequence.last, [{ branch: 'master', value: '26102107' }])
+    assert.equal(managerOverview.canSeed, true)
+    // The master has a Secrets tab; secrets are on it, not the overview.
+    assert.equal(managerOverview.secrets, true)
+    assert.doesNotMatch(JSON.stringify(managerOverview), /SIGNING_TOKEN/)
+    assert(!JSON.stringify(managerOverview).includes('secret-value-fixture'))
+    shell(
+      await request(c.master, 'GET', '/projects/wizard', signIn('developer')),
     )
-    // To a tester projects do not exist.
+    const developerOverview = await overview('developer')
+    assert.deepEqual(
+      developerOverview.rules.find((rule: Json) => rule.pattern === 'master'),
+      { pattern: 'master', mode: 'automatic' },
+    )
+    assert.equal(developerOverview.canSeed, false)
     assert.equal(
-      (await request(c.master, 'GET', '/projects/wizard', signIn('tester')))
-        .status,
-      404,
+      (
+        await request(c.master, 'POST', '/api/v2/build-numbers/seed', {
+          ...signIn('developer'),
+          body: {
+            project: 'wizard',
+            key: 'app.example.ui',
+            branch: 'master',
+            last: '26102108',
+          },
+        })
+      ).status,
+      403,
     )
-    // The Secrets tab: names and configs for developers, controls and the audit for managers.
+    // To a tester projects do not exist: every page under /projects is the
+    // master's not-found page, and the reads refuse them.
+    const testerRoutes = [
+      '/projects/wizard',
+      '/projects/wizard/runs',
+      '/projects/wizard/masonfile',
+      '/projects/wizard/secrets',
+    ]
+    for (const route of testerRoutes)
+      assert.equal(
+        (await request(c.master, 'GET', route, signIn('tester'))).status,
+        404,
+        route,
+      )
+    assert.equal(
+      (
+        await request(
+          c.master,
+          'GET',
+          '/api/v2/projects/wizard/overview',
+          signIn('tester'),
+        )
+      ).status,
+      403,
+    )
+    // The Secrets tab: names and configs for developers, contents and the
+    // audit for managers; values never appear in the list.
+    shell(await request(c.master, 'GET', '/projects/wizard/secrets', manager2))
     const managerSecrets = await request(
       c.master,
       'GET',
-      '/projects/wizard/secrets',
+      '/api/v2/projects/wizard/secrets',
       manager2,
     )
-    assert.equal(managerSecrets.status, 200)
-    assert.match(managerSecrets.text, /aria-current="page">Secrets</)
-    assert.match(managerSecrets.text, /data-secret-name|SIGNING_TOKEN/)
-    assert.match(managerSecrets.text, /data-secret-edit/)
-    assert.match(managerSecrets.text, /<h2><span[^>]*>[^<]*<\/span>Audit<\/h2>/)
-    assert.match(managerSecrets.text, /src="\/assets\/secrets\.js"/)
+    assert.equal(managerSecrets.status, 200, managerSecrets.text)
+    assert(
+      managerSecrets.json.some(
+        (secret: Json) => secret.name === 'SIGNING_TOKEN',
+      ),
+    )
     assert(!managerSecrets.text.includes('secret-value-fixture'))
-    const developerSecrets = (
+    const audit = await request(
+      c.master,
+      'GET',
+      '/api/v2/projects/wizard/secrets/audit',
+      manager2,
+    )
+    assert.equal(audit.status, 200, audit.text)
+    assert(Array.isArray(audit.json))
+    const backups = await request(
+      c.master,
+      'GET',
+      '/api/v2/projects/wizard/secrets/backups',
+      manager2,
+    )
+    assert.equal(backups.status, 200, backups.text)
+    assert.equal(typeof backups.json.backupsConfigured, 'boolean')
+    shell(
       await request(
         c.master,
         'GET',
         '/projects/wizard/secrets',
         signIn('developer'),
-      )
-    ).text
-    assert.match(developerSecrets, /SIGNING_TOKEN/)
-    assert.doesNotMatch(
-      developerSecrets,
-      /data-secret-edit|Audit|data-secrets|assets\/secrets\.js/,
+      ),
+    )
+    const developerSecrets = await request(
+      c.master,
+      'GET',
+      '/api/v2/projects/wizard/secrets',
+      signIn('developer'),
+    )
+    assert.equal(developerSecrets.status, 200, developerSecrets.text)
+    assert(
+      developerSecrets.json.some(
+        (secret: Json) => secret.name === 'SIGNING_TOKEN',
+      ),
+    )
+    assert(!developerSecrets.text.includes('secret-value-fixture'))
+    assert.equal(
+      (
+        await request(
+          c.master,
+          'GET',
+          '/api/v2/projects/wizard/secrets/audit',
+          signIn('developer'),
+        )
+      ).status,
+      403,
+    )
+    shell(
+      await request(c.master, 'GET', '/projects/nope/secrets', manager2),
+      404,
     )
     assert.equal(
       (
         await request(
           c.master,
           'GET',
-          '/projects/wizard/secrets',
-          signIn('tester'),
+          '/api/v2/projects/nope/secrets',
+          manager2,
         )
       ).status,
-      404,
-    )
-    assert.equal(
-      (await request(c.master, 'GET', '/projects/nope/secrets', manager2))
-        .status,
       404,
     )
     assert.equal(
       (await request(c.master, 'GET', '/projects/wizard/secrets')).status,
       303,
     )
-    // Runs and builds is a project tab: the project's runs, under the same tabs.
-    const runsTab = await request(
-      c.master,
-      'GET',
-      '/projects/wizard/runs',
-      signIn('developer'),
+    // Runs and builds is a project tab: the project's runs.
+    shell(
+      await request(
+        c.master,
+        'GET',
+        '/projects/wizard/runs',
+        signIn('developer'),
+      ),
     )
-    assert.equal(runsTab.status, 200)
-    assert.match(runsTab.text, /aria-current="page">Runs and builds</)
-    assert.match(runsTab.text, /<table class="list runs">|No runs yet/)
+    const runsOf = async (query = ''): Promise<Json> => {
+      const reply = await request(
+        c.master,
+        'GET',
+        `/api/v2/projects/wizard/runs${query}`,
+        signIn('developer'),
+      )
+      assert.equal(reply.status, 200, reply.text)
+      return reply.json
+    }
+    const runsTab = await runsOf()
+    assert.equal(runsTab.name, 'wizard')
+    assert(runsTab.runs.some((entry: Json) => entry.id === run))
     // The branches the build's push trigger names lead the list, a glob by its branches with runs.
     const db = c.master.master!.database.db
     const project = c.master.master!.projects.get('wizard')
@@ -1202,16 +1379,7 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       1,
     )
     const order = async (): Promise<string[]> =>
-      [
-        ...(
-          await request(
-            c.master,
-            'GET',
-            '/projects/wizard/runs',
-            signIn('developer'),
-          )
-        ).text.matchAll(/runs\?branch=([^"]+)"/g),
-      ].map((match) => decodeURIComponent(match[1]!))
+      (await runsOf()).branches.map((entry: Json) => entry.branch)
     assert.deepEqual((await order()).slice(0, 3), [
       'develop',
       'release/1',
@@ -1231,101 +1399,54 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       (await order()).slice(0, automatic.length),
       automatic.filter((pattern) => !pattern.includes('*')),
     )
-    assert.match(
-      (
-        await request(
-          c.master,
-          'GET',
-          '/projects/wizard/runs?branch=release%2F1',
-          signIn('developer'),
-        )
-      ).text,
-      /<td class="mono">26110201<\/td>/,
+    // A branch's runs lead with the build number each reserved.
+    shell(
+      await request(
+        c.master,
+        'GET',
+        '/projects/wizard/runs?branch=release%2F1',
+        signIn('developer'),
+      ),
     )
+    const release = await runsOf('?branch=release%2F1')
+    assert.equal(release.branch, 'release/1')
     assert.deepEqual(
-      crumbTrail(
-        (
-          await request(
-            c.master,
-            'GET',
-            '/projects/wizard/runs?branch=release%2F1',
-            signIn('developer'),
-          )
-        ).text,
-      ).slice(-2),
-      [
-        'Runs and builds /projects/wizard/runs',
-        'release/1 /projects/wizard/runs?branch=release%2F1 *',
-      ],
+      release.runs.map((entry: Json) => [entry.id, entry.buildNumber]),
+      [['m2-a', '26110201']],
     )
     db.prepare("DELETE FROM jobs WHERE id IN ('m2-a','m2-b')").run()
     db.prepare('DELETE FROM push_triggers WHERE project_id=?').run(project.id)
-    assert.match(
-      (
-        await request(
-          c.master,
-          'GET',
-          '/projects/wizard/runs?branch=master',
-          signIn('developer'),
-        )
-      ).text,
-      /The latest runs on master/,
-    )
+    const onMaster = await runsOf('?branch=master')
+    assert.equal(onMaster.branch, 'master')
+    assert(onMaster.runs.every((entry: Json) => entry.branch === 'master'))
+    shell(await request(c.master, 'GET', '/projects/nope/runs', manager2), 404)
     assert.equal(
-      (
-        await request(
-          c.master,
-          'GET',
-          '/projects/wizard/runs',
-          signIn('tester'),
-        )
-      ).status,
-      404,
-    )
-    assert.equal(
-      (await request(c.master, 'GET', '/projects/nope/runs', manager2)).status,
+      (await request(c.master, 'GET', '/api/v2/projects/nope/runs', manager2))
+        .status,
       404,
     )
     assert.equal(
       (await request(c.master, 'GET', '/projects/wizard/runs')).status,
       303,
     )
-    assert.doesNotMatch(projectPage, /src="\/assets\/secrets\.js"/)
-    assert.match(projectPage, /aria-current="page">Overview</)
-    const bundle = await request(c.master, 'GET', '/assets/secrets.js')
-    assert.equal(bundle.status, 200)
-    assert.match(bundle.text, /data-secrets/)
+    // The old Secrets page's script is gone with the server pages.
     assert.equal(
-      (await request(c.master, 'GET', '/projects/none', manager2)).status,
+      (await request(c.master, 'GET', '/assets/secrets.js')).status,
       404,
     )
+    shell(await request(c.master, 'GET', '/projects/none', manager2), 404)
     // A developer may not cancel others' runs from a page without the controls of a manager either way; testers see no runs.
-    // A tester's home is Install apps (catalogRelay.test.ts follows it).
-    assert.equal(
-      (await request(c.master, 'GET', '/', signIn('tester'))).status,
-      200,
-    )
+    // A tester's home is Install apps, the web app's (catalogRelay.test.ts follows it).
+    shell(await request(c.master, 'GET', '/', signIn('tester')))
   })
 
-  it('U20.11 Groups lists the groups and opens a page for each; People no longer holds them', async () => {
-    const admin = signIn('admin')
+  it('U20.11 Groups lists the groups and opens a page for each, its picker over every app and person', async () => {
     const manager = signIn('manager')
-    const adminPeople = (await request(c.master, 'GET', '/people', admin)).text
-    assert.match(
-      adminPeople,
-      /data-email-fields><input id="person-email" name="email"/,
-    )
-    assert.doesNotMatch(adminPeople, /\/api\/v2\/groups/)
-    const managerPeople = (await request(c.master, 'GET', '/people', manager))
-      .text
-    assert.doesNotMatch(
-      managerPeople,
-      /data-mason="person-add"|\/api\/v2\/groups/,
-    )
-    assert.match(
-      (await request(c.master, 'GET', '/', admin)).text,
-      /<a href="\/people"[^>]*>.*?<span class="label">People<\/span><\/a><a href="\/groups"[^>]*>.*?<span class="label">Groups<\/span>/,
-    )
+    const read = async (route: string): Promise<Json> => {
+      const reply = await request(c.master, 'GET', route, manager)
+      assert.equal(reply.status, 200, `${route}: ${reply.text}`)
+      return reply.json
+    }
     const db = c.master.master!.database.db
     const app = db
       .prepare('SELECT id,name,slug FROM apps ORDER BY position,id LIMIT 1')
@@ -1340,116 +1461,52 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       },
     })
     assert.equal(created.status, 201, created.text)
-    const list = await request(c.master, 'GET', '/groups', manager)
-    assert.equal(list.status, 200)
-    assert.match(
-      list.text,
-      new RegExp(
-        `<a class="list-row" href="/groups/${created.json.id}"><strong>Ui &lt;crew&gt;</strong>`,
-      ),
-    )
-    assert.match(list.text, /<input id="group-name" name="name"/)
-    assert.match(list.text, /aria-current="page" title="Groups"/)
-    assert.doesNotMatch(list.text, /src="\/assets\/groups\.js"/)
-    const page = await request(
-      c.master,
-      'GET',
-      `/groups/${created.json.id}`,
-      manager,
-    )
-    assert.equal(page.status, 200)
-    assert.match(page.text, /<title>Ui &lt;crew&gt; · Mason<\/title>/)
-    assert.match(page.text, /<h1 data-group-title>Ui &lt;crew&gt;<\/h1>/)
-    assert.match(page.text, /data-group-rename/)
-    assert.match(page.text, /data-group-add>.*Add App<\/button>/)
-    assert.match(page.text, /data-group-add>.*Add member<\/button>/)
-    const catalog = JSON.parse(
-      /<script type="application\/json" data-group-catalog>(.*?)<\/script>/.exec(
-        page.text,
-      )![1]!,
-    )
-    const names = (
-      db.prepare('SELECT name FROM apps ORDER BY position,id').all() as Json[]
-    ).map((row) => row.name)
-    assert.deepEqual(
-      catalog.apps.map((entry: Json) => entry.name),
-      names,
-    )
-    for (const name of names) assert(page.text.includes(JSON.stringify(name)))
+    const page = `/groups/${created.json.id}`
+    // The list and a group's page are the web app's.
+    shell(await request(c.master, 'GET', '/groups', manager))
+    shell(await request(c.master, 'GET', page, manager))
     assert(
-      catalog.people.some(
-        (person: Json) =>
+      ((await read('/api/v2/groups')) as Json[]).some(
+        (group) => group.id === created.json.id && group.name === 'Ui <crew>',
+      ),
+    )
+    const group = await read(`/api/v2/groups/${created.json.id}`)
+    assert.equal(group.name, 'Ui <crew>')
+    assert.deepEqual(group.apps, [{ id: app.id, slug: app.slug }])
+    assert.deepEqual(group.members, [people.tester])
+    // Add App and Add member pick from every app, in catalog order, and
+    // every person.
+    assert.deepEqual(
+      ((await read('/api/v2/apps')) as Json[]).map((entry) => entry.name),
+      (
+        db.prepare('SELECT name FROM apps ORDER BY position,id').all() as Json[]
+      ).map((row) => row.name),
+    )
+    assert(
+      ((await read('/api/v2/people')) as Json[]).some(
+        (person) =>
           person.id === people.tester &&
-          person.emails[0] === 'tester.person@example.test',
+          person.emails[0].email === 'tester.person@example.test',
       ),
     )
-    assert.deepEqual(catalog.group, {
-      apps: [app.id],
-      members: [people.tester],
-    })
-    assert.match(page.text, /<h2>.*Apps<\/h2>/)
-    assert.match(page.text, /<h2>.*Group Members<\/h2>/)
-    assert.match(
-      page.text,
-      new RegExp(
-        `<li data-id="${app.id}"><div><strong>[^<]*</strong><small class="mono">${app.slug.replaceAll('.', '\\.')}<`,
-      ),
+    // The old Groups page's script is gone with the server pages.
+    assert.equal(
+      (await request(c.master, 'GET', '/assets/groups.js')).status,
+      404,
     )
-    assert.match(
-      page.text,
-      new RegExp(
-        `<li data-id="${people.tester}"><div><strong>tester person</strong><small>tester\\.person@example\\.test<`,
-      ),
-    )
-    assert.match(
-      page.text,
-      /data-method="DELETE" data-fields="" data-then="groups"/,
-    )
-    assert.match(
-      page.text,
-      /<script type="module" src="\/assets\/groups\.js"><\/script>/,
-    )
-    const script = await request(c.master, 'GET', '/assets/groups.js')
-    assert.equal(script.status, 200)
-    assert.match(script.type, /javascript/)
-    assert.match(script.text, /data-group-rename/)
     for (const route of [
       '/groups/999999',
       '/groups/0',
       '/groups/x',
       '/groups/1.5',
-    ]) {
-      const missing = await request(c.master, 'GET', route, manager)
-      assert.equal(missing.status, 404, route)
-      assert.match(missing.text, /No such group/, route)
-    }
+    ])
+      shell(await request(c.master, 'GET', route, manager), 404)
     for (const role of ['developer', 'tester'])
-      assert.equal(
-        (
-          await request(
-            c.master,
-            'GET',
-            `/groups/${created.json.id}`,
-            signIn(role),
-          )
-        ).status,
-        403,
-        role,
-      )
-    assert.equal(
-      (await request(c.master, 'GET', `/groups/${created.json.id}`)).status,
-      303,
-    )
+      shell(await request(c.master, 'GET', page, signIn(role)), 403)
+    assert.equal((await request(c.master, 'GET', page)).status, 303)
     assert(
       [403, 404].includes(
-        (
-          await request(
-            host,
-            'GET',
-            `/groups/${created.json.id}`,
-            onHost('admin'),
-          )
-        ).status,
+        (await request(host, 'GET', page, onHost('admin'))).status,
       ),
     )
     assert.equal(
@@ -1461,13 +1518,6 @@ describe('Master and host pages for runs, projects, nodes, settings and people',
       200,
     )
     // A removed group's page is gone.
-    const removed = await request(
-      c.master,
-      'GET',
-      `/groups/${created.json.id}`,
-      manager,
-    )
-    assert.equal(removed.status, 404)
-    assert.match(removed.text, /No such group/)
+    shell(await request(c.master, 'GET', page, manager), 404)
   })
 })
