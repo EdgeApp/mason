@@ -101,6 +101,9 @@ export interface NodeOptions {
     | 'cloudHosts'
     | 'spaces'
     | 'now'
+    | 'log'
+    | 'syncPageBytes'
+    | 'pageHoldMs'
   >
   pollMs?: number
   /**

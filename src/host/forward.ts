@@ -179,12 +179,17 @@ export function forwardRoutes(host: HostRuntime): Router {
         })
         try {
           // A person's own record changed: the page that reloads after it
-          // reads this host's copy, so the copy catches up first.
+          // reads this host's copy, so the copy catches up first. Only a
+          // link replaced mid-request (its opening sync not finished) skips
+          // that; the change is saved, and the reload shows it once the
+          // opening sync applies it.
           await relay(
             stream,
             res,
             isAccountChange(req.method, req.originalUrl)
-              ? async (): Promise<void> => await host.catchUp()
+              ? async (): Promise<void> => {
+                  await host.catchUp()
+                }
               : undefined,
           )
         } catch (error) {

@@ -108,6 +108,10 @@ export { nodeTypesSetting }
 
 export interface MasterOptions {
   methods?: (role: 'worker' | 'host') => MethodTable
+  /** The most of a host's sync one page holds; tests set it below SYNC_PAGE_BYTES. */
+  syncPageBytes?: number
+  /** How long a host's unasked paged sync is held; tests shorten it. */
+  pageHoldMs?: number
   heartbeatMs?: number
   redialBaseMs?: number
   /** Called once the first admin exists. */
@@ -598,6 +602,13 @@ export class Master {
     })
     this.hosts = new HostLinks({
       master: this.database,
+      log: (line): void => (this.options.log ?? console.log)(line),
+      ...(this.options.syncPageBytes == null
+        ? {}
+        : { syncPageBytes: this.options.syncPageBytes }),
+      ...(this.options.pageHoldMs == null
+        ? {}
+        : { pageHoldMs: this.options.pageHoldMs }),
       registry: this.registry,
       changes: this.changes,
       projects: this.projects,

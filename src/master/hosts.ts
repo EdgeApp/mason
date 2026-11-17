@@ -1,4 +1,10 @@
-import { createHmac, sign, timingSafeEqual, type KeyObject } from 'node:crypto'
+import {
+  createHmac,
+  randomBytes,
+  sign,
+  timingSafeEqual,
+  type KeyObject,
+} from 'node:crypto'
 import { identifierOf } from '../auth/passwordProtocol.js'
 import {
   LinkError,
@@ -6,7 +12,12 @@ import {
   type MethodTable,
   type Stream,
 } from '../link/link.js'
-import type { Changes, Sync } from './changes.js'
+import {
+  SYNC_PAGE_BYTES,
+  syncPages,
+  type Changes,
+  type Sync,
+} from './changes.js'
 import type { MasterDatabase } from './database.js'
 import type { Jobs } from './jobs.js'
 import { repositoryName } from './mirrors.js'
@@ -25,6 +36,9 @@ export class HostNotConnected extends Error {}
 
 /** Live master sessions per `catalog.liveSessions` message: about 280 KiB, well under the link's cap. */
 const LIVE_SESSIONS_PAGE = 4096
+
+/** How long a host may leave a paged sync's next page unasked before its pages are dropped. */
+const PAGE_HOLD_MS = 5 * 60_000
 
 /** The only writes a host makes to the master. */
 export const outboxKinds = ['device', 'prepare', 'artifact'] as const
@@ -53,6 +67,22 @@ const refused = (http: 401 | 404 | 422, reason: string): WebhookResult => ({
 export class HostLinks {
   /** The revision each connected host has been sent. */
   private readonly sent = new Map<string, number>()
+  /**
+   * The pages of syncs hosts are fetching (`host.syncPage`), by token. While
+   * a host holds one its pushes wait, so no change lands between its pages
+   * and is overwritten by an older snapshot.
+   */
+  private readonly paged = new Map<
+    string,
+    {
+      fingerprint: string
+      link: Link
+      pages: Sync[]
+      expires: number
+      /** Sweeps once the pages expire, so the held pushes go then. */
+      timer?: NodeJS.Timeout
+    }
+  >()
   /** Each host's own web listener, as it reported it: where nodes fetch a mirrored Xcode. */
   private readonly webs = new Map<string, { url: string; pin?: string }>()
   private pending: NodeJS.Timeout | undefined
@@ -77,6 +107,12 @@ export class HostLinks {
       artifacts?: Artifacts
       /** How long writes are gathered before a push; well under a second. */
       pushMs?: number
+      /** The most of a sync one page holds; tests set it below SYNC_PAGE_BYTES. */
+      syncPageBytes?: number
+      /** How long an unasked paged sync is held (PAGE_HOLD_MS); tests shorten it. */
+      pageHoldMs?: number
+      /** Where the master's log lines go. */
+      log?: (line: string) => void
       /** Called after a device or a prepare request arrives, to provision it. */
       onDevices?: () => void
       /** Runs a request the host forwards to the master's API. */
@@ -117,23 +153,97 @@ export class HostLinks {
     this.pending.unref()
   }
 
-  /** Sends every connected host what changed since its last revision. */
+  /**
+   * Sends every connected host what changed since its last revision, one
+   * `changes` event per page, so a burst larger than one link message
+   * still arrives. Anything that goes wrong for a host stops its sends
+   * until its link reopens; it never escapes the push timer.
+   */
   push(): void {
+    this.sweepPages()
     for (const node of this.options.registry.list()) {
       if (node.role !== 'host') continue
       const link = this.options.registry.link(node.fingerprint)
       const revision = this.sent.get(node.fingerprint)
       if (link == null || link.closed || revision == null) continue
-      const sync = this.options.changes.since(revision)
-      if (sync.revision === revision) continue
+      if (this.fetchingPages(node.fingerprint)) continue
       try {
-        link.event('changes', sync)
-        this.sent.set(node.fingerprint, sync.revision)
-      } catch {
+        const sync = this.options.changes.since(revision)
+        if (sync.revision === revision) continue
+        const pages = syncPages(sync, this.pageBytes)
+        // A host applies a pushed snapshot as the whole cache: one that
+        // takes several pages goes to its opening sync, which fetches them.
+        if (sync.kind === 'snapshot' && pages.length > 1) {
+          this.sent.delete(node.fingerprint)
+          this.log(`Changes for host ${node.name} need a full sync`)
+          link.close()
+          continue
+        }
+        for (const page of pages) {
+          link.event('changes', page)
+          this.sent.set(node.fingerprint, page.revision)
+        }
+      } catch (error) {
         // The host syncs again when its link reopens.
         this.sent.delete(node.fingerprint)
+        this.log(
+          `Changes for host ${node.name} could not be sent: ${(error as Error).message}`,
+        )
       }
     }
+  }
+
+  /**
+   * Drops pages whose link has closed or whose five minutes have passed. A
+   * host still linked whose pages expired gets the pushes it was held from.
+   */
+  private sweepPages(): void {
+    const now = this.options.master.now()
+    let release = false
+    for (const [token, held] of this.paged)
+      if (held.link.closed || held.expires <= now) {
+        this.dropPages(token)
+        if (!held.link.closed) release = true
+      }
+    if (release) this.schedule()
+  }
+
+  private dropPages(token: string): void {
+    clearTimeout(this.paged.get(token)?.timer)
+    this.paged.delete(token)
+  }
+
+  /** (Re)starts the timer that sweeps a held sync once its time runs out. */
+  private expireLater(token: string): void {
+    const held = this.paged.get(token)
+    if (held == null) return
+    clearTimeout(held.timer)
+    const hold = this.options.pageHoldMs ?? PAGE_HOLD_MS
+    held.expires = this.options.master.now() + hold
+    // Its own clock: when it fires the sync is let go, whatever the
+    // master's clock reads, and the host's held pushes go.
+    held.timer = setTimeout(() => {
+      if (this.paged.get(token) !== held) return
+      this.dropPages(token)
+      if (!held.link.closed) this.schedule()
+    }, hold)
+    held.timer.unref()
+  }
+
+  /** Whether a host is fetching a sync's pages. */
+  private fetchingPages(fingerprint: string): boolean {
+    for (const held of this.paged.values())
+      if (held.fingerprint === fingerprint) return true
+    return false
+  }
+
+  /** The most of a sync one page holds. */
+  private get pageBytes(): number {
+    return this.options.syncPageBytes ?? SYNC_PAGE_BYTES
+  }
+
+  private log(line: string): void {
+    ;(this.options.log ?? console.log)(line)
   }
 
   /** The host a request came from, by the fingerprint its handshake proved. */
@@ -589,9 +699,16 @@ export class HostLinks {
           const revision = Number(
             (params as { revision?: unknown })?.revision ?? 0,
           )
+          // A host fetches one paged sync at a time: asking again gives up
+          // the last one, which then holds none of its pushes.
+          this.sweepPages()
+          for (const [token, held] of this.paged)
+            if (held.fingerprint === fingerprint) this.dropPages(token)
           const sync = this.options.changes.since(
             Number.isSafeInteger(revision) ? revision : 0,
           )
+          // Recorded at once, paged or not: the host counts as connected
+          // while it fetches, and its pushes wait for the last page.
           this.sent.set(fingerprint, sync.revision)
           // Once per link, at its first sync: on-demand syncs follow back
           // to back, and one list at a time keeps the host's pages in order.
@@ -599,7 +716,52 @@ export class HostLinks {
             this.listed.add(link)
             this.liveSessions(link).catch(() => undefined)
           }
-          return sync
+          // A host on an earlier release asks for no pages: it gets the
+          // sync whole, which the link refuses when it is too large.
+          if ((params as { pages?: unknown })?.pages !== true) return sync
+          const pages = syncPages(sync, this.pageBytes)
+          if (pages.length === 1) return sync
+          const token = randomBytes(18).toString('base64url')
+          this.paged.set(token, {
+            fingerprint,
+            link,
+            pages,
+            expires: 0,
+          })
+          this.expireLater(token)
+          // A link that closes lets go of its pages at once.
+          link.once('close', () => {
+            if (this.paged.has(token)) this.dropPages(token)
+          })
+          return { ...pages[0]!, page: { token, count: pages.length } }
+        },
+        /** The next page of a paged host.sync; the last lets its pushes go. */
+        'host.syncPage': (params, link): Sync => {
+          const fingerprint = this.host(link)
+          this.sweepPages()
+          const { token, index } = (params ?? {}) as {
+            token?: unknown
+            index?: unknown
+          }
+          const held =
+            typeof token === 'string' ? this.paged.get(token) : undefined
+          if (
+            held == null ||
+            held.fingerprint !== fingerprint ||
+            held.link !== link ||
+            typeof index !== 'number' ||
+            !Number.isSafeInteger(index) ||
+            index < 1 ||
+            index >= held.pages.length
+          )
+            throw new LinkError('No such sync page', 'refused')
+          if (index === held.pages.length - 1) {
+            this.dropPages(token as string)
+            this.schedule()
+          } else
+            // The window bounds a host that stopped asking, not a slow one.
+            this.expireLater(token as string)
+          return held.pages[index]!
         },
         /** A kept Masonfile's text, which a sync leaves out. */
         'masonfile.text': (params, link): { text: string | null } => {
