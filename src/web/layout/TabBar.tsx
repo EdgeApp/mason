@@ -6,9 +6,9 @@ import { Icon } from '../ui/Icon.js'
 import { Sheet } from '../ui/Sheet.js'
 
 /**
- * The narrow shell's floating tab-bar platter (the role's first four
- * destinations and More, or all of them when five or fewer) and its separate
- * round search button.
+ * The narrow shell's floating tab-bar platter (Projects, Install apps and
+ * More, or all of a role's destinations when three or fewer) and its
+ * separate round search button.
  */
 export function TabBar({
   nav,

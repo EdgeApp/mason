@@ -85,18 +85,20 @@ describe('The app shell’s navigation per node and role', () => {
         .textContent!.slice(1),
       'Projects',
     )
-    // Narrow: four tabs and More, which holds the rest and is current for them.
+    // Narrow: Projects, Install and More, which holds the rest and is current for them.
     assert.deepEqual(
       texts(tabbar().querySelectorAll('.m-tabbar__platter > *')).map((text) =>
         text.slice(1),
       ),
-      ['Projects', 'Artifacts', 'Install', 'Devices', 'More'],
+      ['Projects', 'Install', 'More'],
     )
     const more = within(tabbar()).getByRole('button', { name: 'More' })
     assert.equal(more.getAttribute('aria-current'), 'page')
     await act(async () => more.click())
     const sheet = screen.getByRole('dialog', { name: 'More' })
     assert.deepEqual(texts(sheet.querySelectorAll('.m-list__title')), [
+      'Artifacts',
+      'Devices',
       'Nodes',
       'Cloud',
       'People',
@@ -149,7 +151,7 @@ describe('The app shell’s navigation per node and role', () => {
     assert.equal(document.querySelector('.m-topbar__chips'), null)
   })
 
-  it('sends a developer home to Projects & apps, with four destinations on the host', async () => {
+  it('sends a developer home to Projects & apps, with four destinations on the host and Artifacts and Devices in More', async () => {
     renderApp({
       node: nodeInfo('host'),
       replies: shellReplies('developer', 'host'),
@@ -158,7 +160,12 @@ describe('The app shell’s navigation per node and role', () => {
     await page('Projects & apps')
     assert.equal(where.path, '/projects')
     assert.equal(sidebar().querySelectorAll('nav .m-navitem').length, 4)
-    assert.equal(within(tabbar()).queryByRole('button', { name: 'More' }), null)
+    assert.deepEqual(
+      texts(tabbar().querySelectorAll('.m-tabbar__platter > *')).map((text) =>
+        text.slice(1),
+      ),
+      ['Projects', 'Install', 'More'],
+    )
   })
 
   it('shows the brand, version and node in the sidebar, and the projects with a live dot while one runs', async () => {
