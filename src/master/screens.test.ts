@@ -86,6 +86,93 @@ export const WIDTHS: ReadonlyArray<readonly [number, number]> = [
   [1440, 900],
 ]
 
+/**
+ * The design's surface rules, checked in the page (it returns one line per
+ * problem): (a) no card, button, pill or overlay draws an outline, and (b)
+ * every pill keeps its text and icons at least its corner radius from each
+ * side. A pill is drawn (a background, a box-shadow, or the slider thumb
+ * behind it), rounded to at least half its height or padded by its radius
+ * (a pill that wrapped), and wider than tall; one that holds another pill is
+ * a track, and only its options are checked. Its contents are its visible
+ * text nodes (icons are ligature text), clipped by any box between them and
+ * the pill that hides its overflow.
+ */
+export const SURFACE_CHECK = `
+  const problems = []
+  const visible = (el) => {
+    const box = el.getBoundingClientRect()
+    return box.width > 0 && box.height > 0 &&
+      el.checkVisibility({ opacityProperty: true, visibilityProperty: true })
+  }
+  const alpha = (color) => {
+    const m = /rgba?\\(([^)]+)\\)/.exec(color)
+    if (m == null) return color === 'transparent' ? 0 : 1
+    const parts = m[1].split(/[ ,/]+/).filter(Boolean)
+    return parts.length > 3 ? Number(parts[3]) : 1
+  }
+  const name = (el) => el.tagName.toLowerCase() +
+    [...el.classList].slice(0, 2).map((c) => '.' + c).join('') +
+    ' "' + (el.textContent ?? '').trim().replace(/\\s+/g, ' ').slice(0, 30) + '"'
+  // (a) No outline.
+  const outlined = '.m-card, .m-btn, .m-chip, .m-status, .m-runchip, .m-node-pill, .m-filter, .m-seg, .m-searchcap, .m-banner, .m-callout, .m-menu, .m-palette, .m-formsheet'
+  for (const el of document.querySelectorAll(outlined)) {
+    if (!visible(el)) continue
+    const style = getComputedStyle(el)
+    for (const side of ['Top', 'Right', 'Bottom', 'Left'])
+      if (parseFloat(style['border' + side + 'Width']) > 0 &&
+          style['border' + side + 'Style'] !== 'none' &&
+          alpha(style['border' + side + 'Color']) > 0) {
+        problems.push('outline on ' + name(el) + ': ' + style['border' + side + 'Color'])
+        break
+      }
+  }
+  // (b) Pills keep their contents at least their corner radius from each side.
+  const pills = []
+  for (const el of document.querySelectorAll('body *')) {
+    if (el.matches('input, select, textarea, option, svg, svg *') || !visible(el)) continue
+    const box = el.getBoundingClientRect()
+    if (box.width <= box.height + 1) continue
+    const style = getComputedStyle(el)
+    const radius = Math.min(parseFloat(style.borderTopLeftRadius) || 0, box.height / 2)
+    if (radius <= 0) continue
+    const drawn = alpha(style.backgroundColor) > 0 || style.boxShadow !== 'none' || el.hasAttribute('data-thumb-on')
+    const round = radius >= box.height / 2 - 0.5
+    const wrapped = Math.abs(parseFloat(style.paddingLeft) - radius) < 0.5 &&
+      Math.abs(parseFloat(style.paddingRight) - radius) < 0.5
+    if (drawn && (round || wrapped)) pills.push({ el, box, radius })
+  }
+  for (const { el, box, radius } of pills) {
+    if (pills.some((other) => other.el !== el && el.contains(other.el))) continue
+    let left = Infinity, right = -Infinity
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
+    for (let text = walker.nextNode(); text != null; text = walker.nextNode()) {
+      if (text.textContent.trim() === '' || !visible(text.parentElement)) continue
+      const range = document.createRange()
+      range.selectNodeContents(text)
+      for (const r of range.getClientRects()) {
+        if (r.width <= 1 || r.height <= 1) continue
+        let l = r.left, rr = r.right
+        for (let a = text.parentElement; a != null && a !== el.parentElement; a = a.parentElement) {
+          const cs = getComputedStyle(a)
+          if (cs.overflowX !== 'visible' || cs.clipPath !== 'none') {
+            const ab = a.getBoundingClientRect()
+            l = Math.max(l, ab.left)
+            rr = Math.min(rr, ab.right)
+          }
+        }
+        if (rr <= l) continue
+        left = Math.min(left, l)
+        right = Math.max(right, rr)
+      }
+    }
+    if (left === Infinity) continue
+    const inLeft = left - box.left, inRight = box.right - right
+    if (inLeft < radius - 0.5 || inRight < radius - 0.5)
+      problems.push('pill ' + name(el) + ' holds its contents ' + inLeft.toFixed(1) + ' / ' + inRight.toFixed(1) + ' px from its sides, under its ' + radius.toFixed(1) + ' px radius')
+  }
+  return JSON.stringify(problems)
+`
+
 export const ALPHA = 'com.example.alpha'
 export const BETA = 'com.example.beta-with-a-longer-id'
 
@@ -901,6 +988,13 @@ describe('Every Mason screen at three widths', function () {
       problems.push(
         `${file}: requests to another origin: ${foreign.join(', ')}`,
       )
+    // No outlines; every pill clears its contents by its radius. The base
+    // draws outlines, so a `before` capture is not checked.
+    if (variant !== 'before')
+      for (const problem of JSON.parse(
+        await b.script(SURFACE_CHECK),
+      ) as string[])
+        problems.push(`${file}: ${problem}`)
     // Nothing wider than the window: no page scrolls sideways.
     if (page.scrollWidth > page.innerWidth)
       problems.push(
@@ -980,6 +1074,63 @@ describe('Every Mason screen at three widths', function () {
       if (screens.length === 0) return this.skip()
       await captureAll(key.replace('@', '-'), screens)
     })
+
+  it('captures the overlays an admin opens: the account menu, the command palette and More', async function () {
+    if (only != null && !only.includes('overlays')) return this.skip()
+    const problems: string[] = []
+    const overlay = async (
+      b: Browser,
+      name: string,
+      width: number,
+      opener: string,
+      shown: string,
+    ): Promise<void> => {
+      await b.open(origin(c.master) + prefix + '/projects')
+      await b.script(settle)
+      await b.tap(opener)
+      await until(
+        b,
+        `document.querySelector(${JSON.stringify(shown)}) != null`,
+        shown,
+      )
+      // Let the overlay's entrance finish before the capture.
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      const file = `overlay-${name}-${width}-${variant}.png`
+      writeFileSync(path.join(artifacts!, file), await b.shot())
+      manifest.push(`${file}\tadmin@master\t/projects\t${opener} → ${shown}`)
+      if (variant !== 'before')
+        for (const problem of JSON.parse(
+          await b.script(SURFACE_CHECK),
+        ) as string[])
+          problems.push(`${file}: ${problem}`)
+    }
+    for (const [width, height] of [WIDTHS[2]!, WIDTHS[0]!]) {
+      const b = await browser(`screens-overlays-${width}`, width, height)
+      try {
+        await signIn(b, 'admin', c.master)
+        if (width > 800) {
+          await overlay(
+            b,
+            'menu',
+            width,
+            'button[aria-label="Your account"]',
+            '.m-menu',
+          )
+          await overlay(b, 'palette', width, '.m-searchcap', '.m-palette')
+        } else
+          await overlay(
+            b,
+            'more',
+            width,
+            '.m-tabbar__platter button',
+            '.m-formsheet',
+          )
+      } finally {
+        await b.close()
+      }
+    }
+    assert.deepEqual(problems, [], problems.join('\n'))
+  })
 
   it('captures the host while its master is unreachable, then past the grace window', async function () {
     const offline = SCREENS.filter(

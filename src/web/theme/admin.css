@@ -6,7 +6,8 @@
   min-width: 4rem;
 }
 .m-disclosure--boxed {
-  border: 1px solid var(--m-border);
+  border: 1px solid var(--m-edge);
+  background: var(--m-surface-sunken);
   border-radius: var(--m-radius-lg);
 }
 .m-disclosure--boxed > .m-disclosure__body {

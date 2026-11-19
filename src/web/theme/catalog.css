@@ -12,17 +12,10 @@
 }
 .m-catalog-platforms .m-seg {
   background: var(--m-surface-sunken);
-  box-shadow: var(--m-shadow-1);
+  box-shadow: var(--m-halo-sm);
 }
 .m-catalog-platforms .m-seg__opt {
   text-decoration: none;
-}
-.m-catalog-platforms .m-seg__opt[aria-current='true'] {
-  background: var(--m-surface-hover);
-  color: var(--m-text);
-  box-shadow:
-    var(--m-shadow-1),
-    inset 0 0 0 1px var(--m-border-strong);
 }
 @media (forced-colors: active) {
   .m-catalog-platforms .m-seg__opt[aria-current='true'] {

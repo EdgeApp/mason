@@ -65,7 +65,6 @@
 }
 .m-approval--waiting {
   background: var(--m-surface);
-  border-color: var(--m-border);
 }
 
 /* The graph: it scrolls sideways, at most 70 % of the window tall. */
