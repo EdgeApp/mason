@@ -34,6 +34,7 @@ import { EmptyState } from '../../ui/EmptyState.js'
 import { FilterPills } from '../../ui/FilterPills.js'
 import { Icon } from '../../ui/Icon.js'
 import { platformLook } from '../../ui/platform.js'
+import { Stale } from '../../ui/Stale.js'
 import { MoreChip, PlatformChip, RunChip } from '../../ui/RunChip.js'
 import { Skeleton } from '../../ui/Skeleton.js'
 import { StatTile, Gauge, Meter } from '../../ui/StatTile.js'
@@ -47,6 +48,16 @@ const projectHref = (slug: string): string =>
   `/projects/${encodeURIComponent(slug)}`
 const appHref = (project: string, app: string): string =>
   `${projectHref(project)}/apps/${encodeURIComponent(app)}`
+
+/**
+ * The pressed platform pill: the address's, so a choice shows at once while
+ * its answer loads. None is All; one the pills do not offer presses none,
+ * since the read still filters on it.
+ */
+function chosenPlatform(params: URLSearchParams): string {
+  const asked = params.get('platform')
+  return asked == null || asked === '' ? 'all' : asked
+}
 
 /** The dashboard's read for the page's filter. */
 export function dashboardPath(params: URLSearchParams): string {
@@ -563,7 +574,10 @@ export function DashboardPage({
   const profile = useProfile()
   const [params, setParams] = useSearchParams()
   const path = dashboardPath(params)
-  const read = useResource(path, asDashboardData, { invalidatedBy: ['queue'] })
+  const read = useResource(path, asDashboardData, {
+    invalidatedBy: ['queue'],
+    keepAcrossQuery: true,
+  })
   const invalidations = useInvalidations()
   const [text, setText] = useState('')
   const [live, setLive] = useState<QueueEntry[] | undefined>()
@@ -679,12 +693,14 @@ export function DashboardPage({
         )
       ) : (
         <>
-          <Tiles data={data} />
+          <Stale stale={read.stale}>
+            <Tiles data={data} />
+          </Stale>
           <div className="m-row m-row--between">
             <div className="m-row">
               <FilterPills
                 label="Platform"
-                value={data.filter.platform ?? 'all'}
+                value={chosenPlatform(params)}
                 onChange={(key) =>
                   setFilter('platform', key === 'all' ? undefined : key)
                 }
@@ -721,40 +737,42 @@ export function DashboardPage({
               />
             </div>
           </div>
-          <div className="m-split">
-            <div className="m-stack m-stack--lg">
-              {shown.length === 0 ? (
-                <section className="m-card">
-                  <EmptyState icon="folder" title="No projects match.">
-                    {data.projects.length === 0 && text === ''
-                      ? undefined
-                      : 'Clear the filter or choose another platform.'}
-                  </EmptyState>
-                </section>
-              ) : (
-                shown.map(({ card, apps }) => (
-                  <ProjectCardView
-                    key={card.id}
-                    card={card}
-                    apps={apps}
-                    queue={queue}
-                    now={now}
-                    statuses={statuses}
+          <Stale stale={read.stale}>
+            <div className="m-split">
+              <div className="m-stack m-stack--lg">
+                {shown.length === 0 ? (
+                  <section className="m-card">
+                    <EmptyState icon="folder" title="No projects match.">
+                      {data.projects.length === 0 && text === ''
+                        ? undefined
+                        : 'Clear the filter or choose another platform.'}
+                    </EmptyState>
+                  </section>
+                ) : (
+                  shown.map(({ card, apps }) => (
+                    <ProjectCardView
+                      key={card.id}
+                      card={card}
+                      apps={apps}
+                      queue={queue}
+                      now={now}
+                      statuses={statuses}
+                    />
+                  ))
+                )}
+              </div>
+              <aside className="m-stack" aria-label="Cluster activity">
+                <QueuePanel queue={queue} />
+                {data.nodes != null && (
+                  <WorkersPanel
+                    nodes={data.nodes}
+                    link={nav.some((entry) => entry.key === 'nodes')}
                   />
-                ))
-              )}
+                )}
+                <BuildsPanel builds={data.builds} now={now} />
+              </aside>
             </div>
-            <aside className="m-stack" aria-label="Cluster activity">
-              <QueuePanel queue={queue} />
-              {data.nodes != null && (
-                <WorkersPanel
-                  nodes={data.nodes}
-                  link={nav.some((entry) => entry.key === 'nodes')}
-                />
-              )}
-              <BuildsPanel builds={data.builds} now={now} />
-            </aside>
-          </div>
+          </Stale>
         </>
       )}
     </Page>

@@ -13,6 +13,7 @@ import {
   recording,
   text,
 } from '../../test/projects.js'
+import { PAGE_TITLE_ID } from '../../ui/PageHeader.js'
 import { DISCOVERY_POLL_MS } from './Wizard.js'
 
 afterEach(() => cleanup())
@@ -253,6 +254,24 @@ describe('Add a project', () => {
     await until(
       () => where.path === '/projects/new?slug=website&step=3',
       'step 3',
+    )
+    // A step is a new view though only its query changed: focus goes to the
+    // title, by a link and by the browser's Back alike.
+    await until(
+      () => document.activeElement?.id === PAGE_TITLE_ID,
+      'focus on the page title',
+    )
+    ;(document.activeElement as HTMLElement).blur()
+    await act(async () => {
+      await where.navigate(-1)
+    })
+    await until(
+      () => where.path === '/projects/new?slug=website',
+      'back on step 2',
+    )
+    await until(
+      () => document.activeElement?.id === PAGE_TITLE_ID,
+      'focus on the page title after Back',
     )
     // Back to the repository from the apps.
     cleanup()

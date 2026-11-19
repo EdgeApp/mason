@@ -145,20 +145,22 @@ describe('Reads through the typed client', () => {
   function Count({
     path,
     topics,
+    keep = false,
   }: {
     path: string | null
     topics?: Array<'status' | 'queue'>
+    keep?: boolean
   }): JSX.Element {
-    const { data, error, loading, reload } = useResource(
-      path,
-      asCount,
-      topics == null ? {} : { invalidatedBy: topics },
-    )
+    const { data, error, loading, stale, reload } = useResource(path, asCount, {
+      ...(topics == null ? {} : { invalidatedBy: topics }),
+      keepAcrossQuery: keep,
+    })
     return (
       <>
         <p data-testid="count">{data?.count ?? '-'}</p>
         <p data-testid="error">{error?.message ?? ''}</p>
         <p data-testid="loading">{String(loading)}</p>
+        <p data-testid="stale">{String(stale)}</p>
         <button onClick={reload}>Reload</button>
       </>
     )
@@ -247,6 +249,56 @@ describe('Reads through the typed client', () => {
     await rerender(<Count path="/api/v2/thrown" />)
     await until(() => text('error') !== '', 'the unreachable error')
     assert.match(text('error'), /could not be reached/)
+  })
+
+  it('keeps the old answer, stale, when only the query changes, and drops it when the new read fails', async () => {
+    let release: () => void = () => undefined
+    let releaseTwo: () => void = () => undefined
+    const node = fakeNode({
+      '/api/v2/one?platform=ios': { count: 1 },
+      '/api/v2/one?platform=android': async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return new Response(JSON.stringify({ count: 2 }), { status: 200 })
+      },
+      '/api/v2/one?platform=macos': {
+        status: 500,
+        body: { error: 'The database is locked' },
+      },
+      '/api/v2/two': async () => {
+        await new Promise<void>((resolve) => {
+          releaseTwo = resolve
+        })
+        return new Response(JSON.stringify({ count: 3 }), { status: 200 })
+      },
+    })
+    const { rerender } = mount(
+      node,
+      <Count path="/api/v2/one?platform=ios" keep />,
+    )
+    await until(() => text('count') === '1', 'iOS')
+    assert.equal(text('stale'), 'false')
+    // Only the query changes: the iOS answer stays, stale, while Android loads.
+    await rerender(<Count path="/api/v2/one?platform=android" keep />)
+    assert.equal(text('count'), '1')
+    assert.equal(text('stale'), 'true')
+    assert.equal(text('loading'), 'true')
+    await act(async () => release())
+    await until(() => text('count') === '2', 'Android')
+    assert.equal(text('stale'), 'false')
+    // A failed read for the new query drops the kept answer, so it shows why.
+    await rerender(<Count path="/api/v2/one?platform=macos" keep />)
+    await until(() => text('error') === 'The database is locked', 'the error')
+    assert.equal(text('count'), '-')
+    assert.equal(text('stale'), 'false')
+    // Another path forgets it at once.
+    await rerender(<Count path="/api/v2/one?platform=ios" keep />)
+    await until(() => text('count') === '1', 'iOS again')
+    await rerender(<Count path="/api/v2/two" keep />)
+    assert.equal(text('count'), '-')
+    await act(async () => releaseTwo())
+    await until(() => text('count') === '3', 'two')
   })
 
   it('needs an ApiProvider', () => {

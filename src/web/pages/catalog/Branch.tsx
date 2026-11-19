@@ -29,6 +29,7 @@ import { EmptyState } from '../../ui/EmptyState.js'
 import { Icon } from '../../ui/Icon.js'
 import type { IconName } from '../../ui/icons.js'
 import { platformLook } from '../../ui/platform.js'
+import { Stale } from '../../ui/Stale.js'
 import { useToast } from '../../ui/Toast.js'
 import { Loading } from '../projects/project.js'
 import { appIdOf } from './App.js'
@@ -454,12 +455,17 @@ export function BranchPage(): JSX.Element {
       ? null
       : withPlatform(catalogBranchPath(id, key), platform),
     asBranchData,
+    { keepAcrossQuery: true },
   )
+  // While another platform loads, the page draws the one its answer is for.
+  const answered = useRef(platform)
+  if (read.data != null && !read.stale) answered.current = platform
+  const shown = read.stale ? answered.current : platform
   const [result, setResult] = useState<Result>()
   const [busy, setBusy] = useState<number>()
   const [preparing, setPreparing] = useState(false)
   const data = read.data
-  const look = platformLook(platform)
+  const look = platformLook(shown)
   const unavailable = id == null || key === '' || read.error?.status === 404
   const appName = data?.app.name ?? 'App'
   const branch = data?.branch ?? (unavailable ? 'App unavailable' : 'Branch')
@@ -508,7 +514,7 @@ export function BranchPage(): JSX.Element {
     }
   }
 
-  const ios = platform === 'ios' && (data?.builds.length ?? 0) > 0
+  const ios = shown === 'ios' && (data?.builds.length ?? 0) > 0
   const note =
     !ios || data?.ios == null || data.ios.via === 'none'
       ? undefined
@@ -550,29 +556,31 @@ export function BranchPage(): JSX.Element {
           onDismiss={() => setResult(undefined)}
         />
       )}
-      {id == null || key === '' ? (
-        <CatalogState icon="search" title="This app is unavailable">
-          It may have been removed, or your groups no longer include it.
-        </CatalogState>
-      ) : data != null ? (
-        data.builds.length === 0 ? (
-          <CatalogState icon="inventory_2" title={`No ${look.name} builds`}>
-            This branch has no retained builds for the selected platform. Choose
-            another platform or publish a new build.
+      <Stale stale={read.stale}>
+        {id == null || key === '' ? (
+          <CatalogState icon="search" title="This app is unavailable">
+            It may have been removed, or your groups no longer include it.
           </CatalogState>
+        ) : data != null ? (
+          data.builds.length === 0 ? (
+            <CatalogState icon="inventory_2" title={`No ${look.name} builds`}>
+              This branch has no retained builds for the selected platform.
+              Choose another platform or publish a new build.
+            </CatalogState>
+          ) : (
+            <Groups
+              data={data}
+              branchKey={key}
+              busy={busy}
+              onInstall={(build) => void install(build)}
+            />
+          )
+        ) : read.error != null ? (
+          <CatalogRefusal error={read.error} retry={read.reload} />
         ) : (
-          <Groups
-            data={data}
-            branchKey={key}
-            busy={busy}
-            onInstall={(build) => void install(build)}
-          />
-        )
-      ) : read.error != null ? (
-        <CatalogRefusal error={read.error} retry={read.reload} />
-      ) : (
-        <Loading label="Loading the branch’s builds" />
-      )}
+          <Loading label="Loading the branch’s builds" />
+        )}
+      </Stale>
     </Page>
   )
 }

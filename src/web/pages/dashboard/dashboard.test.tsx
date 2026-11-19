@@ -236,6 +236,140 @@ describe('Projects & apps', () => {
     assert.equal(tiles.querySelector('.m-stat__unit')!.textContent, 'B')
   })
 
+  it('presses the platform chosen at once and keeps the keyboard on it while the dashboard reads it', async () => {
+    let release: () => void = () => undefined
+    const ios = { ...(answer() as object), filter: { platform: 'ios' } }
+    dashboardFor('admin', 'master', answer(), {
+      '/api/v2/dashboard?platform=ios': async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return new Response(JSON.stringify(ios), { status: 200 })
+      },
+    })
+    await loaded()
+    const option = within(
+      screen.getByRole('group', { name: 'Platform' }),
+    ).getByRole('button', { name: 'iOS 1' })
+    option.focus()
+    await act(async () => option.click())
+    await until(() => where.path === '/projects?platform=ios', 'iOS chosen')
+    // Before the answer: the same pills, iOS pressed from the address (so a
+    // dragged thumb stays where it was dropped), the projects inert.
+    assert.equal(option.getAttribute('aria-pressed'), 'true')
+    assert(document.activeElement === option, 'focus stays on the choice')
+    assert(
+      screen.getByRole('region', { name: 'Summary' }).closest('[inert]') !=
+        null,
+      'the old projects are inert',
+    )
+    await act(async () => release())
+    await until(
+      () =>
+        screen.getByRole('region', { name: 'Summary' }).closest('[inert]') ==
+        null,
+      'the iOS answer',
+    )
+    assert(option.isConnected && document.activeElement === option)
+  })
+
+  it('presses All at once when the platform is cleared, while the dashboard reads it', async () => {
+    let release: () => void = () => undefined
+    const ios = { ...(answer() as object), filter: { platform: 'ios' } }
+    const app = renderApp({
+      node: nodeInfo('master'),
+      path: '/projects?platform=ios',
+      replies: shellReplies('admin', 'master', {
+        '/api/v2/dashboard?platform=ios': ios,
+        '/api/v2/dashboard': async () => {
+          await new Promise<void>((resolve) => {
+            release = resolve
+          })
+          return new Response(JSON.stringify(answer()), { status: 200 })
+        },
+      }),
+    })
+    await loaded()
+    const pills = screen.getByRole('group', { name: 'Platform' })
+    const all = within(pills).getByRole('button', { name: 'All 2' })
+    assert.equal(
+      within(pills).getByRole('button', { name: 'iOS 1' }).ariaPressed,
+      'true',
+    )
+    await act(async () => all.click())
+    await until(() => where.path === '/projects', 'All chosen')
+    assert.equal(all.ariaPressed, 'true', 'All pressed before its answer')
+    await act(async () => release())
+    await until(
+      () => dashboardReads(app).includes('GET /api/v2/dashboard'),
+      'the read',
+    )
+    assert.equal(all.ariaPressed, 'true')
+  })
+
+  it('presses no pill for a platform the address names but the pills do not offer', async () => {
+    renderApp({
+      node: nodeInfo('master'),
+      path: '/projects?platform=tvos',
+      replies: shellReplies('admin', 'master', {
+        '/api/v2/dashboard?platform=tvos': {
+          ...(answer() as object),
+          filter: { platform: 'tvos' },
+        },
+      }),
+    })
+    await loaded()
+    const pills = screen.getByRole('group', { name: 'Platform' })
+    assert.equal(
+      within(pills)
+        .getAllByRole('button')
+        .filter((button) => button.ariaPressed === 'true').length,
+      0,
+    )
+  })
+
+  it('takes no focus later for a choice that changed nothing, or once the viewer has moved it', async () => {
+    let release: () => void = () => undefined
+    const ios = { ...(answer() as object), filter: { platform: 'ios' } }
+    const app = dashboardFor('admin', 'master', answer(), {
+      '/api/v2/dashboard?platform=ios': async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return new Response(JSON.stringify(ios), { status: 200 })
+      },
+    })
+    await loaded()
+    const pills = (): HTMLElement =>
+      screen.getByRole('group', { name: 'Platform' })
+    // All is pressed: choosing it again reloads nothing and sets nothing up.
+    await act(async () =>
+      within(pills()).getByRole('button', { name: 'All 2' }).click(),
+    )
+    const field = screen.getByRole('searchbox', { name: /Filter app IDs/ })
+    field.focus()
+    const reads = dashboardReads(app).length
+    await act(async () => app.invalidations.invalidate('queue'))
+    await until(() => dashboardReads(app).length > reads, 'the reread')
+    await loaded()
+    assert(document.activeElement === field, 'focus stays in the field')
+    // A new choice whose answer is slow: focus moved meanwhile stays.
+    await act(async () =>
+      within(pills()).getByRole('button', { name: 'iOS 1' }).click(),
+    )
+    await until(() => where.path === '/projects?platform=ios', 'iOS chosen')
+    const elsewhere = screen.getAllByRole('link', { name: /Artifacts/ })[0]!
+    elsewhere.focus()
+    await act(async () => release())
+    await until(
+      () =>
+        within(pills()).getByRole('button', { name: 'iOS 1' }).ariaPressed ===
+        'true',
+      'the iOS answer',
+    )
+    assert(document.activeElement === elsewhere, 'focus was not taken back')
+  })
+
   it('offers platform pills with counts for the platforms that have apps, and reads the dashboard for the pressed one', async () => {
     const app = dashboardFor()
     await loaded()

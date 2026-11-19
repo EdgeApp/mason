@@ -434,6 +434,9 @@ a.m-list__row:hover, button.m-list__row:hover { background: var(--m-surface-hove
 .m-empty__glyph .m-icon { font-size: 1.625rem; }
 .m-empty p { margin: 0; max-width: 26rem; color: var(--m-text-secondary); font-size: 0.875rem; }
 
+/* Content from a stale answer while the new one loads (ui/Stale.tsx): no box of its own. */
+.m-stale { display: contents; }
+.m-stale[data-stale] > * { opacity: 0.55; transition: opacity var(--m-dur-fast); }
 .m-skel { background: linear-gradient(90deg, var(--m-surface-sunken), var(--m-surface-hover), var(--m-surface-sunken)); background-size: 200% 100%; animation: m-shimmer 1.4s linear infinite; border-radius: var(--m-radius-sm); }
 @media (prefers-reduced-motion: reduce) { .m-skel { animation: none; } }
 

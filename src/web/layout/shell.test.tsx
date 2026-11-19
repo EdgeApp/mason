@@ -1097,6 +1097,57 @@ describe('Pages in the shell', () => {
     assert.equal(document.activeElement, screen.getByRole('main'))
   })
 
+  it('keeps a page’s place and focus when only its query changes, and starts a new page at its top', async () => {
+    const scrolls: unknown[][] = []
+    const original = window.scrollTo
+    window.scrollTo = ((...args: unknown[]) => {
+      scrolls.push(args)
+    }) as typeof window.scrollTo
+    const app = (platform: string): unknown => ({
+      app: { id: 7, name: 'Alpha', slug: 'com.example.alpha' },
+      platforms: ['android', 'ios'],
+      branches: [],
+      latest: {},
+      platform,
+    })
+    try {
+      renderApp({
+        path: '/apps/7?platform=android',
+        replies: shellReplies('admin', 'master', {
+          '/api/v2/catalog/apps/7?platform=android': app('android'),
+          '/api/v2/catalog/apps/7?platform=ios': app('ios'),
+        }),
+      })
+      const title = await page('Alpha')
+      const platforms = screen.getByRole('navigation', {
+        name: 'Build platform',
+      })
+      // The first choice on a freshly loaded page, too: the same page. It
+      // keeps the switch while it reads the choice, so the link keeps focus.
+      const ios = within(platforms).getByRole('link', { name: /iOS/ })
+      ios.focus()
+      await act(async () => ios.click())
+      await until(() => where.path === '/apps/7?platform=ios', 'iOS chosen')
+      await until(
+        () => ios.isConnected && ios.getAttribute('aria-current') === 'true',
+        'the iOS answer on the same switch',
+      )
+      assert.deepEqual(scrolls, [])
+      assert(document.activeElement === ios, 'focus stays on the choice')
+      assert(document.activeElement !== title)
+      // Another page starts at its top.
+      await act(async () =>
+        within(sidebar())
+          .getByRole('link', { name: /Artifacts/ })
+          .click(),
+      )
+      await page('Artifacts')
+      assert.deepEqual(scrolls, [[0, 0]])
+    } finally {
+      window.scrollTo = original
+    }
+  })
+
   it('draws a catalog page with breadcrumbs from the node’s pill, the platform kept in each', async () => {
     renderApp({
       path: '/apps/7?platform=android',
