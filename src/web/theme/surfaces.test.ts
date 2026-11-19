@@ -328,6 +328,11 @@ describe('The phone tab bar', () => {
       assert.deepEqual(rule.selectors, ['.m-tabbar__item span:not(.m-icon)'])
   })
 
+  it('lets a press held on a slider option drag the thumb, without a link menu', () => {
+    for (const selector of ['.m-seg__opt', '.m-filter__opt', '.m-tabbar__item'])
+      assert.equal(value(selector, '-webkit-touch-callout'), 'none', selector)
+  })
+
   it('fits three 44 px tabs whose labels clear their pills’ ends from 360 px', () => {
     const narrow =
       '@media (max-width: 46.49em), (max-height: 31.24em) and (max-width: 79.99em)'

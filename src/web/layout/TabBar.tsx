@@ -1,5 +1,6 @@
 import { useState, type JSX } from 'react'
 import { Link, useLocation } from 'react-router'
+import { useSlidingThumb } from '../hooks/useSlidingThumb.js'
 import { isPasswordPath } from '../../shared/routes.js'
 import { currentNav, tabBar, type NavItem } from '../profile/navigation.js'
 import { Icon } from '../ui/Icon.js'
@@ -21,9 +22,10 @@ export function TabBar({
   const [more, setMore] = useState(false)
   const current = currentNav(pathname, nav)
   const { tabs, more: rest } = tabBar(nav)
+  const platter = useSlidingThumb<HTMLDivElement>()
   return (
     <nav className="m-app__tabbar m-tabbar m-glass" aria-label="Main">
-      <div className="m-tabbar__platter m-glass">
+      <div ref={platter} className="m-tabbar__platter m-glass">
         {tabs.map((entry) => (
           <Link
             key={entry.key}

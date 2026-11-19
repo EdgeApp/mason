@@ -24,6 +24,7 @@ import { EmptyState } from '../../ui/EmptyState.js'
 import { Icon } from '../../ui/Icon.js'
 import type { IconName } from '../../ui/icons.js'
 import { platformLook } from '../../ui/platform.js'
+import { SliderTrack } from '../../ui/SliderTrack.js'
 import type { Tone } from '../../ui/status.js'
 
 /** Install apps, the first crumb of every catalog page. */
@@ -119,7 +120,7 @@ export function PlatformSwitch({
   if (platforms.length === 0) return null
   return (
     <nav className="m-catalog-platforms" aria-label="Build platform">
-      <div className="m-seg">
+      <SliderTrack className="m-seg">
         {platformNames
           .filter((platform) => platforms.includes(platform))
           .map((platform) => {
@@ -138,7 +139,7 @@ export function PlatformSwitch({
               </Link>
             )
           })}
-      </div>
+      </SliderTrack>
     </nav>
   )
 }

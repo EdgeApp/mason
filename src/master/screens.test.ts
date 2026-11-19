@@ -827,6 +827,7 @@ describe('Every Mason screen at three widths', function () {
     script: (script: string) => Promise<string>
     tap: (css: string) => Promise<void>
     type: (css: string, text: string) => Promise<void>
+    drag: (from: string, to: string) => Promise<void>
     shot: () => Promise<Buffer>
     close: () => Promise<void>
   }> => {
@@ -874,6 +875,15 @@ describe('Every Mason screen at three widths', function () {
       type: async (css, text): Promise<void> => {
         await device.command('tapOn', { css })
         await device.command('inputText', { text })
+      },
+      // A pointer press held briefly, then moved over 600 ms, as a finger drags.
+      drag: async (from, to): Promise<void> => {
+        await device.command('dragAndDrop', {
+          from: { css: from },
+          to: { css: to },
+          holdDuration: 100,
+          duration: 600,
+        })
       },
       shot: async (): Promise<Buffer> => await device.screenshot(),
       close: async (): Promise<void> => {
@@ -1130,6 +1140,501 @@ describe('Every Mason screen at three widths', function () {
       }
     }
     assert.deepEqual(problems, [], problems.join('\n'))
+  })
+
+  it('slides and drags the slider pills on a real master and host', async function () {
+    if (only != null && !only.includes('sliders')) return this.skip()
+    const log: string[] = []
+    const step = async (
+      b: Browser,
+      what: string,
+      file: string,
+      check: string,
+    ): Promise<void> => {
+      // Let the thumb's slide and any navigation finish.
+      await new Promise((resolve) => setTimeout(resolve, 700))
+      const result = await b.script(`return JSON.stringify(${check})`)
+      writeFileSync(path.join(artifacts!, file), await b.shot())
+      log.push(`$ ${what}`, result, `(${file})`, '')
+    }
+    /** The track's thumb and chosen option, for the log. */
+    const thumbOf = (track: string): string => `(() => {
+      const t = document.querySelector(${JSON.stringify(track)})
+      const on = t.querySelector('[data-thumb-on]')
+      const chosen = t.querySelector("[aria-pressed='true'], [aria-current='true'], [aria-current='page']")
+      return {
+        address: location.pathname + location.search,
+        chosen: chosen?.textContent.trim(),
+        thumbOn: on?.textContent.trim(),
+        thumbX: t.style.getPropertyValue('--thumb-x'),
+        chosenX: chosen == null ? null : chosen.offsetLeft + 'px',
+      }
+    })()`
+    /** The CSS for a track's option by its visible text. */
+    const option = async (
+      b: Browser,
+      track: string,
+      text: string,
+    ): Promise<string> => {
+      const n = await b.script(
+        `return String([...document.querySelector(${JSON.stringify(track)}).children].findIndex((o) => { const label = o.cloneNode(true); for (const icon of label.querySelectorAll('.m-icon')) icon.remove(); return label.textContent.trim().startsWith(${JSON.stringify(text)}) }) + 1)`,
+      )
+      assert(Number(n) > 0, `${text} in ${track}`)
+      return `${track} > :nth-child(${n})`
+    }
+    const expect = async (
+      b: Browser,
+      condition: string,
+      what: string,
+    ): Promise<void> => {
+      await until(b, condition, what)
+    }
+    const master = origin(c.master) + prefix
+    try {
+      // Desktop: the filter pills, the run page's view switch, Appearance.
+      const b = await browser('screens-sliders-1440', 1440, 900)
+      try {
+        await signIn(b, 'admin', c.master)
+        const filter = '.m-filter'
+        await b.open(master + '/projects')
+        await b.script(settle)
+        await expect(
+          b,
+          `document.querySelector('${filter}[data-thumb]') != null`,
+          'the filter thumb',
+        )
+        await b.tap(await option(b, filter, 'iOS'))
+        await expect(
+          b,
+          "location.search.includes('platform=ios')",
+          'iOS chosen by a tap',
+        )
+        // The pills are drawn anew with the reload; focus stays on the choice.
+        await expect(
+          b,
+          `document.activeElement?.matches('${filter} [aria-pressed=true]') === true`,
+          'focus on the chosen filter option',
+        )
+        await step(
+          b,
+          'tap iOS in the platform filter on /projects',
+          'slider-filter-tap.png',
+          thumbOf(filter),
+        )
+        await b.drag(
+          `${filter} > [data-thumb-on]`,
+          await option(b, filter, 'Android'),
+        )
+        await expect(
+          b,
+          "location.search.includes('platform=android')",
+          'Android chosen by a drag',
+        )
+        await expect(
+          b,
+          `document.querySelector('${filter} [aria-pressed=true]').textContent.trim().startsWith('Android') && document.querySelector('${filter}').style.getPropertyValue('--thumb-x') === document.querySelector('${filter} [aria-pressed=true]').offsetLeft + 'px'`,
+          'the thumb on Android',
+        )
+        await step(
+          b,
+          'drag the filter thumb from iOS to Android',
+          'slider-filter-drag.png',
+          thumbOf(filter),
+        )
+
+        const view = '.m-seg[aria-label="Pipeline view"]'
+        await b.open(
+          master +
+            resolve({
+              name: 'run',
+              path: '/runs/{run.succeeded}',
+              as: 'admin',
+              node: 'master',
+            }),
+        )
+        await b.script(settle)
+        await expect(
+          b,
+          `document.querySelector('${view}[data-thumb]') != null`,
+          'the view thumb',
+        )
+        await b.drag(
+          `${view} > [data-thumb-on]`,
+          await option(b, view, 'Timeline'),
+        )
+        await expect(
+          b,
+          "location.search.includes('tab=timeline')",
+          'Timeline chosen by a drag',
+        )
+        await step(
+          b,
+          'drag the run page’s view thumb from Graph to Timeline',
+          'slider-run-drag.png',
+          thumbOf(view),
+        )
+
+        const look = '.m-seg[aria-label="Appearance"]'
+        await b.open(master + '/account')
+        await b.script(settle)
+        await expect(
+          b,
+          `document.querySelector('${look}[data-thumb]') != null`,
+          'the Appearance thumb',
+        )
+        await b.drag(
+          `${look} > [data-thumb-on]`,
+          await option(b, look, 'Light'),
+        )
+        await expect(
+          b,
+          "document.documentElement.dataset.theme === 'light'",
+          'Light chosen by a drag',
+        )
+        await step(
+          b,
+          'drag Appearance’s thumb to Light on /account',
+          'slider-appearance-drag.png',
+          `{ ...${thumbOf(look)}, theme: document.documentElement.dataset.theme }`,
+        )
+      } finally {
+        await b.close()
+      }
+
+      // Phones: three tabs whose labels, where shown, clear their pills' ends.
+      // A desktop window's scrollbar takes part of its width, so the bar is
+      // measured too: from 360 px of bar the labels show.
+      for (const [width, height] of [
+        [390, 844],
+        [375, 812],
+        [360, 780],
+      ] as const) {
+        const p = await browser(`screens-sliders-${width}`, width, height)
+        try {
+          await signIn(p, 'admin', c.master)
+          await p.open(master + '/projects')
+          await p.script(settle)
+          await expect(
+            p,
+            "document.querySelector('.m-tabbar__platter[data-thumb]') != null",
+            'the tab bar thumb',
+          )
+          const tabs = JSON.parse(
+            await p.script(`return JSON.stringify([...document.querySelectorAll('.m-tabbar__platter > .m-tabbar__item')].map((tab) => {
+            const box = tab.getBoundingClientRect()
+            const label = tab.querySelector('span:not(.m-icon)').getBoundingClientRect()
+            return { label: tab.querySelector('span:not(.m-icon)').textContent.trim(), bar: document.querySelector('.m-app__tabbar').getBoundingClientRect().width, shown: label.width > 1, icon: tab.querySelector('.m-icon').getBoundingClientRect().width, width: box.width, radius: box.height / 2, left: label.left - box.left, right: box.right - label.right }
+          }))`),
+          ) as Array<{
+            label: string
+            bar: number
+            shown: boolean
+            icon: number
+            width: number
+            radius: number
+            left: number
+            right: number
+          }>
+          assert.deepEqual(
+            tabs.map((tab) => tab.label),
+            ['Projects', 'Install', 'More'],
+            `${width} px`,
+          )
+          for (const tab of tabs) {
+            // The icon always shows; only the label gives way.
+            assert(
+              tab.icon >= 16,
+              `${width} px: ${tab.label}'s icon is ${tab.icon} px`,
+            )
+            assert.equal(
+              tab.shown,
+              tab.bar >= 360,
+              `${width} px: ${tab.label}'s label ${tab.shown ? 'shows' : 'hides'} on a ${tab.bar} px bar`,
+            )
+            if (!tab.shown) continue
+            assert(
+              tab.left >= tab.radius - 0.5 && tab.right >= tab.radius - 0.5,
+              `${width} px: ${tab.label} is ${tab.left.toFixed(1)} / ${tab.right.toFixed(1)} px from the ends of its ${tab.radius} px-radius pill`,
+            )
+          }
+          log.push(
+            `$ measure the tab bar at ${width} px`,
+            JSON.stringify(tabs),
+            '',
+          )
+          if (width === 390) {
+            // A filter row that scrolls sideways keeps its swipes: a drag
+            // from its thumb chooses nothing.
+            await p.script(
+              "document.querySelector('.m-filter').style.maxWidth = '120px'",
+            )
+            await expect(
+              p,
+              "document.querySelector('.m-filter[data-scrolls]') != null",
+              'the filter row scrolls',
+            )
+            const before = await p.script('return location.search')
+            await p.drag(
+              '.m-filter > [data-thumb-on]',
+              '.m-filter > :nth-child(2)',
+            )
+            await new Promise((resolve) => setTimeout(resolve, 700))
+            assert.equal(
+              await p.script('return location.search'),
+              before,
+              'a swipe on a scrolling filter row chose nothing',
+            )
+            log.push(
+              '$ drag from the thumb of a filter row that scrolls sideways at 390 px',
+              JSON.stringify({ search: before, after: before }),
+              '',
+            )
+            await p.script(
+              "document.querySelector('.m-filter').style.maxWidth = ''",
+            )
+            // At a larger text size the tabs stay 44 px: the labels give way
+            // sooner, and the icon alone clears its pill's ends.
+            const large = JSON.parse(
+              await p.script(`document.documentElement.style.fontSize = '24px'
+                await new Promise((resolve) => setTimeout(resolve, 300))
+                const tabs = [...document.querySelectorAll('.m-tabbar__platter > .m-tabbar__item')].map((tab) => {
+                  const box = tab.getBoundingClientRect()
+                  const label = tab.querySelector('span:not(.m-icon)').getBoundingClientRect()
+                  const icon = tab.querySelector('.m-icon').getBoundingClientRect()
+                  const shown = label.width > 1
+                  const left = Math.min(icon.left, shown ? label.left : Infinity), right = Math.max(icon.right, shown ? label.right : -Infinity)
+                  return { shown, height: box.height, icon: icon.width, left: left - box.left, right: box.right - right }
+                })
+                document.documentElement.style.fontSize = ''
+                return JSON.stringify(tabs)`),
+            ) as Array<{
+              shown: boolean
+              height: number
+              icon: number
+              left: number
+              right: number
+            }>
+            for (const tab of large) {
+              assert.equal(tab.height, 44, 'a tab stays 44 px at 24 px text')
+              assert(tab.icon >= 16, `icon ${tab.icon} px at 24 px text`)
+              assert(
+                tab.left >= 21.5 && tab.right >= 21.5,
+                `at 24 px text a tab's contents are ${tab.left.toFixed(1)} / ${tab.right.toFixed(1)} px from its 22 px ends`,
+              )
+            }
+            log.push(
+              '$ measure the tab bar at 390 px with 24 px text',
+              JSON.stringify(large),
+              '',
+            )
+
+            await p.drag(
+              '.m-tabbar__platter > [data-thumb-on]',
+              '.m-tabbar__platter > a[href="/apps"]',
+            )
+            await expect(
+              p,
+              "location.pathname === '/apps'",
+              'Install apps opened by a drag',
+            )
+            await step(
+              p,
+              'drag the tab bar thumb from Projects to Install at 390 px',
+              'slider-tabbar-drag-390.png',
+              thumbOf('.m-tabbar__platter'),
+            )
+            // A run chip whose branch wraps keeps its contents clear of its corners.
+            await p.open(master + '/projects')
+            await p.script(settle)
+            await expect(
+              p,
+              "document.querySelector('.m-runchip .m-runchip__branch') != null",
+              'a run chip with a branch',
+            )
+            const wrapped = await p.script(`
+              const chip = document.querySelector('.m-runchip:has(.m-runchip__branch)')
+              chip.querySelector('.m-runchip__branch').textContent = 'paul/aBranchNameLongEnoughToWrapOnAPhoneScreen0123456789abcd'
+              return String(chip.getBoundingClientRect().height)`)
+            assert(
+              Number(wrapped) > 30,
+              `the run chip wrapped (${wrapped} px tall)`,
+            )
+            const problems = JSON.parse(
+              await p.script(SURFACE_CHECK),
+            ) as string[]
+            assert.deepEqual(problems, [], problems.join('\n'))
+            await step(
+              p,
+              'wrap a run chip with a 60-character branch at 390 px and check its margins',
+              'slider-runchip-wrapped-390.png',
+              `{ height: document.querySelector('.m-runchip:has(.m-runchip__branch)').getBoundingClientRect().height, problems: ${JSON.stringify(problems.length)} }`,
+            )
+          }
+        } finally {
+          await p.close()
+        }
+      }
+
+      // 175 % text in a window wide enough for labels: icon and label stay
+      // inside the 44 px tab and clear its ends.
+      const wide = await browser('screens-sliders-700', 700, 900)
+      try {
+        await signIn(wide, 'admin', c.master)
+        await wide.open(master + '/projects')
+        await wide.script(settle)
+        await expect(
+          wide,
+          "document.querySelector('.m-tabbar__platter[data-thumb]') != null",
+          'the tab bar thumb at 700 px',
+        )
+        const large = JSON.parse(
+          await wide.script(`document.documentElement.style.fontSize = '28px'
+            await new Promise((resolve) => setTimeout(resolve, 300))
+            const tabs = [...document.querySelectorAll('.m-tabbar__platter > .m-tabbar__item')].map((tab) => {
+              const box = tab.getBoundingClientRect()
+              const label = tab.querySelector('span:not(.m-icon)').getBoundingClientRect()
+              const icon = tab.querySelector('.m-icon').getBoundingClientRect()
+              const shown = label.width > 1
+              const parts = shown ? [icon, label] : [icon]
+              return {
+                shown,
+                height: box.height,
+                top: Math.min(...parts.map((r) => r.top)) - box.top,
+                bottom: box.bottom - Math.max(...parts.map((r) => r.bottom)),
+                left: Math.min(...parts.map((r) => r.left)) - box.left,
+                right: box.right - Math.max(...parts.map((r) => r.right)),
+              }
+            })
+            document.documentElement.style.fontSize = ''
+            return JSON.stringify(tabs)`),
+        ) as Array<{
+          shown: boolean
+          height: number
+          top: number
+          bottom: number
+          left: number
+          right: number
+        }>
+        for (const tab of large) {
+          assert.equal(tab.height, 44, 'a tab stays 44 px at 28 px text')
+          assert(
+            tab.top >= -0.5 && tab.bottom >= -0.5,
+            `at 28 px text a tab's contents spill ${(-Math.min(tab.top, tab.bottom)).toFixed(1)} px past it`,
+          )
+          assert(
+            tab.left >= 21.5 && tab.right >= 21.5,
+            `at 28 px text a tab's contents are ${tab.left.toFixed(1)} / ${tab.right.toFixed(1)} px from its 22 px ends`,
+          )
+        }
+        log.push(
+          '$ measure the tab bar in a 700 px window with 28 px text',
+          JSON.stringify(large),
+          '',
+        )
+      } finally {
+        await wide.close()
+      }
+
+      // A tester's catalog on the host: the platform switch's links.
+      const t = await browser('screens-sliders-host', 390, 844)
+      try {
+        await signIn(t, 'tester', host)
+        const platforms = '.m-catalog-platforms .m-seg'
+        await t.open(origin(host) + prefix + '/apps')
+        await t.script(settle)
+        await expect(
+          t,
+          `document.querySelector('${platforms}[data-thumb]') != null`,
+          'the platform thumb',
+        )
+        const from = await t.script(
+          `return document.querySelector('${platforms} [data-thumb-on]').textContent.trim()`,
+        )
+        const target = from.includes('iOS') ? 'Android' : 'iOS'
+        // The page keeps its scroll when the switch's link is followed: a spacer
+        // below the two apps makes it tall enough to scroll.
+        const scrolled = await t.script(
+          "const spacer = document.createElement('div'); spacer.style.height = '1200px'; document.querySelector('main').append(spacer); window.scrollTo(0, 60); return String(Math.round(scrollY))",
+        )
+        assert.equal(scrolled, '60', 'the page scrolled before the drag')
+        await t.drag(
+          `${platforms} > [data-thumb-on]`,
+          await option(t, platforms, target),
+        )
+        await expect(
+          t,
+          `document.querySelector("${platforms} [aria-current='true']").textContent.trim().includes('${target}')`,
+          `${target} chosen by a drag`,
+        )
+        assert.equal(
+          await t.script('return String(Math.round(scrollY))'),
+          scrolled,
+          'the page kept its scroll',
+        )
+        await step(
+          t,
+          `drag the catalog platform thumb from ${from} to ${target} as a tester on the host`,
+          'slider-catalog-drag-390.png',
+          thumbOf(platforms),
+        )
+        // An app's page reads its builds per platform: it keeps its switch
+        // (the same element) and its scroll while it reads the new one.
+        await t.open(
+          origin(host) +
+            prefix +
+            resolve({
+              name: 'app',
+              path: '/apps/{app.alpha}?platform=android',
+              as: 'tester',
+              node: 'host',
+            }),
+        )
+        await t.script(settle)
+        await expect(
+          t,
+          `document.querySelector('${platforms}[data-thumb]') != null`,
+          'the app page’s platform thumb',
+        )
+        const kept = await t.script(
+          `const spacer = document.createElement('div'); spacer.style.height = '1200px'; document.querySelector('main').append(spacer); document.querySelector('${platforms}').dataset.qaSame = 'yes'; window.scrollTo(0, 60); return String(Math.round(scrollY))`,
+        )
+        assert.equal(kept, '60', 'the app page scrolled before the drag')
+        await t.drag(
+          `${platforms} > [data-thumb-on]`,
+          await option(t, platforms, 'iOS'),
+        )
+        await expect(
+          t,
+          "location.search.includes('platform=ios')",
+          'iOS chosen on the app page',
+        )
+        await expect(
+          t,
+          `document.querySelector("${platforms} [aria-current='true']")?.textContent.trim().includes('iOS') === true`,
+          'the iOS answer',
+        )
+        assert.equal(
+          await t.script(
+            `return String(document.querySelector('${platforms}').dataset.qaSame === 'yes' && Math.round(scrollY) === 60)`,
+          ),
+          'true',
+          'the app page kept its switch and its scroll',
+        )
+        await step(
+          t,
+          'drag the platform thumb from Android to iOS on an app’s page as a tester',
+          'slider-app-drag-390.png',
+          `{ ...${thumbOf(platforms)}, sameSwitch: document.querySelector('${platforms}').dataset.qaSame === 'yes', scrollY: Math.round(scrollY) }`,
+        )
+      } finally {
+        await t.close()
+      }
+    } finally {
+      writeFileSync(
+        path.join(artifacts!, 'sliders-e2e.log'),
+        log.join('\n') + '\n',
+      )
+    }
   })
 
   it('captures the host while its master is unreachable, then past the grace window', async function () {

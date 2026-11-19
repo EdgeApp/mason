@@ -273,6 +273,32 @@ button { cursor: pointer; touch-action: manipulation; }
 .m-seg__opt:hover { color: var(--m-text); text-decoration: none; }
 .m-seg__opt[aria-pressed='true'], .m-seg__opt[aria-selected='true'], .m-seg__opt[aria-current='true'] { background: var(--m-thumb); color: var(--m-text); box-shadow: var(--m-halo-sm); }
 
+/* A slider pill's thumb (src/web/hooks/useSlidingThumb.ts): one shape behind
+   the chosen option of a segmented control, the filter pills or the tab bar,
+   that slides to the next one chosen and drags from option to option. Until
+   it is measured the chosen option colours itself, as above. */
+.m-seg, .m-filter, .m-tabbar__platter { position: relative; }
+.m-seg[data-thumb]::before, .m-filter[data-thumb]::before, .m-tabbar__platter[data-thumb]::before {
+  content: ''; position: absolute; left: 0; top: 0; width: var(--thumb-w); height: var(--thumb-h); border-radius: var(--m-radius-pill); pointer-events: none;
+  transform: translate(var(--thumb-x), var(--thumb-y));
+  transition: transform var(--m-dur-slow) var(--m-ease-snappy), width var(--m-dur-slow) var(--m-ease-snappy), height var(--m-dur-slow) var(--m-ease-snappy);
+}
+.m-seg[data-thumb] > *, .m-filter[data-thumb] > *, .m-tabbar__platter[data-thumb] > * { position: relative; transition: color var(--m-dur-fast); }
+.m-seg[data-thumb]::before { background: var(--m-thumb); box-shadow: var(--m-halo-sm); }
+.m-seg[data-thumb] .m-seg__opt { background: transparent; box-shadow: none; color: var(--m-text-secondary); }
+.m-seg[data-thumb] .m-seg__opt[data-thumb-on], .m-seg[data-thumb] .m-seg__opt:not([data-thumb-on]):hover { color: var(--m-text); }
+.m-filter[data-thumb]::before { background: var(--m-accent); box-shadow: var(--m-halo-accent); }
+.m-filter[data-thumb] .m-filter__opt { background: transparent; color: var(--m-text-secondary); }
+.m-filter[data-thumb] .m-filter__opt .m-count { color: var(--m-text-tertiary); }
+.m-filter[data-thumb] .m-filter__opt:not([data-thumb-on]):hover { background: var(--m-fill); color: var(--m-text); }
+.m-filter[data-thumb] .m-filter__opt[data-thumb-on], .m-filter[data-thumb] .m-filter__opt[data-thumb-on] .m-count { color: var(--m-text-on-accent); }
+.m-tabbar__platter[data-thumb]::before { background: var(--m-accent-soft); }
+.m-tabbar__platter[data-thumb] .m-tabbar__item { background: transparent; color: var(--m-text-secondary); }
+.m-tabbar__platter[data-thumb] .m-tabbar__item[data-thumb-on] { color: var(--m-accent-soft-text); }
+/* A press held on a link before it slides drags the thumb, not Safari's link menu. */
+.m-seg__opt, .m-filter__opt, .m-tabbar__item { -webkit-user-drag: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent; }
+[data-thumb]:not([data-scrolls]) > [data-thumb-on] { touch-action: pan-y; cursor: grab; }
+[data-dragging] > [data-thumb-on] { cursor: grabbing; }
 
 /* Tabs (move between sections of one object). */
 .m-tabs { display: flex; gap: var(--m-space-2); border-bottom: 1px solid var(--m-border); overflow-x: auto; scrollbar-width: none; }
