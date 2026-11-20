@@ -1861,7 +1861,8 @@ describe('Every Mason screen at three widths', function () {
           )
           for (const o of [...right.options, ...left.options])
             assert(o.whole, `${o.text} shows its whole label at 320 px`)
-          assert.equal(left.scrollY, 60, 'the page kept its scroll')
+          // Read before any capture, which drops the page's scroll.
+          assert.equal(right.scrollY, 60, 'the page kept its scroll')
         }
       } finally {
         await narrow.close()
