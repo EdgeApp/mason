@@ -53,7 +53,8 @@ export function useSlidingThumb<T extends HTMLElement>(): RefObject<T | null> {
   const place = useCallback((on: HTMLElement | undefined): void => {
     const element = track.current
     if (element == null) return
-    for (const option of element.querySelectorAll<HTMLElement>(OPTION))
+    const options = element.querySelectorAll<HTMLElement>(OPTION)
+    for (const option of options)
       if (option !== on) delete option.dataset.thumbOn
     if (on == null) {
       delete element.dataset.thumb
@@ -72,8 +73,17 @@ export function useSlidingThumb<T extends HTMLElement>(): RefObject<T | null> {
       if (element.style.getPropertyValue(name) !== `${px}px`)
         element.style.setProperty(name, `${px}px`)
     element.dataset.thumb = ''
-    // A track wider than its box (a filter row on a phone) scrolls sideways.
-    const scrolls = element.scrollWidth > element.clientWidth + 1
+    // A track whose options overflow its box (a filter row on a phone)
+    // scrolls sideways. Its options say so, not its scrollWidth: the thumb
+    // still sliding from a wider layout overflows the track for a moment.
+    const last = options[options.length - 1]
+    const end =
+      last == null
+        ? 0
+        : last.offsetLeft +
+          last.offsetWidth +
+          (parseFloat(getComputedStyle(element).paddingRight) || 0)
+    const scrolls = end > element.clientWidth + 1
     if (scrolls !== (element.dataset.scrolls != null))
       if (scrolls) element.dataset.scrolls = ''
       else delete element.dataset.scrolls

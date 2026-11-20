@@ -10,8 +10,12 @@ afterEach(() => {
   delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver
 })
 
-/** Lays the options out in a row, 100 px each, as jsdom does not lay out. */
+/** Lays the options out in a row, 100 px each, in a 400 px track, as jsdom does not lay out. */
 function layOut(track: HTMLElement): void {
+  Object.defineProperty(track, 'clientWidth', {
+    configurable: true,
+    value: 400,
+  })
   ;[...track.children].forEach((option, n) => {
     for (const [key, value] of Object.entries({
       offsetLeft: 4 + n * 100,
@@ -253,13 +257,10 @@ describe('Slider pills', () => {
     const { rerender } = render(<Pills changes={changes} />)
     const element = track()
     layOut(element)
-    Object.defineProperty(element, 'scrollWidth', {
-      configurable: true,
-      value: 500,
-    })
+    // The options end at 300 px, past the 250 px box.
     Object.defineProperty(element, 'clientWidth', {
       configurable: true,
-      value: 300,
+      value: 250,
     })
     rerender(<Pills changes={changes} />)
     assert.equal(element.dataset.scrolls, '')
@@ -269,9 +270,27 @@ describe('Slider pills', () => {
     pointer(element, 'pointerup', 250)
     assert.deepEqual(changes, [])
     // Wide enough again: the thumb drags.
-    Object.defineProperty(element, 'scrollWidth', {
+    Object.defineProperty(element, 'clientWidth', {
       configurable: true,
       value: 300,
+    })
+    rerender(<Pills changes={changes} />)
+    assert.equal(element.dataset.scrolls, undefined)
+  })
+
+  it('reads whether a track scrolls from its options, not a thumb still sliding past its end', () => {
+    const changes: string[] = []
+    const { rerender } = render(<Pills changes={changes} />)
+    const element = track()
+    layOut(element)
+    Object.defineProperty(element, 'clientWidth', {
+      configurable: true,
+      value: 300,
+    })
+    // The thumb's old, wider box still overflows the track.
+    Object.defineProperty(element, 'scrollWidth', {
+      configurable: true,
+      value: 344,
     })
     rerender(<Pills changes={changes} />)
     assert.equal(element.dataset.scrolls, undefined)
