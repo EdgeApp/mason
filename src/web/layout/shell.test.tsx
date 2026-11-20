@@ -85,18 +85,20 @@ describe('The app shell’s navigation per node and role', () => {
         .textContent!.slice(1),
       'Projects',
     )
-    // Narrow: four tabs and More, which holds the rest and is current for them.
+    // Narrow: Projects, Install and More, which holds the rest and is current for them.
     assert.deepEqual(
       texts(tabbar().querySelectorAll('.m-tabbar__platter > *')).map((text) =>
         text.slice(1),
       ),
-      ['Projects', 'Artifacts', 'Install', 'Devices', 'More'],
+      ['Projects', 'Install', 'More'],
     )
     const more = within(tabbar()).getByRole('button', { name: 'More' })
     assert.equal(more.getAttribute('aria-current'), 'page')
     await act(async () => more.click())
     const sheet = screen.getByRole('dialog', { name: 'More' })
     assert.deepEqual(texts(sheet.querySelectorAll('.m-list__title')), [
+      'Artifacts',
+      'Devices',
       'Nodes',
       'Cloud',
       'People',
@@ -149,7 +151,7 @@ describe('The app shell’s navigation per node and role', () => {
     assert.equal(document.querySelector('.m-topbar__chips'), null)
   })
 
-  it('sends a developer home to Projects & apps, with four destinations on the host', async () => {
+  it('sends a developer home to Projects & apps, with four destinations on the host and Artifacts and Devices in More', async () => {
     renderApp({
       node: nodeInfo('host'),
       replies: shellReplies('developer', 'host'),
@@ -158,7 +160,12 @@ describe('The app shell’s navigation per node and role', () => {
     await page('Projects & apps')
     assert.equal(where.path, '/projects')
     assert.equal(sidebar().querySelectorAll('nav .m-navitem').length, 4)
-    assert.equal(within(tabbar()).queryByRole('button', { name: 'More' }), null)
+    assert.deepEqual(
+      texts(tabbar().querySelectorAll('.m-tabbar__platter > *')).map((text) =>
+        text.slice(1),
+      ),
+      ['Projects', 'Install', 'More'],
+    )
   })
 
   it('shows the brand, version and node in the sidebar, and the projects with a live dot while one runs', async () => {
@@ -1088,6 +1095,57 @@ describe('Pages in the shell', () => {
     assert.equal(skip.className, 'm-skip')
     await act(async () => skip.click())
     assert.equal(document.activeElement, screen.getByRole('main'))
+  })
+
+  it('keeps a page’s place and focus when only its query changes, and starts a new page at its top', async () => {
+    const scrolls: unknown[][] = []
+    const original = window.scrollTo
+    window.scrollTo = ((...args: unknown[]) => {
+      scrolls.push(args)
+    }) as typeof window.scrollTo
+    const app = (platform: string): unknown => ({
+      app: { id: 7, name: 'Alpha', slug: 'com.example.alpha' },
+      platforms: ['android', 'ios'],
+      branches: [],
+      latest: {},
+      platform,
+    })
+    try {
+      renderApp({
+        path: '/apps/7?platform=android',
+        replies: shellReplies('admin', 'master', {
+          '/api/v2/catalog/apps/7?platform=android': app('android'),
+          '/api/v2/catalog/apps/7?platform=ios': app('ios'),
+        }),
+      })
+      const title = await page('Alpha')
+      const platforms = screen.getByRole('navigation', {
+        name: 'Build platform',
+      })
+      // The first choice on a freshly loaded page, too: the same page. It
+      // keeps the switch while it reads the choice, so the link keeps focus.
+      const ios = within(platforms).getByRole('link', { name: /iOS/ })
+      ios.focus()
+      await act(async () => ios.click())
+      await until(() => where.path === '/apps/7?platform=ios', 'iOS chosen')
+      await until(
+        () => ios.isConnected && ios.getAttribute('aria-current') === 'true',
+        'the iOS answer on the same switch',
+      )
+      assert.deepEqual(scrolls, [])
+      assert(document.activeElement === ios, 'focus stays on the choice')
+      assert(document.activeElement !== title)
+      // Another page starts at its top.
+      await act(async () =>
+        within(sidebar())
+          .getByRole('link', { name: /Artifacts/ })
+          .click(),
+      )
+      await page('Artifacts')
+      assert.deepEqual(scrolls, [[0, 0]])
+    } finally {
+      window.scrollTo = original
+    }
   })
 
   it('draws a catalog page with breadcrumbs from the node’s pill, the platform kept in each', async () => {

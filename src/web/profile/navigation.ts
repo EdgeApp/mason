@@ -186,22 +186,31 @@ export function navSections(
   return sections
 }
 
-/** The most items the tab bar holds. */
-export const TAB_BAR_MAX = 5
+/**
+ * The most items the phone tab bar holds, More included: three leave each
+ * tab room for a full pill around its icon and label.
+ */
+export const TAB_BAR_MAX = 3
+
+/** The destinations the tab bar keeps out of More: Projects and Install apps. */
+const TAB_BAR_FIRST: readonly string[] = ['dashboard', 'catalog']
 
 /**
- * The tab bar's items: all of them when there are five or fewer, else the
- * first four and More, which holds the rest.
+ * The tab bar's items: all of them when there are three or fewer, else two
+ * tabs and More, which holds the rest in order. The two are Projects and
+ * Install apps when the viewer has them, filled from the rest in order.
  */
 export function tabBar(items: readonly NavItem[]): {
   tabs: NavItem[]
   more: NavItem[]
 } {
   if (items.length <= TAB_BAR_MAX) return { tabs: [...items], more: [] }
-  return {
-    tabs: items.slice(0, TAB_BAR_MAX - 1),
-    more: items.slice(TAB_BAR_MAX - 1),
-  }
+  const first = items.filter((entry) => TAB_BAR_FIRST.includes(entry.key))
+  const tabs = [
+    ...first,
+    ...items.filter((entry) => !first.includes(entry)),
+  ].slice(0, TAB_BAR_MAX - 1)
+  return { tabs, more: items.filter((entry) => !tabs.includes(entry)) }
 }
 
 /**

@@ -1,4 +1,5 @@
 import type { JSX } from 'react'
+import { useSlidingThumb } from '../hooks/useSlidingThumb.js'
 import { Count } from './Badge.js'
 
 export interface FilterOption {
@@ -20,8 +21,9 @@ export function FilterPills({
   value: string
   onChange: (key: string) => void
 }): JSX.Element {
+  const track = useSlidingThumb<HTMLDivElement>()
   return (
-    <div className="m-filter" role="group" aria-label={label}>
+    <div ref={track} className="m-filter" role="group" aria-label={label}>
       {options.map((option) => (
         <button
           key={option.key}

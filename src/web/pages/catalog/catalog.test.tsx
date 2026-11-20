@@ -26,6 +26,7 @@ import {
   where,
   type Reply,
 } from '../../test/render.js'
+import { PAGE_TITLE_ID } from '../../ui/PageHeader.js'
 import { initials } from './Apps.js'
 import { actionFor, NO_IOS_ADDRESS } from './Branch.js'
 import { platformPreference, refusalOf, rememberPlatform } from './catalog.js'
@@ -260,9 +261,12 @@ describe('An app on Install apps', () => {
       links.map((link) => text(link).replace(/Last built.*/, '')),
       ['iOS', 'Android'],
     )
+    // The link goes stale (inert) under the keyboard: focus goes to the title.
+    links[1]!.focus()
     await act(async () => links[1]!.click())
     await until(() => where.path === '/apps/7?platform=android', 'Android')
     assert.equal(platformPreference(), 'android')
+    assert.equal(document.activeElement?.id, PAGE_TITLE_ID)
   })
 
   it('says when the app has no retained builds, and when it is unavailable', async () => {
@@ -494,6 +498,42 @@ describe('A branch on Install apps', () => {
       await act(async () => target.click())
     }
     await until(() => where.path === '/devices', 'Devices')
+  })
+
+  it('draws the platform its answer is for while another loads, with nothing to install from it', async () => {
+    let release: () => void = () => undefined
+    open(`/apps/7/branches/${KEY}?platform=android`, {
+      [`${BRANCH}?platform=android`]: branch({
+        builds: [build({ platform: 'android', format: 'apk' })],
+      }),
+      [`${BRANCH}?platform=ios`]: async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+        return new Response(
+          JSON.stringify(branch({ builds: [build({ id: 101 })] })),
+          { status: 200 },
+        )
+      },
+    })
+    const android = await screen.findByRole('button', {
+      name: 'Install 4.18.3 build 26110902',
+    })
+    const platforms = screen.getByRole('navigation', { name: 'Build platform' })
+    const ios = within(platforms).getByRole('link', { name: /iOS/ })
+    await act(async () => ios.click())
+    await until(() => where.path.endsWith('?platform=ios'), 'iOS chosen')
+    // The switch shows iOS at once; the page is still Android's, inert.
+    assert.equal(ios.getAttribute('aria-current'), 'true')
+    screen.getByText(/Android builds · newest first/)
+    assert(android.closest('[inert]') != null, 'Android’s Install is inert')
+    assert.equal(android.closest('[aria-busy="true"]') != null, true)
+    await act(async () => release())
+    await screen.findByText(/iOS builds · newest first/)
+    const fresh = screen.getByRole('button', {
+      name: 'Install 4.18.3 build 26110902',
+    })
+    assert.equal(fresh.closest('[inert]'), null)
   })
 
   it('downloads a build that only downloads, and shows the installer link Install answers', async () => {

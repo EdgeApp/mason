@@ -13,6 +13,7 @@ import {
   where,
   type Reply,
 } from '../../test/render.js'
+import { PAGE_TITLE_ID } from '../../ui/PageHeader.js'
 import { artifactsHref, listPath, runName } from './Artifacts.js'
 
 afterEach(() => cleanup())
@@ -320,6 +321,32 @@ describe('Artifacts', () => {
       '/api/v2/artifacts': () => new Promise<Response>(() => undefined),
     })
     await screen.findByRole('status', { name: 'Loading the runs' })
+  })
+
+  it('opens a run’s detail as a new view, and Back to the list, each with focus on its title', async () => {
+    open('/artifacts', {
+      '/api/v2/artifacts': list(),
+      '/api/v2/artifacts/runs/run-181': detail(),
+    })
+    await heading('Artifacts')
+    const table = await screen.findByRole('table')
+    await act(async () =>
+      within(table).getByRole('link', { name: 'fixture Run 181' }).click(),
+    )
+    await heading('Run 181')
+    await until(
+      () => document.activeElement?.id === PAGE_TITLE_ID,
+      'focus on the run’s title',
+    )
+    ;(document.activeElement as HTMLElement).blur()
+    await act(async () => {
+      await where.navigate(-1)
+    })
+    await heading('Artifacts')
+    await until(
+      () => document.activeElement?.id === PAGE_TITLE_ID,
+      'focus on the list’s title after Back',
+    )
   })
 
   it('opens a run’s detail: status, branch, commit, times, description, stages, tests, builds and saved artifacts', async () => {

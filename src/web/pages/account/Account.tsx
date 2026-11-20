@@ -27,6 +27,7 @@ import { Button } from '../../ui/Button.js'
 import { FormError, TextInput } from '../../ui/Field.js'
 import { Icon } from '../../ui/Icon.js'
 import { SkeletonText } from '../../ui/Skeleton.js'
+import { SliderTrack } from '../../ui/SliderTrack.js'
 import { useToast } from '../../ui/Toast.js'
 import {
   AddEmailSheet,
@@ -224,7 +225,7 @@ function AppearanceCard(): JSX.Element {
     <section className="m-card" aria-labelledby="account-look">
       <CardHeader id="account-look" icon="tune" title="Appearance" />
       <div className="m-card__body m-stack">
-        <div className="m-seg" role="group" aria-label="Appearance">
+        <SliderTrack className="m-seg" role="group" aria-label="Appearance">
           {APPEARANCES.map((value) => (
             <button
               key={value}
@@ -236,7 +237,7 @@ function AppearanceCard(): JSX.Element {
               {APPEARANCE_LABELS[value]}
             </button>
           ))}
-        </div>
+        </SliderTrack>
         <p className="m-field__help">
           Dark is Mason’s default. Saved in this browser.
         </p>

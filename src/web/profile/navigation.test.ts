@@ -76,23 +76,46 @@ describe('Navigation per node and role', () => {
     )
   })
 
-  it('fills the tab bar with at most five: four and More past five', () => {
+  it('fills the tab bar with at most three: Projects, Install apps and More', () => {
+    assert.equal(TAB_BAR_MAX, 3)
+    const shorts = (items: readonly { short: string }[]): string[] =>
+      items.map((entry) => entry.short)
     const admin = tabBar(navFor('master', permissionsOf('admin')))
-    assert.deepEqual(
-      admin.tabs.map((entry) => entry.short),
-      ['Projects', 'Artifacts', 'Install', 'Devices'],
-    )
+    assert.deepEqual(shorts(admin.tabs), ['Projects', 'Install'])
     assert.deepEqual(
       admin.more.map((entry) => entry.label),
-      ['Nodes', 'Cloud', 'People', 'Groups', 'Settings', 'Backups'],
+      [
+        'Artifacts',
+        'Devices',
+        'Nodes',
+        'Cloud',
+        'People',
+        'Groups',
+        'Settings',
+        'Backups',
+      ],
     )
-    assert(admin.tabs.length + 1 <= TAB_BAR_MAX)
-    const developer = tabBar(navFor('host', permissionsOf('developer')))
-    assert.equal(developer.tabs.length, 4)
-    assert.deepEqual(developer.more, [])
-    const five = tabBar(NAV.slice(0, 5))
-    assert.equal(five.tabs.length, 5)
-    assert.deepEqual(five.more, [])
+    for (const node of ['master', 'host'] as const) {
+      const developer = tabBar(navFor(node, permissionsOf('developer')))
+      assert.deepEqual(shorts(developer.tabs), ['Projects', 'Install'], node)
+      assert.deepEqual(shorts(developer.more), ['Artifacts', 'Devices'], node)
+      const tester = tabBar(navFor(node, permissionsOf('tester')))
+      assert.deepEqual(shorts(tester.tabs), ['Install', 'Devices'], node)
+      assert.deepEqual(tester.more, [], node)
+    }
+    // Three or fewer: every one a tab, no More.
+    const three = tabBar(NAV.slice(0, 3))
+    assert.deepEqual(shorts(three.tabs), ['Projects', 'Artifacts', 'Install'])
+    assert.deepEqual(three.more, [])
+    // Without Projects or Install apps, the first two, and More the rest.
+    const admin2 = tabBar(NAV.slice(4))
+    assert.deepEqual(shorts(admin2.tabs), ['Nodes', 'Cloud'])
+    assert.deepEqual(shorts(admin2.more), [
+      'People',
+      'Groups',
+      'Settings',
+      'Backups',
+    ])
   })
 
   it('knows the current destination by its path, the home of each role and who a page is for', () => {

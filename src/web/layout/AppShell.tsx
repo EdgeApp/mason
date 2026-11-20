@@ -26,6 +26,7 @@ import { PAGE_TITLE_ID } from '../ui/PageHeader.js'
 import { Skeleton, SkeletonText } from '../ui/Skeleton.js'
 import { BareShell } from './BareShell.js'
 import { CommandPalette } from './CommandPalette.js'
+import { viewKey } from './newView.js'
 import { Maintenance, Unreachable } from './NodeStates.js'
 import { Rail } from './Rail.js'
 import { ShellContext, type PageMeta, type Shell } from './ShellContext.js'
@@ -141,17 +142,19 @@ function SignedIn({ session }: { session: SessionInfo }): JSX.Element {
 
   // On every route change, focus moves to the page's h1, which announces
   // it; a new page starts at its top, while Back keeps the browser's place.
-  const { pathname } = useLocation()
+  // A change of the query alone (a filter, a platform switch) is the same
+  // page: it keeps its place and its focus, unless the query chooses a new
+  // view (viewKey: the wizard's steps).
+  const location = useLocation()
   const navigation = useNavigationType()
-  const first = useRef(true)
+  const view = viewKey(location.pathname, location.search)
+  const shown = useRef(view)
   useEffect(() => {
-    if (first.current) {
-      first.current = false
-      return
-    }
+    if (shown.current === view) return
+    shown.current = view
     if (navigation === 'PUSH') window.scrollTo?.(0, 0)
     document.getElementById(PAGE_TITLE_ID)?.focus({ preventScroll: true })
-  }, [pathname, navigation])
+  }, [view, navigation])
 
   if (status?.link?.maintenance === true) return <Maintenance />
   return (

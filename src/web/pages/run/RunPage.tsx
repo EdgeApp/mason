@@ -35,6 +35,7 @@ import { LogStore, type LogOpen } from '../../ui/logStore.js'
 import { PAGE_TITLE_ID } from '../../ui/PageHeader.js'
 import { PipelineGraph } from '../../ui/PipelineGraph.js'
 import { SkeletonText } from '../../ui/Skeleton.js'
+import { SliderTrack } from '../../ui/SliderTrack.js'
 import { StatusPill } from '../../ui/StatusPill.js'
 import { statusOf } from '../../ui/status.js'
 import { Timeline } from '../../ui/Timeline.js'
@@ -426,7 +427,11 @@ function RunScreen({
       ))}
       <section className="m-stack" aria-label="Pipeline">
         <div className="m-row m-row--between">
-          <div className="m-seg" role="group" aria-label="Pipeline view">
+          <SliderTrack
+            className="m-seg"
+            role="group"
+            aria-label="Pipeline view"
+          >
             <button
               className="m-seg__opt"
               type="button"
@@ -449,7 +454,7 @@ function RunScreen({
               <Icon name="timeline" />
               Timeline
             </button>
-          </div>
+          </SliderTrack>
           {tab === 'graph' && (
             <span className="m-t-subhead m-tertiary m-run__hint">
               Hover a stage to trace what it waits for

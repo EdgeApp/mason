@@ -3,7 +3,14 @@
 // profile and a session, inside a memory router.
 import { render, type RenderResult } from '@testing-library/react'
 import type { JSX, ReactNode } from 'react'
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router'
+import {
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  type NavigateFunction,
+} from 'react-router'
 import type {
   NodeInfo,
   SessionInfo,
@@ -177,12 +184,18 @@ export function dashboard(
 }
 
 /** Where the router is: the test's view of the address (and its fragment). */
-export const where: { path: string; hash: string } = { path: '', hash: '' }
+export const where: {
+  path: string
+  hash: string
+  /** The router's navigate: `where.navigate(-1)` is the browser's Back. */
+  navigate: NavigateFunction
+} = { path: '', hash: '', navigate: () => undefined }
 
 function Location(): null {
   const location = useLocation()
   where.path = `${location.pathname}${location.search}`
   where.hash = location.hash
+  where.navigate = useNavigate()
   return null
 }
 

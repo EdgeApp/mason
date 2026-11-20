@@ -27,10 +27,18 @@ const themes = {
     'border-strong': 'rgba(255,255,255,0.18)',
     'border-control': '#6b7690',
     'focus-ring': '#4d8dff',
+    // Cards, buttons and pills carry no outline: their fill and halo set
+    // them apart. Increase Contrast gives the outline back.
+    edge: 'transparent',
+    // A control's fill, translucent so it lifts off the canvas and a card alike.
+    fill: 'rgba(255,255,255,0.07)',
+    'fill-hover': 'rgba(255,255,255,0.10)',
+    // A slider pill's thumb, lifted off its sunken track.
+    thumb: '#212b42',
     // Text.
     text: '#e8ecf4',
     'text-secondary': '#aab3c5',
-    'text-tertiary': '#8d97ab',
+    'text-tertiary': '#9ea7b9',
     'text-disabled': '#5c6679',
     'text-on-accent': '#ffffff',
     'text-link': '#86adff',
@@ -42,6 +50,7 @@ const themes = {
     'accent-soft': 'rgba(59,130,246,0.16)',
     'accent-soft-text': '#9dbcff',
     'accent-glow': 'rgba(59,130,246,0.35)',
+    'accent-soft-hover': 'rgba(59,130,246,0.24)',
     // Status: text (readable), solid (dots, icons, bars), soft (fills), line.
     'success-text': '#4ade80',
     'success-solid': '#10b981',
@@ -55,6 +64,7 @@ const themes = {
     'danger-solid': '#ef4444',
     'danger-soft': 'rgba(239,68,68,0.14)',
     'danger-line': 'rgba(239,68,68,0.45)',
+    'danger-soft-hover': 'rgba(239,68,68,0.22)',
     'danger-fill': '#dc2626',
     'danger-fill-hover': '#c81e1e',
     'danger-fill-pressed': '#b91c1c',
@@ -104,9 +114,13 @@ const themes = {
     'border-strong': 'rgba(15,23,40,0.20)',
     'border-control': '#808b9f',
     'focus-ring': '#2563eb',
+    edge: 'transparent',
+    fill: 'rgba(15,23,40,0.055)',
+    'fill-hover': 'rgba(15,23,40,0.09)',
+    thumb: '#ffffff',
     text: '#0f1728',
     'text-secondary': '#475569',
-    'text-tertiary': '#5a6780',
+    'text-tertiary': '#535f77',
     'text-disabled': '#a0a9b8',
     'text-on-accent': '#ffffff',
     'text-link': '#1d4ed8',
@@ -117,6 +131,7 @@ const themes = {
     'accent-soft': '#e7efff',
     'accent-soft-text': '#1d4ed8',
     'accent-glow': 'rgba(37,99,235,0.22)',
+    'accent-soft-hover': '#dbe6ff',
     'success-text': '#047857',
     'success-solid': '#059669',
     'success-soft': '#e6f7ef',
@@ -129,6 +144,7 @@ const themes = {
     'danger-solid': '#ef4444',
     'danger-soft': '#fdecec',
     'danger-line': '#f4b4b4',
+    'danger-soft-hover': '#fadcdc',
     'danger-fill': '#dc2626',
     'danger-fill-hover': '#c81e1e',
     'danger-fill-pressed': '#b91c1c',
@@ -172,6 +188,8 @@ const contrastMore = {
     'border-subtle': 'rgba(255,255,255,0.14)',
     border: 'rgba(255,255,255,0.22)',
     'border-control': '#8e98ae',
+    edge: 'rgba(255,255,255,0.22)',
+    'term-edge': 'rgba(255,255,255,0.22)',
   },
   light: {
     'text-secondary': '#334155',
@@ -179,6 +197,8 @@ const contrastMore = {
     'border-subtle': 'rgba(15,23,40,0.14)',
     border: 'rgba(15,23,40,0.24)',
     'border-control': '#5e6a80',
+    edge: 'rgba(15,23,40,0.24)',
+    'term-edge': 'rgba(255,255,255,0.22)',
   },
 }
 
@@ -198,6 +218,8 @@ const terminal = {
   'ansi-magenta': '#e879f9',
   'ansi-cyan': '#22d3ee',
   'ansi-gray': '#94a3b8',
+  // The terminal's outline: none, but a light line under Increase Contrast.
+  'term-edge': 'transparent',
 }
 
 const shadows = {
@@ -207,6 +229,11 @@ const shadows = {
     'shadow-3':
       '0 16px 40px -8px rgba(0,0,0,0.80), 0 0 32px rgba(59,130,246,0.15)',
     'shadow-glow': '0 0 0 1px var(--m-accent), 0 0 16px var(--m-accent-glow)',
+    // Halos: a faint, lighter glow just under a card or a control, in place
+    // of an outline; just enough to lift it off what it sits on.
+    halo: '0 6px 18px -10px rgba(150,180,255,0.20)',
+    'halo-sm': '0 3px 8px -4px rgba(150,180,255,0.24)',
+    'halo-accent': '0 4px 12px -5px rgba(59,130,246,0.50)',
   },
   light: {
     'shadow-1': '0 1px 2px rgba(15,23,40,0.06)',
@@ -214,6 +241,11 @@ const shadows = {
     'shadow-3':
       '0 18px 44px -10px rgba(15,23,40,0.24), 0 0 0 1px rgba(15,23,40,0.04)',
     'shadow-glow': '0 0 0 1px var(--m-accent), 0 0 14px var(--m-accent-glow)',
+    // On the light canvas nothing is lighter than a white card, so the halo
+    // is the faintest cool shade instead.
+    halo: '0 6px 18px -10px rgba(15,23,40,0.16)',
+    'halo-sm': '0 3px 8px -4px rgba(15,23,40,0.16)',
+    'halo-accent': '0 4px 12px -5px rgba(37,99,235,0.42)',
   },
 }
 
@@ -349,6 +381,19 @@ const textSurfaces = [
   'surface-selected',
   'surface-overlay',
   'glass-bg-opaque',
+  'thumb',
+]
+
+/** The translucent fills, and every opaque plane they can sit on. */
+const fills = ['fill', 'fill-hover']
+const fillPlanes = [
+  'canvas',
+  'recessed',
+  'surface',
+  'surface-sunken',
+  'surface-hover',
+  'surface-selected',
+  'surface-overlay',
 ]
 
 function pairsFor(t) {
@@ -360,6 +405,18 @@ function pairsFor(t) {
     add('text-secondary', s, 4.5, 'secondary text')
     add('text-tertiary', s, 4.5, 'tertiary text (still readable text)')
   }
+  // A chip or a button's fill lifts off whatever it sits on, so its text is
+  // checked over every plane; so is a tinted or danger button's hover.
+  for (const f of fills)
+    for (const plane of fillPlanes)
+      for (const fg of ['text', 'text-secondary', 'text-tertiary'])
+        add(fg, f, 4.5, `${fg} on ${f} over ${plane}`, plane)
+  for (const [fg, hover] of [
+    ['accent-soft-text', 'accent-soft-hover'],
+    ['danger-text', 'danger-soft-hover'],
+  ])
+    for (const plane of fillPlanes)
+      add(fg, hover, 4.5, `${fg} on a hovered button over ${plane}`, plane)
   for (const s of ['canvas', 'surface', 'surface-hover', 'surface-overlay'])
     add('text-link', s, 4.5, 'link')
   for (const s of ['accent', 'accent-hover', 'accent-pressed'])
@@ -431,8 +488,9 @@ for (const [name, t] of variants) {
     '| Foreground | Background | Ratio | Needs | Use |',
     '| --- | --- | ---: | ---: | --- |',
   )
-  for (const { fg, bg, min, why } of pairsFor(t)) {
-    const base = solid(t[bg] ?? terminal[bg], t.surface)
+  for (const { fg, bg, min, why, base: plane } of pairsFor(t)) {
+    // A translucent background is resolved over the plane it sits on.
+    const base = solid(t[bg] ?? terminal[bg], t[plane])
     const r = ratio(solid(t[fg], base), base)
     const ok = r >= min
     if (!ok) failures++

@@ -15,7 +15,7 @@
 .m-queue__entry { flex-direction: column; align-items: stretch; gap: var(--m-space-3); }
 .m-queue__name { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
 .m-progress__running { --bar: var(--m-running-solid); }
-.m-chip--remove { cursor: pointer; min-height: 2rem; }
+.m-chip--remove { cursor: pointer; --h: 2rem; }
 .m-chip--remove:hover { background: var(--m-surface-hover); }
 .m-chip--remove:focus-visible { outline: 2px solid var(--m-focus-ring); outline-offset: 2px; }
 .m-dashboard__filter { width: min(100%, 16rem); }

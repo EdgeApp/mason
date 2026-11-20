@@ -59,7 +59,7 @@
 .m-btn.ios27-btn:focus-visible { outline: 2px solid var(--m-focus-ring); outline-offset: 2px; box-shadow: none; }
 .m-btn.ios27-btn:disabled, .m-btn.ios27-btn[aria-disabled='true'] { pointer-events: auto; opacity: 0.45; }
 .m-btn.ios27-btn:active:not(:disabled) { opacity: 1; }
-.m-btn.ios27-btn { border-radius: var(--m-radius-pill); letter-spacing: normal; }
+.m-btn.ios27-btn { border-radius: calc(var(--h) / 2); letter-spacing: normal; }
 
 /* The full-page states (waiting for the master, maintenance) and loading. */
 .m-bare__main--state { justify-content: center; }
