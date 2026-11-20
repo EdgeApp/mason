@@ -376,3 +376,92 @@ describe('The phone tab bar', () => {
     )
   })
 })
+
+describe('The catalog platform switch on a phone', () => {
+  const narrow =
+    '@media (max-width: 46.49em), (max-height: 31.24em) and (max-width: 79.99em)'
+  /** The declarations a selector gets under a prelude, from catalog.css. */
+  const under = (selector: string, media: string): Map<string, string> =>
+    new Map(
+      rules
+        .filter(
+          (rule) =>
+            rule.file === 'catalog.css' &&
+            rule.media === media &&
+            rule.selectors.includes(selector),
+        )
+        .flatMap((rule) => [...rule.declarations]),
+    )
+
+  it('stacks each 44 px option’s icon over its label, as the tab bar does', () => {
+    const option = under('.m-catalog-platforms .m-seg__opt', narrow)
+    assert.equal(option.get('--h'), '44px')
+    assert.equal(option.get('height'), 'var(--h)')
+    // The touch floor (2.75rem) cannot grow it past 44 px at larger text.
+    assert.equal(option.get('min-height'), 'var(--h)')
+    assert.equal(option.get('flex-direction'), 'column')
+    assert.equal(option.get('gap'), '0')
+    // It stays a pill padded by its radius: the base rule's padding and radius stand.
+    assert.equal(option.has('padding'), false)
+    assert.equal(option.has('border-radius'), false)
+    assert.equal(value('.m-seg__opt', 'padding'), '0 calc(var(--h) / 2)')
+    assert.equal(value('.m-seg__opt', 'border-radius'), 'calc(var(--h) / 2)')
+    assert.equal(
+      under('.m-catalog-platforms .m-seg__opt .m-icon', narrow).get(
+        'font-size',
+      ),
+      '20px',
+    )
+    const label = under(
+      '.m-catalog-platforms .m-seg__opt > :not(.m-icon)',
+      narrow,
+    )
+    assert.equal(label.get('font-size'), 'min(0.75rem, 18px)')
+    assert.equal(label.get('line-height'), 'min(1rem, 24px)')
+    assert.equal(label.get('text-overflow'), 'clip')
+    assert.equal(label.get('overflow'), 'visible')
+  })
+
+  it('sizes each option to its whole label and shares the rest of the row', () => {
+    // Its own width plus an equal share, never squeezed: a row that is too
+    // narrow overflows, and scrolls.
+    assert.equal(
+      under('.m-catalog-platforms .m-seg__opt', narrow).get('flex'),
+      '1 0 auto',
+    )
+    const track = under('.m-catalog-platforms .m-seg', narrow)
+    assert.equal(track.get('display'), 'flex')
+    assert.equal(track.get('width'), '100%')
+    assert.equal(track.get('overflow-x'), 'auto')
+    assert.equal(track.get('scrollbar-width'), 'none')
+    assert.equal(track.get('scroll-padding-inline-end'), '2rem')
+    assert.equal(
+      under('.m-catalog-platforms', narrow).get('align-self'),
+      'stretch',
+    )
+  })
+
+  it('fades the scrolling row’s edge only while there is more', () => {
+    const fade = under(
+      '.m-catalog-platforms .m-seg',
+      '@supports (animation-timeline: scroll())',
+    )
+    assert.equal(fade.get('animation'), 'm-edge-fade linear both')
+    assert.equal(fade.get('animation-timeline'), 'scroll(self inline)')
+  })
+
+  it('keeps the icon beside the label in wider windows', () => {
+    const wide = rules.filter(
+      (rule) =>
+        rule.file === 'catalog.css' &&
+        rule.media === '' &&
+        rule.selectors.some((selector) =>
+          selector.startsWith('.m-catalog-platforms .m-seg__opt'),
+        ),
+    )
+    for (const rule of wide) {
+      assert.equal(rule.declarations.has('flex-direction'), false)
+      assert.equal(rule.declarations.has('--h'), false)
+    }
+  })
+})
