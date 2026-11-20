@@ -1233,6 +1233,7 @@ describe('Every Mason screen at three widths', function () {
       return {
         scrolls: t.dataset.scrolls != null,
         scrollLeft: t.scrollLeft,
+        scrollEnd: t.scrollWidth - t.clientWidth,
         width: box.width,
         switchWidth: t.closest('.m-catalog-platforms')?.getBoundingClientRect().width,
         column: column.clientWidth - parseFloat(pad.paddingLeft) - parseFloat(pad.paddingRight),
@@ -1801,6 +1802,126 @@ describe('Every Mason screen at three widths', function () {
           )
       } finally {
         await tablet.close()
+      }
+
+      // A switch too narrow for whole labels scrolls; an option chosen out
+      // of view is scrolled into it. Choices are clicked by the page, since
+      // maestro-d's tap scrolls its target into view itself.
+      const narrow = await browser('screens-sliders-host-320', 320, 700)
+      try {
+        await signIn(narrow, 'tester', host)
+        await narrow.open(origin(host) + prefix + '/apps')
+        await narrow.script(settle)
+        await expect(
+          narrow,
+          `document.querySelector('${platforms}[data-thumb]') != null`,
+          'the platform thumb at 320 px',
+        )
+        await narrow.script(
+          "const spacer = document.createElement('div'); spacer.style.height = '1200px'; document.querySelector('main').append(spacer); window.scrollTo(0, 60); return ''",
+        )
+        /** Clicks a switch option by its label, from a set scroll, as a page script. */
+        const choose = async (
+          text: string,
+          from: 'start' | 'end',
+        ): Promise<void> => {
+          await narrow.script(`const t = document.querySelector('${platforms}')
+            t.scrollLeft = ${from === 'start' ? '0' : 't.scrollWidth'}
+            ;[...t.children].find((o) => o.textContent.includes(${JSON.stringify(text)})).click()
+            return ''`)
+          await expect(
+            narrow,
+            `document.querySelector("${platforms} [aria-current='true']")?.textContent.includes(${JSON.stringify(text)}) === true`,
+            `${text} chosen at 320 px`,
+          )
+        }
+        await choose('tvOS', 'start')
+        const right = await measure(
+          narrow,
+          'choose tvOS, the last platform, from the start of the switch at 320 px',
+          'install-apps-scrolled-320',
+          layoutOf(platforms),
+        )
+        await choose('iOS', 'end')
+        const left = await measure(
+          narrow,
+          'choose iOS, the first platform, from the end of the switch at 320 px',
+          'install-apps-scrolled-back-320',
+          layoutOf(platforms),
+        )
+        if (checked) {
+          assert(right.scrolls, 'the switch scrolls at 320 px')
+          const tvos = right.options.find((o: Json) => o.chosen)
+          assert(
+            right.scrollLeft > 0 && tvos.text === 'tvOS' && tvos.inTrack,
+            `tvOS scrolled into view (scrollLeft ${right.scrollLeft})`,
+          )
+          // The last option reveals to the row's end, where the edge fade is gone.
+          assert(
+            right.scrollLeft >= right.scrollEnd - 1,
+            `the row at its end (scrollLeft ${right.scrollLeft} of ${right.scrollEnd})`,
+          )
+          const ios = left.options.find((o: Json) => o.chosen)
+          assert(
+            left.scrollLeft === 0 && ios.text === 'iOS' && ios.inTrack,
+            `iOS scrolled into view (scrollLeft ${left.scrollLeft})`,
+          )
+          for (const o of [...right.options, ...left.options])
+            assert(o.whole, `${o.text} shows its whole label at 320 px`)
+          // Read before any capture, which drops the page's scroll.
+          assert.equal(right.scrollY, 60, 'the page kept its scroll')
+        }
+      } finally {
+        await narrow.close()
+      }
+
+      // The filter rows scroll sideways on a phone too, and show a pill
+      // chosen beyond their edge.
+      const rows = await browser('screens-sliders-master-320', 320, 700)
+      try {
+        await signIn(rows, 'admin', c.master)
+        for (const [where, label] of [
+          ['/projects', 'Platform'],
+          ['/people', 'Role'],
+        ] as const) {
+          const row = `.m-filter[aria-label="${label}"]`
+          await rows.open(master + where)
+          await rows.script(settle)
+          await expect(
+            rows,
+            `document.querySelector('${row}[data-thumb]') != null`,
+            `the ${label} filter's thumb on ${where}`,
+          )
+          const last =
+            await rows.script(`const t = document.querySelector('${row}')
+            t.scrollLeft = 0
+            const option = t.lastElementChild
+            option.click()
+            return option.textContent.trim()`)
+          await expect(
+            rows,
+            `document.querySelector('${row} > :last-child')?.getAttribute('aria-pressed') === 'true'`,
+            `${last} chosen in the ${label} filter`,
+          )
+          const shown = await measure(
+            rows,
+            `choose ${last}, the last pill of the ${label} filter on ${where}, from its start at 320 px`,
+            `filter-${label.toLowerCase()}-scrolled-320`,
+            `(() => {
+              const t = document.querySelector('${row}')
+              const box = t.getBoundingClientRect()
+              const o = t.lastElementChild.getBoundingClientRect()
+              return { scrolls: t.dataset.scrolls != null, scrollLeft: t.scrollLeft, inRow: o.left >= box.left - 0.5 && o.right <= box.right + 0.5 }
+            })()`,
+          )
+          if (checked)
+            assert(
+              shown.scrolls && shown.scrollLeft > 0 && shown.inRow,
+              `${last} scrolled into view in the ${label} filter: ${JSON.stringify(shown)}`,
+            )
+        }
+      } finally {
+        await rows.close()
       }
     } finally {
       writeFileSync(
