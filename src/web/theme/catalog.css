@@ -23,6 +23,68 @@
     outline-offset: -2px;
   }
 }
+/* Where the tab bar shows, the switch is laid out like it: each option a
+   44 px pill with its icon centred over its label. An option is as wide as
+   its whole label and its radius each side, and the row's leftover is shared
+   equally; a row too narrow for whole labels scrolls sideways instead, its
+   edge fading while there is more. The fade masks only the scrolling track:
+   the switch's surface, edge and halo are the nav's, so the options fade
+   into the switch, not into the cards scrolling under it. */
+@media (max-width: 46.49em), (max-height: 31.24em) and (max-width: 79.99em) {
+  .m-catalog-platforms {
+    align-self: stretch;
+    border-radius: var(--m-radius-pill);
+    background: var(--m-surface-sunken);
+    border: 1px solid var(--m-edge);
+    box-shadow: var(--m-halo-sm);
+  }
+  .m-catalog-platforms .m-seg {
+    display: flex;
+    width: 100%;
+    background: none;
+    border: 0;
+    box-shadow: none;
+    overflow-x: auto;
+    scrollbar-width: none;
+    scroll-padding-inline-end: 2rem;
+  }
+  .m-catalog-platforms .m-seg::-webkit-scrollbar {
+    display: none;
+  }
+  .m-catalog-platforms .m-seg__opt {
+    --h: 44px;
+    flex: 1 0 auto;
+    flex-direction: column;
+    gap: 0;
+    height: var(--h);
+    min-height: var(--h);
+  }
+  /* The scrolling track clips at its 3 px padding: the focus ring is drawn
+     inside the option, whole. */
+  .m-catalog-platforms .m-seg__opt:focus-visible {
+    outline-offset: -2px;
+  }
+  .m-catalog-platforms .m-seg__opt .m-icon {
+    font-size: 20px;
+  }
+  .m-catalog-platforms .m-seg__opt > :not(.m-icon) {
+    font-size: min(0.75rem, 18px);
+    line-height: min(1rem, 24px);
+    overflow: visible;
+    text-overflow: clip;
+  }
+  @supports (animation-timeline: scroll()) {
+    .m-catalog-platforms .m-seg {
+      animation: m-edge-fade linear both;
+      animation-timeline: scroll(self inline);
+    }
+  }
+  @media (forced-colors: active) {
+    .m-catalog-platforms {
+      border-color: CanvasText;
+    }
+  }
+}
 
 /* Branch names are machine values: mono, breaking anywhere on a phone. */
 .m-catalog-branch {

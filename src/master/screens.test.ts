@@ -88,14 +88,17 @@ export const WIDTHS: ReadonlyArray<readonly [number, number]> = [
 
 /**
  * The design's surface rules, checked in the page (it returns one line per
- * problem): (a) no card, button, pill or overlay draws an outline, and (b)
+ * problem): (a) no card, button, pill or overlay draws an outline, (b)
  * every pill keeps its text and icons at least its corner radius from each
- * side. A pill is drawn (a background, a box-shadow, or the slider thumb
+ * side, and (c) no slider option cuts its label short. A pill is drawn (a background, a box-shadow, or the slider thumb
  * behind it), rounded to at least half its height or padded by its radius
  * (a pill that wrapped), and wider than tall; one that holds another pill is
  * a track, and only its options are checked. Its contents are its visible
  * text nodes (icons are ligature text), clipped by any box between them and
- * the pill that hides its overflow.
+ * the pill that hides its overflow, so (b) passes a label cut to an
+ * ellipsis; (c) finds those: a box inside a segmented control's, filter's
+ * or tab's option that clips its overflow and holds more than it shows.
+ * A label hidden on purpose (the tab bar's 1 px clipped labels) is skipped.
  */
 export const SURFACE_CHECK = `
   const problems = []
@@ -114,7 +117,7 @@ export const SURFACE_CHECK = `
     [...el.classList].slice(0, 2).map((c) => '.' + c).join('') +
     ' "' + (el.textContent ?? '').trim().replace(/\\s+/g, ' ').slice(0, 30) + '"'
   // (a) No outline.
-  const outlined = '.m-card, .m-btn, .m-chip, .m-status, .m-runchip, .m-node-pill, .m-filter, .m-seg, .m-searchcap, .m-banner, .m-callout, .m-menu, .m-palette, .m-formsheet'
+  const outlined = '.m-card, .m-btn, .m-chip, .m-status, .m-runchip, .m-node-pill, .m-filter, .m-seg, .m-catalog-platforms, .m-searchcap, .m-banner, .m-callout, .m-menu, .m-palette, .m-formsheet'
   for (const el of document.querySelectorAll(outlined)) {
     if (!visible(el)) continue
     const style = getComputedStyle(el)
@@ -169,6 +172,17 @@ export const SURFACE_CHECK = `
     const inLeft = left - box.left, inRight = box.right - right
     if (inLeft < radius - 0.5 || inRight < radius - 0.5)
       problems.push('pill ' + name(el) + ' holds its contents ' + inLeft.toFixed(1) + ' / ' + inRight.toFixed(1) + ' px from its sides, under its ' + radius.toFixed(1) + ' px radius')
+  }
+  // (c) Slider options show their labels whole.
+  for (const option of document.querySelectorAll('.m-seg__opt, .m-filter__opt, .m-tabbar__item')) {
+    if (!visible(option)) continue
+    for (const el of [option, ...option.querySelectorAll('*')]) {
+      if (el.matches('.m-icon') || el.getBoundingClientRect().width <= 1 || !visible(el)) continue
+      if (getComputedStyle(el).overflowX !== 'visible' && el.scrollWidth > el.clientWidth + 1) {
+        problems.push('slider option ' + name(option) + ' cuts its label short: ' + el.clientWidth + ' of ' + el.scrollWidth + ' px shown')
+        break
+      }
+    }
   }
   return JSON.stringify(problems)
 `
@@ -540,7 +554,7 @@ describe('Every Mason screen at three widths', function () {
       ],
       apps: [
         { bundleId: ALPHA, name: 'Alpha', platforms: ['ios', 'android'] },
-        { bundleId: BETA, name: 'Beta', platforms: ['macos'] },
+        { bundleId: BETA, name: 'Beta', platforms: ['macos', 'tvos'] },
       ],
     })
     const website = c.repo('fixtures/website')
@@ -1189,6 +1203,65 @@ describe('Every Mason screen at three widths', function () {
     ): Promise<void> => {
       await until(b, condition, what)
     }
+    /**
+     * A step that measures the page, then saves `<name>-<MASON_SCREENS>.png`,
+     * before anything is asserted, and returns the measures. It measures
+     * first: the capture is of the whole page, which resizes the window for
+     * a moment and drops its scroll. The base truncates the catalog switch's
+     * labels, so a `before` run only captures: callers assert when `checked`.
+     */
+    const checked = variant !== 'before'
+    const measure = async (
+      b: Browser,
+      what: string,
+      name: string,
+      check: string,
+    ): Promise<Json> => {
+      await new Promise((resolve) => setTimeout(resolve, 700))
+      const result = await b.script(`return JSON.stringify(${check})`)
+      const file = `${name}-${variant}.png`
+      writeFileSync(path.join(artifacts!, file), await b.shot())
+      log.push(`$ ${what}`, result, `(${file})`, '')
+      return JSON.parse(result)
+    }
+    /** A track and each option's box, icon and label, relative to the track. */
+    const layoutOf = (track: string): string => `(() => {
+      const t = document.querySelector(${JSON.stringify(track)})
+      const box = t.getBoundingClientRect()
+      const column = t.parentElement.closest('.m-page')
+      const pad = getComputedStyle(column)
+      return {
+        scrolls: t.dataset.scrolls != null,
+        scrollLeft: t.scrollLeft,
+        width: box.width,
+        switchWidth: t.closest('.m-catalog-platforms')?.getBoundingClientRect().width,
+        column: column.clientWidth - parseFloat(pad.paddingLeft) - parseFloat(pad.paddingRight),
+        pageScrollWidth: document.documentElement.scrollWidth,
+        innerWidth,
+        scrollY: Math.round(scrollY),
+        options: [...t.children].map((o) => {
+          const b = o.getBoundingClientRect()
+          const icon = o.querySelector('.m-icon')?.getBoundingClientRect()
+          const label = o.querySelector(':scope > :not(.m-icon)')
+          const shown = label.getBoundingClientRect()
+          const range = document.createRange()
+          range.selectNodeContents(label)
+          const text = range.getBoundingClientRect()
+          return {
+            text: label.textContent.trim(),
+            chosen: o.matches("[aria-current='true'], [aria-pressed='true']"),
+            height: b.height,
+            inTrack: b.left >= box.left - 0.5 && b.right <= box.right + 0.5,
+            whole: label.scrollWidth <= label.clientWidth + 1,
+            clearLeft: text.left - b.left,
+            clearRight: b.right - text.right,
+            iconOffCentre: icon == null ? 0 : (icon.left + icon.right) / 2 - (b.left + b.right) / 2,
+            iconAbove: icon == null || icon.bottom <= shown.top + 0.5,
+            iconBeside: icon == null || (icon.right <= shown.left + 0.5 && Math.abs((icon.top + icon.bottom) / 2 - (shown.top + shown.bottom) / 2) <= 1),
+          }
+        }),
+      }
+    })()`
     const master = origin(c.master) + prefix
     try {
       // Desktop: the filter pills, the run page's view switch, Appearance.
@@ -1626,8 +1699,108 @@ describe('Every Mason screen at three widths', function () {
           'slider-app-drag-390.png',
           `{ ...${thumbOf(platforms)}, sameSwitch: document.querySelector('${platforms}').dataset.qaSame === 'yes', scrollY: Math.round(scrollY) }`,
         )
+
+        // Where the tab bar shows, the switch is laid out like it: every
+        // option a 44 px pill, its icon centred over its whole label, the
+        // options filling the page column.
+        await t.open(origin(host) + prefix + '/apps')
+        await t.script(settle)
+        const stacked = await measure(
+          t,
+          'lay out the four-platform switch on Install apps at 390 px as a tester',
+          'install-apps-stacked-390',
+          layoutOf(platforms),
+        )
+        if (checked) {
+          assert.deepEqual(
+            stacked.options.map((o: Json) => o.text),
+            ['iOS', 'Android', 'macOS', 'tvOS'],
+          )
+          assert(
+            Math.abs(stacked.switchWidth - stacked.column) <= 1,
+            `the switch spans the column (${stacked.switchWidth} of ${stacked.column} px)`,
+          )
+          assert(!stacked.scrolls, 'four platforms fit at 390 px')
+          for (const o of stacked.options) {
+            assert.equal(o.height, 44, `${o.text} is 44 px tall`)
+            assert(o.whole, `${o.text} shows its whole label`)
+            assert(
+              Math.abs(o.iconOffCentre) <= 1 && o.iconAbove,
+              `${o.text}'s icon is centred over its label`,
+            )
+            assert(
+              o.clearLeft >= 21.5 && o.clearRight >= 21.5,
+              `${o.text}'s label is ${o.clearLeft.toFixed(1)} / ${o.clearRight.toFixed(1)} px from its 22 px ends`,
+            )
+          }
+          const problems = JSON.parse(await t.script(SURFACE_CHECK)) as string[]
+          assert.deepEqual(problems, [], problems.join('\n'))
+        }
+
+        // 175 % text: the options keep whole labels and the switch scrolls
+        // sideways inside its column; the page does not.
+        await t.script(
+          "document.documentElement.style.fontSize = '28px'; await new Promise((resolve) => setTimeout(resolve, 400)); return ''",
+        )
+        const large = await measure(
+          t,
+          'lay out the switch at 390 px with 28 px text',
+          'install-apps-large-text-390',
+          layoutOf(platforms),
+        )
+        const ends =
+          await t.script(`const t = document.querySelector('${platforms}')
+          t.scrollLeft = t.scrollWidth
+          const end = t.scrollLeft
+          t.scrollLeft = 0
+          return JSON.stringify([end, t.scrollLeft])`)
+        log.push('$ scroll the switch to its end and back', ends, '')
+        await t.script(
+          "document.documentElement.style.fontSize = ''; return ''",
+        )
+        if (checked) {
+          assert(large.scrolls, 'the switch scrolls at 28 px text')
+          assert(
+            large.pageScrollWidth <= large.innerWidth,
+            'the page does not scroll sideways',
+          )
+          for (const o of large.options)
+            assert(o.whole, `${o.text} shows its whole label at 28 px text`)
+          const [end, back] = JSON.parse(ends) as number[]
+          assert(
+            end! > 0 && back === 0,
+            `the switch scrolled to ${end} and back to ${back}`,
+          )
+        }
       } finally {
         await t.close()
+      }
+
+      // A tablet keeps the switch's icons beside their labels.
+      const platforms = '.m-catalog-platforms .m-seg'
+      const tablet = await browser('screens-sliders-host-834', 834, 1194)
+      try {
+        await signIn(tablet, 'tester', host)
+        await tablet.open(origin(host) + prefix + '/apps')
+        await tablet.script(settle)
+        await expect(
+          tablet,
+          `document.querySelector('${platforms}[data-thumb]') != null`,
+          'the platform thumb at 834 px',
+        )
+        const inline = await measure(
+          tablet,
+          'lay out the switch on Install apps at 834 px',
+          'install-apps-inline-834',
+          layoutOf(platforms),
+        )
+        for (const o of inline.options)
+          assert(
+            o.iconBeside,
+            `${o.text}'s icon sits beside its label at 834 px`,
+          )
+      } finally {
+        await tablet.close()
       }
     } finally {
       writeFileSync(
