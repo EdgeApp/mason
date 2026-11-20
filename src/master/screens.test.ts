@@ -1204,10 +1204,11 @@ describe('Every Mason screen at three widths', function () {
       await until(b, condition, what)
     }
     /**
-     * A step that saves `<name>-<MASON_SCREENS>.png` before anything is
-     * asserted and returns what the page measured. The base truncates the
-     * catalog switch's labels, so a `before` run only captures: callers
-     * assert when `checked`.
+     * A step that measures the page, then saves `<name>-<MASON_SCREENS>.png`,
+     * before anything is asserted, and returns the measures. It measures
+     * first: the capture is of the whole page, which resizes the window for
+     * a moment and drops its scroll. The base truncates the catalog switch's
+     * labels, so a `before` run only captures: callers assert when `checked`.
      */
     const checked = variant !== 'before'
     const measure = async (
@@ -1217,9 +1218,9 @@ describe('Every Mason screen at three widths', function () {
       check: string,
     ): Promise<Json> => {
       await new Promise((resolve) => setTimeout(resolve, 700))
+      const result = await b.script(`return JSON.stringify(${check})`)
       const file = `${name}-${variant}.png`
       writeFileSync(path.join(artifacts!, file), await b.shot())
-      const result = await b.script(`return JSON.stringify(${check})`)
       log.push(`$ ${what}`, result, `(${file})`, '')
       return JSON.parse(result)
     }
