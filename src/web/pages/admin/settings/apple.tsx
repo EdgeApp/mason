@@ -1,7 +1,8 @@
 // Settings → Apple ID for Xcode downloads (screen-10-settings,
 // screen-10b-settings-more): the Apple ID session in its three states —
-// signed out (Apple ID and password), waiting for Apple's two-factor code,
-// signed in (Sign in again reveals the form with the Apple ID filled in) —
+// signed out (Apple ID and password), waiting for Apple's two-factor code
+// (Send a new code once it expired, or Sign in again), signed in (Sign in
+// again reveals the form with the Apple ID filled in) —
 // with Apple's notice, and each team's signing: being set up, failed, not
 // set up (Set up) or set up with its key and certificate, and Check signing
 // again for a chosen team. Forms need apple.change.
@@ -14,6 +15,7 @@ import {
 import {
   APPLE_SESSION_CODE_PATH,
   APPLE_SESSION_PATH,
+  APPLE_SESSION_RESEND_PATH,
   APPLE_SETUP_PATH,
   asAppleSession,
   asAppleSetupResult,
@@ -194,6 +196,81 @@ function CodeForm({
       </Button>
       <Failure actions={actions} name="code" />
     </form>
+  )
+}
+
+/**
+ * While Apple waits for a code: a new code once the last one expired or never
+ * came (Apple sends one only for a new sign-in, so the master signs the stored
+ * Apple ID in again), or a sign-in with another Apple ID or password.
+ */
+function NewCode({
+  appleId,
+  actions,
+  done,
+}: {
+  appleId: string | undefined
+  actions: Actions
+  done: () => void
+}): JSX.Element {
+  const client = useApi()
+  const toast = useToast()
+  const [again, setAgain] = useState(false)
+  const resend = async (): Promise<void> => {
+    let answer: AppleSession | undefined
+    const ok = await actions.run('resend', async () => {
+      answer = await client.post(APPLE_SESSION_RESEND_PATH, asAppleSession, {
+        body: {},
+      })
+      const refused = refusal(answer)
+      if (refused != null) throw new Error(refused)
+    })
+    if (!ok || answer == null) return
+    toast({
+      text:
+        answer.state === 'needsCode'
+          ? 'Apple sent a new code'
+          : `Signed in as ${answer.appleId ?? 'the Apple ID'}`,
+      icon: 'lock',
+    })
+    done()
+  }
+  return (
+    <div className="m-stack">
+      <p className="m-t-subhead m-secondary">
+        A code lasts about ten minutes. Send a new code signs the Apple ID in
+        again with the password the master keeps, and Apple sends another.
+      </p>
+      <div className="m-row">
+        <Button
+          variant="secondary"
+          icon="refresh"
+          busy={actions.busy === 'resend'}
+          onClick={() => void resend()}
+        >
+          Send a new code
+        </Button>
+        <Button
+          variant="plain"
+          icon="login"
+          aria-expanded={again}
+          onClick={() => setAgain((was) => !was)}
+        >
+          Sign in again
+        </Button>
+      </div>
+      <Failure actions={actions} name="resend" />
+      {again && (
+        <SignInForm
+          appleId={appleId}
+          actions={actions}
+          done={() => {
+            setAgain(false)
+            done()
+          }}
+        />
+      )}
+    </div>
   )
 }
 
@@ -394,7 +471,10 @@ function AppleBody({
       )}
       {change &&
         (signing.needsCode ? (
-          <CodeForm actions={actions} done={done} />
+          <>
+            <CodeForm actions={actions} done={done} />
+            <NewCode appleId={signing.appleId} actions={actions} done={done} />
+          </>
         ) : signing.signedIn ? (
           <>
             <div>

@@ -701,6 +701,28 @@ export class AppleDownloads {
     return await this.finish(stored)
   }
 
+  /**
+   * Asks Apple for a new two-factor code, after the last one expired or never
+   * arrived: Apple sends a code only for a new sign-in, so this signs the
+   * stored Apple ID in again with its stored password.
+   */
+  async resendCode(): Promise<AppleStatus> {
+    return await this.serial(async () => {
+      const stored = this.load()
+      if (stored == null || stored.appleId === '' || stored.password === '')
+        throw new AppleError(
+          'No Apple ID and password are stored: sign in with them',
+        )
+      return await this.authenticate({
+        appleId: stored.appleId,
+        password: stored.password,
+        cookies: [],
+        state: 'signedOut',
+        since: this.master.now(),
+      })
+    })
+  }
+
   /** Completes two-factor with the code Apple sent. */
   async submitCode(code: string): Promise<AppleStatus> {
     if (!/^\d{6}$/.test(code)) throw new AppleError('The code is six digits')

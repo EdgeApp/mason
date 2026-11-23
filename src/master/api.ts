@@ -56,6 +56,7 @@ export interface ApiContext {
     status(): unknown
     signIn(actor: Actor, appleId: unknown, password: unknown): Promise<unknown>
     code(actor: Actor, code: unknown): Promise<unknown>
+    resend(actor: Actor): Promise<unknown>
   }
 }
 
@@ -482,6 +483,10 @@ export function masterApi(context: ApiContext): Router {
         }
         return await apple.signIn(actorOf(res), body.appleId, body.password)
       }),
+    )
+    router.post(
+      '/api/v2/apple/session/resend',
+      json(async (_req, res) => await apple.resend(actorOf(res))),
     )
     router.post(
       '/api/v2/apple/session/code',

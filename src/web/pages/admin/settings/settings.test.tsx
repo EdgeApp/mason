@@ -291,6 +291,66 @@ describe('Settings → Apple ID', () => {
     assert.deepEqual(code.bodies[2], { code: '123456' })
   })
 
+  it('needs a code: Send a new code asks the master for another, and Sign in again opens the form', async () => {
+    const resend = recorder((_body, n) =>
+      n === 1
+        ? {
+            status: 400,
+            body: {
+              error: 'No Apple ID and password are stored: sign in with them',
+            },
+          }
+        : {
+            status: 200,
+            body: { state: 'needsCode', appleId: 'ada@example.test' },
+          },
+    )
+    const app = openSettings({
+      [SIGNING]: signedOut({ needsCode: true, appleId: 'ada@example.test' }),
+      'POST /api/v2/apple/session/resend': resend.reply,
+    })
+    const apple = await card('Apple ID for Xcode downloads')
+    await within(apple).findByText(/Apple sent a six-digit code/)
+    within(apple).getByText(/A code lasts about ten minutes/)
+    // One primary per form: the code's; a new code is secondary, signing in again plain.
+    const again = within(apple).getByRole('button', { name: 'Sign in again' })
+    assert.equal(again.getAttribute('aria-expanded'), 'false')
+    const newCode = within(apple).getByRole('button', {
+      name: 'Send a new code',
+    })
+    assert(newCode.className.includes('m-btn--secondary'), newCode.className)
+    assert(again.className.includes('m-btn--plain'), again.className)
+    fireEvent.click(newCode)
+    await within(apple).findByText(
+      'No Apple ID and password are stored: sign in with them',
+    )
+    fireEvent.click(newCode)
+    await toasted('Apple sent a new code')
+    assert.equal(resend.bodies.length, 2)
+    // The state is read again, and the code field stays for the new code.
+    await until(
+      () =>
+        app.node.requests.filter((request) => request === `GET ${SIGNING}`)
+          .length === 2,
+      'the state read again',
+    )
+    within(apple).getByLabelText('Two-factor code')
+    fireEvent.click(
+      within(apple).getByRole('button', { name: 'Sign in again' }),
+    )
+    assert.equal(
+      within(apple)
+        .getByRole('button', { name: 'Sign in again' })
+        .getAttribute('aria-expanded'),
+      'true',
+    )
+    assert.equal(
+      (within(apple).getByLabelText('Apple ID') as HTMLInputElement).value,
+      'ada@example.test',
+    )
+    within(apple).getByLabelText('Password')
+  })
+
   it('sets a team up, checks signing again for a chosen team, and keeps a refusal in the card', async () => {
     const setup = recorder((body, n) =>
       n === 2
