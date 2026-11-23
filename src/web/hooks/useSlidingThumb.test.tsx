@@ -10,8 +10,12 @@ afterEach(() => {
   delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver
 })
 
-/** Lays the options out in a row, 100 px each, as jsdom does not lay out. */
+/** Lays the options out in a row, 100 px each, in a 400 px track, as jsdom does not lay out. */
 function layOut(track: HTMLElement): void {
+  Object.defineProperty(track, 'clientWidth', {
+    configurable: true,
+    value: 400,
+  })
   ;[...track.children].forEach((option, n) => {
     for (const [key, value] of Object.entries({
       offsetLeft: 4 + n * 100,
@@ -253,13 +257,10 @@ describe('Slider pills', () => {
     const { rerender } = render(<Pills changes={changes} />)
     const element = track()
     layOut(element)
-    Object.defineProperty(element, 'scrollWidth', {
-      configurable: true,
-      value: 500,
-    })
+    // The options end at 300 px, past the 250 px box.
     Object.defineProperty(element, 'clientWidth', {
       configurable: true,
-      value: 300,
+      value: 250,
     })
     rerender(<Pills changes={changes} />)
     assert.equal(element.dataset.scrolls, '')
@@ -269,9 +270,27 @@ describe('Slider pills', () => {
     pointer(element, 'pointerup', 250)
     assert.deepEqual(changes, [])
     // Wide enough again: the thumb drags.
-    Object.defineProperty(element, 'scrollWidth', {
+    Object.defineProperty(element, 'clientWidth', {
       configurable: true,
       value: 300,
+    })
+    rerender(<Pills changes={changes} />)
+    assert.equal(element.dataset.scrolls, undefined)
+  })
+
+  it('reads whether a track scrolls from its options, not a thumb still sliding past its end', () => {
+    const changes: string[] = []
+    const { rerender } = render(<Pills changes={changes} />)
+    const element = track()
+    layOut(element)
+    Object.defineProperty(element, 'clientWidth', {
+      configurable: true,
+      value: 300,
+    })
+    // The thumb's old, wider box still overflows the track.
+    Object.defineProperty(element, 'scrollWidth', {
+      configurable: true,
+      value: 344,
     })
     rerender(<Pills changes={changes} />)
     assert.equal(element.dataset.scrolls, undefined)
@@ -281,6 +300,32 @@ describe('Slider pills', () => {
     const element = renderPills()
     assert.equal(fireEvent.dragStart(option(/^All/)), false)
     assert.equal(fireEvent.dragStart(element), false)
+  })
+
+  it('measures again when fonts arrive, which move the options but not the track', () => {
+    const fonts = new EventTarget()
+    Object.defineProperty(document, 'fonts', {
+      configurable: true,
+      value: fonts,
+    })
+    try {
+      const { unmount } = render(<Pills changes={[]} />)
+      const element = track()
+      layOut(element)
+      assert.equal(element.style.getPropertyValue('--thumb-w'), '0px')
+      fonts.dispatchEvent(new Event('loadingdone'))
+      assert.equal(element.style.getPropertyValue('--thumb-w'), '96px')
+      unmount()
+      // Gone with the track: a later load measures nothing.
+      Object.defineProperty(element.firstElementChild, 'offsetWidth', {
+        configurable: true,
+        value: 50,
+      })
+      fonts.dispatchEvent(new Event('loadingdone'))
+      assert.equal(element.style.getPropertyValue('--thumb-w'), '96px')
+    } finally {
+      delete (document as { fonts?: unknown }).fonts
+    }
   })
 
   it('measures again when the track resizes', () => {
@@ -306,5 +351,157 @@ describe('Slider pills', () => {
     assert.equal(element.style.getPropertyValue('--thumb-w'), '96px')
     unmount()
     assert.equal(disconnected, 1)
+  })
+})
+
+describe('A slider track that scrolls sideways', () => {
+  const restore: Array<() => void> = []
+  afterEach(() => {
+    for (const undo of restore.splice(0).reverse()) undo()
+  })
+
+  /**
+   * Makes the pills' track a box this wide over its 304 px of options, with
+   * 3 px padding and this scroll padding, and records every scroll it is given.
+   */
+  function scrolling(
+    element: HTMLElement,
+    clientWidth: number,
+    padding: { left: string; right: string } = { left: 'auto', right: '32px' },
+  ): number[] {
+    let left = 0
+    const writes: number[] = []
+    Object.defineProperty(element, 'clientWidth', {
+      configurable: true,
+      value: clientWidth,
+    })
+    Object.defineProperty(element, 'scrollWidth', {
+      configurable: true,
+      value: 304,
+    })
+    Object.defineProperty(element, 'scrollLeft', {
+      configurable: true,
+      get: () => left,
+      set: (value: number) => {
+        left = value
+        writes.push(value)
+      },
+    })
+    const computed = window.getComputedStyle
+    window.getComputedStyle = ((target: Element, pseudo?: string | null) =>
+      target === element
+        ? ({
+            paddingLeft: '3px',
+            paddingRight: '3px',
+            scrollPaddingLeft: padding.left,
+            scrollPaddingRight: padding.right,
+          } as CSSStyleDeclaration)
+        : computed.call(window, target, pseudo)) as typeof getComputedStyle
+    restore.push(() => {
+      window.getComputedStyle = computed
+    })
+    return writes
+  }
+
+  it('scrolls a newly chosen option beyond the right edge in, short of its scroll padding', () => {
+    const element = renderPills()
+    scrolling(element, 150)
+    fireEvent.click(option(/^Android/))
+    // Android ends at 300; with 32 px scroll padding the view ends at 268.
+    assert.equal(element.scrollLeft, 300 + 32 - 150)
+    assert.equal(element.dataset.scrolls, '')
+  })
+
+  it('scrolls a newly chosen option left of the view in, counting an auto scroll padding as 0', () => {
+    const element = renderPills()
+    scrolling(element, 150)
+    element.scrollLeft = 250
+    fireEvent.click(option(/^iOS/))
+    // iOS starts at 104; the 3 px padding outweighs the auto scroll padding.
+    assert.equal(element.scrollLeft, 101)
+  })
+
+  it('moves an option that ends under the edge fade, but not one inside both insets', () => {
+    const element = renderPills()
+    const writes = scrolling(element, 210)
+    // iOS ends at 200, 10 px inside the 210 px box: within the 32 px fade.
+    fireEvent.click(option(/^iOS/))
+    assert.equal(element.scrollLeft, 200 + 32 - 210)
+    // All, at 4–100, lies inside both insets at scroll 1: it stays.
+    element.scrollLeft = 1
+    writes.length = 0
+    fireEvent.click(option(/^All/))
+    assert.deepEqual(writes, [])
+    assert.equal(element.scrollLeft, 1)
+  })
+
+  it('leaves the viewer’s scroll alone when a render keeps the choice', () => {
+    const changes: string[] = []
+    const { rerender } = render(<Pills changes={changes} />)
+    const element = track()
+    layOut(element)
+    rerender(<Pills changes={changes} />)
+    const writes = scrolling(element, 150)
+    fireEvent.click(option(/^Android/))
+    element.scrollLeft = 20
+    writes.length = 0
+    rerender(<Pills changes={changes} />)
+    assert.equal(option(/^Android/).dataset.thumbOn, '')
+    assert.deepEqual(writes, [])
+    assert.equal(element.scrollLeft, 20)
+  })
+
+  it('never scrolls a track that fits', () => {
+    const element = renderPills()
+    const writes = scrolling(element, 400)
+    fireEvent.click(option(/^Android/))
+    assert.deepEqual(writes, [])
+    assert.equal(element.dataset.scrolls, undefined)
+  })
+
+  it('shows the chosen option on the first placement after it mounts', () => {
+    let left = 0
+    const stubs: Record<string, PropertyDescriptor> = {
+      offsetLeft: {
+        get(this: HTMLElement) {
+          return 4 + [...this.parentElement!.children].indexOf(this) * 100
+        },
+      },
+      offsetWidth: { get: () => 96 },
+      clientWidth: { get: () => 150 },
+      scrollWidth: { get: () => 304 },
+      scrollLeft: {
+        get: () => left,
+        set: (value: number) => {
+          left = value
+        },
+      },
+    }
+    const proto = HTMLElement.prototype
+    for (const [key, stub] of Object.entries(stubs)) {
+      const own = Object.getOwnPropertyDescriptor(proto, key)
+      Object.defineProperty(proto, key, { configurable: true, ...stub })
+      restore.push(() => {
+        if (own == null)
+          delete (proto as unknown as Record<string, unknown>)[key]
+        else Object.defineProperty(proto, key, own)
+      })
+    }
+    render(
+      <SliderTrack className="m-seg" role="group" aria-label="Platform">
+        <button type="button" aria-pressed={false}>
+          iOS
+        </button>
+        <button type="button" aria-pressed={false}>
+          Android
+        </button>
+        <button type="button" aria-pressed>
+          tvOS
+        </button>
+      </SliderTrack>,
+    )
+    // tvOS ends at 300 in a 150 px box with no padding.
+    assert.equal(left, 150)
+    assert.equal(track().dataset.scrolls, '')
   })
 })

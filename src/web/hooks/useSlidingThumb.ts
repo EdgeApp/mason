@@ -14,6 +14,31 @@ const CHOSEN =
 /** How far a press moves before it is a drag rather than a tap, in pixels. */
 const SLOP = 4
 
+/**
+ * How far in from one side of a track an option must stay to be in view: the
+ * larger of the track's padding and its scroll padding, which a scrolling
+ * strip sets to clear its edge fade (`auto`, the default, counts as 0).
+ */
+function inset(style: CSSStyleDeclaration, side: 'Left' | 'Right'): number {
+  return Math.max(
+    parseFloat(style[`padding${side}`]) || 0,
+    parseFloat(style[`scrollPadding${side}`]) || 0,
+  )
+}
+
+/** Scrolls a sideways-scrolling track the least that shows all of an option inside its insets. */
+function reveal(track: HTMLElement, option: HTMLElement): void {
+  const style = getComputedStyle(track)
+  const start = option.offsetLeft - inset(style, 'Left')
+  const end =
+    option.offsetLeft +
+    option.offsetWidth +
+    inset(style, 'Right') -
+    track.clientWidth
+  if (start < track.scrollLeft) track.scrollLeft = start
+  else if (end > track.scrollLeft) track.scrollLeft = end
+}
+
 /** The option under a point, or the nearest one to it. */
 function optionAt(
   options: HTMLElement[],
@@ -44,18 +69,25 @@ function optionAt(
  * `--thumb-x`, `--thumb-y`, `--thumb-w` and `--thumb-h`; the option under the
  * thumb gets `data-thumb-on`, and the track `data-dragging` while it is
  * dragged. Without a chosen option the track has no thumb, and the CSS falls
- * back to colouring the chosen option itself.
+ * back to colouring the chosen option itself. A track that scrolls sideways
+ * is scrolled to show an option the thumb newly lands on, the first one
+ * included; a re-render that leaves the thumb where it was leaves the
+ * viewer's scroll alone.
  */
 export function useSlidingThumb<T extends HTMLElement>(): RefObject<T | null> {
   const track = useRef<T>(null)
+  /** The option the thumb was last put on. */
+  const shown = useRef<HTMLElement | undefined>(undefined)
 
   /** Puts the thumb on an option (or, with none, takes it away). */
   const place = useCallback((on: HTMLElement | undefined): void => {
     const element = track.current
     if (element == null) return
-    for (const option of element.querySelectorAll<HTMLElement>(OPTION))
+    const options = element.querySelectorAll<HTMLElement>(OPTION)
+    for (const option of options)
       if (option !== on) delete option.dataset.thumbOn
     if (on == null) {
+      shown.current = undefined
       delete element.dataset.thumb
       return
     }
@@ -72,11 +104,24 @@ export function useSlidingThumb<T extends HTMLElement>(): RefObject<T | null> {
       if (element.style.getPropertyValue(name) !== `${px}px`)
         element.style.setProperty(name, `${px}px`)
     element.dataset.thumb = ''
-    // A track wider than its box (a filter row on a phone) scrolls sideways.
-    const scrolls = element.scrollWidth > element.clientWidth + 1
+    // A track whose options overflow its box (a filter row on a phone)
+    // scrolls sideways. Its options say so, not its scrollWidth: the thumb
+    // still sliding from a wider layout overflows the track for a moment.
+    const last = options[options.length - 1]
+    const end =
+      last == null
+        ? 0
+        : last.offsetLeft +
+          last.offsetWidth +
+          (parseFloat(getComputedStyle(element).paddingRight) || 0)
+    const scrolls = end > element.clientWidth + 1
     if (scrolls !== (element.dataset.scrolls != null))
       if (scrolls) element.dataset.scrolls = ''
       else delete element.dataset.scrolls
+    if (on !== shown.current) {
+      shown.current = on
+      if (scrolls && element.dataset.dragging == null) reveal(element, on)
+    }
   }, [])
 
   /** Puts the thumb back on the chosen option. */
@@ -94,10 +139,13 @@ export function useSlidingThumb<T extends HTMLElement>(): RefObject<T | null> {
   useEffect(() => {
     const element = track.current
     if (element == null) return
-    // Fonts arriving and the window narrowing move the options.
+    // The window narrowing moves the options, and so do fonts arriving; a
+    // track as wide as its column keeps its size when only its labels grow.
     const resized =
       typeof ResizeObserver === 'function' ? new ResizeObserver(settle) : null
     resized?.observe(element)
+    const fonts = typeof document === 'undefined' ? undefined : document.fonts
+    fonts?.addEventListener('loadingdone', settle)
 
     let press: { id: number; x: number; y: number; dragging: boolean } | null =
       null
@@ -187,6 +235,7 @@ export function useSlidingThumb<T extends HTMLElement>(): RefObject<T | null> {
     element.addEventListener('click', click, true)
     return (): void => {
       resized?.disconnect()
+      fonts?.removeEventListener('loadingdone', settle)
       element.removeEventListener('pointerdown', down)
       element.removeEventListener('dragstart', drag)
       element.removeEventListener('pointermove', move)

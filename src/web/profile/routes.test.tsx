@@ -63,6 +63,24 @@ describe('The app’s routes', () => {
     }
   })
 
+  it('opens Install apps from `/` on the host for every role, not only testers', async () => {
+    const apps = { apps: [], platforms: [] }
+    for (const role of ['developer', 'manager', 'admin'] as const) {
+      renderApp({
+        node: nodeInfo('host'),
+        path: '/',
+        replies: shellReplies(role, 'host', { '/api/v2/catalog/apps': apps }),
+      })
+      await screen.findByRole('heading', { level: 1, name: 'Install apps' })
+      await until(
+        () => /^\/apps\?platform=\w+$/.test(where.path),
+        `${role}'s platform`,
+      )
+      cleanup()
+    }
+    // The master's own home is unchanged: dashboard.test.tsx covers it.
+  })
+
   it('opens the ⌘K palette at /search, and again from its button', async () => {
     renderApp({ path: '/search' })
     await screen.findByRole('heading', { level: 1, name: 'Search' })
