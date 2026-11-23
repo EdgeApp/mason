@@ -303,13 +303,17 @@ function RoutePage({ route }: { route: PageRoute }): JSX.Element {
 }
 
 /**
- * `/`: on the master, Projects & apps for those who may read projects;
- * otherwise the viewer's first destination: Install apps for a tester (on
- * either node), Projects & apps for a developer on the host.
+ * `/`: on the host, Install apps for everyone, whatever their role, since the
+ * host is where people install builds; on the master, Projects & apps for
+ * those who may read projects, else the viewer's first destination (Install
+ * apps for a tester).
  */
 function Home(): JSX.Element {
   const { nav, session } = useShell()
   const profile = useProfile()
+  const install = nav.find((entry) => entry.href === '/apps')
+  if (profile.role === 'host' && install != null)
+    return <Navigate to={install.href} replace />
   if (
     profile.role === 'master' &&
     session.permissions.includes('projects.read')

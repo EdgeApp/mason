@@ -151,14 +151,16 @@ describe('The app shell’s navigation per node and role', () => {
     assert.equal(document.querySelector('.m-topbar__chips'), null)
   })
 
-  it('sends a developer home to Projects & apps, with four destinations on the host and Artifacts and Devices in More', async () => {
+  it('sends a developer home to Install apps on the host, with four destinations and Artifacts and Devices in More', async () => {
     renderApp({
       node: nodeInfo('host'),
-      replies: shellReplies('developer', 'host'),
+      replies: shellReplies('developer', 'host', {
+        '/api/v2/catalog/apps': { apps: [], platforms: [] },
+      }),
       path: '/',
     })
-    await page('Projects & apps')
-    assert.equal(where.path, '/projects')
+    await page('Install apps')
+    await until(() => /^\/apps\?platform=\w+$/.test(where.path), 'Install apps')
     assert.equal(sidebar().querySelectorAll('nav .m-navitem').length, 4)
     assert.deepEqual(
       texts(tabbar().querySelectorAll('.m-tabbar__platter > *')).map((text) =>
