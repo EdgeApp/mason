@@ -81,11 +81,14 @@ export async function terminalPrompt(
   hidden: boolean,
 ): Promise<string> {
   const { createInterface } = await import('node:readline')
-  const { openSync, createReadStream, createWriteStream } = await import(
-    'node:fs'
-  )
-  const input = createReadStream('', { fd: openSync('/dev/tty', 'r') })
-  const output = createWriteStream('', { fd: openSync('/dev/tty', 'w') })
+  const { openSync } = await import('node:fs')
+  const { ReadStream, WriteStream } = await import('node:tty')
+  // Terminal streams, not file streams: a file stream's read of the terminal
+  // blocks a worker thread that closing the stream cannot cancel, so it took
+  // the line typed for the next question (the two-factor code after the
+  // password), and that question then read an empty line.
+  const input = new ReadStream(openSync('/dev/tty', 'r'))
+  const output = new WriteStream(openSync('/dev/tty', 'w'))
   const rl = createInterface({ input, output, terminal: true })
   if (hidden)
     (
@@ -103,7 +106,7 @@ export async function terminalPrompt(
   } finally {
     rl.close()
     input.destroy()
-    output.end()
+    output.destroy()
   }
 }
 
