@@ -1596,6 +1596,7 @@ describe('Master sign-in, setup, people and permissions', function () {
       'GET /api/v2/apple/session': 'apple.change',
       'POST /api/v2/apple/session': 'apple.change',
       'POST /api/v2/apple/session/code': 'apple.change',
+      'POST /api/v2/apple/session/resend': 'apple.change',
       'GET /api/v2/apple/setup': 'apple.change',
       'POST /api/v2/apple/setup': 'apple.change',
     }

@@ -1142,6 +1142,20 @@ export class Master {
     return status
   }
 
+  /** Asks Apple for a new two-factor code by signing the stored Apple ID in again. */
+  async appleResend(actor: typeof localOperator): Promise<AppleStatus> {
+    allow(actor, 'apple.change')
+    const status = await this.apple.resendCode()
+    this.database.audit(actor, 'apple.resend', status.appleId ?? '')
+    this.nodeStates.reconcileAll()
+    if (status.state === 'signedIn') {
+      // Apple trusted the device and asked no code: waiting Xcode work can go.
+      this.scheduler.poke()
+      this.setupAppleTeams(actor)
+    }
+    return status
+  }
+
   async appleCode(
     actor: typeof localOperator,
     code: unknown,

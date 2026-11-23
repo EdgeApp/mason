@@ -1,11 +1,12 @@
 // Settings → Apple ID for Xcode downloads (screen-10-settings,
 // screen-10b-settings-more): the Apple ID session in its three states —
-// signed out (Apple ID and password), waiting for Apple's two-factor code,
-// signed in (Sign in again reveals the form with the Apple ID filled in) —
+// signed out (Apple ID and password), waiting for Apple's two-factor code
+// (Send a new code once it expired, or Sign in again), signed in (Sign in
+// again reveals the form with the Apple ID filled in) —
 // with Apple's notice, and each team's signing: being set up, failed, not
 // set up (Set up) or set up with its key and certificate, and Check signing
 // again for a chosen team. Forms need apple.change.
-import { useState, type FormEvent, type JSX } from 'react'
+import { useState, type FormEvent, type JSX, type ReactNode } from 'react'
 import {
   APPLE_SIGNING_PATH,
   asAppleSigning,
@@ -14,6 +15,7 @@ import {
 import {
   APPLE_SESSION_CODE_PATH,
   APPLE_SESSION_PATH,
+  APPLE_SESSION_RESEND_PATH,
   APPLE_SETUP_PATH,
   asAppleSession,
   asAppleSetupResult,
@@ -197,6 +199,127 @@ function CodeForm({
   )
 }
 
+/**
+ * Sign in again: reveals the sign-in form with the Apple ID filled in.
+ * `children` are the actions in its row, before it; `notes` sit between the
+ * row and the form.
+ */
+function SignInAgain({
+  appleId,
+  actions,
+  done,
+  variant,
+  children,
+  notes,
+}: {
+  appleId: string | undefined
+  actions: Actions
+  done: () => void
+  variant: 'secondary' | 'plain'
+  children?: ReactNode
+  notes?: ReactNode
+}): JSX.Element {
+  const [again, setAgain] = useState(false)
+  return (
+    <>
+      <div className="m-row">
+        {children}
+        <Button
+          variant={variant}
+          icon="login"
+          aria-expanded={again}
+          onClick={() => setAgain((was) => !was)}
+        >
+          Sign in again
+        </Button>
+      </div>
+      {notes}
+      {again && (
+        <SignInForm
+          appleId={appleId}
+          actions={actions}
+          done={() => {
+            setAgain(false)
+            done()
+          }}
+        />
+      )}
+    </>
+  )
+}
+
+/**
+ * While Apple waits for a code: a new code once the last one expired or never
+ * came (Apple sends one only for a new sign-in, so the master signs the stored
+ * Apple ID in again), or a sign-in with another Apple ID or password.
+ */
+function NewCode({
+  appleId,
+  actions,
+  done,
+  sent,
+}: {
+  appleId: string | undefined
+  actions: Actions
+  done: () => void
+  /** Apple sent a new code: the old one in the code field is void. */
+  sent: () => void
+}): JSX.Element {
+  const client = useApi()
+  const toast = useToast()
+  const resend = async (): Promise<void> => {
+    let answer: AppleSession | undefined
+    const ok = await actions.run('resend', async () => {
+      answer = await client.post(APPLE_SESSION_RESEND_PATH, asAppleSession, {
+        body: {},
+      })
+      const refused = refusal(answer)
+      if (refused != null) throw new Error(refused)
+    })
+    // Refused, the master may no longer wait for a code: Apple refused the
+    // new sign-in (its refusal is then in the card's notice), or the master
+    // was signed in or out elsewhere. The card reads its state again; while
+    // it still waits for a code, the error stays under the button.
+    if (!ok || answer == null) {
+      done()
+      return
+    }
+    sent()
+    toast({
+      text:
+        answer.state === 'needsCode'
+          ? 'Apple sent a new code'
+          : `Signed in as ${answer.appleId ?? 'the Apple ID'}`,
+      icon: 'lock',
+    })
+    done()
+  }
+  return (
+    <div className="m-stack">
+      <p className="m-t-subhead m-secondary">
+        A code lasts about ten minutes. Send a new code signs the Apple ID in
+        again with the password the master keeps, and Apple sends another.
+      </p>
+      <SignInAgain
+        appleId={appleId}
+        actions={actions}
+        done={done}
+        variant="plain"
+        notes={<Failure actions={actions} name="resend" />}
+      >
+        <Button
+          variant="secondary"
+          icon="refresh"
+          busy={actions.busy === 'resend'}
+          onClick={() => void resend()}
+        >
+          Send a new code
+        </Button>
+      </SignInAgain>
+    </div>
+  )
+}
+
 /** Each team's signing, and checking it again. */
 function Signing({
   signing,
@@ -368,7 +491,8 @@ function AppleBody({
   done: () => void
 }): JSX.Element {
   const actions = useActions()
-  const [again, setAgain] = useState(false)
+  // Each new code Apple sends starts the code field empty.
+  const [codes, setCodes] = useState(0)
   const failures = Object.values(signing.failures)
   return (
     <div className="m-card__body m-stack">
@@ -394,30 +518,22 @@ function AppleBody({
       )}
       {change &&
         (signing.needsCode ? (
-          <CodeForm actions={actions} done={done} />
-        ) : signing.signedIn ? (
           <>
-            <div>
-              <Button
-                variant="secondary"
-                icon="login"
-                aria-expanded={again}
-                onClick={() => setAgain((was) => !was)}
-              >
-                Sign in again
-              </Button>
-            </div>
-            {again && (
-              <SignInForm
-                appleId={signing.appleId}
-                actions={actions}
-                done={() => {
-                  setAgain(false)
-                  done()
-                }}
-              />
-            )}
+            <CodeForm key={codes} actions={actions} done={done} />
+            <NewCode
+              appleId={signing.appleId}
+              actions={actions}
+              done={done}
+              sent={() => setCodes((was) => was + 1)}
+            />
           </>
+        ) : signing.signedIn ? (
+          <SignInAgain
+            appleId={signing.appleId}
+            actions={actions}
+            done={done}
+            variant="secondary"
+          />
         ) : (
           <SignInForm appleId={signing.appleId} actions={actions} done={done} />
         ))}

@@ -363,6 +363,10 @@ export interface AppleOptions {
   onChange?: (status: AppleStatus) => void
 }
 
+/** Of a session's cookies, those a new sign-in keeps: Apple's device trust cookie can spare the next code. */
+const trustCookies = (cookies: Cookie[]): Cookie[] =>
+  cookies.filter((cookie) => /^(dslang|site|DES[0-9a-f]+)$/i.test(cookie.name))
+
 export class AppleDownloads {
   private readonly endpoints: AppleEndpoints
   private readonly box: Box
@@ -701,6 +705,34 @@ export class AppleDownloads {
     return await this.finish(stored)
   }
 
+  /**
+   * Asks Apple for a new two-factor code, after the last one expired or never
+   * arrived: Apple sends a code only for a new sign-in, so this signs the
+   * stored Apple ID in again with its stored password.
+   */
+  async resendCode(): Promise<AppleStatus> {
+    return await this.serial(async () => {
+      const stored = this.load()
+      if (stored == null || stored.appleId === '' || stored.password === '')
+        throw new AppleError(
+          'No Apple ID and password are stored: sign in with them',
+        )
+      // A new sign-in would replace a working session with one that waits for a code.
+      if (stored.state === 'signedIn')
+        throw new AppleError(
+          `The Apple ID ${stored.appleId} is signed in: no code is needed`,
+        )
+      this.releases = undefined
+      return await this.authenticate({
+        appleId: stored.appleId,
+        password: stored.password,
+        cookies: trustCookies(stored.cookies),
+        state: 'signedOut',
+        since: this.master.now(),
+      })
+    })
+  }
+
   /** Completes two-factor with the code Apple sent. */
   async submitCode(code: string): Promise<AppleStatus> {
     if (!/^\d{6}$/.test(code)) throw new AppleError('The code is six digits')
@@ -867,10 +899,7 @@ export class AppleDownloads {
 
   private async renew(stored: Stored): Promise<AppleStatus> {
     this.releases = undefined
-    stored.cookies = stored.cookies.filter((cookie) =>
-      // Apple's device trust cookie can spare the next code.
-      /^(dslang|site|DES[0-9a-f]+)$/i.test(cookie.name),
-    )
+    stored.cookies = trustCookies(stored.cookies)
     const status = await this.authenticate(stored).catch((error: unknown) =>
       this.setState(stored, 'expired', (error as Error).message),
     )

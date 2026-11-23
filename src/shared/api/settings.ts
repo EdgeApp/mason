@@ -26,6 +26,8 @@ export const keyPath = (id: string): string =>
 export const APPLE_SESSION_PATH = '/api/v2/apple/session'
 /** `POST /api/v2/apple/session/code`: sends Apple's two-factor code. */
 export const APPLE_SESSION_CODE_PATH = '/api/v2/apple/session/code'
+/** `POST /api/v2/apple/session/resend`: asks Apple for a new two-factor code. */
+export const APPLE_SESSION_RESEND_PATH = '/api/v2/apple/session/resend'
 /** `POST /api/v2/apple/setup`: checks a team's signing again. */
 export const APPLE_SETUP_PATH = '/api/v2/apple/setup'
 

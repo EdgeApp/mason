@@ -1574,6 +1574,7 @@ master.
 | `GET /api/v2/apple/session`             | The Apple ID session's state.                                                                                                                                                                                                                                                          |
 | `POST /api/v2/apple/session`            | Signs the Apple ID in; Apple usually asks for a code next.                                                                                                                                                                                                                             |
 | `POST /api/v2/apple/session/code`       | Sends Apple's two-factor code.                                                                                                                                                                                                                                                         |
+| `POST /api/v2/apple/session/resend`     | Asks Apple for a new two-factor code: signs the stored Apple ID in again with its stored password.                                                                                                                                                                                     |
 | `GET /api/v2/apple/setup`               | The teams the signed-in Apple ID belongs to.                                                                                                                                                                                                                                           |
 | `POST /api/v2/apple/setup`              | Checks a team's signing again: its App Store Connect key and distribution certificate.                                                                                                                                                                                                 |
 | `GET /api/v2/apple/certificates`        | The signing certificates, without private keys.                                                                                                                                                                                                                                        |
@@ -1587,6 +1588,8 @@ master.
   **`POST …/session`** takes `{ "appleId": "ada@example.test", "password":
 "…" }` (`appleId` defaults to the stored one). **`…/session/code`** takes
   `{ "code": "123456" }`, six digits; 400 when no sign-in waits for a code.
+  **`…/session/resend`** takes `{}`; 400 when no Apple ID and password are
+  stored, or when the Apple ID is signed in and needs no code.
 - Once the Apple ID is signed in (directly, or after the code), the master
   sets up in the background the teams it uses: the Apple ID's only team, or
   of several, those with a stored key or an app ID assigned to them (another

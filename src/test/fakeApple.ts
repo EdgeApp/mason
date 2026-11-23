@@ -36,6 +36,8 @@ export class FakeApple {
   /** Cookie headers each `.xip` download arrived with. */
   readonly downloadCookies: string[] = []
   readonly signIns: string[] = []
+  /** The Cookie header each completed sign-in arrived with. */
+  readonly signInCookies: string[] = []
   twoFactor = true
   /** Where the widget key comes from: the sign-out redirect (today), the older configuration endpoint, a configuration without it, or nowhere. */
   widgetKeyFrom: 'signout' | 'config' | 'empty' | 'gone' = 'signout'
@@ -247,6 +249,7 @@ export class FakeApple {
         )
           return { status: 401 }
         this.signIns.push(this.appleId)
+        this.signInCookies.push(String(req.headers.cookie ?? ''))
         if (this.twoFactor && !this.trusted)
           return {
             status: 409,

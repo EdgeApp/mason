@@ -111,6 +111,7 @@ export function masterApp(context: MasterWebContext): express.Express {
         signIn: async (actor, appleId, password) =>
           await master.appleSignIn(actor, appleId, password),
         code: async (actor, code) => await master.appleCode(actor, code),
+        resend: async (actor) => await master.appleResend(actor),
       },
     }),
   )

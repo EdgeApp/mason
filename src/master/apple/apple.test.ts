@@ -264,6 +264,61 @@ describe('Apple ID downloads', () => {
       assert.equal(answered.json.state, 'signedIn')
     })
 
+    it('U9.6 a new code signs the stored Apple ID in again, so Apple sends another; a code then signs in', async () => {
+      const master = c.master.master!
+      apple.expire()
+      assert.equal((await master.apple.check()).state, 'needsCode')
+      const before = apple.signIns.length
+      const resent = await c.api('POST', '/api/v2/apple/session/resend', {})
+      assert.equal(resent.status, 200, resent.text)
+      assert.equal(resent.json.state, 'needsCode')
+      assert.equal(apple.signIns.length, before + 1)
+      // It keeps Apple's device trust cookie, which can spare the code.
+      assert.match(apple.signInCookies.at(-1)!, /DES6f5e=trusted/)
+      assert.equal(JSON.stringify(resent.json).includes(password), false)
+      const answered = await c.api('POST', '/api/v2/apple/session/code', {
+        code: apple.code,
+      })
+      assert.equal(answered.status, 200, answered.text)
+      assert.equal(answered.json.state, 'signedIn')
+      // Signed in, a new code would only replace the working session.
+      const signedIns = apple.signIns.length
+      const kept = await c.api('POST', '/api/v2/apple/session/resend', {})
+      assert.equal(kept.status, 400)
+      assert.match(kept.json.error, /is signed in: no code is needed/)
+      assert.equal(apple.signIns.length, signedIns)
+      assert.equal(master.apple.status().state, 'signedIn')
+      // When Apple trusts the device and asks no code, the new sign-in is
+      // complete, and work waiting for Xcode is scheduled at once.
+      apple.expire()
+      assert.equal((await master.apple.check()).state, 'needsCode')
+      const poke = master.scheduler.poke.bind(master.scheduler)
+      let poked = 0
+      master.scheduler.poke = (): void => {
+        poked++
+        poke()
+      }
+      apple.twoFactor = false
+      try {
+        const trusted = await c.api('POST', '/api/v2/apple/session/resend', {})
+        assert.equal(trusted.status, 200, trusted.text)
+        assert.equal(trusted.json.state, 'signedIn')
+        assert(poked > 0)
+      } finally {
+        apple.twoFactor = true
+        master.scheduler.poke = poke
+      }
+      // With nothing stored there is no one to sign in again.
+      await master.apple.signOut()
+      await assert.rejects(
+        master.apple.resendCode(),
+        /No Apple ID and password are stored: sign in with them/,
+      )
+      const refused = await c.api('POST', '/api/v2/apple/session/resend', {})
+      assert.equal(refused.status, 400)
+      assert.match(refused.json.error, /No Apple ID and password are stored/)
+    })
+
     it('U9.6 mason apple sign-in reads the password and the two-factor code, and the API is for managers and admins', async () => {
       const master = c.master.master!
       await master.apple.signOut()
@@ -320,6 +375,7 @@ describe('Apple ID downloads', () => {
         ['GET', '/api/v2/apple/session', undefined],
         ['POST', '/api/v2/apple/session', { appleId, password }],
         ['POST', '/api/v2/apple/session/code', { code: apple.code }],
+        ['POST', '/api/v2/apple/session/resend', {}],
       ] as const)
         assert.equal(
           (await c.api(method, route, body, developer)).status,
