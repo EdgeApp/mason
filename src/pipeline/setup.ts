@@ -1,3 +1,4 @@
+import type { ChildProcess } from 'node:child_process'
 import { existsSync, lstatSync, readFileSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,6 +26,31 @@ export function runnerEnvironment(): Record<string, string> {
   return env
 }
 
+/** How long a runner has to exit after it reported, before the worker stops it. */
+export const RUNNER_EXIT_GRACE_MS = 5000
+
+/**
+ * Kills `runner`, which has reported what the worker needs, if it is still
+ * running `graceMs` later: its exit can hang for good (see finish in
+ * worker/gitProxy.ts), or a Masonfile can keep it open. Returns a function
+ * that calls this off.
+ */
+export function stopLingering(
+  runner: ChildProcess,
+  graceMs: number,
+  log: Pick<MaskedLog, 'write'>,
+  message: string,
+): () => void {
+  if (runner.exitCode != null || runner.signalCode != null)
+    return () => undefined
+  const timer = setTimeout(() => {
+    log.write(message)
+    runner.kill('SIGKILL')
+  }, graceMs)
+  runner.once('exit', () => clearTimeout(timer))
+  return () => clearTimeout(timer)
+}
+
 export class SetupFailed extends Error {}
 
 export interface SetupOptions {
@@ -38,6 +64,8 @@ export interface SetupOptions {
   timeoutSeconds?: number
   signal?: AbortSignal
   inspect?: () => ProcessIdentity[]
+  /** How long the runner has to exit once it recorded the graph; `RUNNER_EXIT_GRACE_MS` by default. */
+  exitGraceMs?: number
 }
 
 /**
@@ -69,17 +97,37 @@ export async function runSetup(options: SetupOptions): Promise<unknown> {
   )
   const cancel = stop('Setup cancelled')
   options.signal?.addEventListener('abort', cancel, { once: true })
+  let recorded = false
+  let lingering: (() => void) | undefined
   try {
-    await execution.run(
-      process.execPath,
-      [runnerPath, 'setup', options.masonfile],
-      options.checkout,
-      {
-        ...runnerEnvironment(),
-        MASON_RESULT_FILE: resultFile,
-        MASON_SETUP_CONTEXT: JSON.stringify(options.context),
-      },
-    )
+    await execution
+      .run(
+        process.execPath,
+        [runnerPath, 'setup', options.masonfile],
+        options.checkout,
+        {
+          ...runnerEnvironment(),
+          MASON_RESULT_FILE: resultFile,
+          MASON_SETUP_CONTEXT: JSON.stringify(options.context),
+        },
+        false,
+        (runner) => {
+          runner.on('message', (message: { setup?: unknown } | null) => {
+            if (message?.setup !== 'recorded' || recorded) return
+            recorded = true
+            lingering = stopLingering(
+              runner,
+              options.exitGraceMs ?? RUNNER_EXIT_GRACE_MS,
+              log,
+              'Setup recorded its graph, but its runner did not exit; stopping it.\n',
+            )
+          })
+        },
+      )
+      .catch((error: unknown) => {
+        // A runner stopped after it recorded the graph still recorded it.
+        if (!recorded || stopped != null) throw error
+      })
     noSymlinks(resultFile)
     if (
       !lstatSync(resultFile).isFile() ||
@@ -96,6 +144,7 @@ export async function runSetup(options: SetupOptions): Promise<unknown> {
     throw error
   } finally {
     clearTimeout(timer)
+    lingering?.()
     options.signal?.removeEventListener('abort', cancel)
     await execution.stop()
     if (existsSync(resultFile)) rmSync(resultFile, { force: true })

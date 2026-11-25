@@ -1092,6 +1092,37 @@ export async function build(ctx: Stage) {
     )
     assert.equal(cancelled.message, 'Setup cancelled')
   })
+
+  it('U7.15 returns the graph of a runner whose exit hangs after it recorded it, and stops that runner', async () => {
+    // An exit that never finishes, as process.exit() can hang in V8.
+    const { dir, masonfile } = checkout(`
+export function setup(m: any) {
+  m.apiVersion(1)
+  process.on('exit', () => { for (;;) {} })
+  m.stage('build', { on: 'linux', run: build })
+}
+export async function build() {}
+`)
+    const log = memoryLog()
+    const started = Date.now()
+    const graph = (await runSetup({
+      masonfile,
+      checkout: dir,
+      context,
+      scratch: dir,
+      log,
+      exitGraceMs: 300,
+    })) as Graph
+    assert.deepEqual(
+      graph.workflows[0]!.stages.map((stage) => stage.run),
+      ['build'],
+    )
+    assert.match(
+      log.text(),
+      /Setup recorded its graph, but its runner did not exit; stopping it/,
+    )
+    assert(Date.now() - started < 10_000, 'setup waited for the runner')
+  })
 })
 
 describe('pipeline step channel', () => {
@@ -1248,6 +1279,46 @@ async function stage(
 
 describe('pipeline stage run', function () {
   this.timeout(60000)
+
+  it('U7.15 keeps the result of a runner whose exit hangs after reporting it, and stops that runner', async () => {
+    const started = Date.now()
+    const out = await stage(
+      `
+export async function main() {
+  // An exit that never finishes, as process.exit() can hang in V8.
+  process.on('exit', () => { for (;;) {} })
+  return { built: true }
+}
+`,
+      {},
+      { exitGraceMs: 300 },
+    )
+    assert.equal(out.result.status, 'succeeded', out.log)
+    assert.deepEqual(out.result.value, { built: true })
+    assert.match(
+      out.log,
+      /The stage reported its result, but its runner did not exit; stopping it/,
+    )
+    assert(Date.now() - started < 10_000, 'the stage waited for the runner')
+  })
+
+  it('U7.15 ends a stage whose Masonfile leaves a timer running, without stopping its runner', async () => {
+    const started = Date.now()
+    const out = await stage(
+      `
+export async function main() {
+  setInterval(() => {}, 60_000)
+  return 'done'
+}
+`,
+      {},
+      { exitGraceMs: 30_000 },
+    )
+    assert.equal(out.result.status, 'succeeded', out.log)
+    assert.equal(out.result.value, 'done')
+    assert.doesNotMatch(out.log, /did not exit/)
+    assert(Date.now() - started < 10_000, 'the runner did not exit')
+  })
 
   it('U6.4/U6.5/U6.7 calls only the named export with declared secrets kept out of the environment and the log', async () => {
     const out = await stage(

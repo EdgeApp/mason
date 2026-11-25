@@ -45,6 +45,11 @@ export async function setupMain(masonfile: string): Promise<number> {
         flag: 'wx',
       },
     )
+    // The worker reads the graph from here on, and stops a runner that lingers.
+    await new Promise<void>((resolve) => {
+      if (process.send == null) resolve()
+      else process.send({ setup: 'recorded' }, undefined, {}, () => resolve())
+    })
     return 0
   } catch (error) {
     report(error)
@@ -116,9 +121,14 @@ if (
   process.argv[1] != null &&
   import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
+  // Node ends by itself once nothing is left running. process.exit() can hang
+  // for good (see finish in worker/gitProxy.ts), so it is only for a Masonfile
+  // that leaves a timer or socket open; the worker stops a runner that
+  // lingers after its result even so.
   const done = (code: number): void => {
+    process.exitCode = code
     process.disconnect?.()
-    process.exit(code)
+    setTimeout(() => process.exit(code), 1000).unref()
   }
   if (mode === 'setup' && file != null) void setupMain(file).then(done)
   else if (mode === 'stage' && process.send != null)
