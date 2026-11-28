@@ -456,9 +456,62 @@ describe('Settings → Apple ID', () => {
     fireEvent.click(
       within(apple).getByRole('button', { name: 'Check signing again' }),
     )
+    const reads = (): number =>
+      app.node.requests.filter((request) => request === `GET ${SIGNING}`).length
+    const before = reads()
     await within(apple).findByText('Apple allows no more certificates')
     assert.deepEqual(setup.bodies[1], { team: 'ZZZZZ99999' })
     assert.ok(app.node.requests.includes('POST /api/v2/apple/setup'))
+    // A failed check reads the Apple ID again too: it may have ended the session.
+    await until(() => reads() > before, 'the read after the failed check')
+  })
+
+  it('a team App Store Connect does not list says so, with no Set up button, and the check defaults to a listed one', async () => {
+    openSettings({
+      [SIGNING]: signingFixture({
+        setup: {
+          keyName: 'Mason',
+          teams: [
+            { id: 'PORTAL0001', name: 'Portal Only', connect: false },
+            { id: 'G5LQ7MERPK', name: 'Edge Labs', connect: true },
+          ],
+          configured: [],
+        },
+        failures: {},
+        settingUp: [],
+      }),
+    })
+    const apple = await card('Apple ID for Xcode downloads')
+    const row = await within(apple).findByText(
+      /App Store Connect does not list Portal Only \(PORTAL0001\) to this Apple ID: add the Apple ID to the team in App Store Connect’s Users and Access/,
+    )
+    assert.ok(row)
+    assert.equal(
+      within(apple).queryByRole('button', { name: 'Set up Portal Only' }),
+      null,
+    )
+    within(apple).getByRole('button', { name: 'Set up Edge Labs' })
+    assert.equal(
+      (within(apple).getByLabelText('Team') as HTMLSelectElement).value,
+      'G5LQ7MERPK',
+    )
+  })
+
+  it('reads the Apple ID again every few seconds while a team is set up, and stops after', async function () {
+    this.timeout(20_000)
+    const app = openSettings()
+    const apple = await card('Apple ID for Xcode downloads')
+    await within(apple).findByText(/Setting signing up for Side Project/)
+    const reads = (): number =>
+      app.node.requests.filter((request) => request === `GET ${SIGNING}`).length
+    await until(() => reads() >= 2, 'a second read', 5000)
+    app.node.set(SIGNING, signingFixture({ settingUp: [] }))
+    const before = reads()
+    await until(() => reads() > before, 'the read that ends it', 5000)
+    await within(apple).findByText(/Signing is not set up for Side Project/)
+    const after = reads()
+    await new Promise((resolve) => setTimeout(resolve, 3500))
+    assert.equal(reads(), after)
   })
 
   it('says when the Apple ID belongs to no team, or its teams could not be read, or the read failed', async () => {

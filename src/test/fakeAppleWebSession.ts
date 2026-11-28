@@ -36,6 +36,12 @@ export class FakeAppleWebSession {
     downloaded: boolean
     privateKey?: string
   }> = []
+  /** Answer this status to a switch of the session's team. */
+  refuseSwitch: number | undefined
+  /** With `refuseSwitch`, Apple's reason in the answer. */
+  switchReason: string | undefined
+  /** With `refuseSwitch`, the session ends with the switch. */
+  endOnSwitch = false
   /** Answer this status to every call, as Apple does for a role without access. */
   refuse: number | undefined
   /** With `refuse`, only to the calls to these paths. */
@@ -118,6 +124,23 @@ export class FakeAppleWebSession {
         })),
       })
     if (route === 'POST /olympus/v1/session') {
+      // The website's own switch says where it comes from; another is refused.
+      const header = (name: string): string | undefined =>
+        Object.entries(init.headers ?? {}).find(
+          ([key]) => key.toLowerCase() === name,
+        )?.[1]
+      if (header('x-requested-with') !== 'olympus-ui')
+        return json(401, { errors: [{ title: 'Unauthorized' }] })
+      if (this.refuseSwitch != null) {
+        // A switch refused because the session ended: every call after it is refused too.
+        if (this.endOnSwitch) this.refuse = this.refuseSwitch
+        return json(
+          this.refuseSwitch,
+          this.switchReason == null
+            ? {}
+            : { errors: [{ title: 'Forbidden', detail: this.switchReason }] },
+        )
+      }
       const id = (body as { provider?: { providerId?: number } } | undefined)
         ?.provider?.providerId
       if (!this.teams.some((team) => team.providerId === id))

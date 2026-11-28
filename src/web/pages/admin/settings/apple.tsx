@@ -6,7 +6,13 @@
 // with Apple's notice, and each team's signing: being set up, failed, not
 // set up (Set up) or set up with its key and certificate, and Check signing
 // again for a chosen team. Forms need apple.change.
-import { useState, type FormEvent, type JSX, type ReactNode } from 'react'
+import {
+  useEffect,
+  useState,
+  type FormEvent,
+  type JSX,
+  type ReactNode,
+} from 'react'
 import {
   APPLE_SIGNING_PATH,
   asAppleSigning,
@@ -334,10 +340,14 @@ function Signing({
   const toast = useToast()
   const actions = useActions()
   const setup = signing.setup
-  const [team, setTeam] = useState(setup?.teams[0]?.id ?? '')
+  // A team App Store Connect lists first: another's check can only fail.
+  const settable = setup?.teams.filter((entry) => entry.connect !== false)
+  const [team, setTeam] = useState(
+    settable?.[0]?.id ?? setup?.teams[0]?.id ?? '',
+  )
   if (setup == null) return null
   const check = async (id: string): Promise<void> => {
-    const ok = await actions.run(`setup-${id}`, async () => {
+    await actions.run(`setup-${id}`, async () => {
       const answer = await client.post(APPLE_SETUP_PATH, asAppleSetupResult, {
         body: { team: id },
       })
@@ -346,7 +356,8 @@ function Signing({
         icon: 'check_circle',
       })
     })
-    if (ok) done()
+    // A failed check may have ended the session or left a notice: read it again either way.
+    done()
   }
   const configured = new Map(setup.configured.map((entry) => [entry.id, entry]))
   // The Apple ID's teams, then any set up before that it no longer lists.
@@ -359,7 +370,7 @@ function Signing({
   const listed = signing.failures['']
   const chosen = setup.teams.some((entry) => entry.id === team)
     ? team
-    : (setup.teams[0]?.id ?? '')
+    : (settable?.[0]?.id ?? setup.teams[0]?.id ?? '')
   return (
     <div className="m-stack m-settings__signing">
       <h3 className="m-t-headline">
@@ -373,8 +384,12 @@ function Signing({
             const done = configured.get(entry.id)
             const failure = signing.failures[entry.id]
             const settingUp = signing.settingUp.includes(entry.id)
+            // App Store Connect does not list it to the Apple ID: setting it up can only fail.
+            const unlisted =
+              'connect' in entry && entry.connect === false && done == null
             const button = change &&
               !settingUp &&
+              !unlisted &&
               (failure != null || done == null) && (
                 <span className="m-list__end">
                   <Button
@@ -414,13 +429,15 @@ function Signing({
                       ? `Setting signing up for ${label}…`
                       : failure != null
                         ? failure
-                        : done == null
-                          ? `Signing is not set up for ${label}.`
-                          : `Signing is set up for ${label}: App Store Connect API key ${setup.keyName} (${done.keyId}), ${
-                              done.certificate == null
-                                ? 'no distribution certificate yet'
-                                : `${done.certificate.name}, expires ${day(done.certificate.expiresAt)}`
-                            }.`}
+                        : unlisted
+                          ? `App Store Connect does not list ${label} to this Apple ID: add the Apple ID to the team in App Store Connect’s Users and Access, then check signing again.`
+                          : done == null
+                            ? `Signing is not set up for ${label}.`
+                            : `Signing is set up for ${label}: App Store Connect API key ${setup.keyName} (${done.keyId}), ${
+                                done.certificate == null
+                                  ? 'no distribution certificate yet'
+                                  : `${done.certificate.name}, expires ${day(done.certificate.expiresAt)}`
+                              }.`}
                   </span>
                 </span>
                 {button}
@@ -434,10 +451,11 @@ function Signing({
         the team’s App Store Connect API key{' '}
         <span className="m-t-mono-sm">{setup.keyName}</span> and its
         distribution certificate, and keeps them. With several teams, it sets up
-        by itself only those this master already uses, with a stored key or an
-        app ID assigned to them; set up another here. Checking again asks Apple
-        about a team’s key and certificate and replaces only one that is gone;
-        nothing that still works is revoked.
+        by itself the only one App Store Connect lists, and those this master
+        already uses, with a stored key or an app ID assigned to them; set up
+        another here. Checking again asks Apple about a team’s key and
+        certificate and replaces only one that is gone; nothing that still works
+        is revoked.
       </p>
       {setup.teams.length === 0 ? (
         <p className="m-t-callout">
@@ -556,6 +574,17 @@ function AppleBody({
 export function AppleCard({ change }: { change: boolean }): JSX.Element {
   const read = useResource(APPLE_SIGNING_PATH, asAppleSigning)
   const data = read.data
+  // While a team is being set up, its outcome (or the session ending) shows
+  // within seconds: each read is followed, 3 s after it ends, by the next.
+  const settingUp = (data?.settingUp.length ?? 0) > 0
+  const { reload, loading } = read
+  useEffect(() => {
+    if (!settingUp || loading) return
+    const timer = setTimeout(reload, 3000)
+    return (): void => {
+      clearTimeout(timer)
+    }
+  }, [settingUp, loading, reload])
   return (
     <SettingsCard
       id="apple-session"

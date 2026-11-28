@@ -414,23 +414,58 @@ export class AppleService {
    * a team no longer among them has nothing left to set up.
    */
   setupListed(teams: string[]): void {
-    for (const team of Object.keys(this.setupFailures()))
+    for (const [team] of this.cached('setup:'))
       if (!teams.includes(team)) this.setupSucceeded(team)
   }
 
-  /** Why each team's last setup failed, by team ID ('' for reading the teams). */
-  setupFailures(): Record<string, string> {
-    return Object.fromEntries(
+  /**
+   * The teams app IDs sign with that the Apple ID is not in and no key is
+   * stored for, each with its notice; these replace the ones before.
+   */
+  setMissingTeams(
+    teams: Record<string, { name: string; error: string }>,
+  ): void {
+    const notices = Object.entries(teams)
+      .map(([id, team]): [string, string] => [
+        id,
+        `Signing for ${team.name} (${id}) is not set up: ${team.error}`,
+      ])
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    // Most calls change nothing: then nothing is written.
+    if (JSON.stringify(notices) === JSON.stringify(this.cached('missing:')))
+      return
+    this.master.db
+      .prepare("DELETE FROM apple_cache WHERE key LIKE 'missing:%'")
+      .run()
+    for (const [id, notice] of notices)
       this.master.db
-        .prepare(
-          "SELECT key,value FROM apple_cache WHERE key LIKE 'setup:%' ORDER BY key",
-        )
-        .all()
-        .map((row) => [
-          String(row.key).slice('setup:'.length),
-          JSON.parse(String(row.value)) as string,
-        ]),
-    )
+        .prepare('INSERT INTO apple_cache(key,value,fetched_at) VALUES(?,?,?)')
+        .run(`missing:${id}`, JSON.stringify(notice), this.master.now())
+  }
+
+  /** The teams `setMissingTeams` last named. */
+  missingTeams(): string[] {
+    return this.cached('missing:').map(([team]) => team)
+  }
+
+  /** Why each team's last setup failed, by team ID ('' for reading the teams), and each missing team's notice. */
+  setupFailures(): Record<string, string> {
+    return Object.fromEntries([
+      ...this.cached('setup:'),
+      ...this.cached('missing:'),
+    ])
+  }
+
+  private cached(prefix: string): Array<[string, string]> {
+    return this.master.db
+      .prepare(
+        'SELECT key,value FROM apple_cache WHERE key LIKE ? ORDER BY key',
+      )
+      .all(`${prefix}%`)
+      .map((row) => [
+        String(row.key).slice(prefix.length),
+        JSON.parse(String(row.value)) as string,
+      ])
   }
 
   /** What needs a person: expiring certificates, teams not set up and app IDs whose Apple setup is incomplete. */

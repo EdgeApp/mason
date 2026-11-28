@@ -813,16 +813,21 @@ export class AppleDownloads {
       method?: string
       headers?: Record<string, string>
       body?: unknown
+      /** A 401 refuses this call only, and leaves the session signed in. */
+      keepSession?: boolean
     } = {},
   ): Promise<Response> {
     return await this.serial(async () => {
       const stored = this.load()
       if (stored?.state !== 'signedIn')
-        throw new AppleError('Sign in with the Apple ID first')
-      const response = await this.request(stored, url, init)
+        throw new AppleError(
+          this.status().notice ?? 'Sign in with the Apple ID first',
+        )
+      const { keepSession, ...call } = init
+      const response = await this.request(stored, url, call)
       const body = await response.text()
       // Apple no longer takes the session; a 403 is the team's role or access instead.
-      if (response.status === 401) {
+      if (response.status === 401 && keepSession !== true) {
         this.releases = undefined
         this.setState(
           stored,

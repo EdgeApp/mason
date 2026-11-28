@@ -45,7 +45,13 @@ export interface AppleWeb {
 /** A request with the master's Apple session; the website's own JSON API. */
 export type AppleRequest = (
   url: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: unknown },
+  init?: {
+    method?: string
+    headers?: Record<string, string>
+    body?: unknown
+    /** A 401 refuses this call only, and leaves the session signed in. */
+    keepSession?: boolean
+  },
 ) => Promise<Response>
 
 export class AppleWebError extends Error {}
@@ -71,6 +77,28 @@ export interface OlympusProvider {
   /** The provider's public id, which is its App Store Connect API issuer ID. */
   publicProviderId?: string
   name: string
+}
+
+const roleRefusal =
+  'Apple refused: the Apple ID must be the team’s Account Holder or an Admin, and the team must have App Store Connect API access (the Account Holder requests it in Users and Access, Integrations)'
+const sessionEnded = 'The Apple session ended: sign in with the Apple ID again'
+
+/** Apple's own words for a refusal, when its answer carries them. */
+function appleReason(text: string): string {
+  try {
+    const body = JSON.parse(text) as {
+      errors?: Array<{ title?: string; detail?: string }>
+      serviceErrors?: Array<{ message?: string }>
+    }
+    const first = body.errors?.[0]
+    const words =
+      first != null
+        ? [first.title, first.detail].filter(Boolean).join(': ')
+        : (body.serviceErrors?.[0]?.message ?? '')
+    return words === '' ? '' : `: ${words.slice(0, 300)}`
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -108,9 +136,7 @@ export class AppStoreConnectWeb implements AppleWeb {
     const text = await response.text()
     if (response.status === 401 || response.status === 403)
       throw new AppleWebError(
-        response.status === 403
-          ? 'Apple refused: the Apple ID must be the team’s Account Holder or an Admin, and the team must have App Store Connect API access (the Account Holder requests it in Users and Access, Integrations)'
-          : 'The Apple session ended: sign in with the Apple ID again',
+        response.status === 403 ? roleRefusal : sessionEnded,
       )
     if (!response.ok)
       throw new AppleWebError(
@@ -135,12 +161,41 @@ export class AppStoreConnectWeb implements AppleWeb {
     return matchTeams(providers, developer.teams ?? [])
   }
 
+  /**
+   * Switches the session's current team, as App Store Connect's own page
+   * does. A refused switch fails this team's setup and leaves the session
+   * signed in: the session read just before it answered.
+   */
   async selectTeam(providerId: number): Promise<void> {
     if ((await this.session()).provider?.providerId === providerId) return
-    await this.json('/olympus/v1/session', {
+    const response = await this.request(`${this.base}/olympus/v1/session`, {
       method: 'POST',
+      headers: {
+        Accept: 'application/json, text/plain, */*',
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'olympus-ui',
+        'X-Csrf-Itc': 'itc',
+        Origin: this.base,
+        Referer: `${this.base}/`,
+      },
       body: { provider: { providerId } },
+      keepSession: true,
     })
+    const text = await response.text()
+    if (!response.ok) {
+      // A session Apple no longer takes ends here, as any other call's would.
+      if (response.status === 401) await this.session()
+      const reason = appleReason(text)
+      throw new AppleWebError(
+        response.status === 403 && reason === ''
+          ? roleRefusal
+          : `App Store Connect refused to switch the session to this team (${response.status}${reason})`,
+      )
+    }
+    if ((await this.session()).provider?.providerId !== providerId)
+      throw new AppleWebError(
+        'App Store Connect did not switch the session to this team',
+      )
   }
 
   async issuerId(): Promise<string> {
@@ -239,14 +294,19 @@ const companySuffixes = new Set([
   'kk',
 ])
 
-/** A team's name with case, accents, punctuation and company suffixes set aside. */
+/**
+ * A team's name with case, accents, punctuation and company suffixes set
+ * aside; letters of any script stay, kana with their voicing marks. A name of only punctuation has the
+ * empty key, which pairs with nothing.
+ */
 export function teamNameKey(name: string): string {
   const words = name
     .normalize('NFKD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
+    .normalize('NFC')
     .toLowerCase()
     .replace(/\./g, '')
-    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
     .split(' ')
   while (words.length > 1 && companySuffixes.has(words[words.length - 1]!))
@@ -260,7 +320,9 @@ export function teamNameKey(name: string): string {
  * case, punctuation and company suffixes set aside, then a provider and a
  * team that are the only ones left. A name pairs only when it picks out one
  * of each. A team left without a provider is still listed, so its setup can
- * say why.
+ * say why. Two left over that are not one team cannot make a key in the
+ * wrong account: making one takes the Admin role in the provider's team,
+ * and an Admin is a member of its developer team, so that team is listed.
  */
 export function matchTeams(
   providers: OlympusProvider[],
@@ -280,6 +342,7 @@ export function matchTeams(
   for (const key of [(name: string): string => name, teamNameKey]) {
     const free = left()
     for (const team of free.teams) {
+      if (key(team.name) === '') continue
       const named = free.providers.filter(
         (provider) => key(provider.name) === key(team.name),
       )
@@ -317,6 +380,8 @@ export interface SetupResult {
 export interface AppleSetupOptions {
   /** The website, while the master is signed in to Apple. */
   web: () => AppleWeb | undefined
+  /** Why it is not, as the Apple session says (its sign-in lapsed, say). */
+  signedOut?: () => string | undefined
   /** The `apple` settings' team keys. */
   teamKey: (team: string) => { keyId: string } | undefined
   saveTeamKey: (
@@ -336,14 +401,52 @@ export interface AppleSetupOptions {
   appleCertificates: (team: string) => Promise<string[]>
   /** The master's fingerprint: its key is named `Mason <first 8>`. */
   fingerprint: string
+  now?: () => number
+  /** Each read of the Apple ID's teams, whoever made it. */
+  onTeams?: (teams: SetupTeam[]) => void
+}
+
+/** A team of the Apple ID, as setup offers it. */
+export interface SetupTeam {
+  id: string
+  name: string
+  /**
+   * False for a team App Store Connect lists no provider for, so nothing
+   * but adding the Apple ID to the team there sets it up. A team left
+   * unpaired among providers of unlike names is listed: its setup says
+   * what to do.
+   */
+  connect: boolean
+  /** Paired with its App Store Connect provider, so setup can switch to it. */
+  paired: boolean
 }
 
 export class AppleSetup {
+  private listing: { at: number; teams: Promise<SetupTeam[]> } | undefined
   constructor(private readonly options: AppleSetupOptions) {}
+
+  private now(): number {
+    return (this.options.now ?? Date.now)()
+  }
+
+  /** The teams as setup offers them, told to `onTeams` as each read lands. */
+  private listed(teams: AppleWebTeam[]): SetupTeam[] {
+    const out = teams.map(({ id, name, providerId, unmatched }) => ({
+      id,
+      name,
+      connect: providerId != null || (unmatched ?? []).length > 0,
+      paired: providerId != null,
+    }))
+    this.options.onTeams?.(out)
+    return out
+  }
 
   private web(): AppleWeb {
     const web = this.options.web()
-    if (web == null) throw new AppleWebError('Sign in with the Apple ID first')
+    if (web == null)
+      throw new AppleWebError(
+        this.options.signedOut?.() ?? 'Sign in with the Apple ID first',
+      )
     return web
   }
 
@@ -352,8 +455,28 @@ export class AppleSetup {
     return `Mason ${this.options.fingerprint.replace(/^mldsa65:/, '').slice(0, 8)}`
   }
 
-  async teams(): Promise<Array<{ id: string; name: string }>> {
-    return (await this.web().teams()).map(({ id, name }) => ({ id, name }))
+  /** The Apple ID's teams; `connect` is false for one App Store Connect does not list. */
+  async teams(): Promise<SetupTeam[]> {
+    const teams = this.web()
+      .teams()
+      .then((listed) => this.listed(listed))
+    this.listing = { at: this.now(), teams }
+    teams.catch(() => {
+      if (this.listing?.teams === teams) this.listing = undefined
+    })
+    return await teams
+  }
+
+  /**
+   * The teams as last read, if within `ms`, else read again; reads at once
+   * share one. For pages read again and again, so Apple is not.
+   */
+  async recentTeams(ms: number): Promise<SetupTeam[]> {
+    this.web()
+    const listing = this.listing
+    if (listing != null && this.now() - listing.at < ms)
+      return await listing.teams
+    return await this.teams()
   }
 
   /**
@@ -363,10 +486,13 @@ export class AppleSetup {
   async setup(teamId?: string): Promise<SetupResult> {
     const web = this.web()
     const teams = await web.teams()
+    this.listed(teams)
+    // With no team named, the one App Store Connect lists.
+    const listed = teams.filter((entry) => entry.providerId != null)
     const team =
       teamId == null
-        ? teams.length === 1
-          ? teams[0]
+        ? listed.length === 1
+          ? listed[0]
           : undefined
         : teams.find((entry) => entry.id === teamId)
     if (team == null)
