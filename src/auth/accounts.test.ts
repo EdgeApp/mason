@@ -132,10 +132,7 @@ describe('Mason identities and local access', () => {
       accounts.invitations().find((row) => row.id === id)?.claimed_account,
       accepted.account.id,
     )
-    assert.equal(
-      login('duplicate', 'jordan@example.test').account.is_tester,
-      0,
-    )
+    assert.equal(login('duplicate', 'jordan@example.test').account.is_tester, 0)
     assert.throws(() =>
       accounts.invite(admin, 'unknown', 'someone@example.test'),
     )
@@ -208,8 +205,7 @@ describe('Mason identities and local access', () => {
     assert.throws(() => login('second', 'second@example.test'), /disabled/)
     assert.throws(() => accounts.setAdmin(other.account.id, true), /disabled/)
     assert.throws(
-      () =>
-        accounts.invite(other.account.id, 'example', 'third@example.test'),
+      () => accounts.invite(other.account.id, 'example', 'third@example.test'),
       /Administrator/,
     )
   })

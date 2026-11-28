@@ -10,11 +10,7 @@ export type HeadResolver = (
 ) => Promise<string>
 
 /** Inspect one exact remote ref without a checkout or interactive credentials. */
-export const remoteHead: HeadResolver = async (
-  repository,
-  branch,
-  signal,
-) => {
+export const remoteHead: HeadResolver = async (repository, branch, signal) => {
   signal.throwIfAborted()
   return await new Promise((resolve, reject) => {
     const ref = 'refs/heads/' + branch
@@ -25,8 +21,7 @@ export const remoteHead: HeadResolver = async (
         env: {
           ...baseEnvironment(),
           GIT_TERMINAL_PROMPT: '0',
-          GIT_SSH_COMMAND:
-            'ssh -o BatchMode=yes -o ConnectTimeout=10',
+          GIT_SSH_COMMAND: 'ssh -o BatchMode=yes -o ConnectTimeout=10',
         },
         detached: true,
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -63,12 +58,7 @@ export const remoteHead: HeadResolver = async (
       try {
         const lines = output.trim().split('\n')
         const [sha, name] = lines[0]!.split('\t')
-        if (
-          stopped ||
-          code !== 0 ||
-          lines.length !== 1 ||
-          name !== ref
-        )
+        if (stopped || code !== 0 || lines.length !== 1 || name !== ref)
           throw new Error('Branch lookup failed')
         resolve(commitHash(sha))
       } catch {
@@ -108,11 +98,7 @@ export class AutomaticPoller {
       const key = app.repository + ':' + rule.branch
       let head = heads.get(key)
       if (head == null) {
-        head = this.resolveHead(
-          app.repository,
-          rule.branch,
-          this.abort.signal,
-        )
+        head = this.resolveHead(app.repository, rule.branch, this.abort.signal)
         heads.set(key, head)
       }
       let commit: string

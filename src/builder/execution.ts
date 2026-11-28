@@ -39,7 +39,8 @@ export class MaskedLog {
           break
         }
         if (
-          !final && this.pending.length - i < candidate.length &&
+          !final &&
+          this.pending.length - i < candidate.length &&
           candidate.startsWith(this.pending.slice(i))
         ) {
           partial = true
@@ -59,10 +60,7 @@ export class MaskedLog {
     if (out.length > 0) this.onOutput?.(out)
     if (this.fullFile != null && redacted.length > 0)
       appendFileSync(this.fullFile, redacted)
-    const data = redacted.subarray(
-      0,
-      Math.max(0, this.limit - this.bytes),
-    )
+    const data = redacted.subarray(0, Math.max(0, this.limit - this.bytes))
     if (data.length) appendFileSync(this.file, data)
     this.bytes += data.length
   }
@@ -75,21 +73,15 @@ export interface ProcessIdentity {
   state?: string
 }
 export function processSnapshot(): ProcessIdentity[] {
-  const rows = execFileSync(
-    'ps',
-    ['-axo', 'pid=,ppid=,pgid=,stat=,lstart='],
-    {
-      encoding: 'utf8',
-      timeout: 3000,
-      maxBuffer: 4 * 1024 * 1024,
-    },
-  )
+  const rows = execFileSync('ps', ['-axo', 'pid=,ppid=,pgid=,stat=,lstart='], {
+    encoding: 'utf8',
+    timeout: 3000,
+    maxBuffer: 4 * 1024 * 1024,
+  })
     .trim()
     .split('\n')
     .map((line) => {
-      const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/.exec(
-        line,
-      )
+      const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.+)$/.exec(line)
       if (match == null) throw new Error('Invalid process inventory')
       return {
         pid: Number(match[1]),
@@ -128,18 +120,13 @@ export class Execution {
   }
   private inspectionError(): void {
     if (!this.inspectionFailed)
-      this.log.write(
-        'Process inspection temporarily unavailable; retrying.\n',
-      )
+      this.log.write('Process inspection temporarily unavailable; retrying.\n')
     this.inspectionFailed = true
   }
   private scan(): ProcessIdentity[] {
     // Zombies cannot execute or retain build files and need no signal.
-    const all = this.inspect().filter(
-      (item) => !item.state?.startsWith('Z'),
-    )
-    if (this.inspectionFailed)
-      this.log.write('Process inspection recovered.\n')
+    const all = this.inspect().filter((item) => !item.state?.startsWith('Z'))
+    if (this.inspectionFailed) this.log.write('Process inspection recovered.\n')
     this.inspectionFailed = false
     // Ownership starts from the processes this execution spawned, so several
     // executions in one process (a worker's slots) never claim each other's.
@@ -148,15 +135,12 @@ export class Execution {
       const previous = this.children.get(pid)
       if (
         previous == null ||
-        all.some(
-          (item) => item.pid === pid && item.start === previous.start,
-        )
+        all.some((item) => item.pid === pid && item.start === previous.start)
       )
         owned.add(pid)
     }
     for (const item of all)
-      if (this.children.get(item.pid)?.start === item.start)
-        owned.add(item.pid)
+      if (this.children.get(item.pid)?.start === item.start) owned.add(item.pid)
     let changed = true
     while (changed) {
       changed = false
@@ -180,9 +164,7 @@ export class Execution {
           this.children.get(item.pid)?.start === item.start)
       ) {
         this.children.set(item.pid, item)
-        const leader = all.find(
-          (candidate) => candidate.pid === item.group,
-        )
+        const leader = all.find((candidate) => candidate.pid === item.group)
         if (
           !this.groups.has(item.group) ||
           (leader != null && owned.has(leader.pid))
@@ -221,7 +203,10 @@ export class Execution {
         cwd,
         env,
         detached: true,
-        stdio: ipc == null ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe', 'ipc'],
+        stdio:
+          ipc == null
+            ? ['ignore', 'pipe', 'pipe']
+            : ['ignore', 'pipe', 'pipe', 'ipc'],
       })
       ipc?.(child)
       let output = ''
@@ -273,14 +258,10 @@ export class Execution {
         if (++empty >= 2) return true
       } else empty = 0
       for (const item of remaining) {
-        if (this.children.get(item.pid)?.start !== item.start)
-          continue
+        if (this.children.get(item.pid)?.start !== item.start) continue
         const force = Date.now() >= forceAt
         // Give only entrypoints TERM; allow their cleanup subprocesses to finish.
-        if (
-          !force &&
-          (!this.roots.has(item.pid) || signalled.has(item.pid))
-        )
+        if (!force && (!this.roots.has(item.pid) || signalled.has(item.pid)))
           continue
         try {
           process.kill(item.pid, force ? 'SIGKILL' : 'SIGTERM')
@@ -301,9 +282,13 @@ export class Execution {
     if (!this.inspectionFailed && remaining.length > 0)
       this.log.write(
         'Unverified build processes: ' +
-          remaining.map((item) =>
-            `pid=${item.pid} parent=${item.parent} group=${item.group} state=${item.state ?? 'unknown'} ownership=${this.children.get(item.pid)?.start === item.start ? 'tracked' : 'group-only'}`,
-          ).join('; ') + '\n',
+          remaining
+            .map(
+              (item) =>
+                `pid=${item.pid} parent=${item.parent} group=${item.group} state=${item.state ?? 'unknown'} ownership=${this.children.get(item.pid)?.start === item.start ? 'tracked' : 'group-only'}`,
+            )
+            .join('; ') +
+          '\n',
       )
     return false
   }

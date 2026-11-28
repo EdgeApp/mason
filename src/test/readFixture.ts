@@ -279,11 +279,7 @@ export async function readFixture(root: string): Promise<ReadFixture> {
     .catch(() => {
       throw new Error(`The host never had: ${missing.join(', ')}`)
     })
-  const publish: ReadFixture['publish'] = async (
-    platform,
-    number,
-    devices,
-  ) => {
+  const publish: ReadFixture['publish'] = async (platform, number, devices) => {
     const format = platform === 'ios' ? 'ipa' : 'apk'
     const data = Buffer.from(`alpha ${platform} ${number} `.repeat(20))
     const digest = createHash('sha256').update(data).digest('hex')
