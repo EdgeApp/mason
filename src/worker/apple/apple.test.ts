@@ -1512,168 +1512,181 @@ export async function sign(ctx: Stage) {
       await apple?.close()
     })
 
-    it('U14.4 an unprepared Mac signs with what the stage brings, only on a node with the project’s signing label, and keeps nothing afterwards', async () => {
-      const runs = []
-      for (let i = 0; i < 2; i++) {
+    // Darwin only: the fixture worker reports this computer's OS, and must be a Mac.
+    ;(process.platform === 'darwin' ? it : it.skip)(
+      'U14.4 an unprepared Mac signs with what the stage brings, only on a node with the project’s signing label, and keeps nothing afterwards',
+      async () => {
+        const runs = []
+        for (let i = 0; i < 2; i++) {
+          const created = await c.api('POST', '/api/v2/runs', {
+            project: 'signed',
+            branch: 'master',
+          })
+          assert.equal(created.status, 202, created.text)
+          runs.push(
+            await c.until(
+              () => {
+                const run = c.master.master!.run(created.json.id) as Json
+                return ['succeeded', 'failed'].includes(run.status)
+                  ? run
+                  : undefined
+              },
+              60_000,
+              'the signed run',
+            ),
+          )
+        }
+        for (const run of runs) {
+          assert.equal(
+            run.status,
+            'succeeded',
+            c.master.master!.scheduler.logs(run.id),
+          )
+          const stage = run.stages.find((entry: Json) => entry.name === 'sign')
+          assert.equal(stage.workerName ?? stage.worker, 'signer')
+          const output = stage.output
+          assert.equal(output.teamId, TEAM)
+          assert.equal(output.keychainExists, true)
+          assert.equal(output.exportExists, true)
+          assert.deepEqual(Object.keys(output.profiles).sort(), [
+            'app.example.signed',
+            'app.example.signed.widgets',
+          ])
+          assert.equal(
+            output.buildSettings.MASON_PROFILE_app_example_signed,
+            output.profiles['app.example.signed'],
+          )
+        }
+        // The ad hoc and App Store profiles were made when the app ID was saved, and both runs reused them.
+        assert.equal(
+          apple.calls.filter(
+            (call) => call.path === '/v1/profiles' && call.method === 'POST',
+          ).length,
+          4,
+        )
+        // The signer removed its keychain and profiles; the plain node never saw signing material.
+        const signer = securities.get('signer')!
+        assert(
+          signer.calls.filter((call) => call[1] === 'delete-keychain').length >=
+            2,
+        )
+        assert.equal(signer.list.length, 1)
+        assert.equal(securities.get('plain')!.calls.length, 0)
+        for (const dirName of profileDirectories(homes.get('signer')!))
+          assert.deepEqual(readdirSync(dirName), [])
+        assert(!existsSync(profileDirectories(homes.get('plain')!)[0]!))
+        // The journal keeps no private key.
+        const journal = readFileSync(
+          path.join(c.workers.get('signer')!.dir, 'worker.sqlite'),
+        )
+        assert(!journal.includes(Buffer.from('BEGIN PRIVATE KEY')))
+      },
+    )
+
+    // Darwin only: the fixture worker reports this computer's OS, and must be a Mac.
+    ;(process.platform === 'darwin' ? it : it.skip)(
+      'U14.7/U14.8 a stage archives, sends TestFlight and notarizes through the master, and reports capabilities from its archive',
+      async () => {
+        apple.apps.push({
+          type: 'apps',
+          id: 'APP1',
+          attributes: { bundleId: 'app.example.signed' },
+        })
+        apple.groups.push({
+          type: 'betaGroups',
+          id: 'GROUP1',
+          app: 'APP1',
+          attributes: { name: 'Internal', isInternalGroup: true },
+        })
         const created = await c.api('POST', '/api/v2/runs', {
           project: 'signed',
           branch: 'master',
+          params: { mode: 'ship' },
         })
         assert.equal(created.status, 202, created.text)
-        runs.push(
-          await c.until(
-            () => {
-              const run = c.master.master!.run(created.json.id) as Json
-              return ['succeeded', 'failed'].includes(run.status)
-                ? run
-                : undefined
-            },
-            60_000,
-            'the signed run',
+        const run = await c.until(
+          () => {
+            const value = c.master.master!.run(created.json.id) as Json
+            return ['succeeded', 'failed'].includes(value.status)
+              ? value
+              : undefined
+          },
+          60_000,
+          'the shipping run',
+        )
+        const log = c.master.master!.scheduler.logs(run.id)
+        assert.equal(run.status, 'succeeded', log)
+        const output = run.stages.find(
+          (entry: Json) => entry.name === 'sign',
+        ).output
+        assert.equal(output.built, 'App.ipa')
+        assert.deepEqual(
+          {
+            version: output.testflight.version,
+            buildNumber: output.testflight.buildNumber,
+            state: output.testflight.state,
+          },
+          { version: '1.0', buildNumber: '7', state: 'VALID' },
+        )
+        assert.equal(output.notarized.status, 'accepted')
+        assert(xcodeCalls.some((call) => call[1] === 'stapler'))
+        // xcodebuild and xcrun run with the stage's environment under the call's own.
+        const envOf = (step: string): NodeJS.ProcessEnv =>
+          xcodeEnvs[
+            xcodeCalls.findLastIndex((call) => call.slice(1, 3).includes(step))
+          ]!
+        const archived = envOf('archive')
+        assert.equal(archived.FIXTURE_STAGE, 'stage')
+        assert.equal(archived.FIXTURE_SET_BY, 'call')
+        assert.match(
+          archived.DEVELOPER_DIR!,
+          /Xcode\.app\/Contents\/Developer$/,
+        )
+        assert.equal(archived.NODE_BINARY, undefined)
+        assert.equal(envOf('-exportArchive').FIXTURE_SET_BY, 'call')
+        assert.equal(envOf('stapler').FIXTURE_STAGE, 'stage')
+        assert.equal(envOf('stapler').FIXTURE_SET_BY, 'stage')
+        // The archive's entitlements added associated domains to both bundle
+        // IDs on Apple's side; push, which the profiles grant, was not asked for.
+        assert(
+          [...apple.capabilities.values()].every((types) =>
+            types.includes('ASSOCIATED_DOMAINS'),
           ),
         )
-      }
-      for (const run of runs) {
-        assert.equal(
-          run.status,
-          'succeeded',
-          c.master.master!.scheduler.logs(run.id),
+        assert(
+          !apple.calls.some(
+            (call) =>
+              call.path === '/v1/bundleIdCapabilities' &&
+              call.body?.data?.attributes?.capabilityType ===
+                'PUSH_NOTIFICATIONS',
+          ),
         )
-        const stage = run.stages.find((entry: Json) => entry.name === 'sign')
-        assert.equal(stage.workerName ?? stage.worker, 'signer')
-        const output = stage.output
-        assert.equal(output.teamId, TEAM)
-        assert.equal(output.keychainExists, true)
-        assert.equal(output.exportExists, true)
-        assert.deepEqual(Object.keys(output.profiles).sort(), [
-          'app.example.signed',
-          'app.example.signed.widgets',
-        ])
-        assert.equal(
-          output.buildSettings.MASON_PROFILE_app_example_signed,
-          output.profiles['app.example.signed'],
+        // Before the archive, associated domains came from the project's
+        // entitlements; a key Mason does not know only warned, and push,
+        // which the profile grants, was not sent.
+        assert.match(log!, /capabilities added from the project’s entitlements/)
+        assert.match(
+          log!,
+          /Apple signing: app\.example\.signed: com\.apple\.developer\.carplay-audio needs a capability Mason cannot enable; the archive goes ahead with its profile as it is/,
         )
-      }
-      // The ad hoc and App Store profiles were made when the app ID was saved, and both runs reused them.
-      assert.equal(
-        apple.calls.filter(
-          (call) => call.path === '/v1/profiles' && call.method === 'POST',
-        ).length,
-        4,
-      )
-      // The signer removed its keychain and profiles; the plain node never saw signing material.
-      const signer = securities.get('signer')!
-      assert(
-        signer.calls.filter((call) => call[1] === 'delete-keychain').length >=
-          2,
-      )
-      assert.equal(signer.list.length, 1)
-      assert.equal(securities.get('plain')!.calls.length, 0)
-      for (const dirName of profileDirectories(homes.get('signer')!))
-        assert.deepEqual(readdirSync(dirName), [])
-      assert(!existsSync(profileDirectories(homes.get('plain')!)[0]!))
-      // The journal keeps no private key.
-      const journal = readFileSync(
-        path.join(c.workers.get('signer')!.dir, 'worker.sqlite'),
-      )
-      assert(!journal.includes(Buffer.from('BEGIN PRIVATE KEY')))
-    })
-
-    it('U14.7/U14.8 a stage archives, sends TestFlight and notarizes through the master, and reports capabilities from its archive', async () => {
-      apple.apps.push({
-        type: 'apps',
-        id: 'APP1',
-        attributes: { bundleId: 'app.example.signed' },
-      })
-      apple.groups.push({
-        type: 'betaGroups',
-        id: 'GROUP1',
-        app: 'APP1',
-        attributes: { name: 'Internal', isInternalGroup: true },
-      })
-      const created = await c.api('POST', '/api/v2/runs', {
-        project: 'signed',
-        branch: 'master',
-        params: { mode: 'ship' },
-      })
-      assert.equal(created.status, 202, created.text)
-      const run = await c.until(
-        () => {
-          const value = c.master.master!.run(created.json.id) as Json
-          return ['succeeded', 'failed'].includes(value.status)
-            ? value
-            : undefined
-        },
-        60_000,
-        'the shipping run',
-      )
-      const log = c.master.master!.scheduler.logs(run.id)
-      assert.equal(run.status, 'succeeded', log)
-      const output = run.stages.find(
-        (entry: Json) => entry.name === 'sign',
-      ).output
-      assert.equal(output.built, 'App.ipa')
-      assert.deepEqual(
-        {
-          version: output.testflight.version,
-          buildNumber: output.testflight.buildNumber,
-          state: output.testflight.state,
-        },
-        { version: '1.0', buildNumber: '7', state: 'VALID' },
-      )
-      assert.equal(output.notarized.status, 'accepted')
-      assert(xcodeCalls.some((call) => call[1] === 'stapler'))
-      // xcodebuild and xcrun run with the stage's environment under the call's own.
-      const envOf = (step: string): NodeJS.ProcessEnv =>
-        xcodeEnvs[
-          xcodeCalls.findLastIndex((call) => call.slice(1, 3).includes(step))
-        ]!
-      const archived = envOf('archive')
-      assert.equal(archived.FIXTURE_STAGE, 'stage')
-      assert.equal(archived.FIXTURE_SET_BY, 'call')
-      assert.match(archived.DEVELOPER_DIR!, /Xcode\.app\/Contents\/Developer$/)
-      assert.equal(archived.NODE_BINARY, undefined)
-      assert.equal(envOf('-exportArchive').FIXTURE_SET_BY, 'call')
-      assert.equal(envOf('stapler').FIXTURE_STAGE, 'stage')
-      assert.equal(envOf('stapler').FIXTURE_SET_BY, 'stage')
-      // The archive's entitlements added associated domains to both bundle
-      // IDs on Apple's side; push, which the profiles grant, was not asked for.
-      assert(
-        [...apple.capabilities.values()].every((types) =>
-          types.includes('ASSOCIATED_DOMAINS'),
-        ),
-      )
-      assert(
-        !apple.calls.some(
-          (call) =>
-            call.path === '/v1/bundleIdCapabilities' &&
-            call.body?.data?.attributes?.capabilityType ===
-              'PUSH_NOTIFICATIONS',
-        ),
-      )
-      // Before the archive, associated domains came from the project's
-      // entitlements; a key Mason does not know only warned, and push,
-      // which the profile grants, was not sent.
-      assert.match(log!, /capabilities added from the project’s entitlements/)
-      assert.match(
-        log!,
-        /Apple signing: app\.example\.signed: com\.apple\.developer\.carplay-audio needs a capability Mason cannot enable; the archive goes ahead with its profile as it is/,
-      )
-      assert.match(log!, /capabilities added from the archive’s entitlements/)
-      // The build signed, so what Mason cannot enable only warns: a key it
-      // does not know, and Declared Age Range with no Apple ID signed in.
-      assert.match(
-        log!,
-        /Apple signing: app\.example\.signed: com\.apple\.developer\.carplay-maps needs a capability Mason cannot enable; it was signed as its profile allows/,
-      )
-      assert.match(
-        log!,
-        /Apple signing: app\.example\.signed: .*Declared Age Range .*sign the Apple ID in on the master; it was signed as its profile allows/,
-      )
-      assert(
-        !xcodeCalls.some((call) => /ruby|bundle|fastlane/.test(call.join(' '))),
-      )
-    })
+        assert.match(log!, /capabilities added from the archive’s entitlements/)
+        // The build signed, so what Mason cannot enable only warns: a key it
+        // does not know, and Declared Age Range with no Apple ID signed in.
+        assert.match(
+          log!,
+          /Apple signing: app\.example\.signed: com\.apple\.developer\.carplay-maps needs a capability Mason cannot enable; it was signed as its profile allows/,
+        )
+        assert.match(
+          log!,
+          /Apple signing: app\.example\.signed: .*Declared Age Range .*sign the Apple ID in on the master; it was signed as its profile allows/,
+        )
+        assert(
+          !xcodeCalls.some((call) =>
+            /ruby|bundle|fastlane/.test(call.join(' ')),
+          ),
+        )
+      },
+    )
     ;(process.platform === 'darwin' ? it : it.skip)(
       'a stage re-signs a build through ctx.apple.resign with the profiles the master sent',
       async () => {
@@ -1896,42 +1909,46 @@ export async function sign(ctx: Stage) {
       )
     })
 
-    it('U14.5 crash recovery removes a keychain and profiles a stage held when the worker stopped', async () => {
-      await c.stopWorker('signer')
-      const dir = c.workers.get('signer')?.dir ?? path.join(c.root, 'signer')
-      const profile = path.join(
-        profileDirectories(homes.get('signer')!)[0]!,
-        'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE.mobileprovision',
-      )
-      writeFileSync(profile, 'left behind')
-      const keychain = path.join(
-        dir,
-        'keychains',
-        'mason-stage-crashed.keychain-db',
-      )
-      mkdirSync(path.dirname(keychain), { recursive: true })
-      writeFileSync(keychain, 'left behind')
-      const journal = new Journal(
-        new DatabaseSync(path.join(dir, 'worker.sqlite')),
-      )
-      journal.setSigning('crashed/sign/1', { keychain, profiles: [profile] })
-      journal.db.close()
-      securities.get('signer')!.list.push(keychain)
-      await c.startWorker({
-        name: 'signer',
-        type: 'mac-xcode',
-        labels: ['apple-signing'],
-        workerOptions: {
-          appleCommand: securities.get('signer')!.run,
-          home: homes.get('signer')!,
-          systemRun: new FakeMac(root('again-')).run,
-          appleExec: fakeXcodebuild(xcodeCalls),
-          applePollMs: 10,
-        },
-      })
-      await c.until(() => !existsSync(profile), 10_000, 'the profile removed')
-      assert(!existsSync(keychain))
-      assert(!securities.get('signer')!.list.includes(keychain))
-    })
+    // Darwin only: the fixture worker reports this computer's OS, and must be a Mac.
+    ;(process.platform === 'darwin' ? it : it.skip)(
+      'U14.5 crash recovery removes a keychain and profiles a stage held when the worker stopped',
+      async () => {
+        await c.stopWorker('signer')
+        const dir = c.workers.get('signer')?.dir ?? path.join(c.root, 'signer')
+        const profile = path.join(
+          profileDirectories(homes.get('signer')!)[0]!,
+          'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE.mobileprovision',
+        )
+        writeFileSync(profile, 'left behind')
+        const keychain = path.join(
+          dir,
+          'keychains',
+          'mason-stage-crashed.keychain-db',
+        )
+        mkdirSync(path.dirname(keychain), { recursive: true })
+        writeFileSync(keychain, 'left behind')
+        const journal = new Journal(
+          new DatabaseSync(path.join(dir, 'worker.sqlite')),
+        )
+        journal.setSigning('crashed/sign/1', { keychain, profiles: [profile] })
+        journal.db.close()
+        securities.get('signer')!.list.push(keychain)
+        await c.startWorker({
+          name: 'signer',
+          type: 'mac-xcode',
+          labels: ['apple-signing'],
+          workerOptions: {
+            appleCommand: securities.get('signer')!.run,
+            home: homes.get('signer')!,
+            systemRun: new FakeMac(root('again-')).run,
+            appleExec: fakeXcodebuild(xcodeCalls),
+            applePollMs: 10,
+          },
+        })
+        await c.until(() => !existsSync(profile), 10_000, 'the profile removed')
+        assert(!existsSync(keychain))
+        assert(!securities.get('signer')!.list.includes(keychain))
+      },
+    )
   })
 })

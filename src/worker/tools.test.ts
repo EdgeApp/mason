@@ -26,6 +26,8 @@ import {
   ChecksumMismatch,
   extract,
   readMarker,
+  stdinErrorListener,
+  step,
   type InstallContext,
 } from './tools/common.js'
 import {
@@ -783,6 +785,54 @@ describe('Worker tooling', function () {
     assert(!existsSync(path.join(dir, 'outside')))
   })
 
+  it('U8.3-E1 a step whose child exits before reading its input reports the exit, with no uncaught EPIPE', async () => {
+    const dir = root()
+    const script = (name: string, code: number): string => {
+      const file = path.join(dir, name)
+      writeFileSync(file, `#!/bin/sh\necho ${name} ran\nexit ${code}\n`)
+      chmodSync(file, 0o755)
+      return file
+    }
+    // More than a pipe buffer, so the write fails on every platform.
+    const input = 'y\n'.repeat(512 * 1024)
+    const uncaught: unknown[] = []
+    const record = (error: unknown): void => {
+      uncaught.push(error)
+    }
+    process.on('uncaughtException', record)
+    try {
+      const log: string[] = []
+      await step(
+        script('exits-zero', 0),
+        [],
+        context(dir, log),
+        undefined,
+        input,
+      )
+      await assert.rejects(
+        step(script('exits-three', 3), [], context(dir, log), undefined, input),
+        /exits-three exited with 3/,
+      )
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      assert.deepEqual(uncaught, [])
+      assert.match(log.join(''), /exits-zero ran/)
+      assert.match(log.join(''), /exits-three ran/)
+    } finally {
+      process.off('uncaughtException', record)
+    }
+  })
+
+  it('U8.3-E2 a stdin error other than EPIPE rejects the step with that error', () => {
+    const rejected: Error[] = []
+    const listener = stdinErrorListener((error) => rejected.push(error))
+    listener(Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }))
+    assert.deepEqual(rejected, [])
+    const other = Object.assign(new Error('x'), { code: 'EIO' })
+    listener(other)
+    assert.equal(rejected.length, 1)
+    assert.strictEqual(rejected[0], other)
+  })
+
   it('U8.7 installs CocoaPods with a portable Ruby, compiling with the given Xcode, on macOS only', async () => {
     const dir = root()
     const log: string[] = []
@@ -1204,106 +1254,118 @@ export async function use(ctx: Stage) {
       )
     })
 
-    it('U8.4/U8.7 runs on the node with the Xcode a range needs, and fails when no connected node has one', async () => {
-      const run = await runWith('xcode')
-      assert.equal(
-        run.status,
-        'succeeded',
-        c.master.master!.scheduler.logs(run.id),
-      )
-      assert.equal(use(run).output.node, 'tooled')
-      assert.equal(
-        use(run).output.developerDir,
-        path.join(apps, 'Xcode-26.1.app', 'Contents', 'Developer'),
-      )
-      const none = await runWith('nox')
-      assert.equal(none.status, 'failed')
-      assert.equal(
-        use(none).reason,
-        'No connected macOS node for this stage has or can install an Xcode matching 99',
-      )
-    })
-
-    it('U8.7 installs CocoaPods over the link with the Xcode its request names, or refuses', async () => {
-      const link = c.master.master!.registry.link(c.fingerprint('tooled'))!
-      const answer = (await link.request('tools.install', {
-        tool: 'cocoapods',
-        version: '1.16.2',
-        xcode: '>=26',
-      })) as Json
-      assert.equal(answer.ok, true, answer.error)
-      assert(
-        String(answer.log).includes(
-          `DEVELOPER_DIR=${path.join(apps, 'Xcode-26.1.app', 'Contents', 'Developer')}`,
-        ),
-        answer.log,
-      )
-      assert.deepEqual(answer.inventory.tools.cocoapods, ['1.16.2'])
-      const none = (await link.request('tools.install', {
-        tool: 'cocoapods',
-        version: '1.15.2',
-        xcode: '99',
-      })) as Json
-      assert.equal(none.ok, false)
-      assert.equal(
-        none.error,
-        "No installed Xcode matches 99, which CocoaPods' native gems compile with",
-      )
-    })
-
-    it('U8.7 a CocoaPods stage waits while no connected Mac matches, then runs on a Mac', async () => {
-      const db = c.master.master!.database.db
-      const nodes = [c.fingerprint('tooled'), c.fingerprint('bare')]
-      // The scheduler reads each worker's stored inventory on every pass.
-      const reportAs = (os: string): void => {
-        for (const fingerprint of nodes)
-          db.prepare(
-            "UPDATE worker_inventory SET inventory=json_set(inventory,'$.os',?) WHERE fingerprint=?",
-          ).run(os, fingerprint)
-      }
-      reportAs('linux')
-      let id: string
-      try {
-        const created = await c.api('POST', '/api/v2/runs', {
-          project: 'tools',
-          params: { want: 'pods' },
-        })
-        assert.equal(created.status, 202, created.text)
-        id = created.json.id as string
-        await c.until(
-          () =>
-            (c.master.master!.run(id) as Json).stages.some(
-              (stage: Json) => stage.name === 'use',
-            ) || undefined,
-          30000,
-          'the pods stage queued',
-        )
-        await new Promise((resolve) => setTimeout(resolve, 1500))
-        const waiting = c.master.master!.run(id) as Json
+    // Darwin only: the fixture worker reports this computer's OS, and must be a Mac.
+    ;(process.platform === 'darwin' ? it : it.skip)(
+      'U8.4/U8.7 runs on the node with the Xcode a range needs, and fails when no connected node has one',
+      async () => {
+        const run = await runWith('xcode')
         assert.equal(
-          use(waiting).status,
-          'queued',
-          JSON.stringify(waiting.stages),
+          run.status,
+          'succeeded',
+          c.master.master!.scheduler.logs(run.id),
         )
-      } finally {
-        reportAs('macos')
-      }
-      const done = await c.until(
-        () => {
-          const run = c.master.master!.run(id) as Json
-          return ['succeeded', 'failed', 'cancelled'].includes(run.status)
-            ? run
-            : undefined
-        },
-        60000,
-        'the pods run',
-      )
-      assert.equal(
-        done.status,
-        'succeeded',
-        c.master.master!.scheduler.logs(done.id),
-      )
-    })
+        assert.equal(use(run).output.node, 'tooled')
+        assert.equal(
+          use(run).output.developerDir,
+          path.join(apps, 'Xcode-26.1.app', 'Contents', 'Developer'),
+        )
+        const none = await runWith('nox')
+        assert.equal(none.status, 'failed')
+        assert.equal(
+          use(none).reason,
+          'No connected macOS node for this stage has or can install an Xcode matching 99',
+        )
+      },
+    )
+
+    // Darwin only: the fixture worker reports this computer's OS, and must be a Mac.
+    ;(process.platform === 'darwin' ? it : it.skip)(
+      'U8.7 installs CocoaPods over the link with the Xcode its request names, or refuses',
+      async () => {
+        const link = c.master.master!.registry.link(c.fingerprint('tooled'))!
+        const answer = (await link.request('tools.install', {
+          tool: 'cocoapods',
+          version: '1.16.2',
+          xcode: '>=26',
+        })) as Json
+        assert.equal(answer.ok, true, answer.error)
+        assert(
+          String(answer.log).includes(
+            `DEVELOPER_DIR=${path.join(apps, 'Xcode-26.1.app', 'Contents', 'Developer')}`,
+          ),
+          answer.log,
+        )
+        assert.deepEqual(answer.inventory.tools.cocoapods, ['1.16.2'])
+        const none = (await link.request('tools.install', {
+          tool: 'cocoapods',
+          version: '1.15.2',
+          xcode: '99',
+        })) as Json
+        assert.equal(none.ok, false)
+        assert.equal(
+          none.error,
+          "No installed Xcode matches 99, which CocoaPods' native gems compile with",
+        )
+      },
+    )
+
+    // Darwin only: the fixture worker reports this computer's OS, and must be a Mac.
+    ;(process.platform === 'darwin' ? it : it.skip)(
+      'U8.7 a CocoaPods stage waits while no connected Mac matches, then runs on a Mac',
+      async () => {
+        const db = c.master.master!.database.db
+        const nodes = [c.fingerprint('tooled'), c.fingerprint('bare')]
+        // The scheduler reads each worker's stored inventory on every pass.
+        const reportAs = (os: string): void => {
+          for (const fingerprint of nodes)
+            db.prepare(
+              "UPDATE worker_inventory SET inventory=json_set(inventory,'$.os',?) WHERE fingerprint=?",
+            ).run(os, fingerprint)
+        }
+        reportAs('linux')
+        let id: string
+        try {
+          const created = await c.api('POST', '/api/v2/runs', {
+            project: 'tools',
+            params: { want: 'pods' },
+          })
+          assert.equal(created.status, 202, created.text)
+          id = created.json.id as string
+          await c.until(
+            () =>
+              (c.master.master!.run(id) as Json).stages.some(
+                (stage: Json) => stage.name === 'use',
+              ) || undefined,
+            30000,
+            'the pods stage queued',
+          )
+          await new Promise((resolve) => setTimeout(resolve, 1500))
+          const waiting = c.master.master!.run(id) as Json
+          assert.equal(
+            use(waiting).status,
+            'queued',
+            JSON.stringify(waiting.stages),
+          )
+        } finally {
+          reportAs('macos')
+        }
+        const done = await c.until(
+          () => {
+            const run = c.master.master!.run(id) as Json
+            return ['succeeded', 'failed', 'cancelled'].includes(run.status)
+              ? run
+              : undefined
+          },
+          60000,
+          'the pods run',
+        )
+        assert.equal(
+          done.status,
+          'succeeded',
+          c.master.master!.scheduler.logs(done.id),
+        )
+      },
+    )
 
     it('U8.6 refuses an install outside the closed set over the link', async () => {
       const link = c.master.master!.registry.link(c.fingerprint('bare'))!

@@ -166,10 +166,17 @@ describe('Your account', () => {
       [...group.querySelectorAll('button[aria-pressed="true"]')].map(text)
     assert.deepEqual(pressed(), ['Dark'])
     fireEvent.click(within(group).getByRole('button', { name: 'Light' }))
+    // The store's change re-renders the group; on a loaded Linux runner
+    // that can land after the click returns, so wait for it.
+    await until(() => pressed().join() === 'Light', 'Light pressed')
     assert.deepEqual(pressed(), ['Light'])
     assert.equal(localStorage.getItem(APPEARANCE_KEY), 'light')
     assert.equal(document.documentElement.dataset.theme, 'light')
     fireEvent.click(within(group).getByRole('button', { name: 'Match system' }))
+    await until(
+      () => pressed().join() === 'Match system',
+      'Match system pressed',
+    )
     assert.equal(localStorage.getItem(APPEARANCE_KEY), 'system')
     screen.getByText('Dark is Mason’s default. Saved in this browser.')
   })

@@ -12,6 +12,7 @@ import {
   readdirSync,
   readlinkSync,
   realpathSync,
+  rmSync,
   statSync,
   symlinkSync,
   utimesSync,
@@ -75,6 +76,24 @@ const repo = fileURLToPath(new URL('../..', import.meta.url))
 const root = (): string =>
   mkdtempSync(path.join(realpathSync(process.env.MASON_TEST_ROOT!), 'release-'))
 const here = releasePlatform()
+/**
+ * A directory for a helper socket, removed when the tests exit. A Unix
+ * socket path has 104 bytes on macOS and Node refuses a longer one, while a
+ * fixture directory under macOS's per-user temporary directory takes 92 of
+ * them; one under /tmp leaves room.
+ */
+const socketDir = (): string => {
+  const dir = mkdtempSync('/tmp/mason-helper-')
+  process.once('exit', () => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+  return dir
+}
+/**
+ * The fixture releases' platforms, sorted as the store lists them: this
+ * platform and linux-x64, once each, so a linux-x64 host builds one tarball.
+ */
+const fixturePlatforms = [...new Set([here, 'linux-x64'])].sort()
 /** Runs a command without blocking this process, whose servers it talks to. */
 async function run(
   command: string,
@@ -316,7 +335,7 @@ describe('Releases, install.sh and updates', function () {
         repo,
         version,
         out,
-        platforms: [here as never, 'linux-x64'],
+        platforms: fixturePlatforms as never[],
         nodeVersion: '24.22.0',
         nodeSource: distBase,
         modules: path.join(repo, 'node_modules'),
@@ -1069,16 +1088,19 @@ describe('Releases, install.sh and updates', function () {
     assert.deepEqual(store.list(), [
       {
         version: '1.99.1',
-        platforms: [here, 'linux-x64'].sort(),
+        platforms: fixturePlatforms,
         current: true,
       },
     ])
     const bad = path.join(dir, 'bad')
     mkdirSync(bad)
+    // Every file but this platform's tarball, which is then missing.
     for (const name of [
       'SHA256SUMS',
       'install.sh',
-      tarballName('1.99.2', 'linux-x64'),
+      ...fixturePlatforms
+        .filter((platform) => platform !== here)
+        .map((platform) => tarballName('1.99.2', platform as never)),
     ])
       writeFileSync(
         path.join(bad, name),
@@ -1525,7 +1547,7 @@ describe('Releases, install.sh and updates', function () {
 
     it('U9.2 answers only on an owner-only socket', async () => {
       const dir = root()
-      const socket = path.join(dir, 'run', 'helper.sock')
+      const socket = path.join(socketDir(), 'run', 'helper.sock')
       const server = await serveHelper(socket, context(dir))
       try {
         assert.equal(lstatSync(socket).mode & 0o777, 0o600)
@@ -1575,7 +1597,7 @@ describe('Releases, install.sh and updates', function () {
         if (command === 'pmset') await gate
         return await run(command, args, options)
       }
-      const socket = path.join(dir, 'run', 'helper.sock')
+      const socket = path.join(socketDir(), 'run', 'helper.sock')
       const server = await serveHelper(socket, ctx)
       try {
         await helperRequest(socket, 'key.set', {
@@ -2090,7 +2112,7 @@ describe('Releases, install.sh and updates', function () {
 
       // Unreadable and oversized requests end the connection; a silent helper times out.
       const dir = root()
-      const socket = path.join(dir, 'helper.sock')
+      const socket = path.join(socketDir(), 'helper.sock')
       const server = await serveHelper(socket, mac)
       try {
         const reply = await new Promise<string>((resolve) => {
@@ -2205,8 +2227,8 @@ describe('Releases, install.sh and updates', function () {
           'Stored release 1.99.2',
           'Current release: 1.99.1',
           'Current release: 1.99.1',
-          `* 1.99.1  ${[here, 'linux-x64'].sort().join(' ')}`,
-          `  1.99.2  ${[here, 'linux-x64'].sort().join(' ')}`,
+          `* 1.99.1  ${fixturePlatforms.join(' ')}`,
+          `  1.99.2  ${fixturePlatforms.join(' ')}`,
         ])
         assert.equal(JSON.parse(cli.lines[7]!).length, 2)
         assert.match(cli.errors.join('\n'), /Usage:/)

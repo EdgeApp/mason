@@ -1602,98 +1602,105 @@ describe('Host cache, sign-in and offline serving', function () {
     assert(!existsSync(path.join(host.dir, 'storage', 'releases')))
   })
 
-  it('U10.14 mirrors the first Xcode a node downloads on the host, and nodes install it from there once Apple’s session lapses', async () => {
-    const master = c.master.master!
-    await master.settings.set(admin, 'nodeTypes', {
-      'mac-xcode': { software: { xcode: ['26.1'] } },
-    })
-    assert.equal(
-      (
-        await master.appleSignIn(
-          admin,
-          'builds@example.com',
-          'Apple-Password-9',
-        )
-      ).state,
-      'needsCode',
-    )
-    assert.equal((await master.appleCode(admin, apple.code)).state, 'signedIn')
-    await c.until(
-      () => existsSync(path.join(mac.applications, 'Xcode-26.1.app')),
-      20000,
-      'Xcode from Apple',
-    )
-    await c.until(
-      () => existsSync(runtime().xcodeFile('26.1')),
-      10000,
-      'the mirror on the host',
-    )
-    assert.equal(
-      readFileSync(runtime().xcodeFile('26.1'), 'utf8'),
-      'xcode:26.1:17B55',
-    )
-    assert.equal(apple.downloadCookies.length, 1)
-    // Apple's session lapses; a new node gets the version from the host with the master's grant.
-    apple.expire()
-    await master.apple.check()
-    assert.notEqual(master.apple.status().state, 'signedIn')
-    const authorization = master.hosts.mirrorAuthorization('26.1')!
-    assert(authorization.pin != null)
-    assert.match(authorization.url, /\/xcode\/Xcode-26\.1\.xip\?grant=/)
-    const direct = await pinnedFetch(authorization.url, {}, authorization.pin)
-    assert.equal(await direct.text(), 'xcode:26.1:17B55')
-    assert.equal(
-      (
-        await pinnedFetch(
-          authorization.url.replace(/grant=.*/, 'grant=forged.sig'),
-          {},
-          authorization.pin,
-        )
-      ).status,
-      403,
-    )
-    assert.equal(
-      (
-        await pinnedFetch(
-          authorization.url.replace('26.1.xip', '26.2.xip'),
-          {},
-          authorization.pin,
-        )
-      ).status,
-      403,
-    )
-    const spare = root()
-    const second = new FakeMac(path.join(spare, 'mac2'))
-    writeFileSync(path.join(spare, 'mac2-helper.sock'), '')
-    fakeXcode(path.join(second.applications, 'Xcode.app'), '26.0.1', '17A400')
-    await c.startWorker({
-      name: 'mac2',
-      type: 'mac-xcode',
-      workerOptions: {
-        applications: second.applications,
-        systemRun: second.run,
-        helper: second.helper,
-        helperSocket: path.join(spare, 'mac2-helper.sock'),
-      },
-    })
-    await c.until(
-      () => existsSync(path.join(second.applications, 'Xcode-26.1.app')),
-      20000,
-      'Xcode from the mirror',
-    )
-    assert.equal(
-      apple.downloadCookies.length,
-      1,
-      'the second node never went to Apple',
-    )
-    // An expired grant is refused.
-    runtime().advanceClock(2 * 3_600_000)
-    assert.equal(
-      (await pinnedFetch(authorization.url, {}, authorization.pin)).status,
-      403,
-    )
-    runtime().resetClock()
-  })
+  // Darwin only: the fixture worker reports this computer's OS, and must be a Mac.
+  ;(process.platform === 'darwin' ? it : it.skip)(
+    'U10.14 mirrors the first Xcode a node downloads on the host, and nodes install it from there once Apple’s session lapses',
+    async () => {
+      const master = c.master.master!
+      await master.settings.set(admin, 'nodeTypes', {
+        'mac-xcode': { software: { xcode: ['26.1'] } },
+      })
+      assert.equal(
+        (
+          await master.appleSignIn(
+            admin,
+            'builds@example.com',
+            'Apple-Password-9',
+          )
+        ).state,
+        'needsCode',
+      )
+      assert.equal(
+        (await master.appleCode(admin, apple.code)).state,
+        'signedIn',
+      )
+      await c.until(
+        () => existsSync(path.join(mac.applications, 'Xcode-26.1.app')),
+        20000,
+        'Xcode from Apple',
+      )
+      await c.until(
+        () => existsSync(runtime().xcodeFile('26.1')),
+        10000,
+        'the mirror on the host',
+      )
+      assert.equal(
+        readFileSync(runtime().xcodeFile('26.1'), 'utf8'),
+        'xcode:26.1:17B55',
+      )
+      assert.equal(apple.downloadCookies.length, 1)
+      // Apple's session lapses; a new node gets the version from the host with the master's grant.
+      apple.expire()
+      await master.apple.check()
+      assert.notEqual(master.apple.status().state, 'signedIn')
+      const authorization = master.hosts.mirrorAuthorization('26.1')!
+      assert(authorization.pin != null)
+      assert.match(authorization.url, /\/xcode\/Xcode-26\.1\.xip\?grant=/)
+      const direct = await pinnedFetch(authorization.url, {}, authorization.pin)
+      assert.equal(await direct.text(), 'xcode:26.1:17B55')
+      assert.equal(
+        (
+          await pinnedFetch(
+            authorization.url.replace(/grant=.*/, 'grant=forged.sig'),
+            {},
+            authorization.pin,
+          )
+        ).status,
+        403,
+      )
+      assert.equal(
+        (
+          await pinnedFetch(
+            authorization.url.replace('26.1.xip', '26.2.xip'),
+            {},
+            authorization.pin,
+          )
+        ).status,
+        403,
+      )
+      const spare = root()
+      const second = new FakeMac(path.join(spare, 'mac2'))
+      writeFileSync(path.join(spare, 'mac2-helper.sock'), '')
+      fakeXcode(path.join(second.applications, 'Xcode.app'), '26.0.1', '17A400')
+      await c.startWorker({
+        name: 'mac2',
+        type: 'mac-xcode',
+        workerOptions: {
+          applications: second.applications,
+          systemRun: second.run,
+          helper: second.helper,
+          helperSocket: path.join(spare, 'mac2-helper.sock'),
+        },
+      })
+      await c.until(
+        () => existsSync(path.join(second.applications, 'Xcode-26.1.app')),
+        20000,
+        'Xcode from the mirror',
+      )
+      assert.equal(
+        apple.downloadCookies.length,
+        1,
+        'the second node never went to Apple',
+      )
+      // An expired grant is refused.
+      runtime().advanceClock(2 * 3_600_000)
+      assert.equal(
+        (await pinnedFetch(authorization.url, {}, authorization.pin)).status,
+        403,
+      )
+      runtime().resetClock()
+    },
+  )
 
   it('U10.4 answers unavailable pages, missing files and the waiting host plainly', async () => {
     const anonymous = browser()

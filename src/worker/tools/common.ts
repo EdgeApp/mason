@@ -233,6 +233,20 @@ export function readMarker(dir: string): Marker | undefined {
   }
 }
 
+/**
+ * The `error` listener `step()` puts on a child's `stdin`. A child that
+ * exits before reading its input makes the write fail with `EPIPE`, which is
+ * ignored: the step's outcome is the child's exit, through `execFile`'s
+ * callback. Any other `stdin` error rejects the step with that error.
+ */
+export function stdinErrorListener(
+  reject: (error: Error) => void,
+): (error: NodeJS.ErrnoException) => void {
+  return (error) => {
+    if (error.code !== 'EPIPE') reject(error)
+  }
+}
+
 /** Runs an installer step, logging its output. */
 export async function step(
   file: string,
@@ -261,6 +275,7 @@ export async function step(
         else resolve()
       },
     )
+    child.stdin?.on('error', stdinErrorListener(reject))
     if (input != null) child.stdin?.end(input)
     else child.stdin?.end()
   })
