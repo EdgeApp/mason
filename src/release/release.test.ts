@@ -360,6 +360,9 @@ describe('Releases, install.sh and updates', function () {
       'mason-1.99.1/assets/fonts/geist-variable.woff2',
       'mason-1.99.1/package.json',
       'mason-1.99.1/THIRD_PARTY_LICENCES.md',
+      // Apache-2.0: Mason's licence and NOTICE travel with every copy.
+      'mason-1.99.1/LICENSE',
+      'mason-1.99.1/NOTICE',
       'mason-1.99.1/src/devices/apple-roots.pem',
     ])
       assert(list.includes(entry + '\n'), entry)
@@ -409,18 +412,38 @@ describe('Releases, install.sh and updates', function () {
       unpacked,
       'mason-1.99.1/package.json',
       'mason-1.99.1/THIRD_PARTY_LICENCES.md',
+      'mason-1.99.1/LICENSE',
+      'mason-1.99.1/NOTICE',
     ])
-    assert.equal(
-      (
-        JSON.parse(
-          readFileSync(
-            path.join(unpacked, 'mason-1.99.1', 'package.json'),
-            'utf8',
-          ),
-        ) as { masonReleases?: string }
-      ).masonReleases,
-      'EdgeApp/mason',
-    )
+    const released = JSON.parse(
+      readFileSync(path.join(unpacked, 'mason-1.99.1', 'package.json'), 'utf8'),
+    ) as { masonReleases?: string; license?: string }
+    assert.equal(released.masonReleases, 'EdgeApp/mason')
+    // The release declares the checkout's licence.
+    const checkout = JSON.parse(
+      readFileSync(path.join(repo, 'package.json'), 'utf8'),
+    ) as { license?: string }
+    assert.equal(checkout.license, 'Apache-2.0')
+    assert.equal(released.license, checkout.license)
+    // This platform's tarball carries the same LICENSE and NOTICE, byte for
+    // byte, as the linux-x64 one and the checkout.
+    const local = path.join(root(), 'here')
+    mkdirSync(local)
+    execFileSync('tar', [
+      '-xzf',
+      path.join(out, tarballName('1.99.1', here as never)),
+      '-C',
+      local,
+      'mason-1.99.1/LICENSE',
+      'mason-1.99.1/NOTICE',
+    ])
+    for (const name of ['LICENSE', 'NOTICE'])
+      for (const dir of [unpacked, local])
+        assert.deepEqual(
+          readFileSync(path.join(dir, 'mason-1.99.1', name)),
+          readFileSync(path.join(repo, name)),
+          `${name} in ${path.basename(dir)}`,
+        )
     // The notice names the web app's bundled packages, which are not installed.
     const notice = readFileSync(
       path.join(unpacked, 'mason-1.99.1', 'THIRD_PARTY_LICENCES.md'),
@@ -436,6 +459,54 @@ describe('Releases, install.sh and updates', function () {
     assert(!list.includes('node/include/'))
     assert(!/mason-1\.99\.1\/lib\/[^\n]*\.test\.js\n/.test(list))
     assert(!list.includes('mason-1.99.1/lib/test/'))
+  })
+
+  it('U9.1 refuses a checkout without LICENSE or NOTICE before any download', async () => {
+    // nodejs.org in miniature, counting what is asked of it.
+    let requests = 0
+    const counted = await serve(dist, () => {
+      requests++
+      return false
+    })
+    try {
+      for (const missing of ['NOTICE', 'LICENSE']) {
+        const checkout = root()
+        cpSync(path.join(repo, 'lib'), path.join(checkout, 'lib'), {
+          recursive: true,
+        })
+        for (const file of [
+          'package.json',
+          'package-lock.json',
+          'LICENSE',
+          'NOTICE',
+        ])
+          if (file !== missing)
+            cpSync(path.join(repo, file), path.join(checkout, file))
+        await assert.rejects(
+          buildRelease({
+            repo: checkout,
+            version: '1.99.3',
+            out: path.join(checkout, 'out'),
+            platforms: ['linux-x64'],
+            nodeVersion: '24.22.0',
+            nodeSource: counted.base,
+            modules: path.join(repo, 'node_modules'),
+          }),
+          (error: Error) => {
+            assert.match(
+              error.message,
+              /LICENSE and NOTICE must be at the root/,
+            )
+            assert(error.message.endsWith(checkout), error.message)
+            return true
+          },
+          `no ${missing}`,
+        )
+      }
+      assert.equal(requests, 0, 'nothing downloaded')
+    } finally {
+      counted.server.close()
+    }
   })
 
   it('U9.1 builds the darwin-x64 argon2 binary the package does not ship', async () => {

@@ -1,5 +1,13 @@
-Device model identifiers in models.json are adapted from DeviceKit.
+Mason
+Copyright 2026 Airbitz Inc (dba Edge)
+
+This product includes software and data developed by third parties.
+
+--------------------------------------------------------------------------------
+
+Device model identifiers in src/devices/models.ts are adapted from DeviceKit.
 https://github.com/devicekit/DeviceKit
+Licensed under the MIT License:
 
 Copyright (c) 2015 Dennis Weissmann
 
@@ -21,8 +29,12 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
-The Profile Service flow follows Apple documentation and the MIT-licensed Zealot implementation.
+--------------------------------------------------------------------------------
+
+The Profile Service flow follows Apple documentation and the MIT-licensed
+Zealot implementation.
 https://github.com/tryzealot/zealot
+Licensed under the MIT License:
 
 The MIT License (MIT)
 
@@ -45,3 +57,20 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+--------------------------------------------------------------------------------
+
+The web app's fonts in assets/fonts/ are third-party works. Each one's licence
+sits beside it there, and ships with it in every release:
+
+- Geist, Copyright (c) 2023 Vercel, in collaboration with basement.studio.
+  https://github.com/vercel/geist-font
+  SIL Open Font License, Version 1.1: assets/fonts/LICENSE-geist.txt
+
+- JetBrains Mono, Copyright 2020 The JetBrains Mono Project Authors.
+  https://github.com/JetBrains/JetBrainsMono
+  SIL Open Font License, Version 1.1: assets/fonts/LICENSE-jetbrains-mono.txt
+
+- Material Symbols (a subset of Material Symbols Outlined), by Google.
+  https://github.com/google/material-design-icons
+  Apache License, Version 2.0: assets/fonts/LICENSE-material-symbols.txt

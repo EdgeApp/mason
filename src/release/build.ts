@@ -118,8 +118,9 @@ export async function buildArgon2X64(
 /**
  * Builds a release: one self-contained tarball per platform (the official
  * Node.js runtime verified against its SHASUMS256.txt, Mason's `lib/`,
- * production modules with that platform's argon2, licences and the `mason`
- * launcher), `install.sh`, and `SHA256SUMS` over them all.
+ * production modules with that platform's argon2, Mason's LICENSE and NOTICE,
+ * its dependencies' licences and the `mason` launcher), `install.sh`, and
+ * `SHA256SUMS` over them all.
  */
 export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
   if (!semver.test(options.version))
@@ -141,6 +142,11 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
     !existsSync(bundled)
   )
     throw new Error('Build lib/ first (npm run build)')
+  // Apache-2.0 section 4: every redistribution carries the licence and the
+  // NOTICE, and a release is one.
+  const legal = ['LICENSE', 'NOTICE']
+  if (legal.some((name) => !existsSync(path.join(options.repo, name))))
+    throw new Error(`LICENSE and NOTICE must be at the root of ${options.repo}`)
 
   let modules = options.modules
   if (modules == null) {
@@ -252,6 +258,7 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
           version: options.version,
           private: true,
           type: 'module',
+          ...(pkg.license == null ? {} : { license: pkg.license }),
           // Where `mason releases fetch` and updates find later releases.
           ...(pkg.repository == null ? {} : { repository: pkg.repository }),
           ...(pkg.masonReleases == null
@@ -288,6 +295,8 @@ export async function buildRelease(options: ReleaseOptions): Promise<string[]> {
       copyFileSync(built, path.join(prebuilds, platform, 'argon2.node'))
     }
     writeFileSync(path.join(root, 'THIRD_PARTY_LICENCES.md'), notice)
+    for (const name of legal)
+      copyFileSync(path.join(options.repo, name), path.join(root, name))
     writeFileSync(path.join(root, 'mason'), launcher, { mode: 0o755 })
     const tarball = path.join(
       options.out,

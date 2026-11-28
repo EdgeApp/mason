@@ -1,6 +1,7 @@
 {
   "name": "mason-distribution",
   "version": "1.2.2",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/EdgeApp/mason.git"

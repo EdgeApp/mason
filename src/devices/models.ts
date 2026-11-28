@@ -1,4 +1,4 @@
-// Model identifiers adapted from DeviceKit (MIT); see NOTICE.md.
+// Model identifiers adapted from DeviceKit (MIT); see NOTICE at the repository root.
 export const models: Record<string, string> = {
   'iPod5,1': 'iPodTouch5',
   'iPod7,1': 'iPodTouch6',

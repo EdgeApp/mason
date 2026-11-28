@@ -276,7 +276,7 @@ existing behavior.
 Apple's annual device allowance still applies. Removing an account association
 does not disable the device at Apple, recover a device slot, or revoke downloaded
 apps. Use the Apple developer account to manage that separate device lifecycle.
-See `src/devices/NOTICE.md` for Zealot and DeviceKit attribution.
+See `NOTICE` at the repository root for Zealot and DeviceKit attribution.
 
 ## Projects
 
@@ -376,3 +376,8 @@ distribution database stay: `mason migrate|prune|status|accounts --config
 <file>`, `admin-grant`, `admin-revoke`, `rewrite-teamstation-subjects` and
 `devices-inspect --config <file>` (which backfills device metadata from
 retained IPAs).
+
+## Licence
+
+Mason is licensed under the Apache License, Version 2.0: see `LICENSE`. The
+third-party works it includes, and their licences, are listed in `NOTICE`.
