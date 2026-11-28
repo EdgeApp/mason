@@ -1,0 +1,67 @@
+name: CI
+
+# Every push to any branch runs CI. A pull request from a branch of this
+# repository is already checked by that branch's push run, whose checks
+# GitHub shows on the pull request, so pull requests run CI only from a fork.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, lint, format and unit tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      # src/node/terminalPrompt.test.ts drives the terminal prompts through
+      # /usr/bin/expect, which macOS ships and Ubuntu does not.
+      - name: Install expect
+        run: sudo apt-get update && sudo apt-get install -y expect
+      - name: npm ci
+        run: npm ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Typecheck Masonfiles
+        run: npm run typecheck:masonfiles
+      - name: Lint
+        run: npm run lint
+      - name: Prettier check
+        run: npx prettier --no-semi --single-quote --check '**/*.{ts,tsx,js,mjs}'
+      - name: Check doc examples
+        run: npm run check:doc-examples
+      # The compiled suite without the coverage gate: the darwin-only tests
+      # skip here, so the files they cover would fall under 90% per file.
+      - name: Unit tests
+        run: npm run test:lib
+
+  macos:
+    name: Unit tests with coverage on macOS
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+      - name: npm ci
+        run: npm ci
+      # The whole suite, the darwin-only tests included, under the 90%
+      # per-file coverage gate.
+      - name: Unit tests with coverage
+        run: npm run coverage
