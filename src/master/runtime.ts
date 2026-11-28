@@ -739,6 +739,7 @@ export class Master {
               (options.appleEndpoints ?? appleEndpoints).developer,
             )
           : undefined,
+      signedOut: (): string | undefined => this.apple.status().notice,
       teamKey: (team): { keyId: string } | undefined =>
         (
           this.settings.value('apple') as

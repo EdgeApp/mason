@@ -131,11 +131,16 @@ export class FakeApple {
         url.pathname,
       )
     ) {
+      // The headers the website's calls carry, as Apple reads them.
+      const headers = Object.fromEntries(
+        ['content-type', 'x-requested-with'].flatMap((name) => {
+          const value = req.headers[name]
+          return typeof value === 'string' ? [[name, value]] : []
+        }),
+      )
       const response = await this.web.request(`http://apple${req.url}`, {
         method: req.method ?? 'GET',
-        ...(req.headers['content-type'] == null
-          ? {}
-          : { headers: { 'Content-Type': req.headers['content-type'] } }),
+        headers,
         ...(text === '' ? {} : { body: text }),
       })
       return { status: response.status, body: await response.text() }

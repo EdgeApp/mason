@@ -298,6 +298,28 @@ describe('Apple setup from an Apple ID', () => {
     assert.equal(apple.keys.length, 0)
     assert(!apple.calls.includes('POST /olympus/v1/session'))
   })
+  it('U8.18 a switch to another team App Store Connect refuses fails that team’s setup with Apple’s reason; nothing is made', async () => {
+    const { apple, setup, keys } = harness()
+    apple.teams.push({
+      providerId: 2,
+      publicProviderId: 'b2c3d4e5-0000-0000-0000-000000000000',
+      name: 'Other Team',
+      teamId: 'ZYXWV98765',
+    })
+    apple.refuseSwitch = 403
+    await assert.rejects(
+      setup.setup('ZYXWV98765'),
+      (error: unknown) =>
+        error instanceof AppleTeamError &&
+        error.team.id === 'ZYXWV98765' &&
+        error.message ===
+          'App Store Connect refused to switch the session to this team (403: Forbidden: Switching is refused)',
+    )
+    assert.equal(apple.keys.length, 0)
+    assert.equal(keys.size, 0)
+    // The first team, already the session's, needs no switch.
+    assert.equal((await setup.setup('ABCDE12345')).key, 'created')
+  })
 })
 
 describe('Apple setup when the master stops', function () {
@@ -1076,5 +1098,59 @@ describe('Apple setup on a master', function () {
     master.projects.removeApp(admin, 'edge', 'app.example.stranger')
     master.projects.removeApp(admin, 'edge', 'app.example.coin')
     web.teams.pop()
+  })
+
+  it('U8.19 App Store Connect refusing the switch to a team leaves the Apple ID signed in, with a notice for that team, until a setup succeeds', async () => {
+    const master = c.master.master!
+    await master.settings.set(admin, 'apple', {
+      teams: { ABCDE12345: { ...connectKey, name: 'Example Team' } },
+    })
+    master.appleSigning.setupSucceeded('ZYXWV98765')
+    web.current = 1
+    web.refuseSwitch = 401
+    const from = web.calls.length
+    await signInTrusted()
+    await settled(from)
+    await c.until(
+      () => signingNotices().some((notice) => notice.includes('ZYXWV98765')),
+      20_000,
+      'the team’s notice',
+    )
+    assert.equal(master.apple.status().state, 'signedIn')
+    assert.deepEqual(signingNotices(), [
+      'Signing for Other Team (ZYXWV98765) is not set up: App Store Connect refused to switch the session to this team (401: Forbidden: Switching is refused)',
+    ])
+    const page = await settingsPage()
+    assert.equal(page.signedIn, true)
+    assert.match(page.failures.ZYXWV98765, /refused to switch/)
+    // Once Apple switches, the team's button sets it up and the notice goes.
+    web.refuseSwitch = undefined
+    const fresh = { ...fakeConnectKey(), keyId: 'FRESHKEY12' }
+    connect.teamKeys.push({ team: 'ZYXWV98765', key: fresh })
+    web.nextKeys.length = 0
+    web.nextKeys.push({ keyId: fresh.keyId, privateKey: fresh.privateKey })
+    const made = await c.api('POST', '/api/v2/apple/setup', {
+      team: 'ZYXWV98765',
+    })
+    assert.equal(made.status, 200, made.text)
+    assert.deepEqual(signingNotices(), [])
+  })
+
+  it('U8.20 a team set up once the session has lapsed says the session lapsed', async () => {
+    const master = c.master.master!
+    web.refuse = 401
+    await assert.rejects(master.appleSetup.teams(), /The Apple session ended/)
+    web.refuse = undefined
+    assert.equal(master.apple.status().state, 'expired')
+    const refused = await c.api('POST', '/api/v2/apple/setup', {
+      team: 'ZYXWV98765',
+    })
+    assert.equal(refused.status, 400)
+    assert.match(
+      refused.text,
+      new RegExp(
+        `The Apple ID session for ${appleId} has lapsed: sign in again`,
+      ),
+    )
   })
 })

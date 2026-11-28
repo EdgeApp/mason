@@ -45,7 +45,13 @@ export interface AppleWeb {
 /** A request with the master's Apple session; the website's own JSON API. */
 export type AppleRequest = (
   url: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: unknown },
+  init?: {
+    method?: string
+    headers?: Record<string, string>
+    body?: unknown
+    /** A 401 refuses this call only, and leaves the session signed in. */
+    keepSession?: boolean
+  },
 ) => Promise<Response>
 
 export class AppleWebError extends Error {}
@@ -71,6 +77,24 @@ export interface OlympusProvider {
   /** The provider's public id, which is its App Store Connect API issuer ID. */
   publicProviderId?: string
   name: string
+}
+
+/** Apple's own words for a refusal, when its answer carries them. */
+function appleReason(text: string): string {
+  try {
+    const body = JSON.parse(text) as {
+      errors?: Array<{ title?: string; detail?: string }>
+      serviceErrors?: Array<{ message?: string }>
+    }
+    const first = body.errors?.[0]
+    const words =
+      first != null
+        ? [first.title, first.detail].filter(Boolean).join(': ')
+        : (body.serviceErrors?.[0]?.message ?? '')
+    return words === '' ? '' : `: ${words.slice(0, 300)}`
+  } catch {
+    return ''
+  }
 }
 
 /**
@@ -135,12 +159,35 @@ export class AppStoreConnectWeb implements AppleWeb {
     return matchTeams(providers, developer.teams ?? [])
   }
 
+  /**
+   * Switches the session's current team, as App Store Connect's own page
+   * does. A refused switch fails this team's setup and leaves the session
+   * signed in: the session read just before it answered.
+   */
   async selectTeam(providerId: number): Promise<void> {
     if ((await this.session()).provider?.providerId === providerId) return
-    await this.json('/olympus/v1/session', {
+    const response = await this.request(`${this.base}/olympus/v1/session`, {
       method: 'POST',
+      headers: {
+        Accept: 'application/json, text/plain, */*',
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'olympus-ui',
+        'X-Csrf-Itc': 'itc',
+        Origin: this.base,
+        Referer: `${this.base}/`,
+      },
       body: { provider: { providerId } },
+      keepSession: true,
     })
+    const text = await response.text()
+    if (!response.ok)
+      throw new AppleWebError(
+        `App Store Connect refused to switch the session to this team (${response.status}${appleReason(text)})`,
+      )
+    if ((await this.session()).provider?.providerId !== providerId)
+      throw new AppleWebError(
+        'App Store Connect did not switch the session to this team',
+      )
   }
 
   async issuerId(): Promise<string> {
@@ -317,6 +364,8 @@ export interface SetupResult {
 export interface AppleSetupOptions {
   /** The website, while the master is signed in to Apple. */
   web: () => AppleWeb | undefined
+  /** Why it is not, as the Apple session says (its sign-in lapsed, say). */
+  signedOut?: () => string | undefined
   /** The `apple` settings' team keys. */
   teamKey: (team: string) => { keyId: string } | undefined
   saveTeamKey: (
@@ -343,7 +392,10 @@ export class AppleSetup {
 
   private web(): AppleWeb {
     const web = this.options.web()
-    if (web == null) throw new AppleWebError('Sign in with the Apple ID first')
+    if (web == null)
+      throw new AppleWebError(
+        this.options.signedOut?.() ?? 'Sign in with the Apple ID first',
+      )
     return web
   }
 

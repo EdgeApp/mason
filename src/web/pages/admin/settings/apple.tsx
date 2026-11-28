@@ -6,7 +6,13 @@
 // with Apple's notice, and each team's signing: being set up, failed, not
 // set up (Set up) or set up with its key and certificate, and Check signing
 // again for a chosen team. Forms need apple.change.
-import { useState, type FormEvent, type JSX, type ReactNode } from 'react'
+import {
+  useEffect,
+  useState,
+  type FormEvent,
+  type JSX,
+  type ReactNode,
+} from 'react'
 import {
   APPLE_SIGNING_PATH,
   asAppleSigning,
@@ -337,7 +343,7 @@ function Signing({
   const [team, setTeam] = useState(setup?.teams[0]?.id ?? '')
   if (setup == null) return null
   const check = async (id: string): Promise<void> => {
-    const ok = await actions.run(`setup-${id}`, async () => {
+    await actions.run(`setup-${id}`, async () => {
       const answer = await client.post(APPLE_SETUP_PATH, asAppleSetupResult, {
         body: { team: id },
       })
@@ -346,7 +352,8 @@ function Signing({
         icon: 'check_circle',
       })
     })
-    if (ok) done()
+    // A failed check may have ended the session or left a notice: read it again either way.
+    done()
   }
   const configured = new Map(setup.configured.map((entry) => [entry.id, entry]))
   // The Apple ID's teams, then any set up before that it no longer lists.
@@ -556,6 +563,16 @@ function AppleBody({
 export function AppleCard({ change }: { change: boolean }): JSX.Element {
   const read = useResource(APPLE_SIGNING_PATH, asAppleSigning)
   const data = read.data
+  // While a team is being set up, its outcome (or the session ending) shows within seconds.
+  const settingUp = (data?.settingUp.length ?? 0) > 0
+  const { reload } = read
+  useEffect(() => {
+    if (!settingUp) return
+    const timer = setInterval(reload, 3000)
+    return (): void => {
+      clearInterval(timer)
+    }
+  }, [settingUp, reload])
   return (
     <SettingsCard
       id="apple-session"
