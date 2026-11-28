@@ -81,29 +81,56 @@ export async function terminalPrompt(
   hidden: boolean,
 ): Promise<string> {
   const { createInterface } = await import('node:readline')
-  const { openSync, createReadStream, createWriteStream } = await import(
-    'node:fs'
-  )
-  const input = createReadStream('', { fd: openSync('/dev/tty', 'r') })
-  const output = createWriteStream('', { fd: openSync('/dev/tty', 'w') })
+  const { openSync } = await import('node:fs')
+  const { ReadStream, WriteStream } = await import('node:tty')
+  // Terminal streams, not file streams: a file stream's read of the terminal
+  // blocks a worker thread that closing the stream cannot cancel, so it took
+  // the line typed for the next question (the two-factor code after the
+  // password), and that question then read an empty line.
+  const input = new ReadStream(openSync('/dev/tty', 'r'))
+  const output = new WriteStream(openSync('/dev/tty', 'w'))
   const rl = createInterface({ input, output, terminal: true })
-  if (hidden)
-    (
-      rl as unknown as { _writeToOutput: (text: string) => void }
-    )._writeToOutput = (text: string): void => {
-      if (text.startsWith(question)) output.write(question)
-    }
+  // A hidden answer: once the question is on the terminal, nothing readline
+  // writes reaches it, neither the characters typed nor the cursor moves of
+  // Backspace and the arrow keys, which would show how many there are.
+  let muted = false
+  if (hidden) {
+    const write = output.write.bind(output) as (...args: unknown[]) => boolean
+    output.write = ((...args: unknown[]): boolean =>
+      muted || write(...args)) as typeof output.write
+  }
+  const say = (text: string): void => {
+    muted = false
+    output.write(text)
+  }
+  // A terminal stream puts the terminal in raw mode, so Ctrl-C reaches
+  // readline as a key, not as SIGINT: it is sent to the process again once
+  // the terminal is back in cooked mode, and Ctrl-D ends the prompt unanswered.
+  // Either way the next output starts on a line of its own.
+  let interrupted = false
+  let answered = false
   try {
-    return await new Promise((resolve) => {
+    return await new Promise((resolve, reject) => {
+      rl.on('SIGINT', () => {
+        interrupted = true
+        rl.close()
+      })
+      rl.on('close', () => {
+        if (!answered) say('\n')
+        reject(new Error('No answer was typed'))
+      })
       rl.question(question, (answer) => {
-        if (hidden) output.write('\n')
+        answered = true
+        if (hidden) say('\n')
         resolve(answer.trim())
       })
+      muted = hidden
     })
   } finally {
     rl.close()
     input.destroy()
-    output.end()
+    output.destroy()
+    if (interrupted) process.kill(process.pid, 'SIGINT')
   }
 }
 

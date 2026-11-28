@@ -9,7 +9,17 @@ import { generateKeyPairSync, randomBytes } from 'node:crypto'
  * request function, as the master's Apple session gives one.
  */
 export class FakeAppleWebSession {
-  teams = [
+  teams: Array<{
+    providerId: number
+    publicProviderId: string
+    /** The name App Store Connect gives the team. */
+    name: string
+    teamId: string
+    /** The name the developer site gives it, when not the same. */
+    developerName?: string
+    /** False for a team App Store Connect does not list to this Apple ID. */
+    inConnect?: boolean
+  }> = [
     {
       providerId: 1,
       publicProviderId: 'a1b2c3d4-0000-0000-0000-000000000000',
@@ -26,6 +36,12 @@ export class FakeAppleWebSession {
     downloaded: boolean
     privateKey?: string
   }> = []
+  /** Answer this status to a switch of the session's team. */
+  refuseSwitch: number | undefined
+  /** With `refuseSwitch`, Apple's reason in the answer. */
+  switchReason: string | undefined
+  /** With `refuseSwitch`, the session ends with the switch. */
+  endOnSwitch = false
   /** Answer this status to every call, as Apple does for a role without access. */
   refuse: number | undefined
   /** With `refuse`, only to the calls to these paths. */
@@ -93,19 +109,38 @@ export class FakeAppleWebSession {
     if (route === 'GET /olympus/v1/session')
       return json(200, {
         ...(current == null ? {} : { provider: provider(current) }),
-        availableProviders: this.teams.map(provider),
+        availableProviders: this.teams
+          .filter((team) => team.inConnect !== false)
+          .map(provider),
       })
     if (route === 'POST /services-account/QH65B2/account/listTeams.action')
       return json(200, {
         resultCode: 0,
         teams: this.teams.map((team) => ({
           teamId: team.teamId,
-          name: team.name,
+          name: team.developerName ?? team.name,
           type: 'Company/Organization',
           status: 'active',
         })),
       })
     if (route === 'POST /olympus/v1/session') {
+      // The website's own switch says where it comes from; another is refused.
+      const header = (name: string): string | undefined =>
+        Object.entries(init.headers ?? {}).find(
+          ([key]) => key.toLowerCase() === name,
+        )?.[1]
+      if (header('x-requested-with') !== 'olympus-ui')
+        return json(401, { errors: [{ title: 'Unauthorized' }] })
+      if (this.refuseSwitch != null) {
+        // A switch refused because the session ended: every call after it is refused too.
+        if (this.endOnSwitch) this.refuse = this.refuseSwitch
+        return json(
+          this.refuseSwitch,
+          this.switchReason == null
+            ? {}
+            : { errors: [{ title: 'Forbidden', detail: this.switchReason }] },
+        )
+      }
       const id = (body as { provider?: { providerId?: number } } | undefined)
         ?.provider?.providerId
       if (!this.teams.some((team) => team.providerId === id))

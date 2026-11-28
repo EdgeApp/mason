@@ -71,7 +71,8 @@ export interface AppleSigning {
   /** With the Apple ID signed in: its teams, or why they could not be read. */
   setup?: {
     keyName: string
-    teams: Array<{ id: string; name: string }>
+    /** `connect` false: App Store Connect does not list the team to the Apple ID. */
+    teams: Array<{ id: string; name: string; connect?: boolean }>
     /** Teams with a stored key: the key, and the distribution certificate held. */
     configured: Array<{
       id: string
@@ -148,7 +149,13 @@ export const asAppleSigning = asObject<AppleSigning>({
   setup: asOptional(
     asObject({
       keyName: asString,
-      teams: asArray(asObject({ id: asString, name: asString })),
+      teams: asArray(
+        asObject({
+          id: asString,
+          name: asString,
+          connect: asOptional(asBoolean),
+        }),
+      ),
       configured: asArray(
         asObject({
           id: asString,

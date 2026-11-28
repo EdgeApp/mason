@@ -1,3 +1,4 @@
+import type { SetupTeam } from './apple/accountSetup.js'
 import type { NodeRecord } from './nodes.js'
 import { reservedBuildNumber } from './buildNumbers.js'
 import { NotFound, authenticate, actorOf } from './api.js'
@@ -187,34 +188,37 @@ export function masonfileCommits(
 /** Settings → Apple: the Apple ID, its teams and their certificates, failures and teams being set up. */
 export async function appleSigning(master: Master): Promise<AppleSigning> {
   const apple = master.apple.status()
-  const stored = (
-    (master.settings.value('apple') ?? {}) as {
-      teams?: Record<string, { keyId: string; name?: string }>
-    }
-  ).teams
-  const configured = Object.entries(stored ?? {}).map(([id, key]) => {
-    const certificate = master.appleSigning.certificates.current(
-      id,
-      'distribution',
-    )
-    return {
-      id,
-      name: key.name ?? id,
-      keyId: key.keyId,
-      ...(certificate == null
-        ? {}
-        : {
-            certificate: {
-              name: certificate.name,
-              expiresAt: certificate.expiresAt,
-            },
-          }),
-    }
-  })
+  const configured = Object.entries(master.storedAppleTeams()).map(
+    ([id, key]) => {
+      const certificate = master.appleSigning.certificates.current(
+        id,
+        'distribution',
+      )
+      return {
+        id,
+        name: key.name ?? id,
+        keyId: key.keyId,
+        ...(certificate == null
+          ? {}
+          : {
+              certificate: {
+                name: certificate.name,
+                expiresAt: certificate.expiresAt,
+              },
+            }),
+      }
+    },
+  )
+  // While a team is set up, the page reads again every few seconds: the
+  // teams as read within 15 s serve it, so Apple's queue is the setup's.
+  const teams = async (): Promise<SetupTeam[]> =>
+    master.appleTeamsInSetup().length > 0
+      ? await master.appleSetup.recentTeams(15_000)
+      : await master.appleSetup.teams()
   const setup =
     apple.state !== 'signedIn'
       ? undefined
-      : await master.appleSetup.teams().then(
+      : await teams().then(
           (teams) => ({
             keyName: master.appleSetup.keyName,
             teams,

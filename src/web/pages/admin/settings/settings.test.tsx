@@ -291,6 +291,141 @@ describe('Settings → Apple ID', () => {
     assert.deepEqual(code.bodies[2], { code: '123456' })
   })
 
+  it('needs a code: Send a new code asks the master for another, and Sign in again opens the form', async () => {
+    const resend = recorder((_body, n) =>
+      n === 1
+        ? {
+            status: 400,
+            body: {
+              error: 'No Apple ID and password are stored: sign in with them',
+            },
+          }
+        : {
+            status: 200,
+            body: { state: 'needsCode', appleId: 'ada@example.test' },
+          },
+    )
+    const app = openSettings({
+      [SIGNING]: signedOut({ needsCode: true, appleId: 'ada@example.test' }),
+      'POST /api/v2/apple/session/resend': resend.reply,
+    })
+    const apple = await card('Apple ID for Xcode downloads')
+    await within(apple).findByText(/Apple sent a six-digit code/)
+    within(apple).getByText(/A code lasts about ten minutes/)
+    // One primary per form: the code's; a new code is secondary, signing in again plain.
+    const again = within(apple).getByRole('button', { name: 'Sign in again' })
+    assert.equal(again.getAttribute('aria-expanded'), 'false')
+    const newCode = within(apple).getByRole('button', {
+      name: 'Send a new code',
+    })
+    assert(newCode.className.includes('m-btn--secondary'), newCode.className)
+    assert(again.className.includes('m-btn--plain'), again.className)
+    fireEvent.click(newCode)
+    await within(apple).findByText(
+      'No Apple ID and password are stored: sign in with them',
+    )
+    // A refusal reads the state again; still waiting for a code, the card keeps the error.
+    await until(
+      () =>
+        app.node.requests.filter((request) => request === `GET ${SIGNING}`)
+          .length === 2,
+      'the state read again after the refusal',
+    )
+    within(apple).getByText(
+      'No Apple ID and password are stored: sign in with them',
+    )
+    // The old code is void once Apple sends another, so its field empties.
+    type('Two-factor code', '111111', apple)
+    fireEvent.click(newCode)
+    await toasted('Apple sent a new code')
+    assert.equal(resend.bodies.length, 2)
+    // The state is read again, and the code field stays for the new code.
+    await until(
+      () =>
+        app.node.requests.filter((request) => request === `GET ${SIGNING}`)
+          .length === 3,
+      'the state read again',
+    )
+    assert.equal(
+      (within(apple).getByLabelText('Two-factor code') as HTMLInputElement)
+        .value,
+      '',
+    )
+    fireEvent.click(
+      within(apple).getByRole('button', { name: 'Sign in again' }),
+    )
+    assert.equal(
+      within(apple)
+        .getByRole('button', { name: 'Sign in again' })
+        .getAttribute('aria-expanded'),
+      'true',
+    )
+    assert.equal(
+      (within(apple).getByLabelText('Apple ID') as HTMLInputElement).value,
+      'ada@example.test',
+    )
+    within(apple).getByLabelText('Password')
+  })
+
+  it('needs a code: a new code refused because the Apple ID was signed in elsewhere shows it signed in', async () => {
+    const app = openSettings({
+      [SIGNING]: signedOut({ needsCode: true, appleId: 'ada@example.test' }),
+      'POST /api/v2/apple/session/resend': {
+        status: 400,
+        body: {
+          error:
+            'The Apple ID ada@example.test is signed in: no code is needed',
+        },
+      },
+    })
+    const apple = await card('Apple ID for Xcode downloads')
+    await within(apple).findByText(/Apple sent a six-digit code/)
+    // The code was sent from mason apple sign-in, or another page.
+    app.node.set(
+      SIGNING,
+      signedOut({ signedIn: true, appleId: 'ada@example.test' }),
+    )
+    fireEvent.click(
+      within(apple).getByRole('button', { name: 'Send a new code' }),
+    )
+    await within(apple).findByText(/Signed in as/)
+    assert.equal(within(apple).queryByLabelText('Two-factor code'), null)
+    assert.equal(
+      within(apple).queryByRole('button', { name: 'Send a new code' }),
+      null,
+    )
+  })
+
+  it('needs a code: when Apple refuses the new sign-in, the card reads its state again and offers the sign-in form', async () => {
+    const notice =
+      'Apple refused the sign-in for ada@example.test: Wrong password'
+    const app = openSettings({
+      [SIGNING]: signedOut({ needsCode: true, appleId: 'ada@example.test' }),
+      'POST /api/v2/apple/session/resend': {
+        status: 200,
+        body: {
+          state: 'failed',
+          appleId: 'ada@example.test',
+          error: 'Wrong password',
+        },
+      },
+    })
+    const apple = await card('Apple ID for Xcode downloads')
+    await within(apple).findByText(/Apple sent a six-digit code/)
+    // The master saved the refusal and waits for no code any more.
+    app.node.set(SIGNING, signedOut({ appleId: 'ada@example.test', notice }))
+    fireEvent.click(
+      within(apple).getByRole('button', { name: 'Send a new code' }),
+    )
+    await within(apple).findByText(notice)
+    assert.equal(within(apple).queryByLabelText('Two-factor code'), null)
+    assert.equal(
+      (within(apple).getByLabelText('Apple ID') as HTMLInputElement).value,
+      'ada@example.test',
+    )
+    within(apple).getByRole('button', { name: 'Sign in' })
+  })
+
   it('sets a team up, checks signing again for a chosen team, and keeps a refusal in the card', async () => {
     const setup = recorder((body, n) =>
       n === 2
@@ -321,9 +456,62 @@ describe('Settings → Apple ID', () => {
     fireEvent.click(
       within(apple).getByRole('button', { name: 'Check signing again' }),
     )
+    const reads = (): number =>
+      app.node.requests.filter((request) => request === `GET ${SIGNING}`).length
+    const before = reads()
     await within(apple).findByText('Apple allows no more certificates')
     assert.deepEqual(setup.bodies[1], { team: 'ZZZZZ99999' })
     assert.ok(app.node.requests.includes('POST /api/v2/apple/setup'))
+    // A failed check reads the Apple ID again too: it may have ended the session.
+    await until(() => reads() > before, 'the read after the failed check')
+  })
+
+  it('a team App Store Connect does not list says so, with no Set up button, and the check defaults to a listed one', async () => {
+    openSettings({
+      [SIGNING]: signingFixture({
+        setup: {
+          keyName: 'Mason',
+          teams: [
+            { id: 'PORTAL0001', name: 'Portal Only', connect: false },
+            { id: 'G5LQ7MERPK', name: 'Edge Labs', connect: true },
+          ],
+          configured: [],
+        },
+        failures: {},
+        settingUp: [],
+      }),
+    })
+    const apple = await card('Apple ID for Xcode downloads')
+    const row = await within(apple).findByText(
+      /App Store Connect does not list Portal Only \(PORTAL0001\) to this Apple ID: add the Apple ID to the team in App Store Connect’s Users and Access/,
+    )
+    assert.ok(row)
+    assert.equal(
+      within(apple).queryByRole('button', { name: 'Set up Portal Only' }),
+      null,
+    )
+    within(apple).getByRole('button', { name: 'Set up Edge Labs' })
+    assert.equal(
+      (within(apple).getByLabelText('Team') as HTMLSelectElement).value,
+      'G5LQ7MERPK',
+    )
+  })
+
+  it('reads the Apple ID again every few seconds while a team is set up, and stops after', async function () {
+    this.timeout(20_000)
+    const app = openSettings()
+    const apple = await card('Apple ID for Xcode downloads')
+    await within(apple).findByText(/Setting signing up for Side Project/)
+    const reads = (): number =>
+      app.node.requests.filter((request) => request === `GET ${SIGNING}`).length
+    await until(() => reads() >= 2, 'a second read', 5000)
+    app.node.set(SIGNING, signingFixture({ settingUp: [] }))
+    const before = reads()
+    await until(() => reads() > before, 'the read that ends it', 5000)
+    await within(apple).findByText(/Signing is not set up for Side Project/)
+    const after = reads()
+    await new Promise((resolve) => setTimeout(resolve, 3500))
+    assert.equal(reads(), after)
   })
 
   it('says when the Apple ID belongs to no team, or its teams could not be read, or the read failed', async () => {

@@ -23,7 +23,12 @@ import {
 } from '../builder/execution.js'
 import { inside, type StageSnapshot } from './context.js'
 import { NEEDS_DIRECTORY } from './variants.js'
-import { runnerEnvironment, runnerPath } from './setup.js'
+import {
+  RUNNER_EXIT_GRACE_MS,
+  runnerEnvironment,
+  runnerPath,
+  stopLingering,
+} from './setup.js'
 import { StepChannel, type Port, type RequestHandler } from './steps.js'
 
 /**
@@ -138,6 +143,8 @@ export interface StageOptions {
   onStep?: (step: StepRecord) => void
   onDescribe?: (text: string) => void
   inspect?: () => ProcessIdentity[]
+  /** How long the runner has to exit once it reported its result; `RUNNER_EXIT_GRACE_MS` by default. */
+  exitGraceMs?: number
 }
 
 /** One file a stage wrote, and what was at its path before, to put back. */
@@ -397,6 +404,7 @@ export async function runStage(options: StageOptions): Promise<StageResult> {
     | { status: string; value?: Json; reason?: string; error?: string }
     | undefined
   let description: string | undefined
+  let lingering: (() => void) | undefined
   const connect = (child: ChildProcess): void => {
     channel = new StepChannel(child as unknown as Port)
     channel.onNotice((type, data) => {
@@ -413,6 +421,12 @@ export async function runStage(options: StageOptions): Promise<StageResult> {
     channel.handle(async (method, params) => {
       if (method === 'result') {
         result = params as typeof result
+        lingering ??= stopLingering(
+          child,
+          options.exitGraceMs ?? RUNNER_EXIT_GRACE_MS,
+          log,
+          'The stage reported its result, but its runner did not exit; stopping it.\n',
+        )
         return null
       }
       if (method === 'writeSecretFile')
@@ -471,6 +485,7 @@ export async function runStage(options: StageOptions): Promise<StageResult> {
   } finally {
     clearTimeout(timer)
     clearTimeout(activity)
+    lingering?.()
     options.signal?.removeEventListener('abort', cancel)
     channel?.close()
     await (stopping ?? execution.stop())

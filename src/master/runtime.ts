@@ -80,6 +80,7 @@ import { CloudHosts, type CloudHostsOptions } from './cloud/hosts.js'
 import { hostView } from './cloudHostsApi.js'
 import {
   AppleSetup,
+  type SetupTeam,
   AppleTeamError,
   AppStoreConnectWeb,
   type AppleWeb,
@@ -290,6 +291,10 @@ export class Master {
   private appleTeamQueue: Promise<unknown> = Promise.resolve()
   /** Teams whose setup runs or waits its turn, for the Settings page. */
   private readonly appleTeamsSettingUp = new Map<string, number>()
+  /** The Apple ID's teams as last read; none read since the master started, or since the Apple ID changed. */
+  private appleListedTeams: SetupTeam[] | undefined
+  /** The Apple ID the teams were read for. */
+  private appleListedFor: string | undefined
   private compaction: NodeJS.Timeout | undefined
   constructor(
     db: DatabaseSync,
@@ -389,6 +394,13 @@ export class Master {
     )
     this.apple = new AppleDownloads(this.database, {
       keyFile: path.join(dir, 'apple.key'),
+      // Another Apple ID, or none, has other teams: they are not known until read.
+      onChange: (status): void => {
+        if (status.appleId !== this.appleListedFor) {
+          this.appleListedTeams = undefined
+          this.appleListedFor = undefined
+        }
+      },
       ...(options.appleEndpoints == null
         ? {}
         : { endpoints: options.appleEndpoints }),
@@ -436,7 +448,32 @@ export class Master {
     })
     // An app ID with an Apple team gets its bundle IDs and profiles when it is added or changed.
     this.database.listeners.add((entity, key) => {
-      if (entity === 'app') this.setupApple((app) => String(app.id) === key)
+      // An app ID removed, or its project, may leave a team no app ID uses.
+      if (entity === 'project') this.noteMissingAppleTeams()
+      if (entity !== 'app') return
+      this.setupApple((app) => String(app.id) === key)
+      this.noteMissingAppleTeams()
+      // A team no key is stored for yet is set up from the signed-in Apple ID,
+      // then its app IDs; not one the Apple ID's teams, as last read, lack.
+      const team = this.projects
+        .list()
+        .flatMap((project) => project.apps)
+        .find((app) => String(app.id) === key)?.apple?.team
+      // Nor one whose setup failed, or App Store Connect does not list: the
+      // next sign-in and its Set up button try it again.
+      const listed =
+        team == null
+          ? undefined
+          : this.appleListedTeams?.find((entry) => entry.id === team)
+      if (
+        team != null &&
+        this.storedAppleTeams()[team] == null &&
+        (this.appleListedTeams == null || listed?.connect === true) &&
+        this.appleSigning.setupFailures()[team] == null &&
+        !this.appleTeamsSettingUp.has(team) &&
+        this.apple.ready()
+      )
+        this.setupNewAppleTeam(team)
     })
     this.runtimes = new RuntimeStore(path.join(dir, 'runtimes'))
     this.artifacts = new Artifacts({
@@ -521,6 +558,7 @@ export class Master {
       changed: (): void => {
         // A new App Store Connect key checks again the app IDs whose setup was incomplete.
         this.setupApple((app) => this.appleSigning.incomplete(app))
+        this.noteMissingAppleTeams()
       },
     })
     this.settings.register('host', hostArea)
@@ -719,18 +757,12 @@ export class Master {
               (options.appleEndpoints ?? appleEndpoints).developer,
             )
           : undefined,
+      signedOut: (): string | undefined => this.apple.status().notice,
       teamKey: (team): { keyId: string } | undefined =>
-        (
-          this.settings.value('apple') as
-            | { teams?: Record<string, { keyId: string }> }
-            | undefined
-        )?.teams?.[team],
+        this.storedAppleTeams()[team],
       saveTeamKey: async (team, key): Promise<void> => {
-        const stored = (this.settings.value('apple') ?? {}) as {
-          teams?: Record<string, unknown>
-        }
         await this.settings.set(localOperator, 'apple', {
-          teams: { ...stored.teams, [team]: key },
+          teams: { ...this.storedAppleTeams(), [team]: key },
         })
       },
       certificate: (team, kind): CertificateView | undefined =>
@@ -752,6 +784,13 @@ export class Master {
         })
       },
       fingerprint: identity.fingerprint,
+      // Any read of the teams (a sign-in's, a setup's, the Settings page's)
+      // is what the master knows of them, after a restart too.
+      onTeams: (teams): void => {
+        this.appleListedTeams = teams
+        this.appleListedFor = this.apple.status().appleId
+        this.noteMissingAppleTeams()
+      },
     })
     this.cloudHosts = new CloudHosts({
       master: this.database,
@@ -959,18 +998,20 @@ export class Master {
   }
 
   /**
-   * Once the Apple ID is signed in, sets up in the background the teams
-   * this master uses: the Apple ID's only team, or of several those with a
-   * stored key or an app ID assigned (another is set up from Settings →
-   * Apple). Of those, each with no stored key or whose last setup failed;
-   * then the app IDs whose Apple setup was incomplete. The sign-in does not
+   * Once the Apple ID is signed in, or an app ID is given a team no key is
+   * stored for, sets up in the background the teams this master uses: the
+   * Apple ID's only team, or of several those with a stored key or an app
+   * ID assigned (another is set up from Settings → Apple). Of those, each
+   * with no stored key or whose last setup failed; then the app IDs whose
+   * Apple setup was incomplete. A team an app ID is assigned that the Apple
+   * ID is not in, with no stored key, is a notice. The sign-in does not
    * wait; stop() does.
    */
-  private setupAppleTeams(actor: Actor): void {
+  private async setupAppleTeams(actor: Actor): Promise<void> {
     if (this.stopped) return
     const log = this.options.log ?? console.log
     const run: Promise<void> = (async (): Promise<void> => {
-      let teams: Array<{ id: string; name: string }>
+      let teams: SetupTeam[]
       try {
         teams = await this.appleSetup.teams()
       } catch (error) {
@@ -981,23 +1022,16 @@ export class Master {
         return
       }
       this.appleSigning.setupListed(teams.map((team) => team.id))
-      const stored = (
-        this.settings.value('apple') as
-          | { teams?: Record<string, unknown> }
-          | undefined
-      )?.teams
-      const assigned = new Set(
-        this.projects
-          .list()
-          .flatMap((project) => project.apps)
-          .flatMap((app) => (app.apple == null ? [] : [app.apple.team])),
+      const stored = this.storedAppleTeams()
+      const assigned = new Set(this.appleTeamApps().keys())
+      // The only team paired with its App Store Connect provider, and those this master uses.
+      const listed = teams.filter((team) => team.paired)
+      const chosen = teams.filter(
+        (team) =>
+          (listed.length === 1 && listed[0]!.id === team.id) ||
+          stored[team.id] != null ||
+          assigned.has(team.id),
       )
-      const chosen =
-        teams.length === 1
-          ? teams
-          : teams.filter(
-              (team) => stored?.[team.id] != null || assigned.has(team.id),
-            )
       const failed = this.appleSigning.setupFailures()
       for (const team of chosen) {
         if (this.stopped) return
@@ -1006,7 +1040,9 @@ export class Master {
           log('Apple setup stopped: the Apple ID session ended')
           return
         }
-        if (stored?.[team.id] != null && failed[team.id] == null) continue
+        if (stored[team.id] != null && failed[team.id] == null) continue
+        // Another setup of the team runs or waits its turn already.
+        if (this.appleTeamsSettingUp.has(team.id)) continue
         await this.setupAppleTeam(actor, team.id).then(
           (result) => {
             log(
@@ -1031,6 +1067,88 @@ export class Master {
         this.appleSetups.delete(run)
       })
     this.appleSetups.add(run)
+    await run
+  }
+
+  /**
+   * Sets up from the signed-in Apple ID a team an app ID was just given,
+   * then that team's app IDs whose Apple setup was incomplete. The master
+   * makes the key, as after a sign-in; the person's change of the app ID is
+   * audited as theirs. stop() waits for it.
+   */
+  private setupNewAppleTeam(team: string): void {
+    if (this.stopped) return
+    const log = this.options.log ?? console.log
+    const run: Promise<void> = this.setupAppleTeam(localOperator, team)
+      .then(
+        (result) => {
+          log(
+            `Apple setup of ${result.team.name} (${team}): key ${result.key}, certificate ${result.certificate}`,
+          )
+          if (this.apple.ready())
+            this.setupApple(
+              (app) =>
+                app.apple?.team === team && this.appleSigning.incomplete(app),
+            )
+        },
+        (error: unknown) => {
+          log(`Apple setup of team ${team} failed: ${(error as Error).message}`)
+        },
+      )
+      .finally(() => {
+        this.appleSetups.delete(run)
+      })
+    this.appleSetups.add(run)
+  }
+
+  /** The teams whose App Store Connect key is stored, by team ID. */
+  storedAppleTeams(): Record<string, { keyId: string; name?: string }> {
+    return (
+      (
+        this.settings.value('apple') as
+          | { teams?: Record<string, { keyId: string; name?: string }> }
+          | undefined
+      )?.teams ?? {}
+    )
+  }
+
+  /** The app IDs signing with each Apple team. */
+  private appleTeamApps(): Map<string, string[]> {
+    const out = new Map<string, string[]>()
+    for (const app of this.projects.list().flatMap((project) => project.apps))
+      if (app.apple != null)
+        out.set(app.apple.team, [
+          ...(out.get(app.apple.team) ?? []),
+          app.bundleId,
+        ])
+    return out
+  }
+
+  /**
+   * A team an app ID signs with that the Apple ID is not in, and no key is
+   * stored for, cannot be set up from it: each is a notice, gone once its
+   * key is stored, no app ID uses it, or a later read of the Apple ID's teams
+   * lists it. Before a read since the master started, the teams named
+   * before stay named.
+   */
+  private noteMissingAppleTeams(): void {
+    const stored = this.storedAppleTeams()
+    const listed = this.appleListedTeams?.map((team) => team.id)
+    const before = this.appleSigning.missingTeams()
+    let appleId: string | undefined | null = null
+    const missing: Record<string, { name: string; error: string }> = {}
+    for (const [team, apps] of this.appleTeamApps()) {
+      if (stored[team] != null) continue
+      if (listed == null ? !before.includes(team) : listed.includes(team))
+        continue
+      // The session is read only when a team is missing.
+      if (appleId === null) appleId = this.apple.status().appleId
+      missing[team] = {
+        name: `the team of ${apps.join(', ')}`,
+        error: `the Apple ID${appleId == null ? '' : ` ${appleId}`} is not in team ${team}; sign in with an Apple ID that is, or store the team’s App Store Connect key`,
+      }
+    }
+    this.appleSigning.setMissingTeams(missing)
   }
 
   async stop(): Promise<void> {
@@ -1134,11 +1252,28 @@ export class Master {
         ? appleId
         : String(this.settings.value('apple')?.appleId ?? '')
     if (typeof password !== 'string') throw new Error('A password is required')
+    // A new sign-in reads the Apple ID's teams again before anything uses them.
+    this.appleListedTeams = undefined
+    this.appleListedFor = undefined
     await this.settings.set(actor, 'apple', { appleId: id })
     const status = await this.apple.signIn(id, password)
     this.database.audit(actor, 'apple.signIn', id)
     this.nodeStates.reconcileAll()
-    if (status.state === 'signedIn') this.setupAppleTeams(actor)
+    if (status.state === 'signedIn') void this.setupAppleTeams(actor)
+    return status
+  }
+
+  /** Asks Apple for a new two-factor code by signing the stored Apple ID in again. */
+  async appleResend(actor: typeof localOperator): Promise<AppleStatus> {
+    allow(actor, 'apple.change')
+    const status = await this.apple.resendCode()
+    this.database.audit(actor, 'apple.resend', status.appleId ?? '')
+    this.nodeStates.reconcileAll()
+    if (status.state === 'signedIn') {
+      // Apple trusted the device and asked no code: waiting Xcode work can go.
+      this.scheduler.poke()
+      void this.setupAppleTeams(actor)
+    }
     return status
   }
 
@@ -1152,7 +1287,7 @@ export class Master {
     if (status.state === 'signedIn') {
       this.nodeStates.reconcileAll()
       this.scheduler.poke()
-      this.setupAppleTeams(actor)
+      void this.setupAppleTeams(actor)
     }
     return status
   }

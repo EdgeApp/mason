@@ -264,17 +264,31 @@ export function proxyMain(args: string[]): void {
   connection.pipe(process.stdout, { end: false })
   connection.on('error', (error) => {
     process.stderr.write(`mason: ${error.message}\n`)
-    process.exit(128)
+    finish(128, connection)
   })
   // The master has sent everything once its side ends; exit after stdout drains.
   connection.on('end', () => {
     process.stdout.write('', () => {
-      process.exit(0)
+      finish(0, connection)
     })
   })
   connection.on('close', () => {
-    process.exit(0)
+    finish(0, connection)
   })
+}
+
+/**
+ * Lets the process end by itself, with `code` unless one is already set,
+ * by closing what keeps it running: git's input, which git may not have
+ * closed yet, and the bridge connection. Never `process.exit()`: it joins
+ * V8's background threads before tearing down the heap, so a background
+ * compile waiting for a garbage collection waits for good, and git with it.
+ */
+function finish(code: number, connection: net.Socket): void {
+  process.exitCode ??= code
+  process.stdin.unpipe(connection)
+  process.stdin.destroy()
+  connection.destroy()
 }
 
 /**
@@ -339,7 +353,11 @@ export function lfsMain(args: string[]): void {
           error: { code: 2, message: 'LFS bridge failed' },
         })
       })
-    } else if (event.event === 'terminate') process.exit(0)
+    } else if (event.event === 'terminate') {
+      // Ends by itself, as the fetch proxy does (see finish).
+      lines.close()
+      process.stdin.destroy()
+    }
   })
 }
 
