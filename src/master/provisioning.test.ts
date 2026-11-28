@@ -311,129 +311,137 @@ describe('Devices across nodes', function () {
     await apple?.close()
   })
 
-  it('U15.1/U15.2/U15.3 a device registered on the host reaches the master, which registers it with Apple, makes the ad hoc profile again and queues the automatic branch', async () => {
-    const before = apple.calls.filter(
-      (call) => call.path === '/v1/profiles' && call.method === 'POST',
-    ).length
-    const { token, callback } = await register(udidA)
-    assert.equal(callback.status, 301, await callback.clone().text())
-    assert.equal(
-      callback.headers.get('location'),
-      `${hostUrl()}/devices/complete/${token}`,
-    )
-    const waiting = await hostRequest(`/devices/complete/${token}`, {
-      cookie: session().cookie,
-    })
-    await shell(waiting)
-    assert.match(
-      (await api('GET', `/api/v2/devices/complete/${token}`, session())).json
-        .state,
-      /^(registering|registered)$/,
-    )
-    // The registration went through the outbox; the master registered it with Apple.
-    const device = await c.until(
-      () =>
-        db()
-          .prepare("SELECT * FROM devices WHERE udid=? AND status='registered'")
-          .get(udidA) as Json,
-      10_000,
-      'the device registered',
-    )
-    assert(
-      db()
-        .prepare(
-          'SELECT 1 FROM account_devices WHERE account_id=? AND device_id=?',
-        )
-        .get(tester.id, device.id),
-    )
-    assert(
-      apple.calls.some(
-        (call) =>
-          call.path === '/v1/devices' &&
-          call.method === 'POST' &&
-          call.body!.data.attributes.udid === udidA,
-      ),
-    )
-    const posts = apple.calls.filter(
-      (call) => call.path === '/v1/profiles' && call.method === 'POST',
-    )
-    assert.equal(posts.length, before + 1)
-    assert(posts.at(-1)!.body!.data.relationships.devices.data.length >= 1)
-    assert.equal(
-      apple.calls.filter((call) => call.method === 'DELETE').length,
-      1,
-    )
-    const job = db()
-      .prepare(
-        "SELECT branch,requested_commit,trigger FROM jobs WHERE trigger='deviceRegistered'",
+  // Darwin only: the fixture worker reports this computer's OS, and must be a Mac.
+  ;(process.platform === 'darwin' ? it : it.skip)(
+    'U15.1/U15.2/U15.3 a device registered on the host reaches the master, which registers it with Apple, makes the ad hoc profile again and queues the automatic branch',
+    async () => {
+      const before = apple.calls.filter(
+        (call) => call.path === '/v1/profiles' && call.method === 'POST',
+      ).length
+      const { token, callback } = await register(udidA)
+      assert.equal(callback.status, 301, await callback.clone().text())
+      assert.equal(
+        callback.headers.get('location'),
+        `${hostUrl()}/devices/complete/${token}`,
       )
-      .get() as Json
-    assert.deepEqual(
-      { ...job },
-      {
-        branch: 'main',
-        requested_commit: commitA,
-        trigger: 'deviceRegistered',
-      },
-    )
-    // The device comes back to the host, and the page says so.
-    await c.until(
-      () =>
-        host
-          .host!.cache.db.prepare(
-            "SELECT 1 FROM devices WHERE udid=? AND status='registered'",
-          )
-          .get(udidA),
-      2000,
-      'the device on the host',
-    )
-    const done = await hostRequest(`/devices/complete/${token}`, {
-      cookie: session().cookie,
-    })
-    await shell(done)
-    const registered = (
-      await api('GET', `/api/v2/devices/complete/${token}`, session())
-    ).json
-    assert.deepEqual(registered, {
-      state: 'registered',
-      device: { id: device.id, model: 'iPhone13' },
-    })
-    const reused = await hostRequest(`/devices/callback/${token}`, {
-      method: 'POST',
-      body: new Uint8Array(sign(answer(token, udidA))),
-    })
-    assert.equal(reused.status, 400)
-    assert.equal((await register(udidB)).callback.status, 301)
-    await c.until(
-      () =>
-        db()
-          .prepare("SELECT 1 FROM devices WHERE udid=? AND status='registered'")
-          .get(udidB),
-      10_000,
-      'the second device',
-    )
-    assert.equal(
-      Number(
-        (
+      const waiting = await hostRequest(`/devices/complete/${token}`, {
+        cookie: session().cookie,
+      })
+      await shell(waiting)
+      assert.match(
+        (await api('GET', `/api/v2/devices/complete/${token}`, session())).json
+          .state,
+        /^(registering|registered)$/,
+      )
+      // The registration went through the outbox; the master registered it with Apple.
+      const device = await c.until(
+        () =>
           db()
             .prepare(
-              "SELECT COUNT(*) n FROM jobs WHERE trigger='deviceRegistered'",
+              "SELECT * FROM devices WHERE udid=? AND status='registered'",
             )
-            .get() as Json
-        ).n,
-      ),
-      1,
-    )
-    // No Apple credential reached the host.
-    assert.equal(host.host!.cache.setting('apple'), undefined)
-    const unavailable = await hostRequest(
-      `/devices/complete/${'x'.repeat(43)}`,
-      {
+            .get(udidA) as Json,
+        10_000,
+        'the device registered',
+      )
+      assert(
+        db()
+          .prepare(
+            'SELECT 1 FROM account_devices WHERE account_id=? AND device_id=?',
+          )
+          .get(tester.id, device.id),
+      )
+      assert(
+        apple.calls.some(
+          (call) =>
+            call.path === '/v1/devices' &&
+            call.method === 'POST' &&
+            call.body!.data.attributes.udid === udidA,
+        ),
+      )
+      const posts = apple.calls.filter(
+        (call) => call.path === '/v1/profiles' && call.method === 'POST',
+      )
+      assert.equal(posts.length, before + 1)
+      assert(posts.at(-1)!.body!.data.relationships.devices.data.length >= 1)
+      assert.equal(
+        apple.calls.filter((call) => call.method === 'DELETE').length,
+        1,
+      )
+      const job = db()
+        .prepare(
+          "SELECT branch,requested_commit,trigger FROM jobs WHERE trigger='deviceRegistered'",
+        )
+        .get() as Json
+      assert.deepEqual(
+        { ...job },
+        {
+          branch: 'main',
+          requested_commit: commitA,
+          trigger: 'deviceRegistered',
+        },
+      )
+      // The device comes back to the host, and the page says so.
+      await c.until(
+        () =>
+          host
+            .host!.cache.db.prepare(
+              "SELECT 1 FROM devices WHERE udid=? AND status='registered'",
+            )
+            .get(udidA),
+        2000,
+        'the device on the host',
+      )
+      const done = await hostRequest(`/devices/complete/${token}`, {
         cookie: session().cookie,
-      },
-    )
-    await shell(unavailable, 410)
-  })
+      })
+      await shell(done)
+      const registered = (
+        await api('GET', `/api/v2/devices/complete/${token}`, session())
+      ).json
+      assert.deepEqual(registered, {
+        state: 'registered',
+        device: { id: device.id, model: 'iPhone13' },
+      })
+      const reused = await hostRequest(`/devices/callback/${token}`, {
+        method: 'POST',
+        body: new Uint8Array(sign(answer(token, udidA))),
+      })
+      assert.equal(reused.status, 400)
+      assert.equal((await register(udidB)).callback.status, 301)
+      await c.until(
+        () =>
+          db()
+            .prepare(
+              "SELECT 1 FROM devices WHERE udid=? AND status='registered'",
+            )
+            .get(udidB),
+        10_000,
+        'the second device',
+      )
+      assert.equal(
+        Number(
+          (
+            db()
+              .prepare(
+                "SELECT COUNT(*) n FROM jobs WHERE trigger='deviceRegistered'",
+              )
+              .get() as Json
+          ).n,
+        ),
+        1,
+      )
+      // No Apple credential reached the host.
+      assert.equal(host.host!.cache.setting('apple'), undefined)
+      const unavailable = await hostRequest(
+        `/devices/complete/${'x'.repeat(43)}`,
+        {
+          cookie: session().cookie,
+        },
+      )
+      await shell(unavailable, 410)
+    },
+  )
 
   it('U15.3 retries Apple at most three times, then shows an error the tester can retry', async () => {
     const master = c.master.master!
@@ -762,100 +770,106 @@ describe('Devices across nodes', function () {
     )
   })
 
-  it('U15.5 an ad hoc IPA published through a grant records its devices and expiry for the master and the host', async () => {
-    const master = c.master.master!
-    const profileXml = `<plist version="1.0"><dict><key>ProvisionedDevices</key><array><string>${udidB}</string></array><key>TeamIdentifier</key><array><string>${TEAM}</string></array><key>ExpirationDate</key><date>${new Date(Date.now() + 86_400_000).toISOString()}</date><key>Entitlements</key><dict><key>get-task-allow</key><false/><key>application-identifier</key><string>${TEAM}.${APP}</string></dict></dict></plist>`
-    const info = plist()
-      .toString()
-      .replace('test.example.app', APP)
-      .replace('>42<', '>77<')
-    const ipa = zip([
-      ['Payload/Phone.app/Info.plist', Buffer.from(info)],
-      ['Payload/Phone.app/embedded.mobileprovision', sign(profileXml)],
-    ])
-    // As a stage publishes: a reservation for the run, a grant, then the file to the host.
-    const run = master.jobs.request(localOperator, {
-      app: 'phones',
-      branch: 'release',
-    })
-    // The build records the run's commit; this suite's runs never resolve one.
-    db()
-      .prepare('UPDATE jobs SET commit_sha=? WHERE id=?')
-      .run('d'.repeat(40), run.id)
-    const job = db()
-      .prepare('SELECT id,project_id FROM jobs WHERE id=?')
-      .get(run.id) as Json
-    master.artifacts.reserve(
-      { job: job.id, stage: 'publish', attempt: 7, project: job.project_id },
-      [APP],
-      { [APP]: '77' },
-    )
-    const granted = master.artifacts.grant(
-      { job: job.id, stage: 'publish', attempt: 7 },
-      {
-        app: APP,
-        platform: 'ios',
-        format: 'ipa',
-        digest: createHash('sha256').update(ipa).digest('hex'),
-        size: ipa.length,
-        version: '1.2.3',
-      },
-    )
-    const upload = await pinnedFetch(
-      granted.url,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          Authorization: `Bearer ${granted.grant}`,
+  // Darwin only: the fixture worker reports this computer's OS, and must be a Mac.
+  ;(process.platform === 'darwin' ? it : it.skip)(
+    'U15.5 an ad hoc IPA published through a grant records its devices and expiry for the master and the host',
+    async () => {
+      const master = c.master.master!
+      const profileXml = `<plist version="1.0"><dict><key>ProvisionedDevices</key><array><string>${udidB}</string></array><key>TeamIdentifier</key><array><string>${TEAM}</string></array><key>ExpirationDate</key><date>${new Date(Date.now() + 86_400_000).toISOString()}</date><key>Entitlements</key><dict><key>get-task-allow</key><false/><key>application-identifier</key><string>${TEAM}.${APP}</string></dict></dict></plist>`
+      const info = plist()
+        .toString()
+        .replace('test.example.app', APP)
+        .replace('>42<', '>77<')
+      const ipa = zip([
+        ['Payload/Phone.app/Info.plist', Buffer.from(info)],
+        ['Payload/Phone.app/embedded.mobileprovision', sign(profileXml)],
+      ])
+      // As a stage publishes: a reservation for the run, a grant, then the file to the host.
+      const run = master.jobs.request(localOperator, {
+        app: 'phones',
+        branch: 'release',
+      })
+      // The build records the run's commit; this suite's runs never resolve one.
+      db()
+        .prepare('UPDATE jobs SET commit_sha=? WHERE id=?')
+        .run('d'.repeat(40), run.id)
+      const job = db()
+        .prepare('SELECT id,project_id FROM jobs WHERE id=?')
+        .get(run.id) as Json
+      master.artifacts.reserve(
+        { job: job.id, stage: 'publish', attempt: 7, project: job.project_id },
+        [APP],
+        { [APP]: '77' },
+      )
+      const granted = master.artifacts.grant(
+        { job: job.id, stage: 'publish', attempt: 7 },
+        {
+          app: APP,
+          platform: 'ios',
+          format: 'ipa',
+          digest: createHash('sha256').update(ipa).digest('hex'),
+          size: ipa.length,
+          version: '1.2.3',
         },
-        body: ipa,
-      },
-      granted.pin,
-    )
-    assert.equal(upload.status, 201, await upload.clone().text())
-    const build = db()
-      .prepare("SELECT id FROM builds WHERE bundle_id=? AND build_number='77'")
-      .get(APP) as Json
-    const provisioning = db()
-      .prepare('SELECT devices,team FROM build_provisioning WHERE build_id=?')
-      .get(build.id) as Json
-    assert.deepEqual(JSON.parse(provisioning.devices), [udidB])
-    assert.equal(provisioning.team, TEAM)
-    await c.until(
-      () =>
-        host
-          .host!.cache.db.prepare(
-            'SELECT 1 FROM build_provisioning WHERE build_id=?',
-          )
-          .get(build.id),
-      2000,
-      'the profile on the host',
-    )
-    const devices = new Devices(host.host!.cache.store)
-    const hostBuild = host.host!.cache.store.build(Number(build.id))!
-    const registered = host
-      .host!.cache.db.prepare('SELECT * FROM devices WHERE udid=?')
-      .get(udidB) as Json
-    assert.equal(devices.eligible(hostBuild, { ...registered }), true)
-    assert.equal(
-      devices.eligible(hostBuild, { ...registered, udid: udidA }),
-      false,
-    )
-    // A profile for another app is refused by the master.
-    assert.throws(
-      () =>
-        (
-          master.artifacts as unknown as {
-            recordProvisioning(build: unknown, value: unknown): void
-          }
-        ).recordProvisioning(
-          { id: build.id, bundle_id: APP },
-          { devices: [udidB], expiresAt: 1, team: TEAM, appId: 'other.app' },
-        ),
-      /does not match the build/,
-    )
-  })
+      )
+      const upload = await pinnedFetch(
+        granted.url,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            Authorization: `Bearer ${granted.grant}`,
+          },
+          body: ipa,
+        },
+        granted.pin,
+      )
+      assert.equal(upload.status, 201, await upload.clone().text())
+      const build = db()
+        .prepare(
+          "SELECT id FROM builds WHERE bundle_id=? AND build_number='77'",
+        )
+        .get(APP) as Json
+      const provisioning = db()
+        .prepare('SELECT devices,team FROM build_provisioning WHERE build_id=?')
+        .get(build.id) as Json
+      assert.deepEqual(JSON.parse(provisioning.devices), [udidB])
+      assert.equal(provisioning.team, TEAM)
+      await c.until(
+        () =>
+          host
+            .host!.cache.db.prepare(
+              'SELECT 1 FROM build_provisioning WHERE build_id=?',
+            )
+            .get(build.id),
+        2000,
+        'the profile on the host',
+      )
+      const devices = new Devices(host.host!.cache.store)
+      const hostBuild = host.host!.cache.store.build(Number(build.id))!
+      const registered = host
+        .host!.cache.db.prepare('SELECT * FROM devices WHERE udid=?')
+        .get(udidB) as Json
+      assert.equal(devices.eligible(hostBuild, { ...registered }), true)
+      assert.equal(
+        devices.eligible(hostBuild, { ...registered, udid: udidA }),
+        false,
+      )
+      // A profile for another app is refused by the master.
+      assert.throws(
+        () =>
+          (
+            master.artifacts as unknown as {
+              recordProvisioning(build: unknown, value: unknown): void
+            }
+          ).recordProvisioning(
+            { id: build.id, bundle_id: APP },
+            { devices: [udidB], expiresAt: 1, team: TEAM, appId: 'other.app' },
+          ),
+        /does not match the build/,
+      )
+    },
+  )
 
   it('U15.7 an extra Profile Service root is refused and ignored without --test-endpoints, and trusted with it', async () => {
     const pem = readFileSync(path.join(root, 'ca.pem'), 'utf8')

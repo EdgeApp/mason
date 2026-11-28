@@ -20,6 +20,7 @@
     "lint": "eslint src",
     "test": "tsc && node scripts/bundle-web.mjs && mocha --require=./lib/test/fixtureRoots.test.js --import=tsx --timeout 10000 --ignore 'src/web/**' 'src/**/*.test.ts' && mocha --require=./lib/test/fixtureRoots.test.js --require=./src/web/test/setup.ts --import=tsx --timeout 10000 'src/web/**/*.test.ts' 'src/web/**/*.test.tsx'",
     "coverage": "tsc && node scripts/bundle-web.mjs && NODE_DISABLE_COMPILE_CACHE=1 c8 --all --include 'src/**/*.ts' --include 'src/**/*.tsx' --include 'lib/**/*.js' --exclude 'src/**/*.test.ts' --exclude 'src/**/*.test.tsx' --exclude 'lib/**/*.test.js' --exclude 'lib/web/bundles/**' --exclude-after-remap --reporter text --reporter json --reporter lcov --check-coverage --per-file --lines 90 sh -c \"mocha --require=./lib/test/fixtureRoots.test.js --timeout 10000 --ignore 'lib/web/**' 'lib/**/*.test.js' && mocha --require=./lib/test/fixtureRoots.test.js --require=./lib/web/test/setup.js --timeout 10000 'lib/web/**/*.test.js'\"",
+    "test:lib": "tsc && node scripts/bundle-web.mjs && mocha --require=./lib/test/fixtureRoots.test.js --timeout 10000 --ignore 'lib/web/**' 'lib/**/*.test.js' && mocha --require=./lib/test/fixtureRoots.test.js --require=./lib/web/test/setup.js --timeout 10000 'lib/web/**/*.test.js'",
     "start": "node lib/cli.js serve",
     "mason": "node lib/cli.js",
     "tokens": "node scripts/tokens.mjs"
