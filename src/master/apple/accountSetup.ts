@@ -17,10 +17,20 @@ import type {
  * changes them.
  */
 
+/** A developer team of the Apple ID, with its App Store Connect provider. */
+export interface AppleWebTeam {
+  id: string
+  name: string
+  /** None when no App Store Connect provider could be told to be this team. */
+  providerId?: number
+  /** Without a provider: the providers no team was found for, by name. */
+  unmatched?: string[]
+}
+
 /** What Mason uses of App Store Connect's website, signed in. */
 export interface AppleWeb {
   /** The teams the Apple ID belongs to: Team ID, name, App Store Connect provider. */
-  teams(): Promise<Array<{ id: string; name: string; providerId: number }>>
+  teams(): Promise<AppleWebTeam[]>
   selectTeam(providerId: number): Promise<void>
   /** The selected team's App Store Connect API issuer ID. */
   issuerId(): Promise<string>
@@ -56,7 +66,7 @@ interface OlympusSession {
   provider?: OlympusProvider
   availableProviders?: OlympusProvider[]
 }
-interface OlympusProvider {
+export interface OlympusProvider {
   providerId: number
   /** The provider's public id, which is its App Store Connect API issuer ID. */
   publicProviderId?: string
@@ -113,32 +123,16 @@ export class AppStoreConnectWeb implements AppleWeb {
     return await this.json<OlympusSession>('/olympus/v1/session')
   }
 
-  async teams(): Promise<
-    Array<{ id: string; name: string; providerId: number }>
-  > {
+  async teams(): Promise<AppleWebTeam[]> {
     const providers = (await this.session()).availableProviders ?? []
-    // The developer site has the Team IDs, by the same names.
+    // The developer site has the Team IDs, by much the same names.
     const developer = await this.json<{
       teams?: Array<{ teamId: string; name: string }>
     }>('/services-account/QH65B2/account/listTeams.action', {
       method: 'POST',
       body: '',
     })
-    const teams = developer.teams ?? []
-    return providers.flatMap((provider) => {
-      const team =
-        teams.find((entry) => entry.name === provider.name) ??
-        (providers.length === 1 && teams.length === 1 ? teams[0] : undefined)
-      return team == null
-        ? []
-        : [
-            {
-              id: team.teamId,
-              name: provider.name,
-              providerId: provider.providerId,
-            },
-          ]
-    })
+    return matchTeams(providers, developer.teams ?? [])
   }
 
   async selectTeam(providerId: number): Promise<void> {
@@ -213,6 +207,103 @@ export class AppStoreConnectWeb implements AppleWeb {
       },
     })
   }
+}
+
+/** Company suffixes one site may carry and the other leave out. */
+const companySuffixes = new Set([
+  'inc',
+  'incorporated',
+  'llc',
+  'pllc',
+  'ltd',
+  'limited',
+  'corp',
+  'corporation',
+  'co',
+  'company',
+  'gmbh',
+  'ag',
+  'sa',
+  'sas',
+  'sarl',
+  'srl',
+  'spa',
+  'bv',
+  'nv',
+  'pty',
+  'plc',
+  'lp',
+  'llp',
+  'ab',
+  'oy',
+  'kk',
+])
+
+/** A team's name with case, accents, punctuation and company suffixes set aside. */
+export function teamNameKey(name: string): string {
+  const words = name
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\./g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+  while (words.length > 1 && companySuffixes.has(words[words.length - 1]!))
+    words.pop()
+  return words.join(' ')
+}
+
+/**
+ * Pairs App Store Connect's providers with the developer site's teams, which
+ * Apple names each on its own: by the same name, then by the same name with
+ * case, punctuation and company suffixes set aside, then a provider and a
+ * team that are the only ones left. A name pairs only when it picks out one
+ * of each. A team left without a provider is still listed, so its setup can
+ * say why.
+ */
+export function matchTeams(
+  providers: OlympusProvider[],
+  teams: Array<{ teamId: string; name: string }>,
+): AppleWebTeam[] {
+  const paired = new Map<string, OlympusProvider>()
+  const left = (): {
+    providers: OlympusProvider[]
+    teams: Array<{ teamId: string; name: string }>
+  } => {
+    const taken = new Set(paired.values())
+    return {
+      providers: providers.filter((provider) => !taken.has(provider)),
+      teams: teams.filter((team) => !paired.has(team.teamId)),
+    }
+  }
+  for (const key of [(name: string): string => name, teamNameKey]) {
+    const free = left()
+    for (const team of free.teams) {
+      const named = free.providers.filter(
+        (provider) => key(provider.name) === key(team.name),
+      )
+      const alike = free.teams.filter(
+        (other) => key(other.name) === key(team.name),
+      )
+      if (named.length === 1 && alike.length === 1)
+        paired.set(team.teamId, named[0]!)
+    }
+  }
+  const last = left()
+  if (last.providers.length === 1 && last.teams.length === 1)
+    paired.set(last.teams[0]!.teamId, last.providers[0]!)
+  const unmatched = left().providers.map((provider) => provider.name)
+  return teams.map((team) => {
+    const provider = paired.get(team.teamId)
+    return provider == null
+      ? { id: team.teamId, name: team.name, unmatched }
+      : {
+          id: team.teamId,
+          name: provider.name,
+          providerId: provider.providerId,
+        }
+  })
 }
 
 /** One step's outcome, as the Apple page shows it. */
@@ -299,8 +390,14 @@ export class AppleSetup {
 
   private async setupTeam(
     web: AppleWeb,
-    team: { id: string; name: string; providerId: number },
+    team: AppleWebTeam,
   ): Promise<SetupResult> {
+    if (team.providerId == null)
+      throw new AppleWebError(
+        (team.unmatched ?? []).length === 0
+          ? `App Store Connect lists no team for ${team.name} to this Apple ID: add the Apple ID to the team in App Store Connect’s Users and Access, then check signing again`
+          : `App Store Connect names this Apple ID’s other teams ${team.unmatched!.join(', ')}, and none is plainly ${team.name}; store the team’s App Store Connect key with mason settings set apple`,
+      )
     await web.selectTeam(team.providerId)
     // The key: this master's, kept while its private key is stored here.
     const listed = (await web.apiKeys()).filter((key) => key.active)

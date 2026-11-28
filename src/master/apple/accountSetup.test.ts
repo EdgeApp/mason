@@ -20,8 +20,10 @@ import { FakeAppleWebSession } from '../../test/fakeAppleWebSession.js'
 import {
   AppleSetup,
   type AppleSetupOptions,
+  AppleTeamError,
   AppleWebError,
   AppStoreConnectWeb,
+  teamNameKey,
 } from './accountSetup.js'
 
 /** Apple setup over the fake website, with the master's key store and certificates in memory. */
@@ -223,6 +225,78 @@ describe('Apple setup from an Apple ID', () => {
       /no longer offers this key’s private key/,
     )
     await assert.rejects(web.downloadKey('NOSUCHKEY0'), /404/)
+  })
+  it('U8.15 a team the two sites name differently is paired by its name without case, punctuation and company suffixes, else as the only one left', async () => {
+    assert.equal(teamNameKey('Airbitz, Inc.'), 'airbitz')
+    assert.equal(teamNameKey('Coinhub  L.L.C.'), 'coinhub')
+    assert.equal(teamNameKey('Société Générale S.A.'), 'societe generale')
+    assert.equal(teamNameKey('Example Co., Ltd'), 'example')
+    assert.equal(teamNameKey('Co'), 'co')
+    const { apple, setup, keys } = harness()
+    apple.teams[0]!.developerName = 'EXAMPLE TEAM, Inc.'
+    apple.teams.push({
+      providerId: 2,
+      publicProviderId: 'b2c3d4e5-0000-0000-0000-000000000000',
+      name: 'Coin ATM LLC',
+      teamId: 'ZYXWV98765',
+      developerName: 'Coin Wallet',
+    })
+    assert.deepEqual(await setup.teams(), [
+      { id: 'ABCDE12345', name: 'Example Team' },
+      { id: 'ZYXWV98765', name: 'Coin ATM LLC' },
+    ])
+    const result = await setup.setup('ZYXWV98765')
+    assert.deepEqual(result.team, { id: 'ZYXWV98765', name: 'Coin ATM LLC' })
+    assert.equal(
+      keys.get('ZYXWV98765')!.issuerId,
+      'b2c3d4e5-0000-0000-0000-000000000000',
+    )
+    assert.equal(apple.keys[0]!.team, 2)
+    await setup.setup('ABCDE12345')
+    assert.equal(
+      keys.get('ABCDE12345')!.issuerId,
+      apple.teams[0]!.publicProviderId,
+    )
+  })
+
+  it('U8.16 a team App Store Connect does not list, or cannot be told apart, is offered and its setup says why; nothing is made', async () => {
+    const { apple, setup } = harness()
+    apple.teams.push({
+      providerId: 2,
+      publicProviderId: 'b2c3d4e5-0000-0000-0000-000000000000',
+      name: 'Other Team',
+      teamId: 'ZYXWV98765',
+      inConnect: false,
+    })
+    assert.deepEqual(await setup.teams(), [
+      { id: 'ABCDE12345', name: 'Example Team' },
+      { id: 'ZYXWV98765', name: 'Other Team' },
+    ])
+    await assert.rejects(
+      setup.setup('ZYXWV98765'),
+      (error: unknown) =>
+        error instanceof AppleTeamError &&
+        error.team.id === 'ZYXWV98765' &&
+        /^App Store Connect lists no team for Other Team to this Apple ID: add the Apple ID to the team in App Store Connect’s Users and Access/.test(
+          error.message,
+        ),
+    )
+    // Two of each left over under unlike names: none is guessed.
+    apple.teams[1]!.inConnect = true
+    apple.teams[1]!.developerName = 'Third Name'
+    apple.teams.push({
+      providerId: 3,
+      publicProviderId: 'c3d4e5f6-0000-0000-0000-000000000000',
+      name: 'Fourth Name',
+      teamId: 'QWERT12345',
+      developerName: 'Fifth Name',
+    })
+    await assert.rejects(
+      setup.setup('QWERT12345'),
+      /names this Apple ID’s other teams Other Team, Fourth Name, and none is plainly Fifth Name; store the team’s App Store Connect key with mason settings set apple$/,
+    )
+    assert.equal(apple.keys.length, 0)
+    assert(!apple.calls.includes('POST /olympus/v1/session'))
   })
 })
 
@@ -590,6 +664,7 @@ describe('Apple setup on a master', function () {
       ['signedIn', 'signedIn'],
     )
     await settled(from)
+    // Each sign-in reads the teams; the one that finds the team not being set up sets it up.
     await c.until(
       () =>
         web.calls
@@ -597,9 +672,9 @@ describe('Apple setup on a master', function () {
           .filter(
             (call) =>
               call === 'POST /services-account/QH65B2/account/listTeams.action',
-          ).length >= 4,
+          ).length >= 3,
       20_000,
-      'both setups',
+      'both sign-ins’ team reads, and the one setup’s',
     )
     await c.until(
       () => master.appleTeamsInSetup().length === 0,
@@ -674,17 +749,20 @@ describe('Apple setup on a master', function () {
     )
     assert.deepEqual(signing.setup.configured, [])
 
-    // An app ID assigned to a team makes it one this master uses.
+    // An app ID assigned to a team makes it one this master uses, set up at once while signed in.
     master.projects.save(admin, 'edge', {
       name: 'Edge',
       repository: 'https://github.com/a/edge',
     })
+    from = web.calls.length
     master.projects.addApp(admin, 'edge', {
       bundleId: 'app.example.other',
       name: 'Other',
       platforms: ['ios'],
       apple: { team: 'ZYXWV98765' },
     })
+    await settled(from)
+    // A sign-in after it leaves it alone.
     from = web.calls.length
     await signInTrusted()
     await settled(from)
@@ -910,5 +988,93 @@ describe('Apple setup on a master', function () {
       /enable Declared Age Range for app\.example\.ages in the Apple Developer portal, or sign the Apple ID in on the master$/,
     )
     apple.portal = undefined
+  })
+
+  it('U8.17 an app ID given a team no key is stored for sets the team up at once; one given a team the Apple ID is not in is a notice', async () => {
+    const master = c.master.master!
+    const otherKey = connect.teamKeys.find(
+      (entry) => entry.team === 'ZYXWV98765',
+    )!.key
+    await master.settings.set(admin, 'apple', {
+      teams: {
+        ABCDE12345: { ...connectKey, name: 'Example Team' },
+        ZYXWV98765: { ...otherKey, name: 'Other Team' },
+      },
+    })
+    for (const team of ['ABCDE12345', 'ZYXWV98765'])
+      master.appleSigning.setupSucceeded(team)
+    // A third team, named one way in App Store Connect and another on the developer site.
+    const third = { ...fakeConnectKey(), keyId: 'THIRDKEY12' }
+    web.teams.push({
+      providerId: 3,
+      publicProviderId: third.issuerId,
+      name: 'Coin ATM LLC',
+      teamId: 'COINT12345',
+      developerName: 'Coin Wallet',
+    })
+    connect.teamKeys.push({ team: 'COINT12345', key: third })
+    web.nextKeys.length = 0
+    web.nextKeys.push({ keyId: third.keyId, privateKey: third.privateKey })
+    let from = web.calls.length
+    await signInTrusted()
+    await settled(from)
+    const stored = (): Record<string, { keyId: string; issuerId: string }> =>
+      (
+        master.settings.value('apple') as {
+          teams?: Record<string, { keyId: string; issuerId: string }>
+        }
+      ).teams ?? {}
+    // No app ID uses it yet: the sign-in leaves it alone.
+    assert.equal(stored().COINT12345, undefined)
+    from = web.calls.length
+    master.projects.addApp(admin, 'edge', {
+      bundleId: 'app.example.coin',
+      name: 'Coin',
+      platforms: ['ios'],
+      apple: { team: 'COINT12345' },
+    })
+    await settled(from)
+    await c.until(
+      () => distribution('COINT12345') != null,
+      20_000,
+      'the certificate',
+    )
+    assert.equal(stored().COINT12345!.keyId, 'THIRDKEY12')
+    assert.equal(stored().COINT12345!.issuerId, third.issuerId)
+    assert.equal(
+      distribution('COINT12345')!.name,
+      'Apple Distribution: Fake Team (COINT12345)',
+    )
+    assert.equal(setups().at(-1)!.target, 'COINT12345')
+    // Its app ID's setup runs again with the key.
+    await c.until(
+      () =>
+        !master
+          .notices()
+          .some((notice) =>
+            /COINT12345 has no App Store Connect key/.test(notice),
+          ),
+      20_000,
+      'the app ID set up with the key',
+    )
+
+    // A team the Apple ID is not in, with no key, says so.
+    master.projects.addApp(admin, 'edge', {
+      bundleId: 'app.example.stranger',
+      name: 'Stranger',
+      platforms: ['ios'],
+      apple: { team: 'STRNG12345' },
+    })
+    await c.until(
+      () => signingNotices().some((notice) => notice.includes('STRNG12345')),
+      20_000,
+      'the notice',
+    )
+    assert.deepEqual(signingNotices(), [
+      `Signing for the team of app.example.stranger (STRNG12345) is not set up: the Apple ID ${appleId} is not in team STRNG12345; sign in with an Apple ID that is, or store the team’s App Store Connect key`,
+    ])
+    master.projects.removeApp(admin, 'edge', 'app.example.stranger')
+    master.projects.removeApp(admin, 'edge', 'app.example.coin')
+    web.teams.pop()
   })
 })

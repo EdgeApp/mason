@@ -290,6 +290,8 @@ export class Master {
   private appleTeamQueue: Promise<unknown> = Promise.resolve()
   /** Teams whose setup runs or waits its turn, for the Settings page. */
   private readonly appleTeamsSettingUp = new Map<string, number>()
+  /** A team setup for newly assigned teams, and whether another is wanted after it. */
+  private appleTeamsForApps: { again: boolean } | undefined
   private compaction: NodeJS.Timeout | undefined
   constructor(
     db: DatabaseSync,
@@ -436,7 +438,25 @@ export class Master {
     })
     // An app ID with an Apple team gets its bundle IDs and profiles when it is added or changed.
     this.database.listeners.add((entity, key) => {
-      if (entity === 'app') this.setupApple((app) => String(app.id) === key)
+      if (entity !== 'app') return
+      this.setupApple((app) => String(app.id) === key)
+      // A team no key is stored for yet is set up from the signed-in Apple ID, then its app IDs.
+      const team = this.projects
+        .list()
+        .flatMap((project) => project.apps)
+        .find((app) => String(app.id) === key)?.apple?.team
+      const stored = (
+        this.settings.value('apple') as
+          | { teams?: Record<string, unknown> }
+          | undefined
+      )?.teams
+      if (
+        team != null &&
+        stored?.[team] == null &&
+        !this.appleTeamsSettingUp.has(team) &&
+        this.apple.ready()
+      )
+        this.setupNewAppleTeams()
     })
     this.runtimes = new RuntimeStore(path.join(dir, 'runtimes'))
     this.artifacts = new Artifacts({
@@ -959,14 +979,16 @@ export class Master {
   }
 
   /**
-   * Once the Apple ID is signed in, sets up in the background the teams
-   * this master uses: the Apple ID's only team, or of several those with a
-   * stored key or an app ID assigned (another is set up from Settings →
-   * Apple). Of those, each with no stored key or whose last setup failed;
-   * then the app IDs whose Apple setup was incomplete. The sign-in does not
+   * Once the Apple ID is signed in, or an app ID is given a team no key is
+   * stored for, sets up in the background the teams this master uses: the
+   * Apple ID's only team, or of several those with a stored key or an app
+   * ID assigned (another is set up from Settings → Apple). Of those, each
+   * with no stored key or whose last setup failed; then the app IDs whose
+   * Apple setup was incomplete. A team an app ID is assigned that the Apple
+   * ID is not in, with no stored key, is a notice. The sign-in does not
    * wait; stop() does.
    */
-  private setupAppleTeams(actor: Actor): void {
+  private async setupAppleTeams(actor: Actor): Promise<void> {
     if (this.stopped) return
     const log = this.options.log ?? console.log
     const run: Promise<void> = (async (): Promise<void> => {
@@ -986,12 +1008,24 @@ export class Master {
           | { teams?: Record<string, unknown> }
           | undefined
       )?.teams
-      const assigned = new Set(
-        this.projects
-          .list()
-          .flatMap((project) => project.apps)
-          .flatMap((app) => (app.apple == null ? [] : [app.apple.team])),
-      )
+      const apps = this.projects
+        .list()
+        .flatMap((project) => project.apps)
+        .filter((app) => app.apple != null)
+      const assigned = new Set(apps.map((app) => app.apple!.team))
+      const appleId = this.apple.status().appleId
+      // A team an app ID signs with that the Apple ID is not in, and no key is stored for, cannot be set up from it.
+      for (const team of assigned) {
+        if (stored?.[team] != null || teams.some((entry) => entry.id === team))
+          continue
+        const users = apps
+          .filter((app) => app.apple!.team === team)
+          .map((app) => app.bundleId)
+        this.appleSigning.setupFailed(
+          { id: team, name: `the team of ${users.join(', ')}` },
+          `the Apple ID${appleId == null ? '' : ` ${appleId}`} is not in team ${team}; sign in with an Apple ID that is, or store the team’s App Store Connect key`,
+        )
+      }
       const chosen =
         teams.length === 1
           ? teams
@@ -1007,6 +1041,8 @@ export class Master {
           return
         }
         if (stored?.[team.id] != null && failed[team.id] == null) continue
+        // Another setup of the team runs or waits its turn already.
+        if (this.appleTeamsSettingUp.has(team.id)) continue
         await this.setupAppleTeam(actor, team.id).then(
           (result) => {
             log(
@@ -1031,6 +1067,26 @@ export class Master {
         this.appleSetups.delete(run)
       })
     this.appleSetups.add(run)
+    await run
+  }
+
+  /**
+   * Sets up from the signed-in Apple ID a team an app ID was just given; app
+   * IDs changed together share one setup, and one changed during it gets
+   * another after it.
+   */
+  private setupNewAppleTeams(): void {
+    if (this.appleTeamsForApps != null) {
+      this.appleTeamsForApps.again = true
+      return
+    }
+    const state = { again: false }
+    this.appleTeamsForApps = state
+    void this.setupAppleTeams(localOperator).finally(() => {
+      this.appleTeamsForApps = undefined
+      if (state.again && !this.stopped && this.apple.ready())
+        this.setupNewAppleTeams()
+    })
   }
 
   async stop(): Promise<void> {
@@ -1138,7 +1194,7 @@ export class Master {
     const status = await this.apple.signIn(id, password)
     this.database.audit(actor, 'apple.signIn', id)
     this.nodeStates.reconcileAll()
-    if (status.state === 'signedIn') this.setupAppleTeams(actor)
+    if (status.state === 'signedIn') void this.setupAppleTeams(actor)
     return status
   }
 
@@ -1151,7 +1207,7 @@ export class Master {
     if (status.state === 'signedIn') {
       // Apple trusted the device and asked no code: waiting Xcode work can go.
       this.scheduler.poke()
-      this.setupAppleTeams(actor)
+      void this.setupAppleTeams(actor)
     }
     return status
   }
@@ -1166,7 +1222,7 @@ export class Master {
     if (status.state === 'signedIn') {
       this.nodeStates.reconcileAll()
       this.scheduler.poke()
-      this.setupAppleTeams(actor)
+      void this.setupAppleTeams(actor)
     }
     return status
   }

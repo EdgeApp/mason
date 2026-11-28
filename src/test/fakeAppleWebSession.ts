@@ -9,7 +9,17 @@ import { generateKeyPairSync, randomBytes } from 'node:crypto'
  * request function, as the master's Apple session gives one.
  */
 export class FakeAppleWebSession {
-  teams = [
+  teams: Array<{
+    providerId: number
+    publicProviderId: string
+    /** The name App Store Connect gives the team. */
+    name: string
+    teamId: string
+    /** The name the developer site gives it, when not the same. */
+    developerName?: string
+    /** False for a team App Store Connect does not list to this Apple ID. */
+    inConnect?: boolean
+  }> = [
     {
       providerId: 1,
       publicProviderId: 'a1b2c3d4-0000-0000-0000-000000000000',
@@ -93,14 +103,16 @@ export class FakeAppleWebSession {
     if (route === 'GET /olympus/v1/session')
       return json(200, {
         ...(current == null ? {} : { provider: provider(current) }),
-        availableProviders: this.teams.map(provider),
+        availableProviders: this.teams
+          .filter((team) => team.inConnect !== false)
+          .map(provider),
       })
     if (route === 'POST /services-account/QH65B2/account/listTeams.action')
       return json(200, {
         resultCode: 0,
         teams: this.teams.map((team) => ({
           teamId: team.teamId,
-          name: team.name,
+          name: team.developerName ?? team.name,
           type: 'Company/Organization',
           status: 'active',
         })),
