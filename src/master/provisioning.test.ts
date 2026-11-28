@@ -809,9 +809,19 @@ describe('Devices across nodes', function () {
       db()
         .prepare('UPDATE jobs SET commit_sha=? WHERE id=?')
         .run('d'.repeat(40), run.id)
-      const job = db()
-        .prepare('SELECT id,project_id FROM jobs WHERE id=?')
-        .get(run.id) as Json
+      // The run fails once the scheduler finds the repository lacks that
+      // commit, and a run that ends drops its unused reservations. It ends
+      // first, so it cannot drop the reservation below while the IPA uploads.
+      const job = await c.until(
+        () =>
+          db()
+            .prepare(
+              "SELECT id,project_id FROM jobs WHERE id=? AND status='failed'",
+            )
+            .get(run.id) as Json,
+        10000,
+        'the run to fail',
+      )
       master.artifacts.reserve(
         { job: job.id, stage: 'publish', attempt: 7, project: job.project_id },
         [APP],
